@@ -1,0 +1,57 @@
+services:
+  # --- DATENBANKEN FÜR LIBRECHAT ---
+  mongodb:
+    image: mongodb/mongodb-community-server:latest
+    container_name: mongodb
+    volumes:
+      - ./librechat-data/db:/data/db
+    restart: always
+
+  redis:
+    image: redis:alpine
+    container_name: redis
+    restart: always
+
+  # --- LITELLM (Der Modell-Vermittler) ---
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: litellm
+    volumes:
+      - ./litellm-config/config.yaml:/app/config.yaml
+    ports:
+      - "4000:4000"
+    command: [ "--config", "/app/config.yaml", "--port", "4000" ]
+    restart: always
+
+  # --- LANGGRAPH API (Das Gehirn) ---
+  langgraph-api:
+    image: langchain/langgraph-api:latest
+    container_name: langgraph-api
+    environment:
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY} # Optional für Debugging
+    volumes:
+      - ./langgraph-app:/app
+    ports:
+      - "8123:8123"
+    depends_on:
+      - litellm
+    restart: always
+
+  # --- LIBRECHAT (Das Gesicht) ---
+  librechat:
+    image: ghcr.io/danny-avila/librechat:latest
+    container_name: librechat
+    ports:
+      - "3080:3080"
+    depends_on:
+      - mongodb
+      - redis
+      - litellm
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017/LibreChat
+      - REDIS_URL=redis://redis:6379
+      - CONFIG_PATH=/app/librechat.yaml
+    volumes:
+      - ./librechat.yaml:/app/librechat.yaml
+      - ./librechat-data/images:/app/client/public/images
+    restart: always

@@ -1,0 +1,16 @@
+# Virtuelle Umgebungen
+.venv/
+__pycache__/
+
+# Datenbanken und Volumes (EXTREM WICHTIG!)
+librechat-data/
+*.db
+*.sqlite
+
+# Passwörter und Keys
+.env
+config.yaml  # Nur ignorieren, wenn da echte API-Keys (OpenAI etc.) drin stehen!
+
+# Mac/Windows Systemdateien
+.DS_Store
+Thumbs.db
