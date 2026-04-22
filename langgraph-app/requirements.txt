@@ -6,6 +6,7 @@ langchain
 deepagents
 langchain-litellm
 langgraph-checkpoint-mongodb
+langgraph-store-mongodb
 langchain-mongodb
 langchain-redis
 duckduckgo-search
@@ -13,3 +14,4 @@ redis
 beautifulsoup4
 html2text
 tavily-python
+langmem

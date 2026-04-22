@@ -14,6 +14,9 @@ from langchain.globals import set_llm_cache
 from langchain_fastapi_chat_completion.fastapi.langchain_openai_api_bridge_fastapi import LangchainOpenaiApiBridgeFastapi
 from langchain_fastapi_chat_completion.core.base_agent_factory import BaseAgentFactory
 
+from langgraph.store.mongodb import MongoDBSaver
+from langgraph.store.base import BaseStore
+
 # Optional: Hier würden wir später den Deep Researcher importieren
 # import sys
 # sys.path.append("/app/local_deep_researcher")
@@ -75,3 +78,19 @@ bridge = LangchainOpenaiApiBridgeFastapi(
     agent_factory=MyEnterpriseAgentFactory()
 )
 app.include_router(bridge.router)
+
+
+
+
+# Dein neuer permanenter Speicher
+# Wir nutzen dieselbe MongoDB wie für die Checkpoints, aber eine andere Collection
+store = MongoDBSaver(mongo_client, db_name="langgraph_memory", collection_name="long_term_store")
+
+# Beim Erstellen des Agenten übergeben wir jetzt den Store
+agent_executor = create_deep_agent(
+    model=llm,
+    tools=[wake_up_big_pc, fast_web_search, deep_research_agent],
+    checkpointer=checkpointer,
+    store=store, # <--- HIER wird das Langzeitgedächtnis aktiviert!
+    system_prompt="Du hast Zugriff auf ein Langzeitgedächtnis. Merke dir wichtige Details über den Nutzer."
+)

@@ -12,6 +12,44 @@ services:
     container_name: redis
     restart: always
 
+
+  # --- RAG DATENBANK (PostgreSQL mit Vector-Erweiterung) ---
+  vectordb:
+    image: ankane/pgvector:latest
+    container_name: vectordb
+    environment:
+      POSTGRES_DB: rag_api
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: mysecretpassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data/pgdata:/var/lib/postgresql/data
+    restart: always
+
+  # --- RAG API (Dokumenten-Leser) ---
+  rag_api:
+    build:
+      context: ./rag-api-repo  # <-- Das Submodule, das du gerade geladen hast
+      dockerfile: Dockerfile
+    container_name: rag_api
+    environment:
+      - VECTOR_DB_TYPE=pgvector
+      - POSTGRES_DB=rag_api
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=mysecretpassword
+      - DB_HOST=vectordb
+      - DB_PORT=5432
+      # Wir nutzen dein lokales LiteLLM für das Erstellen der Vektoren!
+      - RAG_OPENAI_API_KEY=any-string
+      - RAG_OPENAI_BASEURL=http://litellm:4000
+    depends_on:
+      - vectordb
+      - litellm
+    ports:
+      - "8000:8000"
+    restart: always
+
   # --- LITELLM (Der Modell-Vermittler) ---
   litellm:
     image: ghcr.io/berriai/litellm:main-latest
