@@ -7,3 +7,6 @@
 [submodule "local-deep-researcher-repo"]
 	path = local-deep-researcher-repo
 	url = https://github.com/langchain-ai/local-deep-researcher
+[submodule "rag-api-repo"]
+	path = rag-api-repo
+	url = https://github.com/danny-avila/rag_api

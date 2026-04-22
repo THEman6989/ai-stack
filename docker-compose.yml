@@ -86,6 +86,7 @@ services:
       - MONGO_URI=mongodb://mongodb:27017/LibreChat
       - REDIS_URL=redis://redis:6379
       - CONFIG_PATH=/app/librechat.yaml
+      - RAG_API_URL=http://rag_api:8000
     volumes:
       - ./librechat.yaml:/app/librechat.yaml
       - ./librechat-data/images:/app/client/public/images
