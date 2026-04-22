@@ -4,3 +4,6 @@
 [submodule "agent-custom-ui"]
 	path = agent-custom-ui
 	url = https://github.com/THEman6989/agent-chat-ui-costom
+[submodule "local-deep-researcher-repo"]
+	path = local-deep-researcher-repo
+	url = https://github.com/langchain-ai/local-deep-researcher

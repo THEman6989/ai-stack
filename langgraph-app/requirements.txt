@@ -10,3 +10,6 @@ langchain-mongodb
 langchain-redis
 duckduckgo-search
 redis
+beautifulsoup4
+html2text
+tavily-python
