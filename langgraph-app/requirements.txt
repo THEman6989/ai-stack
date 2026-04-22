@@ -4,3 +4,4 @@ wakeonlan
 langgraph
 langchain
 litellm
+deepagents
