@@ -3,9 +3,10 @@ uvicorn
 wakeonlan
 langgraph
 langchain
-litellm
 deepagents
+langchain-litellm
+langgraph-checkpoint-mongodb
 langchain-mongodb
 langchain-redis
-langchain-litellm
-deepagents
+duckduckgo-search
+redis
