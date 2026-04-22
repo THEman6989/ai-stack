@@ -25,6 +25,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from langchain_mcp_adapters.tools import load_mcp_tools
 
+from langmem import create_manage_memory_tool, create_search_memory_tool
 # Optional: Hier würden wir später den Deep Researcher importieren
 # import sys
 # sys.path.append("/app/local_deep_researcher")
@@ -100,15 +101,21 @@ async def lifespan(app: FastAPI):
             # JETZT erstellen wir den Agenten, übergeben das Gedächtnis (store) und bündeln ALLE Tools an einem Ort
             agent_executor = create_deep_agent(
                 model=llm,
-                tools=[wake_up_big_pc, fast_web_search, deep_research_agent] + opencode_tools,
+                tools=[
+                    wake_up_big_pc,
+                    fast_web_search,
+                    deep_research_agent,
+                    # --- LANGMEM TOOLS HINZUFÜGEN ---
+                    create_manage_memory_tool(namespace=("memories",)),
+                    create_search_memory_tool(namespace=("memories",))
+                ] + opencode_tools,
                 checkpointer=checkpointer,
                 store=store, # <--- Dein Langzeitgedächtnis ist hiermit aktiv!
-                system_prompt="""Du bist der Chef-Agent dieses Systems.
-                Entscheide weise: Für kurze Fragen nutzt du 'fast_web_search'.
-                Wenn der User eine tiefgehende Analyse will, delegierst du an den 'deep_research_agent'.
-                Du hast zudem Zugriff auf extrem mächtige OpenCode-Werkzeuge (wie opencode_run, write, bash).
-                Nutze diese, um aktiv am Code im /workspace zu arbeiten oder komplexe Programmier-Aufgaben an OpenCode zu delegieren.
-                Merke dir wichtige Details über den Nutzer in deinem Langzeitgedächtnis."""
+                system_prompt="""You are the chief agent of this system.
+                Decide wisely: For quick questions, use 'fast_web_search'.
+                If the user requests an in-depth analysis, delegate it to the 'deep_research_agent'.
+                You also have access to extremely powerful OpenCode tools (such as opencode_run, write, bash).
+                Use your memory tools (manage_memory, search_memory) to actively remember the user's preferences and important facts across sessions!"""
             )
 
             # Ab hier läuft der Server ganz normal, die Verbindung bleibt aber im Hintergrund offen
