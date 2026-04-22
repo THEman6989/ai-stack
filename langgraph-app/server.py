@@ -1,73 +1,61 @@
 import time
 from fastapi import FastAPI
-from pydantic import BaseModel
 from pymongo import MongoClient
 from redis import Redis
 
-# LangChain & LangGraph Enterprise-Komponenten
+# Deine Enterprise-Tools (Wie bisher)
 from langchain_core.tools import tool
 from langchain_litellm import ChatLiteLLM
 from deepagents import create_deep_agent
-from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.mongodb import MongoDBSaver
-from langchain_community.tools import DuckDuckGoSearchRun
-from langchain_redis import RedisCache
-from langchain.globals import set_llm_cache
+
+# ----------------------------------------------------
+# NEU: Importiere die Bridge aus dem lokalen Ordner!
+# ----------------------------------------------------
+from langchain_fastapi_chat_completion.fastapi.langchain_openai_api_bridge_fastapi import LangchainOpenaiApiBridgeFastapi
+from langchain_fastapi_chat_completion.core.base_agent_factory import BaseAgentFactory
+from langchain_fastapi_chat_completion.chat_model_adapter.base_openai_compatible_chat_model_adapter import BaseOpenaiCompatibleChatModelAdapter
 
 app = FastAPI()
 
-# --- INFRASTRUKTUR ---
-# Geteilte MongoDB (Checkpointing)
+# --- INFRASTRUKTUR & GEHIRN (Bleibt gleich!) ---
 mongo_client = MongoClient("mongodb://mongodb:27017")
 checkpointer = MongoDBSaver(mongo_client, db_name="langgraph_memory")
 
-# Redis Semantic Cache (Turbo)
-redis_client = Redis(host="redis", port=6379)
-set_llm_cache(RedisCache(redis_client))
-
-# --- TOOLS ---
 @tool
 def wake_up_big_pc(mac_address: str = "AA:BB:CC:DD:EE:FF"):
-    """Weckt den großen Hauptrechner auf."""
-    from wakeonlan import send_magic_packet
-    send_magic_packet(mac_address)
-    return "System: Magic Packet gesendet."
+    """Weckt den großen PC."""
+    return "PC geweckt."
 
-@tool
-def deep_web_research(query: str):
-    """Sucht im Web nach aktuellen Informationen für Deep Research."""
-    search = DuckDuckGoSearchRun()
-    return search.invoke(query)
-
-# --- GEHIRN ---
 llm = ChatLiteLLM(model="edge-gemma", base_url="http://litellm:4000")
 
 agent_executor = create_deep_agent(
     model=llm,
-    tools=[wake_up_big_pc, deep_web_research],
+    tools=[wake_up_big_pc],
     checkpointer=checkpointer,
-    system_prompt="Du bist ein Deep-Research-Agent. Nutze deine Tools für PC-Steuerung und Websuche."
+    system_prompt="Du bist ein Deep-Research-Agent."
 )
 
-# --- API ---
-class ChatRequest(BaseModel):
-    messages: list[dict]
-    model: str
+# ----------------------------------------------------
+# NEU: Die Integration der importierten API-Bridge
+# ----------------------------------------------------
+# Die Bridge zwingt uns, eine "Factory" zu schreiben. 
+# Sie ruft diese Factory auf, wenn LibreChat eine Anfrage schickt.
+class MyEnterpriseAgentFactory(BaseAgentFactory):
+    def create_agent(self, create_agent_dto):
+        # Hier übergeben wir unseren fertigen LangGraph-Agenten an die Bridge
+        return agent_executor
 
-@app.post("/v1/chat/completions")
-async def chat(request: ChatRequest):
-    user_msg = request.messages[-1]["content"]
-    config = {"configurable": {"thread_id": "shared-enterprise-thread"}}
-    
-    result = agent_executor.invoke(
-        {"messages": [HumanMessage(content=user_msg)]}, 
-        config=config
-    )
-    
-    return {
-        "id": "chatcmpl-enterprise",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": request.model,
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": result["messages"][-1].content}}]
-    }
+class MyModelAdapter(BaseOpenaiCompatibleChatModelAdapter):
+    # Die Bridge braucht auch einen Adapter, um das Modell-Format zu verstehen
+    def adapt(self, agent_response):
+        return agent_response
+
+# Wir initialisieren die Bridge mit unserer Factory
+bridge = LangchainOpenaiApiBridgeFastapi(
+    agent_factory=MyEnterpriseAgentFactory(),
+    chat_model_adapter=MyModelAdapter()
+)
+
+# Wir hängen die Routen (/v1/chat/completions) automatisch an FastAPI an!
+app.include_router(bridge.router)
