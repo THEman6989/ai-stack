@@ -25,10 +25,8 @@ services:
 
   # --- LANGGRAPH API (Das Gehirn) ---
   langgraph-api:
-    image: langchain/langgraph-api:latest
+    build: ./langgraph-app  # <-- Das hier ist neu!
     container_name: langgraph-api
-    environment:
-      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY} # Optional für Debugging
     volumes:
       - ./langgraph-app:/app
     ports:
