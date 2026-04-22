@@ -61,6 +61,23 @@ services:
     command: [ "--config", "/app/config.yaml", "--port", "4000" ]
     restart: always
 
+
+  # --- OPENCODE SERVER (Der Code-Arbeiter) ---
+  opencode-server:
+    image: golang:1.24 # Go 1.24 ist laut README die Voraussetzung
+    container_name: opencode-server
+    # Installiert OpenCode beim Start und fährt den Headless-Server hoch
+    command: bash -c "go install github.com/opencode-ai/opencode@latest && /go/bin/opencode serve --host 0.0.0.0 --port 4096"
+    ports:
+      - "4096:4096"
+    volumes:
+      # EXTREM WICHTIG: Er braucht Zugriff auf deinen gesamten Workspace,
+      # um Code zu lesen und zu schreiben!
+      - ./:/workspace
+    working_dir: /workspace
+    restart: always
+
+
   langgraph-api:
     build:
       context: .
@@ -82,6 +99,7 @@ services:
       - OPENAI_API_KEY=any-string
     depends_on:
       - litellm
+      - opencode-server
     restart: always
 
 
@@ -129,4 +147,5 @@ services:
       - ./librechat.yaml:/app/librechat.yaml
       - ./librechat-data/images:/app/client/public/images
     restart: always
+
 

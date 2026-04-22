@@ -1,6 +1,9 @@
 FROM python:3.11-slim
 WORKDIR /app
 
+# NEU: Node.js und npm installieren (wird für 'npx' von MCP benötigt)
+RUN apt-get update && apt-get install -y nodejs npm curl
+
 # 1. Requirements installieren
 COPY langgraph-app/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

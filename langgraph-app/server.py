@@ -1,3 +1,6 @@
+import os
+import asyncio
+from contextlib import asynccontextmanager
 import time
 from fastapi import FastAPI
 from pymongo import MongoClient
@@ -17,19 +20,27 @@ from langchain_fastapi_chat_completion.core.base_agent_factory import BaseAgentF
 from langgraph.store.mongodb import MongoDBSaver
 from langgraph.store.base import BaseStore
 
+# --- NEUE MCP IMPORTE FÜR OPENCODE ---
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+from langchain_mcp_adapters.tools import load_mcp_tools
+
 # Optional: Hier würden wir später den Deep Researcher importieren
 # import sys
 # sys.path.append("/app/local_deep_researcher")
 # from graph import graph as deep_researcher_graph
 
-app = FastAPI()
 
 # --- INFRASTRUKTUR ---
 mongo_client = MongoClient("mongodb://mongodb:27017")
 checkpointer = MongoDBSaver(mongo_client, db_name="langgraph_memory")
 
+# Dein permanenter Speicher (Langzeitgedächtnis)
+store = MongoDBSaver(mongo_client, db_name="langgraph_memory", collection_name="long_term_store")
+
 redis_client = Redis(host="redis", port=6379)
 set_llm_cache(RedisCache(redis_client))
+
 
 # --- WERKZEUGE (TOOLS) ---
 
@@ -50,24 +61,62 @@ def fast_web_search(query: str):
 def deep_research_agent(topic: str):
     """Nutze dieses Tool NUR für KOMPLEXE Themen, die einen extrem langen und detaillierten Bericht erfordern.
     Dieses Tool startet einen Sub-Agenten, der stundenlang das Web analysiert."""
-
-    # ⚠️ PLATZHALTER: Hier verknüpfen wir gleich den Code aus dem Submodule!
-    # Wir machen das in zwei Schritten, damit dein Container jetzt nicht abstürzt.
     return f"Ich habe den Deep Researcher beauftragt, einen umfassenden Bericht über '{topic}' zu erstellen. (Hinweis für Entwickler: Submodule muss noch konfiguriert werden)."
 
 
 # --- GEHIRN (DER CHEF-AGENT) ---
 llm = ChatLiteLLM(model="edge-gemma", base_url="http://litellm:4000")
 
-agent_executor = create_deep_agent(
-    model=llm,
-    # NEU: Der Chef hat jetzt 3 Werkzeuge!
-    tools=[wake_up_big_pc, fast_web_search, deep_research_agent],
-    checkpointer=checkpointer,
-    system_prompt="""Du bist der Chef-Agent dieses Systems.
-    Entscheide weise: Für kurze Fragen nutzt du 'fast_web_search'.
-    Wenn der User aber eine tiefgehende Analyse, ein Essay oder einen wissenschaftlichen Bericht will, delegierst du das an den 'deep_research_agent'."""
-)
+# Wir bereiten die Variable für den Agenten vor, füllen sie aber erst beim Server-Start
+agent_executor = None
+
+
+# --- LEBENSZYKLUS DES SERVERS (Hier wird die MCP-Verbindung hergestellt) ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global agent_executor
+
+    print("Starte MCP Verbindung zu OpenCode...")
+    # Definiert, wie der npm-Prozess gestartet wird
+    server_parameters = StdioServerParameters(
+        command="npx",
+        args=["-y", "opencode-mcp"],
+        env={
+            **os.environ,
+            # Verweist auf den neuen OpenCode-Docker-Container (muss in der docker-compose.yml sein!)
+            "OPENCODE_BASE_URL": "http://opencode-server:4096"
+        }
+    )
+
+    # Baut die Verbindung zum MCP-Server auf
+    async with stdio_client(server_parameters) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            # Alle 79 Tools von OpenCode dynamisch abrufen
+            opencode_tools = await load_mcp_tools(session)
+            print(f"✅ Erfolgreich {len(opencode_tools)} OpenCode MCP Tools geladen!")
+
+            # JETZT erstellen wir den Agenten, übergeben das Gedächtnis (store) und bündeln ALLE Tools an einem Ort
+            agent_executor = create_deep_agent(
+                model=llm,
+                tools=[wake_up_big_pc, fast_web_search, deep_research_agent] + opencode_tools,
+                checkpointer=checkpointer,
+                store=store, # <--- Dein Langzeitgedächtnis ist hiermit aktiv!
+                system_prompt="""Du bist der Chef-Agent dieses Systems.
+                Entscheide weise: Für kurze Fragen nutzt du 'fast_web_search'.
+                Wenn der User eine tiefgehende Analyse will, delegierst du an den 'deep_research_agent'.
+                Du hast zudem Zugriff auf extrem mächtige OpenCode-Werkzeuge (wie opencode_run, write, bash).
+                Nutze diese, um aktiv am Code im /workspace zu arbeiten oder komplexe Programmier-Aufgaben an OpenCode zu delegieren.
+                Merke dir wichtige Details über den Nutzer in deinem Langzeitgedächtnis."""
+            )
+
+            # Ab hier läuft der Server ganz normal, die Verbindung bleibt aber im Hintergrund offen
+            yield
+
+
+# FastAPI mit dem Lifespan (Start-Routine) initialisieren
+app = FastAPI(lifespan=lifespan)
 
 # --- API BRIDGE ---
 class MyEnterpriseAgentFactory(BaseAgentFactory):
@@ -78,19 +127,3 @@ bridge = LangchainOpenaiApiBridgeFastapi(
     agent_factory=MyEnterpriseAgentFactory()
 )
 app.include_router(bridge.router)
-
-
-
-
-# Dein neuer permanenter Speicher
-# Wir nutzen dieselbe MongoDB wie für die Checkpoints, aber eine andere Collection
-store = MongoDBSaver(mongo_client, db_name="langgraph_memory", collection_name="long_term_store")
-
-# Beim Erstellen des Agenten übergeben wir jetzt den Store
-agent_executor = create_deep_agent(
-    model=llm,
-    tools=[wake_up_big_pc, fast_web_search, deep_research_agent],
-    checkpointer=checkpointer,
-    store=store, # <--- HIER wird das Langzeitgedächtnis aktiviert!
-    system_prompt="Du hast Zugriff auf ein Langzeitgedächtnis. Merke dir wichtige Details über den Nutzer."
-)
