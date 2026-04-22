@@ -5,3 +5,7 @@ langgraph
 langchain
 litellm
 deepagents
+langchain-mongodb
+langchain-redis
+langchain-litellm
+deepagents

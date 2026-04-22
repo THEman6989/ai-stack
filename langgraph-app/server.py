@@ -6,6 +6,19 @@ from langchain_core.tools import tool
 from langchain_community.chat_models import ChatLiteLLM
 from deepagents import create_deep_agent  # <--- HIER IST DIE NEUE MAGIE
 from langchain_core.messages import HumanMessage, AIMessage
+from langchain_mongodb import MongoDBSaver
+from pymongo import MongoClient
+
+# Verbindung zur MongoDB (die schon in deinem Docker läuft)
+client = MongoClient("mongodb://mongodb:27017")
+checkpointer = MongoDBSaver(client)
+
+# Den Agenten mit Gedächtnis erstellen
+app = create_deep_agent(
+    model=llm,
+    tools=[wake_up_big_pc],
+    checkpointer=checkpointer # <--- Hier passiert die Magie
+)
 
 app = FastAPI()
 
