@@ -23,12 +23,15 @@ services:
     command: [ "--config", "/app/config.yaml", "--port", "4000" ]
     restart: always
 
-  # --- LANGGRAPH API (Das Gehirn) ---
   langgraph-api:
-    build: ./langgraph-app  # <-- Das hier ist neu!
+    build:
+      context: .  # <-- Wir bauen jetzt vom Hauptverzeichnis aus
+      dockerfile: ./langgraph-app/Dockerfile
     container_name: langgraph-api
     volumes:
       - ./langgraph-app:/app
+      # Wir mounten NUR den Unterordner mit den Unterstrichen in den Container!
+      - ./langchain-bridge-repo/langchain_fastapi_chat_completion:/app/langchain_fastapi_chat_completion
     ports:
       - "8123:8123"
     depends_on:
