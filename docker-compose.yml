@@ -25,18 +25,26 @@ services:
 
   langgraph-api:
     build:
-      context: .  # <-- Wir bauen jetzt vom Hauptverzeichnis aus
+      context: .
       dockerfile: ./langgraph-app/Dockerfile
     container_name: langgraph-api
     volumes:
       - ./langgraph-app:/app
-      # Wir mounten NUR den Unterordner mit den Unterstrichen in den Container!
+      # Die Bridge und den Deep Researcher als Volumes einbinden (für Live-Updates)
       - ./langchain-bridge-repo/langchain_fastapi_chat_completion:/app/langchain_fastapi_chat_completion
-    ports:
-      - "8123:8123"
+      - ./local-deep-researcher-repo:/app/local_deep_researcher
+    environment:
+      # --- SUCHE (WICHTIG!) ---
+      # Wenn wir Tavily nutzen (empfohlen für Qualität):
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+      # Wenn wir nur DuckDuckGo nutzen, lassen wir das weg oder konfigurieren es hier.
+
+      # --- MODELL-STEUERUNG ---
+      - OPENAI_API_BASE=http://litellm:4000
+      - OPENAI_API_KEY=any-string
     depends_on:
       - litellm
-    restart:
+    restart: always
 
 
   # --- DEIN CUSTOM AGENT UI ---
