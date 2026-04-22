@@ -36,6 +36,21 @@ services:
       - "8123:8123"
     depends_on:
       - litellm
+    restart:
+
+
+  # --- CUSTOM AGENT UI ---
+  agent-custom-ui:
+    build:
+      context: ./agent-custom-ui
+      dockerfile: Dockerfile
+    container_name: agent-custom-ui
+    ports:
+      - "3001:3000" # Erreichbar unter Port 3001
+    environment:
+      - NEXT_PUBLIC_API_URL=http://langgraph-api:8123
+    depends_on:
+      - langgraph-api
     restart: always
 
   # --- LIBRECHAT (Das Gesicht) ---
@@ -56,3 +71,4 @@ services:
       - ./librechat.yaml:/app/librechat.yaml
       - ./librechat-data/images:/app/client/public/images
     restart: always
+

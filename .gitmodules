@@ -1,3 +1,6 @@
 [submodule "langchain-bridge-repo"]
 	path = langchain-bridge-repo
 	url = https://github.com/THEman6989/langchain-fastapi-chat-completion
+[submodule "agent-custom-ui"]
+	path = agent-custom-ui
+	url = https://github.com/THEman6989/agent-chat-ui-costom
