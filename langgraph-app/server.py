@@ -1,90 +1,87 @@
+import time
 from fastapi import FastAPI
 from pydantic import BaseModel
-import time
-
-from langchain_core.tools import tool
-from langchain_community.chat_models import ChatLiteLLM
-from deepagents import create_deep_agent  # <--- HIER IST DIE NEUE MAGIE
-from langchain_core.messages import HumanMessage, AIMessage
-from langchain_mongodb import MongoDBSaver
 from pymongo import MongoClient
 
-# Verbindung zur MongoDB (die schon in deinem Docker läuft)
-client = MongoClient("mongodb://mongodb:27017")
-checkpointer = MongoDBSaver(client)
+# LangChain & LangGraph Enterprise-Komponenten
+from langchain_core.tools import tool
+from langchain_litellm import ChatLiteLLM
+from deepagents import create_deep_agent
+from langchain_core.messages import HumanMessage, AIMessage
+from langgraph.checkpoint.mongodb import MongoDBSaver
+from langchain_community.tools import DuckDuckGoSearchRun
 
-# Den Agenten mit Gedächtnis erstellen
-app = create_deep_agent(
-    model=llm,
-    tools=[wake_up_big_pc],
-    checkpointer=checkpointer # <--- Hier passiert die Magie
-)
+# Caching & Memory Pakete
+from langchain_redis import RedisCache
+from langchain.globals import set_llm_cache
+from redis import Redis
 
 app = FastAPI()
 
 # ==========================================
-# 1. DEIN EIGENES TOOL
+# 1. INFRASTRUKTUR: MONGODB & REDIS
+# ==========================================
+# MongoDB Setup (Geteilt mit LibreChat)
+mongo_client = MongoClient("mongodb://mongodb:27017")
+checkpointer = MongoDBSaver(mongo_client, db_name="langgraph_memory")
+
+# Redis Semantic Cache Setup
+# Dies spart Rechenpower bei identischen Fragen
+redis_client = Redis(host="redis", port=6379)
+set_llm_cache(RedisCache(redis_client))
+
+# ==========================================
+# 2. WERKZEUGE (INKL. RESEARCH)
 # ==========================================
 @tool
 def wake_up_big_pc(mac_address: str = "AA:BB:CC:DD:EE:FF"):
-    """
-    Weckt den großen Hauptrechner auf.
-    Nutze dieses Tool, wenn der User dich darum bittet oder du mehr Rechenpower brauchst.
-    """
+    """Weckt den großen Hauptrechner per Magic Packet."""
     from wakeonlan import send_magic_packet
-    print(">>> AGENT NUTZT TOOL: Sende Magic Packet...")
     send_magic_packet(mac_address)
-    time.sleep(2)
-    return "System-Antwort: Der große PC wurde erfolgreich aufgeweckt."
+    return "System: Magic Packet gesendet."
+
+@tool
+def deep_web_research(query: str):
+    """Sucht im Web nach aktuellen Informationen."""
+    search = DuckDuckGoSearchRun()
+    return search.invoke(query)
 
 # ==========================================
-# 2. DEIN "DEEP AGENT"
+# 3. DAS GEHIRN (LITELLM PROXY)
 # ==========================================
+# Wir nutzen dein edge-gemma via LiteLLM Container
 llm = ChatLiteLLM(model="edge-gemma", base_url="http://litellm:4000")
 
-# Deep Agents baut den LangGraph automatisch mit allen Spezial-Funktionen zusammen
 agent_executor = create_deep_agent(
     model=llm,
-    tools=[wake_up_big_pc],
-    system_prompt="Du bist ein genialer System-Agent. Du kannst planen, das Dateisystem nutzen und PCs aufwecken."
+    tools=[wake_up_big_pc, deep_web_research],
+    checkpointer=checkpointer,
+    system_prompt="Du bist ein Deep-Research-Agent mit lokalem Gedächtnis."
 )
 
 # ==========================================
-# 3. DIE SCHNITTSTELLE ZU LIBRECHAT
+# 4. API FÜR LIBRECHAT & AGENT UI
 # ==========================================
-class Message(BaseModel):
-    role: str
-    content: str
-
 class ChatRequest(BaseModel):
-    messages: list[Message]
+    messages: list[dict]
     model: str
 
 @app.post("/v1/chat/completions")
 async def chat(request: ChatRequest):
-    lc_messages = []
-
-    for msg in request.messages:
-        if msg.role == "user":
-            lc_messages.append(HumanMessage(content=msg.content))
-        elif msg.role == "assistant":
-            lc_messages.append(AIMessage(content=msg.content))
-
-    print(">>> DEEP AGENT DENKT NACH...")
-    # Da create_deep_agent einen LangGraph zurückgibt, rufen wir ihn genauso auf!
-    result = agent_executor.invoke({"messages": lc_messages})
-
-    final_reply = result["messages"][-1].content
-    print(">>> AGENT ANTWORTET:", final_reply)
-
+    user_msg = request.messages[-1]["content"]
+    
+    # Der Checkpointer nutzt diese ID, um den Chat in MongoDB wiederzufinden
+    config = {"configurable": {"thread_id": "global_user_thread"}}
+    
+    result = agent_executor.invoke(
+        {"messages": [HumanMessage(content=user_msg)]}, 
+        config=config
+    )
+    
     return {
-        "id": "chatcmpl-deepagents",
+        "id": "chatcmpl-enterprise",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": request.model,
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": final_reply},
-            "finish_reason": "stop"
-        }]
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": result["messages"][-1].content}}]
     }
