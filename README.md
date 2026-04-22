@@ -36,4 +36,4 @@ AlphaRavis besteht aus mehreren Microservices, die per Docker Compose orchestrie
 1. **Repository klonen:**
    ```bash
    git clone --recurse-submodules <deine-repo-url>
-   cd AlphaRavis
+   cd ai-stack
