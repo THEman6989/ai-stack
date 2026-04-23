@@ -7,6 +7,7 @@ from pymongo import MongoClient
 from redis import Redis
 
 from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage
 from langchain_litellm import ChatLiteLLM
 from langgraph.checkpoint.mongodb import MongoDBSaver
 from langchain_community.tools import DuckDuckGoSearchRun
@@ -20,7 +21,20 @@ from langmem import create_manage_memory_tool, create_search_memory_tool
 from deepagents import create_deep_agent
 from deepagents.backends.local_shell import LocalShellSandbox
 
-# --- INFRASTRUKTUR (Bleibt erhalten) ---
+# --- NEU: MCP Imports ---
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+from langchain_mcp_adapters.tools import load_mcp_tools
+
+# =====================================================================
+# --- KONFIGURATION FÜR REMOTE PIXELLE (PC B) ---
+# =====================================================================
+# TRAGE HIER DIE IP-ADRESSE DEINES COMFYUI/PIXELLE-RECHNERS EIN:
+PC_B_IP = "192.168.178.50"
+PIXELLE_URL = f"http://{PC_B_IP}:8080" # Port ggf. anpassen
+# =====================================================================
+
+# --- INFRASTRUKTUR ---
 mongo_client = MongoClient("mongodb://mongodb:27017")
 checkpointer = MongoDBSaver(mongo_client, db_name="langgraph_memory")
 store = MongoDBSaver(mongo_client, db_name="langgraph_memory", collection_name="long_term_store")
@@ -28,7 +42,77 @@ store = MongoDBSaver(mongo_client, db_name="langgraph_memory", collection_name="
 redis_client = Redis(host="redis", port=6379)
 set_llm_cache(RedisCache(redis_client))
 
+# --- GEHIRN ---
+llm = ChatLiteLLM(model="edge-gemma", base_url="http://litellm:4000")
+agent_executor = None
+mcp_session_manager = None # Für den sauberen Shutdown des MCP Clients
+
+# --- DER SEPARATE ERROR-VERWALTER (Background Task) ---
+async def monitor_pixelle_job(job_id: str, original_thread_id: str):
+    """
+    Läuft im Hintergrund auf PC A.
+    Fragt alle 10 Sek PC B nach dem Status und nutzt einen eigenen Kontext.
+    """
+    print(f"👁️ Error-Verwalter gestartet für Remote-Job {job_id}")
+
+    # Eigener Kontext (Thread) für die Fehlerüberwachung, stört Hauptchat nicht!
+    monitor_config = {"configurable": {"thread_id": f"monitor_{job_id}"}}
+
+    # Initiale Instruktion an den Monitor-Agenten
+    await agent_executor.ainvoke(
+        {"messages": [HumanMessage(content=f"Du überwachst den Remote-Job {job_id} auf PC B. Achte auf Fehlermeldungen (z.B. Winston 1) oder Timeouts in den kommenden Logs.")]},
+        config=monitor_config
+    )
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        is_running = True
+        while is_running:
+            await asyncio.sleep(10) # Alle 10 Sekunden checken
+
+            try:
+                # 1. Status und Logs von PC B abrufen
+                response = await client.get(f"{PIXELLE_URL}/api/status/{job_id}")
+                data = response.json()
+                logs = data.get("logs", "Keine neuen Logs.")
+                status = data.get("status", "running")
+
+                # 2. Den Monitor-Agenten im eigenen Kontext prüfen lassen
+                check_msg = f"Neue Logs von PC B: {logs[-500:]}" # Nur die letzten 500 Zeichen schicken, um Kontext zu sparen
+
+                res = await agent_executor.ainvoke(
+                    {"messages": [HumanMessage(content=check_msg)]},
+                    config=monitor_config
+                )
+
+                verwalter_fazit = res["messages"][-1].content
+                print(f"🛡️ Monitor Job {job_id}: {verwalter_fazit}")
+
+                # Beenden, wenn fertig oder fehlgeschlagen
+                if status in ["completed", "failed"]:
+                    print(f"🏁 Remote-Job {job_id} beendet. Status: {status}")
+                    is_running = False
+
+            except Exception as e:
+                print(f"⚠️ Netzwerk-Fehler beim Monitoring von PC B: {e}")
+                is_running = False
+
 # --- WERKZEUGE (TOOLS) ---
+
+@tool
+async def start_pixelle_remote(prompt: str):
+    """NUR zum STARTEN eines Bild/Workflow-Auftrags in Pixelle auf PC B nutzen. Wartet NICHT auf das Ende!"""
+    async with httpx.AsyncClient() as client:
+        try:
+            # Request an PC B senden
+            res = await client.post(f"{PIXELLE_URL}/api/run", json={"prompt": prompt})
+            job_id = res.json().get("job_id")
+
+            # Hintergrund-Task auf PC A (Error-Verwalter) starten
+            asyncio.create_task(monitor_pixelle_job(job_id, "main_user_thread"))
+
+            return f"System: Pixelle Job {job_id} wurde auf dem Remote-Server erfolgreich gestartet! Der Error-Verwalter überwacht die Logs nun im Hintergrund. Du kannst normal im Chat weiterschreiben."
+        except Exception as e:
+            return f"System-Fehler: Konnte PC B nicht erreichen. Fehler: {e}"
 
 @tool
 def wake_up_big_pc(mac_address: str = "AA:BB:CC:DD:EE:FF"):
@@ -47,7 +131,6 @@ def fast_web_search(query: str):
 async def ask_documents(query: str):
     """Nutze dieses Tool, um Wissen aus deinen lokal hochgeladenen Dokumenten (RAG) abzurufen."""
     async with httpx.AsyncClient() as client:
-        # Verbindung zur rag_api in deinem Docker-Netzwerk
         try:
             response = await client.get(f"http://rag_api:8000/query", params={"text": query})
             return response.json()
@@ -59,42 +142,43 @@ def deep_research_agent(topic: str):
     """NUR für extrem komplexe Themen nutzen, die eine tiefe Analyse erfordern."""
     return f"Deep Researcher wurde für '{topic}' gestartet. (Sub-Graph Integration folgt)."
 
-# --- GEHIRN ---
-llm = ChatLiteLLM(model="edge-gemma", base_url="http://litellm:4000")
-agent_executor = None
-
 # --- LEBENSZYKLUS DES SERVERS ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global agent_executor
+    global agent_executor, mcp_session_manager
 
     print("🚀 AlphaRavis wird initialisiert...")
 
-    # 1. Native Sandbox für Code (Ersetzt OpenCode komplett!)
+    # 1. Native Sandbox für Code
     sandbox = LocalShellSandbox(cwd="/workspace")
 
-    # 2. ComfyUI MCP Tools laden (Optionaler Block)
-    comfy_tools = []
-    # try:
-    #     from langchain_mcp_adapters.tools import load_mcp_tools
-    #     # Hier die URL deines ComfyUI-MCP-Servers einfügen
-    #     comfy_tools = await load_mcp_tools("http://comfyui-mcp:8080")
-    #     print(f"✅ {len(comfy_tools)} ComfyUI Tools geladen.")
-    # except Exception as e:
-    #     print(f"⚠️ ComfyUI MCP konnte nicht geladen werden: {e}")
+    # 2. Remote Pixelle MCP Tools via SSE laden
+    mcp_tools = []
+    try:
+        # Verbindung zu PC B aufbauen
+        mcp_session_manager = sse_client(f"http://{PC_B_IP}:8080/pixelle/mcp/sse")
+        mcp_streams = await mcp_session_manager.__aenter__()
+        session = ClientSession(*mcp_streams)
+        await session.initialize()
 
-    # 3. Agenten erstellen (Der ultimative Allrounder)
+        mcp_tools = await load_mcp_tools(session)
+        print(f"✅ {len(mcp_tools)} Remote MCP Tools von PC B geladen.")
+    except Exception as e:
+        print(f"⚠️ Remote MCP (PC B) konnte nicht erreicht werden: {e}")
+
+    # 3. Agenten erstellen
     agent_executor = create_deep_agent(
         model=llm,
         tools=[
+            start_pixelle_remote, # <-- Neues asynchrones Remote-Tool
             wake_up_big_pc,
             fast_web_search,
-            ask_documents,       # Neu: RAG Power
+            ask_documents,
             deep_research_agent,
             create_manage_memory_tool(namespace=("memories",)),
             create_search_memory_tool(namespace=("memories",))
-        ] + comfy_tools,
-        sandbox=sandbox,        # Native Coding Power
+        ] + mcp_tools, # <-- Fügt die nativen MCP Tools von PC B hinzu, falls sie direkt genutzt werden sollen
+        sandbox=sandbox,
         checkpointer=checkpointer,
         store=store,
         system_prompt="""You are AlphaRavis, the chief agent of this system.
@@ -102,12 +186,17 @@ Decide wisely:
 - Use 'fast_web_search' for quick internet facts.
 - Use 'ask_documents' to find info in your own files and archives.
 - Use 'deep_research_agent' for long, complex analyses.
+- Use 'start_pixelle_remote' to start image generation or ComfyUI workflows on the remote PC. DO NOT wait for the image, just trigger it.
 - You have native computer access via a sandbox to write, read, and run code autonomously.
 - Proactively use your memory tools to remember user preferences across chats!"""
     )
 
     print("✅ AlphaRavis Ready.")
     yield
+
+    # Cleanup beim Beenden des Servers
+    if mcp_session_manager:
+        await mcp_session_manager.__aexit__(None, None, None)
 
 # FastAPI initialisieren
 app = FastAPI(lifespan=lifespan)
