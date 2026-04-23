@@ -1,8 +1,10 @@
 services:
-  # --- DATENBANKEN FÜR LIBRECHAT ---
+  # --- DATENBANKEN ---
   mongodb:
     image: mongodb/mongodb-community-server:latest
     container_name: mongodb
+    ports:
+      - "27017:27017" # Debugging-Port für MongoDB Compass
     volumes:
       - ./librechat-data/db:/data/db
     restart: always
@@ -10,10 +12,10 @@ services:
   redis:
     image: redis:alpine
     container_name: redis
+    ports:
+      - "6379:6379" # Debugging-Port für Redis
     restart: always
 
-
-  # --- RAG DATENBANK (PostgreSQL mit Vector-Erweiterung) ---
   vectordb:
     image: ankane/pgvector:latest
     container_name: vectordb
@@ -27,30 +29,7 @@ services:
       - ./data/pgdata:/var/lib/postgresql/data
     restart: always
 
-  # --- RAG API (Dokumenten-Leser) ---
-  rag_api:
-    build:
-      context: ./rag-api-repo  # <-- Das Submodule, das du gerade geladen hast
-      dockerfile: Dockerfile
-    container_name: rag_api
-    environment:
-      - VECTOR_DB_TYPE=pgvector
-      - POSTGRES_DB=rag_api
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=mysecretpassword
-      - DB_HOST=vectordb
-      - DB_PORT=5432
-      # Wir nutzen dein lokales LiteLLM für das Erstellen der Vektoren!
-      - RAG_OPENAI_API_KEY=any-string
-      - RAG_OPENAI_BASEURL=http://litellm:4000
-    depends_on:
-      - vectordb
-      - litellm
-    ports:
-      - "8000:8000"
-    restart: always
-
-  # --- LITELLM (Der Modell-Vermittler) ---
+  # --- KI INFRASTRUKTUR ---
   litellm:
     image: ghcr.io/berriai/litellm:main-latest
     container_name: litellm
@@ -61,49 +40,71 @@ services:
     command: [ "--config", "/app/config.yaml", "--port", "4000" ]
     restart: always
 
-
-  # --- OPENCODE SERVER (Der Code-Arbeiter) ---
-  opencode-server:
-    image: golang:1.24 # Go 1.24 ist laut README die Voraussetzung
-    container_name: opencode-server
-    # Installiert OpenCode beim Start und fährt den Headless-Server hoch
-    command: bash -c "go install github.com/opencode-ai/opencode@latest && /go/bin/opencode serve --host 0.0.0.0 --port 4096"
+  rag_api:
+    build:
+      context: ./rag-api-repo
+      dockerfile: Dockerfile
+    container_name: rag_api
+    environment:
+      - VECTOR_DB_TYPE=pgvector
+      - DB_HOST=vectordb
+      - DB_PORT=5432
+      - POSTGRES_DB=rag_api
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=mysecretpassword
+      - RAG_OPENAI_API_KEY=any-string
+      - RAG_OPENAI_BASEURL=http://litellm:4000
+    depends_on:
+      - vectordb
+      - litellm
     ports:
-      - "4096:4096"
-    volumes:
-      # EXTREM WICHTIG: Er braucht Zugriff auf deinen gesamten Workspace,
-      # um Code zu lesen und zu schreiben!
-      - ./:/workspace
-    working_dir: /workspace
+      - "8000:8000"
     restart: always
 
-
+  # --- DER BRAIN (AlphaRavis LangGraph API) ---
   langgraph-api:
     build:
       context: .
       dockerfile: ./langgraph-app/Dockerfile
     container_name: langgraph-api
+    ports:
+      - "8123:8123" # Dein Debug-Port für die API
     volumes:
       - ./langgraph-app:/app
-      # Die Bridge und den Deep Researcher als Volumes einbinden (für Live-Updates)
       - ./langchain-bridge-repo/langchain_fastapi_chat_completion:/app/langchain_fastapi_chat_completion
       - ./local-deep-researcher-repo:/app/local_deep_researcher
+      - ./:/workspace # WICHTIG: Die Sandbox braucht Zugriff auf deine Files zum Coden!
     environment:
-      # --- SUCHE (WICHTIG!) ---
-      # Wenn wir Tavily nutzen (empfohlen für Qualität):
       - TAVILY_API_KEY=${TAVILY_API_KEY}
-      # Wenn wir nur DuckDuckGo nutzen, lassen wir das weg oder konfigurieren es hier.
-
-      # --- MODELL-STEUERUNG ---
       - OPENAI_API_BASE=http://litellm:4000
       - OPENAI_API_KEY=any-string
+      - MONGODB_URI=mongodb://mongodb:27017
+      - REDIS_URL=redis://redis:6379
+      - PORT=8123
     depends_on:
       - litellm
-      - opencode-server
+      - mongodb
+      - redis
     restart: always
 
+  # --- FRONTENDS ---
 
-  # --- DEIN CUSTOM AGENT UI ---
+  # Das offizielle LangChain Deep Agents UI
+  deep-agents-ui:
+    build:
+      context: ./deep-agents-ui
+    container_name: deep-agents-ui
+    ports:
+      - "3000:3000"
+    environment:
+      # Browser-Seite: Muss über localhost erreichbar sein
+      - NEXT_PUBLIC_LANGGRAPH_API_URL=http://localhost:8123
+      # Server-Seite: Interne Kommunikation im Docker-Netz
+      - LANGGRAPH_API_URL=http://langgraph-api:8123
+    depends_on:
+      - langgraph-api
+
+  # Dein spezielles Agent UI (Alternative)
   agent-custom-ui:
     build:
       context: ./agent-custom-ui
@@ -112,23 +113,14 @@ services:
     ports:
       - "3001:3000"
     environment:
-      # 1. Die ID deines Agenten (Standard ist meistens "agent")
       - NEXT_PUBLIC_ASSISTANT_ID=agent
-
-      # 2. Wo liegt dein ECHTER Server im Docker-Netzwerk?
       - LANGGRAPH_API_URL=http://langgraph-api:8123
-
-      # 3. Wie verbindet sich das Frontend mit seinem eigenen Proxy?
-      # Bei Docker reicht hier meistens der relative Pfad "/api" oder "http://localhost:3001/api"
       - NEXT_PUBLIC_API_URL=/api
-
-      # (Optional) Wenn du LangSmith zum Aufzeichnen der Agenten-Gedanken nutzt:
-      # - LANGSMITH_API_KEY=dein_langsmith_key
     depends_on:
       - langgraph-api
     restart: always
 
-  # --- LIBRECHAT (Das Gesicht) ---
+  # LibreChat (Main Chat Interface)
   librechat:
     image: ghcr.io/danny-avila/librechat:latest
     container_name: librechat
@@ -138,11 +130,14 @@ services:
       - mongodb
       - redis
       - litellm
+      - rag_api
     environment:
       - MONGO_URI=mongodb://mongodb:27017/LibreChat
       - REDIS_URL=redis://redis:6379
       - CONFIG_PATH=/app/librechat.yaml
       - RAG_API_URL=http://rag_api:8000
+      # Hier verbindest du LibreChat mit deiner LangGraph Bridge
+      - OPENAI_REVERSE_PROXY=http://langgraph-api:8123/v1
     volumes:
       - ./librechat.yaml:/app/librechat.yaml
       - ./librechat-data/images:/app/client/public/images
