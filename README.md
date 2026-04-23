@@ -38,4 +38,4 @@ AlphaRavis is composed of several microservices orchestrated via Docker Compose:
    cd ai-stack
 2. **Update submodules:**
    ```bash
-   git submodule update --init --recursive
+   git submodule update --init --recursive --remote
