@@ -25,6 +25,7 @@ from deepagents.backends.local_shell import LocalShellSandbox
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 from langchain_mcp_adapters.tools import load_mcp_tools
+from langchain_core.runnables import RunnableConfig
 
 # =====================================================================
 # --- KONFIGURATION FÜR REMOTE PIXELLE (PC B) ---
@@ -51,68 +52,82 @@ mcp_session_manager = None # Für den sauberen Shutdown des MCP Clients
 async def monitor_pixelle_job(job_id: str, original_thread_id: str):
     """
     Läuft im Hintergrund auf PC A.
-    Fragt alle 10 Sek PC B nach dem Status und nutzt einen eigenen Kontext.
+    Überwacht PC B und postet das Ergebnis zurück in den Haupt-Chat.
     """
     print(f"👁️ Error-Verwalter gestartet für Remote-Job {job_id}")
 
-    # Eigener Kontext (Thread) für die Fehlerüberwachung, stört Hauptchat nicht!
+    # Separater Kontext für die Überwachung (Monitor-Session)
     monitor_config = {"configurable": {"thread_id": f"monitor_{job_id}"}}
-
-    # Initiale Instruktion an den Monitor-Agenten
-    await agent_executor.ainvoke(
-        {"messages": [HumanMessage(content=f"Du überwachst den Remote-Job {job_id} auf PC B. Achte auf Fehlermeldungen (z.B. Winston 1) oder Timeouts in den kommenden Logs.")]},
-        config=monitor_config
-    )
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         is_running = True
         while is_running:
-            await asyncio.sleep(10) # Alle 10 Sekunden checken
+            await asyncio.sleep(10) # Check alle 10 Sekunden
 
             try:
-                # 1. Status und Logs von PC B abrufen
+                # 1. Status von PC B abrufen
                 response = await client.get(f"{PIXELLE_URL}/api/status/{job_id}")
                 data = response.json()
-                logs = data.get("logs", "Keine neuen Logs.")
                 status = data.get("status", "running")
+                logs = data.get("logs", "Keine Logs.")
 
-                # 2. Den Monitor-Agenten im eigenen Kontext prüfen lassen
-                check_msg = f"Neue Logs von PC B: {logs[-500:]}" # Nur die letzten 500 Zeichen schicken, um Kontext zu sparen
-
-                res = await agent_executor.ainvoke(
-                    {"messages": [HumanMessage(content=check_msg)]},
+                # 2. Monitor-Agent prüft Logs im Hintergrund-Kontext
+                await agent_executor.ainvoke(
+                    {"messages": [HumanMessage(content=f"Prüfe Logs von PC B: {logs[-500:]}")]},
                     config=monitor_config
                 )
 
-                verwalter_fazit = res["messages"][-1].content
-                print(f"🛡️ Monitor Job {job_id}: {verwalter_fazit}")
+                # 3. VERARBEITUNG DES ERGEBNISSES
+                if status == "completed":
+                    # NEU: Wir nehmen direkt die echte HTTP-URL (oder den Text),
+                    # den Pixelle standardmäßig ausspuckt!
+                    original_pixelle_result = data.get("result", "")
 
-                # Beenden, wenn fertig oder fehlgeschlagen
-                if status in ["completed", "failed"]:
-                    print(f"🏁 Remote-Job {job_id} beendet. Status: {status}")
+                    final_msg = (
+                        f"🔔 **Update: Dein Bild ist fertig!**\n\n"
+                        f"{original_pixelle_result}" # Hier ist Pixelles kompletter Link schon drin!
+                    )
+
+                    print(f"✅ Job {job_id} fertig. Injiziere Nachricht in Thread {original_thread_id}")
+                    await agent_executor.ainvoke(
+                        {"messages": [HumanMessage(content=f"SYSTEM-MELDUNG: {final_msg}")]},
+                        config={"configurable": {"thread_id": original_thread_id}}
+                    )
+                    is_running = False
+
+                elif status == "failed":
+                    error_msg = f"❌ **Job {job_id} abgebrochen.** In den Logs wurde ein Fehler erkannt."
+
+                    # Fehler-Info in den Haupt-Chat posten
+                    await agent_executor.ainvoke(
+                        {"messages": [HumanMessage(content=error_msg)]},
+                        config={"configurable": {"thread_id": original_thread_id}}
+                    )
                     is_running = False
 
             except Exception as e:
-                print(f"⚠️ Netzwerk-Fehler beim Monitoring von PC B: {e}")
+                print(f"⚠️ Monitoring-Fehler (PC B evtl. offline?): {e}")
                 is_running = False
 
 # --- WERKZEUGE (TOOLS) ---
 
 @tool
-async def start_pixelle_remote(prompt: str):
-    """NUR zum STARTEN eines Bild/Workflow-Auftrags in Pixelle auf PC B nutzen. Wartet NICHT auf das Ende!"""
+async def start_pixelle_remote(prompt: str, config: RunnableConfig):
+    """Startet einen Workflow auf PC B. Die ID wird automatisch für das Monitoring genutzt."""
+    # Hole die aktuelle Thread-ID aus der Config (von LibreChat/LangGraph)
+    current_thread_id = config["configurable"].get("thread_id", "default_thread")
+
     async with httpx.AsyncClient() as client:
         try:
-            # Request an PC B senden
             res = await client.post(f"{PIXELLE_URL}/api/run", json={"prompt": prompt})
             job_id = res.json().get("job_id")
 
-            # Hintergrund-Task auf PC A (Error-Verwalter) starten
-            asyncio.create_task(monitor_pixelle_job(job_id, "main_user_thread"))
+            # Starte Monitor und übergib die aktuelle Thread-ID für den Callback!
+            asyncio.create_task(monitor_pixelle_job(job_id, current_thread_id))
 
-            return f"System: Pixelle Job {job_id} wurde auf dem Remote-Server erfolgreich gestartet! Der Error-Verwalter überwacht die Logs nun im Hintergrund. Du kannst normal im Chat weiterschreiben."
+            return f"Bestätigt: Job `{job_id}` wurde auf PC B gestartet. Ich melde mich hier in diesem Chat, sobald das Bild fertig ist!"
         except Exception as e:
-            return f"System-Fehler: Konnte PC B nicht erreichen. Fehler: {e}"
+            return f"Fehler: Konnte PC B nicht erreichen. ({e})"
 
 @tool
 def wake_up_big_pc(mac_address: str = "AA:BB:CC:DD:EE:FF"):
