@@ -93,13 +93,12 @@ services:
   deep-agents-ui:
     build:
       context: ./deep-agents-ui
+      dockerfile: ../docker/deep-agents-ui/Dockerfile
     container_name: deep-agents-ui
     ports:
       - "3000:3000"
     environment:
-      # Browser-Seite: Muss über localhost erreichbar sein
       - NEXT_PUBLIC_LANGGRAPH_API_URL=http://localhost:8123
-      # Server-Seite: Interne Kommunikation im Docker-Netz
       - LANGGRAPH_API_URL=http://langgraph-api:8123
     depends_on:
       - langgraph-api
