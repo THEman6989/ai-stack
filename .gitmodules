@@ -10,3 +10,6 @@
 [submodule "rag-api-repo"]
 	path = rag-api-repo
 	url = https://github.com/danny-avila/rag_api
+[submodule "deep-agents-ui"]
+	path = deep-agents-ui
+	url = https://github.com/langchain-ai/deep-agents-ui
