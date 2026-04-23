@@ -34,5 +34,8 @@ AlphaRavis is composed of several microservices orchestrated via Docker Compose:
 
 1. **Clone the repository with submodules:**
    ```bash
-   git clone --recurse-submodules <your-repo-url>
+   git clone --recurse-submodules https://github.com/THEman6989/ai-stack
    cd ai-stack
+2. **Update submodules:**
+   ```bash
+   git submodule update --init --recursive
