@@ -279,6 +279,8 @@ async def lifespan(app: FastAPI):
     
     # Worker 3: The Computer Use Agent (Direct GUI control via VNC) 
     computer_worker = create_cua(
+        name="ui_assistant",
+        model=llm,
         prompt="""You are the UI Expert. 
         You have access to a virtual Linux desktop via DISPLAY :0.
         You can use a browser, terminal, and other GUI apps.
@@ -303,7 +305,7 @@ async def lifespan(app: FastAPI):
         - 'pm2 list' → see all processes and their status/port
         - 'pm2 logs comfyui_production --lines 50' → read recent logs
         - 'pm2 restart comfyui_production' → restart (ONLY with user approval!)
-        - 'cat /path/to/server.py' → inspect code files
+        - comfy_server is an arch stystem
         - Pixelle and LangGraph run as local Docker containers. Use 'docker logs <name> --tail 50'.
         - Process names in PM2: look for 'comfyui_production' for production. Ignore 'comfyui_test'.
 
