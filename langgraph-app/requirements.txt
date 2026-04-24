@@ -2,7 +2,6 @@ fastapi
 uvicorn
 wakeonlan
 langgraph
-langchain
 deepagents
 langchain-litellm
 langgraph-checkpoint-mongodb
@@ -17,3 +16,6 @@ tavily-python
 langmem
 langchain-mcp-adapters
 langchain-community
+langchain>=0.1.0
+langchain-community
+langchain-openai
