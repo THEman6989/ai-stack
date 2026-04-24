@@ -141,5 +141,7 @@ services:
       - ./librechat.yaml:/app/librechat.yaml
       - ./librechat-data/images:/app/client/public/images
     restart: always
+    env_file:
+      - .env
 
 
