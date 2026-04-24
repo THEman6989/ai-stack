@@ -68,7 +68,8 @@ services:
       dockerfile: ./langgraph-app/Dockerfile
     container_name: langgraph-api
     ports:
-      - "8123:8123" # Dein Debug-Port für die API
+      - "8123:8123"
+      - "5900:5900" # VNC Port für die Sandbox
     volumes:
       - ./langgraph-app:/app
       - ./langchain-bridge-repo/langchain_fastapi_chat_completion:/app/langchain_fastapi_chat_completion
@@ -81,6 +82,11 @@ services:
       - MONGODB_URI=mongodb://mongodb:27017
       - REDIS_URL=redis://redis:6379
       - PORT=8123
+      # --- LANGSMITH OBSERVABILITY (Für LangGraphics & Debugging) ---
+      - LANGCHAIN_TRACING_V2=true
+      - LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
+      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY:-dein_langsmith_key_hier}
+      - LANGCHAIN_PROJECT=AlphaRavis_Stack
     depends_on:
       - litellm
       - mongodb

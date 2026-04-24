@@ -11,6 +11,9 @@ from langchain_core.messages import HumanMessage
 from langchain_litellm import ChatLiteLLM
 from langgraph.checkpoint.mongodb import MongoDBSaver
 from langchain_community.tools import DuckDuckGoSearchRun
+from langchain_community.tools.tavily_search import TavilySearchResults
+from langgraph_supervisor import create_supervisor
+from langgraph_cua import create_computer_use_agent
 from langchain_redis import RedisCache
 # Von: from langchain.globals import set_llm_cache
 # Zu:
@@ -25,6 +28,7 @@ from langchain_fastapi_chat_completion.fastapi.langchain_openai_api_bridge_fasta
 from langmem import create_manage_memory_tool, create_search_memory_tool
 from deepagents import create_deep_agent
 from deepagents.backends.local_shell import LocalShellBackend
+from langgraphics import LangGraphicsMiddleware
 
 # --- NEU: MCP Imports ---
 from mcp import ClientSession
@@ -144,9 +148,16 @@ def wake_up_big_pc(mac_address: str = "AA:BB:CC:DD:EE:FF"):
 
 @tool
 def fast_web_search(query: str):
-    """Nutze dieses Tool für SCHNELLE Suchen (Wetter, Fakten, News)."""
+    """ONLY for quick facts, weather, or simple questions (max 1-2 sources)."""
     search = DuckDuckGoSearchRun()
     return search.invoke(query)
+
+@tool
+async def deep_web_research(query: str):
+    """USE THIS TOOL for complex research, comparisons, or when more than 5 websites need to be checked. 
+    It uses secure proxies (Tavily) to hide your IP and perform deep searches."""
+    search = TavilySearchResults(max_results=10)
+    return await search.ainvoke({"query": query})
 
 @tool
 async def ask_documents(query: str):
@@ -158,10 +169,10 @@ async def ask_documents(query: str):
         except Exception as e:
             return f"Fehler bei der Dokumentensuche: {e}"
 
-@tool
-def deep_research_agent(topic: str):
-    """NUR für extrem komplexe Themen nutzen, die eine tiefe Analyse erfordern."""
-    return f"Deep Researcher wurde für '{topic}' gestartet. (Sub-Graph Integration folgt)."
+#@tool
+#def deep_research_agent(topic: str):
+    #"""NUR für extrem komplexe Themen nutzen, die eine tiefe Analyse erfordern."""
+    #return f"Deep Researcher wurde für '{topic}' gestartet. (Sub-Graph Integration folgt)."
 
 # --- LEBENSZYKLUS DES SERVERS ---
 @asynccontextmanager
@@ -186,32 +197,55 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"⚠️ Interner MCP (Pixelle) konnte nicht erreicht werden: {e}")
 
-    # 3. Agenten erstellen
-    agent_executor = create_deep_agent(
+# 3. Create Specialized Workers (Phase 2 & 3: Supervisor + Deep Research)
+    
+    # Worker 1: The Research Expert (Uses Tavily for IP protection and local documents)
+    research_worker = create_deep_agent(
         model=llm,
-        tools=[
-            start_pixelle_remote, # <-- Neues asynchrones Remote-Tool
-            wake_up_big_pc,
-            fast_web_search,
-            ask_documents,
-            deep_research_agent,
-            create_manage_memory_tool(namespace=("memories",)),
-            create_search_memory_tool(namespace=("memories",))
-        ] + mcp_tools, # <-- Fügt die nativen MCP Tools von PC B hinzu, falls sie direkt genutzt werden sollen
-        backend=sandbox,
-        checkpointer=checkpointer,
-        store=store,
-        system_prompt="""You are AlphaRavis, the chief agent of this system.
-Decide wisely:
-- Use 'fast_web_search' for quick internet facts.
-- Use 'ask_documents' to find info in your own files and archives.
-- Use 'deep_research_agent' for long, complex analyses.
-- Use 'start_pixelle_remote' to start image generation or ComfyUI workflows on the remote PC. DO NOT wait for the image, just trigger it.
-- You have native computer access via a sandbox to write, read, and run code autonomously.
-- Proactively use your memory tools to remember user preferences across chats!"""
+        tools=[deep_web_research, ask_documents, deep_research_agent],
+        name="research_expert",
+        system_prompt="You are the Research Expert. Use 'deep_web_research' (Tavily) for deep web research and ask_documents for local data. You search thoroughly and comprehensively."
     )
 
-    print("✅ AlphaRavis Ready.")
+    # Worker 2: The Generalist (Fast searches, PC control, Pixelle, Code)
+    general_worker = create_deep_agent(
+        model=llm,
+        tools=[
+            start_pixelle_remote,
+            wake_up_big_pc,
+            fast_web_search,
+            create_manage_memory_tool(namespace=("memories",)),
+            create_search_memory_tool(namespace=("memories",))
+        ] + mcp_tools,
+        backend=sandbox,
+        name="general_assistant",
+        system_prompt="You are the Generalist. Responsible for quick facts (fast_web_search), Pixelle control, code execution in the sandbox, and memory management."
+    )
+    
+    # Worker 3: The Computer Use Agent (Direct GUI control via VNC) 
+    computer_worker = create_computer_use_agent(
+        model=llm,
+        name="ui_assistant",
+        system_prompt="""You are the UI Expert. 
+        You have access to a virtual Linux desktop via DISPLAY :0.
+        You can use a browser, terminal, and other GUI apps.
+        Use visual feedback to confirm your actions."""
+    )
+
+    # 4. THE SUPERVISOR (AlphaRavis Chief Logic)
+    agent_executor = create_supervisor(
+        [research_worker, general_worker, computer_worker],
+        model=llm,
+        prompt="""You are AlphaRavis, the Chief Supervisor of this system. 
+        Your job is to delegate tasks to the right specialized worker:
+        - For simple questions (facts, weather, single info), coding, or PC/Pixelle control: Use 'general_assistant'.
+        - For deep research, complex comparisons, or if more than 5 sources are needed: Use 'research_expert'.
+        - ALWAYS coordinate the workers to give the user a perfect final answer. Do not do the work yourself, delegate it!""",
+        checkpointer=checkpointer,
+        store=store
+    )
+
+    print("✅ AlphaRavis Supervisor Ready.")
     yield
 
     # Cleanup beim Beenden des Servers
