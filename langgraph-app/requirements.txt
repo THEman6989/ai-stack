@@ -16,6 +16,6 @@ tavily-python
 langmem
 langchain-mcp-adapters
 langchain-community
-langchain>=0.1.0
+langchain>=0.1.1
 langchain-community
 langchain-openai
