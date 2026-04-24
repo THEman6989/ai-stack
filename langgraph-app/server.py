@@ -37,7 +37,7 @@ from langchain_core.runnables import RunnableConfig
 # =====================================================================
 # TRAGE HIER DIE IP-ADRESSE DEINES COMFYUI/PIXELLE-RECHNERS EIN:
 PC_B_IP = "192.168.178.50"
-PIXELLE_URL = f"http://{PC_B_IP}:8080" # Port ggf. anpassen
+PIXELLE_URL = f"http://{PIXELLE_HOST}:9004"
 # =====================================================================
 
 # --- INFRASTRUKTUR ---
@@ -175,16 +175,16 @@ async def lifespan(app: FastAPI):
     # 2. Remote Pixelle MCP Tools via SSE laden
     mcp_tools = []
     try:
-        # Verbindung zu PC B aufbauen
-        mcp_session_manager = sse_client(f"http://{PC_B_IP}:8080/pixelle/mcp/sse")
+        # Verbindung zum internen Pixelle-Container aufbauen
+        mcp_session_manager = sse_client(f"{PIXELLE_URL}/pixelle/mcp/sse")
         mcp_streams = await mcp_session_manager.__aenter__()
         session = ClientSession(*mcp_streams)
         await session.initialize()
 
         mcp_tools = await load_mcp_tools(session)
-        print(f"✅ {len(mcp_tools)} Remote MCP Tools von PC B geladen.")
+        print(f"✅ {len(mcp_tools)} Interne Docker MCP Tools von Pixelle geladen.")
     except Exception as e:
-        print(f"⚠️ Remote MCP (PC B) konnte nicht erreicht werden: {e}")
+        print(f"⚠️ Interner MCP (Pixelle) konnte nicht erreicht werden: {e}")
 
     # 3. Agenten erstellen
     agent_executor = create_deep_agent(

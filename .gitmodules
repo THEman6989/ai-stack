@@ -13,3 +13,6 @@
 [submodule "deep-agents-ui"]
 	path = deep-agents-ui
 	url = https://github.com/langchain-ai/deep-agents-ui
+[submodule "pixelle-mcp-custom"]
+	path = pixelle-mcp-custom
+	url = https://github.com/theman6989/pixelle-mcp-costom

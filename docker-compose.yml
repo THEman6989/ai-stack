@@ -143,5 +143,24 @@ services:
     restart: always
     env_file:
       - .env
-
+  # --- PIXELLE MCP ---
+  pixelle:
+    build:
+      context: ./pixelle-mcp-custom
+      dockerfile: Dockerfile
+    container_name: pixelle
+    ports:
+      - "9004:9004"
+    volumes:
+      - ./pixelle-data:/app/data
+      - ./pixelle-mcp-custom/.env:/app/.env:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
 
