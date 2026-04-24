@@ -1,0 +1,5 @@
+data/
+librechat-data/
+node_modules/
+.git/
+.next/
