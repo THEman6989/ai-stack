@@ -1,0 +1,4 @@
+#librechat
+JWT_SECRET=mach_hier_irgendwelche_zufaelligen_buchstaben_123
+CREDS_KEY=f3423f423f423f423f423f423f423f42  # Muss 32 Zeichen lang sein
+CREDS_IV=f3423f423f423f423f423f423f423f42   # Muss 16 Zeichen lang sein (oder nimm einfach 32)
