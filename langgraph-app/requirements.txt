@@ -2,7 +2,7 @@ fastapi
 uvicorn
 wakeonlan
 langgraph
-deepagents
+deepagents==0.4.12
 langchain-litellm
 langgraph-checkpoint-mongodb
 langgraph-store-mongodb
@@ -21,9 +21,11 @@ langchain-core>=0.2.0
 langchain-openai
 # --- VISUALISIERUNG & DEBUGGING (Awesome LangGraph) ---
 langgraphics
-agent-tackle-box
+# agent-tackle-box
 langsmith
 
 # --- SUPERVISOR & SEARCH ---
 langgraph-supervisor
 tavily-python
+# langgraph-cua
+scrapybara

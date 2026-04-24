@@ -1,0 +1,40 @@
+[33m0874b77[m[33m ([m[1;36mHEAD[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m HEAD@{0}: pull --tags -r origin main (start): checkout 0874b776b3e97d1f0d036610ba272cd7c28e2425
+[33md65964e[m[33m ([m[1;32mmain[m[33m)[m HEAD@{1}: commit: feat: migrate to supervisor architecture with debugger agent & dynamic PC config
+[33mc8e6232[m HEAD@{2}: commit: feat(langgraph): upgrade to Supervisor architecture, CUA, and Tavily
+[33md4f08ed[m HEAD@{3}: commit: add pixelle-mcp
+[33m44805fa[m HEAD@{4}: commit: fix server.py
+[33m0b992da[m HEAD@{5}: commit: fix server.py imports
+[33m9b8db1e[m HEAD@{6}: commit: fix
+[33m0b729af[m HEAD@{7}: commit: fix: env(example)
+[33mec7be18[m HEAD@{8}: commit: fix: env(example)
+[33m590213b[m HEAD@{9}: commit: fix: resolve build errors, missing dependencies, and mongo kernel compatibility
+[33m997c31d[m HEAD@{10}: commit: fix: resolve build errors, missing dependencies, and mongo kernel compatibility
+[33m93cfd9e[m HEAD@{11}: commit: add dockerignore
+[33m61dc8c3[m HEAD@{12}: commit: fix import and chnag MangoDB to v7.0
+[33mafbaf61[m HEAD@{13}: commit: fix import and chnag MangoDB to v7.0
+[33m17a6a1d[m HEAD@{14}: commit (merge): Merge remote changes from main
+[33m2bff632[m HEAD@{15}: commit (amend): Add Docker configuration for deep-agents-ui
+[33m66710f9[m HEAD@{16}: commit (amend): Update Docker configs for UI
+[33mca99ce1[m HEAD@{17}: commit: opdate
+[33m73ed4b5[m HEAD@{18}: commit (merge): Merge remote-tracking branch 'origin/main'
+[33mb90f59c[m HEAD@{19}: commit: Add missing deep-agents-ui submodule
+[33mdd6dfba[m HEAD@{20}: commit: pixelle-mcp integreation upate
+[33m3e7fa38[m HEAD@{21}: commit: pixelle-mcp integreation
+[33me08c643[m HEAD@{22}: commit: add update
+[33m9807de0[m HEAD@{23}: commit: add langmem
+[33m149ad80[m HEAD@{24}: pull: Fast-forward
+[33madfc573[m HEAD@{25}: commit: add opencode as mcp
+[33m139d3ef[m HEAD@{26}: reset: moving to HEAD
+[33m139d3ef[m HEAD@{27}: commit: add langchain-mcp-adapters
+[33mdbc97d0[m HEAD@{28}: commit: add liberechat RAG update
+[33mbd4cf45[m HEAD@{29}: commit: add liberechat RAG
+[33m1003213[m HEAD@{30}: commit: add local-deep-researcher
+[33m175b04a[m HEAD@{31}: commit: add langchain agent-ui
+[33mca26e4c[m HEAD@{32}: commit: add langchain agent-ui
+[33m77c51ce[m HEAD@{33}: pull: Fast-forward
+[33me12a37e[m HEAD@{34}: commit: Wechsel zu langchain-ai/deepagents
+[33me329846[m HEAD@{35}: commit: Wechsel zu langchain-ai/deepagents
+[33md533bef[m HEAD@{36}: commit: update
+[33m67d722a[m HEAD@{37}: commit: Füge eigenen LangGraph-Server hinzu
+[33m5dbde7c[m HEAD@{38}: Branch: renamed refs/heads/master to refs/heads/main
+[33m5dbde7c[m HEAD@{40}: commit (initial): Erster Commit: Mein eigener AI Stack

@@ -13,7 +13,7 @@ from langgraph.checkpoint.mongodb import MongoDBSaver
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langgraph_supervisor import create_supervisor
-from langgraph_cua import create_computer_use_agent
+from langgraph_cua import create_cua
 from langchain_redis import RedisCache
 # Von: from langchain.globals import set_llm_cache
 # Zu:
@@ -28,7 +28,7 @@ from langchain_fastapi_chat_completion.fastapi.langchain_openai_api_bridge_fasta
 from langmem import create_manage_memory_tool, create_search_memory_tool
 from deepagents import create_deep_agent
 from deepagents.backends.local_shell import LocalShellBackend
-from langgraphics import LangGraphicsMiddleware
+# from langgraphics import LangGraphicsMiddleware
 
 # --- NEU: MCP Imports ---
 from mcp import ClientSession
@@ -278,14 +278,14 @@ async def lifespan(app: FastAPI):
     )
     
     # Worker 3: The Computer Use Agent (Direct GUI control via VNC) 
-    computer_worker = create_computer_use_agent(
-        model=llm,
-        name="ui_assistant",
-        system_prompt="""You are the UI Expert. 
+    computer_worker = create_cua(
+        prompt="""You are the UI Expert. 
         You have access to a virtual Linux desktop via DISPLAY :0.
         You can use a browser, terminal, and other GUI apps.
-        Use visual feedback to confirm your actions."""
+        Use visual feedback to confirm your actions.""",
+        environment="ubuntu"
     )
+    computer_worker.name = "ui_assistant"
     # --- NEW: Worker 4: The Debugger Agent ---
     debugger_worker = create_deep_agent(
         model=llm,

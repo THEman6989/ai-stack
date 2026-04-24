@@ -26,7 +26,7 @@ ENV SCREEN_DEPTH=24
 
 # 1. Install Requirements
 COPY langgraph-app/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install uv && uv pip install --system -r requirements.txt && uv pip install --system --no-deps langgraph-cua
 
 # 2. Copy the API-Bridge (Your Custom Fork)
 COPY langchain-bridge-repo/langchain_fastapi_chat_completion /app/langchain_fastapi_chat_completion
