@@ -1,12 +1,93 @@
-#librechat
-# JWT_SECRET: Irgendein langer, zufälliger Text (wird für Session-Tokens genutzt)
+# =====================================================================
+# AlphaRavis AI Stack — Environment Configuration
+# Copy this file to .env and fill in your values.
+# DO NOT commit your real .env to Git!
+# =====================================================================
+
+
+# =====================================================================
+# --- LIBRECHAT ---
+# =====================================================================
+
+# JWT_SECRET: Any long random string (used for session tokens)
+# Generate with: openssl rand -hex 32
 JWT_SECRET=88f98a728b7e4c9e8d1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p
 
-# CREDS_KEY: Muss EXAKT 32 Zeichen lang sein (Hexadezimal ist am besten)
+# CREDS_KEY: Must be EXACTLY 32 characters (hex recommended)
+# Generate with: openssl rand -hex 16
 CREDS_KEY=f3423f423f423f423f423f423f423f42
 
-# CREDS_IV: Muss EXAKT 16 Zeichen lang sein
+# CREDS_IV: Must be EXACTLY 16 characters
+# Generate with: openssl rand -hex 8
 CREDS_IV=a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
 
-TAVILY_API_KEY=tvly-dein-echter-key-hier
-LANGCHAIN_API_KEY=lsv2-dein-echter-key-hier
+
+# =====================================================================
+# --- REMOTE PC CONFIGURATION ---
+# =====================================================================
+# Format: JSON object where each key is a PC name (used by the agent).
+# Required fields per PC:
+#   "ip"  — Local IP address of the PC
+#   "mac" — MAC address for Wake-on-LAN (format: AA:BB:CC:DD:EE:FF)
+#
+# Optional fields per PC:
+#   "ssh_pass" — SSH password for THIS specific PC.
+#                If not set, SSH_PASS_DEFAULT is used as fallback.
+#
+# Add as many PCs as you want — the agent will know all of them automatically.
+#
+# Example with 2 PCs (one uses default password, one has its own):
+# REMOTE_PCS='{"main_pc": {"ip": "192.168.178.140", "mac": "AA:BB:CC:DD:EE:FF"}, "comfy_server": {"ip": "192.168.178.50", "mac": "11:22:33:44:55:66", "ssh_pass": "myOtherPassword"}}'
+#
+REMOTE_PCS='{"main_pc": {"ip": "192.168.178.140", "mac": "AA:BB:CC:DD:EE:FF"}, "comfy_server": {"ip": "192.168.178.50", "mac": "11:22:33:44:55:66"}}'
+
+
+# =====================================================================
+# --- SSH CREDENTIALS ---
+# =====================================================================
+
+# SSH_USER: The Linux username used for all SSH connections.
+# Default: root
+SSH_USER=root
+
+# SSH_PASS_DEFAULT: The default SSH password used for ALL PCs
+# unless a PC has its own "ssh_pass" set in REMOTE_PCS above.
+#
+# To use SSH key auth instead (more secure):
+#   1. Leave SSH_PASS_DEFAULT empty
+#   2. Mount your SSH keys into the container in docker-compose.yml:
+#      volumes:
+#        - ~/.ssh:/root/.ssh:ro
+#
+SSH_PASS_DEFAULT=yourPasswordHere
+
+
+# =====================================================================
+# --- REDIS ---
+# =====================================================================
+# Used for LLM response caching (speeds up repeated questions).
+# Default points to the Redis container in docker-compose.yml.
+# Only change if you use an external Redis instance.
+REDIS_URL=redis://redis:6379
+
+
+# =====================================================================
+# --- SEARCH (TAVILY) ---
+# =====================================================================
+# Required for the 'deep_web_research' tool (used by the Research Expert agent).
+# Get your free API key at: https://tavily.com
+TAVILY_API_KEY=tvly-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+
+# =====================================================================
+# --- LITELLM (LLM GATEWAY) ---
+# =====================================================================
+# LiteLLM acts as a proxy for all LLM calls.
+# The model name "edge-gemma" is defined in litellm-config/config.yaml.
+# You can add API keys for cloud models here if needed.
+#
+# Example for OpenAI (if you want to add GPT-4 as a fallback):
+# OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+#
+# Example for Anthropic:
+# ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

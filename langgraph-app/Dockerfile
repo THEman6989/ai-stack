@@ -14,6 +14,8 @@ RUN apt-get update && apt-get install -y \
     python3-dev \
     scrot \
     xdotool \
+    sshpass \
+    openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Environment Variables for the Virtual Display

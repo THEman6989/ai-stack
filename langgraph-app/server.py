@@ -37,11 +37,27 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 from langchain_core.runnables import RunnableConfig
 
 # =====================================================================
-# --- KONFIGURATION FÜR REMOTE PIXELLE (PC B) ---
+# --- DYNAMIC INFRASTRUCTURE CONFIG ---
 # =====================================================================
-# TRAGE HIER DIE IP-ADRESSE DEINES COMFYUI/PIXELLE-RECHNERS EIN:
-PC_B_IP = "192.168.178.50"
-PIXELLE_URL = f"http://{PIXELLE_HOST}:9004"
+import json
+
+pcs_env = os.getenv("REMOTE_PCS", "{}")
+try:
+    REMOTE_PCS = json.loads(pcs_env)
+except Exception as e:
+    print(f"Error loading REMOTE_PCS: {e}")
+    REMOTE_PCS = {}
+
+SSH_USER = os.getenv("SSH_USER", "root")
+SSH_PASS_DEFAULT = os.getenv("SSH_PASS_DEFAULT", "")
+
+# Pixelle runs locally in Docker — no remote IP needed
+PIXELLE_URL = "http://pixelle:9004"
+
+#COMFY_IP = REMOTE_PCS.get("comfy_server", {}).get("ip")
+COMFY_IP = REMOTE_PCS.get("comfy_server", {}).get("ip")
+if not COMFY_IP:
+    print("⚠️ WARNING: 'comfy_server' IP not found in REMOTE_PCS env variable!")
 # =====================================================================
 
 # --- INFRASTRUKTUR ---
@@ -81,12 +97,6 @@ async def monitor_pixelle_job(job_id: str, original_thread_id: str):
                 status = data.get("status", "running")
                 logs = data.get("logs", "Keine Logs.")
 
-                # 2. Monitor-Agent prüft Logs im Hintergrund-Kontext
-                await agent_executor.ainvoke(
-                    {"messages": [HumanMessage(content=f"Prüfe Logs von PC B: {logs[-500:]}")]},
-                    config=monitor_config
-                )
-
                 # 3. VERARBEITUNG DES ERGEBNISSES
                 if status == "completed":
                     # NEU: Wir nehmen direkt die echte HTTP-URL (oder den Text),
@@ -94,23 +104,34 @@ async def monitor_pixelle_job(job_id: str, original_thread_id: str):
                     original_pixelle_result = data.get("result", "")
 
                     final_msg = (
-                        f"🔔 **Update: Dein Bild ist fertig!**\n\n"
-                        f"{original_pixelle_result}" # Hier ist Pixelles kompletter Link schon drin!
+                        f"🔔 **Image ready!** Job `{job_id}` completed.\n\n"
+                        f"{original_pixelle_result}"
                     )
 
                     print(f"✅ Job {job_id} fertig. Injiziere Nachricht in Thread {original_thread_id}")
                     await agent_executor.ainvoke(
-                        {"messages": [HumanMessage(content=f"SYSTEM-MELDUNG: {final_msg}")]},
+                        {"messages": [HumanMessage(content=f"SYSTEM NOTIFICATION: {final_msg}")]},
                         config={"configurable": {"thread_id": original_thread_id}}
                     )
                     is_running = False
 
                 elif status == "failed":
-                    error_msg = f"❌ **Job {job_id} abgebrochen.** In den Logs wurde ein Fehler erkannt."
+                    # System instruction for the Supervisor to trigger the Debugger Agent
+                    instruction = (
+                        f"CRITICAL ERROR: Pixelle job `{job_id}` failed.\n"
+                        f"INSTRUCTION FOR SUPERVISOR:\n"
+                        f"1. Delegate to 'debugger_agent' immediately.\n"
+                        f"2. Pixelle runs as a local Docker container. Use 'execute_ssh_command' on 'main_pc' "
+                        f"   (localhost equivalent) or check Docker logs directly: 'docker logs pixelle --tail 50'.\n"
+                        f"3. Also check the LangGraph app logs: 'docker logs langgraph-app --tail 50'.\n"
+                        f"4. If a code error is found in server.py or any project file, read the file, "
+                        f"   propose the fix in the chat, and WAIT for user approval before applying. Do NOT apply any changes automatically, even if the fix is obvious.\n"
+                        f"5. HUMAN-IN-THE-LOOP: Do NOT apply any fix, restart, or docker command automatically. "
+                        f"   Present findings and proposed solution first."
+                    )
 
-                    # Fehler-Info in den Haupt-Chat posten
                     await agent_executor.ainvoke(
-                        {"messages": [HumanMessage(content=error_msg)]},
+                        {"messages": [HumanMessage(content=instruction)]},
                         config={"configurable": {"thread_id": original_thread_id}}
                     )
                     is_running = False
@@ -123,28 +144,62 @@ async def monitor_pixelle_job(job_id: str, original_thread_id: str):
 
 @tool
 async def start_pixelle_remote(prompt: str, config: RunnableConfig):
-    """Startet einen Workflow auf PC B. Die ID wird automatisch für das Monitoring genutzt."""
-    # Hole die aktuelle Thread-ID aus der Config (von LibreChat/LangGraph)
+    """Starts a workflow on the remote ComfyUI PC. The job ID is monitored automatically."""
     current_thread_id = config["configurable"].get("thread_id", "default_thread")
-
+    
     async with httpx.AsyncClient() as client:
         try:
             res = await client.post(f"{PIXELLE_URL}/api/run", json={"prompt": prompt})
             job_id = res.json().get("job_id")
-
-            # Starte Monitor und übergib die aktuelle Thread-ID für den Callback!
             asyncio.create_task(monitor_pixelle_job(job_id, current_thread_id))
-
-            return f"Bestätigt: Job `{job_id}` wurde auf PC B gestartet. Ich melde mich hier in diesem Chat, sobald das Bild fertig ist!"
+            return f"Confirmed: Job `{job_id}` started on Comfy Server. I will notify you here once it's done."
         except Exception as e:
-            return f"Fehler: Konnte PC B nicht erreichen. ({e})"
+            return f"Error: Could not reach Comfy Server. ({e})"
 
 @tool
-def wake_up_big_pc(mac_address: str = "AA:BB:CC:DD:EE:FF"):
-    """Weckt den großen Hauptrechner via Wake-on-LAN auf."""
+def wake_on_lan(pc_name: str):
+    """Sends a magic packet to wake up a remote PC by its name (e.g., 'main_pc')."""
     from wakeonlan import send_magic_packet
-    send_magic_packet(mac_address)
-    return "System: Magic Packet gesendet."
+    pc_info = REMOTE_PCS.get(pc_name)
+    if not pc_info or "mac" not in pc_info:
+        return f"Error: PC '{pc_name}' not found. Available: {list(REMOTE_PCS.keys())}"
+    
+    send_magic_packet(pc_info["mac"])
+    return f"System: Magic Packet sent to {pc_name}."
+
+
+@tool
+def execute_ssh_command(pc_name: str, command: str):
+    """Executes a shell command on a remote PC via SSH.
+    Use this for debugging: reading logs, checking PM2 status, inspecting files.
+    Available PCs: see REMOTE_PCS env variable."""
+    import subprocess
+
+    pc_info = REMOTE_PCS.get(pc_name)
+    if not pc_info or "ip" not in pc_info:
+        return f"Error: PC '{pc_name}' not found. Available: {list(REMOTE_PCS.keys())}"
+
+    ip = pc_info["ip"]
+    # Per-PC password override, or fall back to global default
+    ssh_pass = pc_info.get("ssh_pass", SSH_PASS_DEFAULT)
+
+    ssh_target = f"{SSH_USER}@{ip}"
+    ssh_opts = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
+
+    if ssh_pass:
+        # Use sshpass for password auth (requires sshpass installed in Dockerfile)
+        cmd = ["sshpass", "-p", ssh_pass, "ssh"] + ssh_opts + [ssh_target, command]
+    else:
+        # Fall back to key-based auth
+        cmd = ["ssh"] + ssh_opts + [ssh_target, command]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+        return f"Exit Code {result.returncode}\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    except subprocess.TimeoutExpired:
+        return f"Error: SSH command timed out after 45s on '{pc_name}'."
+    except Exception as e:
+        return f"SSH Connection failed: {str(e)}"
 
 @tool
 def fast_web_search(query: str):
@@ -202,7 +257,7 @@ async def lifespan(app: FastAPI):
     # Worker 1: The Research Expert (Uses Tavily for IP protection and local documents)
     research_worker = create_deep_agent(
         model=llm,
-        tools=[deep_web_research, ask_documents, deep_research_agent],
+        tools=[deep_web_research, ask_documents,],
         name="research_expert",
         system_prompt="You are the Research Expert. Use 'deep_web_research' (Tavily) for deep web research and ask_documents for local data. You search thoroughly and comprehensively."
     )
@@ -212,7 +267,7 @@ async def lifespan(app: FastAPI):
         model=llm,
         tools=[
             start_pixelle_remote,
-            wake_up_big_pc,
+            wake_on_lan,
             fast_web_search,
             create_manage_memory_tool(namespace=("memories",)),
             create_search_memory_tool(namespace=("memories",))
@@ -231,16 +286,49 @@ async def lifespan(app: FastAPI):
         You can use a browser, terminal, and other GUI apps.
         Use visual feedback to confirm your actions."""
     )
+    # --- NEW: Worker 4: The Debugger Agent ---
+    debugger_worker = create_deep_agent(
+        model=llm,
+        tools=[
+            execute_ssh_command,
+            fast_web_search,   # To look up error messages online
+        ],
+        name="debugger_agent",
+        system_prompt=f"""You are the Debugger Agent. Your ONLY job is to investigate and fix infrastructure problems.
+ 
+        CAPABILITIES:
+        - SSH into remote PCs to read logs and inspect files
+        - Available PCs: {list(REMOTE_PCS.keys())}
+        - ComfyUI is managed via PM2 on 'comfy_server'. Use these commands:
+        - 'pm2 list' → see all processes and their status/port
+        - 'pm2 logs comfyui_production --lines 50' → read recent logs
+        - 'pm2 restart comfyui_production' → restart (ONLY with user approval!)
+        - 'cat /path/to/server.py' → inspect code files
+        - Pixelle and LangGraph run as local Docker containers. Use 'docker logs <name> --tail 50'.
+        - Process names in PM2: look for 'comfyui_production' for production. Ignore 'comfyui_test'.
+
+        STRICT RULES:
+        1. DIAGNOSE first — always read logs before proposing anything.
+        2. NEVER run destructive commands (restart, rm, stop, docker-compose down) without explicit user approval.
+        3. If you find a code error in a file (e.g. server.py), show the user: the file path, the problematic lines, and your proposed fix.
+        4. After presenting findings, WAIT. Only proceed when the user says "yes", "fix it", or "proceed".
+        5. After a confirmed fix, you MAY run 'docker compose up -d --build' or 'pm2 restart' to apply it."""
+
+
+    )
 
     # 4. THE SUPERVISOR (AlphaRavis Chief Logic)
     agent_executor = create_supervisor(
-        [research_worker, general_worker, computer_worker],
+        [research_worker, general_worker, computer_worker, debugger_worker],
         model=llm,
-        prompt="""You are AlphaRavis, the Chief Supervisor of this system. 
-        Your job is to delegate tasks to the right specialized worker:
-        - For simple questions (facts, weather, single info), coding, or PC/Pixelle control: Use 'general_assistant'.
-        - For deep research, complex comparisons, or if more than 5 sources are needed: Use 'research_expert'.
-        - ALWAYS coordinate the workers to give the user a perfect final answer. Do not do the work yourself, delegate it!""",
+        prompt="""You are AlphaRavis, the Chief Supervisor of this system.
+        Delegate tasks to the right specialized worker:
+        - Simple questions, facts, coding, PC/Pixelle control: Use 'general_assistant'.
+        - Deep research, complex comparisons, 5+ sources needed: Use 'research_expert'.
+        - GUI automation, browser control, desktop tasks: Use 'ui_assistant'.
+        - ANY error, failed job, infrastructure problem, SSH investigation, container issues: Use 'debugger_agent'.
+        - ALWAYS coordinate the workers to give the user a perfect final answer. Do not do the work yourself, delegate it!
+        CRITICAL RULE: The 'debugger_agent' must ALWAYS ask the user for approval before applying any fix. Never bypass this rule.""",
         checkpointer=checkpointer,
         store=store
     )
