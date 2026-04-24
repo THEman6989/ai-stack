@@ -16,12 +16,14 @@ from langchain_redis import RedisCache
 # Zu:
 from langchain_core.globals import set_llm_cache
 
-from langchain_fastapi_chat_completion.fastapi.langchain_openai_api_bridge_fastapi import LangchainOpenaiApiBridgeFastapi
+# Change "Fastapi" to "FastAPI"
+from langchain_fastapi_chat_completion.fastapi.langchain_openai_api_bridge_fastapi import LangchainOpenaiApiBridgeFastAPI
 from langchain_fastapi_chat_completion.core.base_agent_factory import BaseAgentFactory
+from langchain_fastapi_chat_completion.core.create_agent_dto import CreateAgentDto
 
 from langmem import create_manage_memory_tool, create_search_memory_tool
 from deepagents import create_deep_agent
-from deepagents.backends.local_shell import LocalShellSandbox
+from deepagents.backends.local_shell import LocalShellBackend
 
 # --- NEU: MCP Imports ---
 from mcp import ClientSession
@@ -42,8 +44,12 @@ mongo_client = MongoClient("mongodb://mongodb:27017")
 checkpointer = MongoDBSaver(mongo_client, db_name="langgraph_memory")
 store = MongoDBSaver(mongo_client, db_name="langgraph_memory", collection_name="long_term_store")
 
-redis_client = Redis(host="redis", port=6379)
-set_llm_cache(RedisCache(redis_client))
+# FIX: Pass the connection string to RedisCache instead of the client object
+redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
+set_llm_cache(RedisCache(redis_url=redis_url))
+
+# If you need the client for other parts of the app:
+redis_client = Redis.from_url(redis_url)
 
 # --- GEHIRN ---
 llm = ChatLiteLLM(model="edge-gemma", base_url="http://litellm:4000")
@@ -167,7 +173,7 @@ async def lifespan(app: FastAPI):
     print("🚀 AlphaRavis wird initialisiert...")
 
     # 1. Native Sandbox für Code
-    sandbox = LocalShellSandbox(cwd="/workspace")
+    sandbox = LocalShellBackend(working_directory="/workspace")
 
     # 2. Remote Pixelle MCP Tools via SSE laden
     mcp_tools = []
@@ -220,10 +226,16 @@ app = FastAPI(lifespan=lifespan)
 
 # --- API BRIDGE (Anbindung an LibreChat) ---
 class MyEnterpriseAgentFactory(BaseAgentFactory):
-    def create_agent(self, create_agent_dto):
+    # Add ": CreateAgentDto" to the parameter
+    def create_agent(self, create_agent_dto: CreateAgentDto):
         return agent_executor
 
-bridge = LangchainOpenaiApiBridgeFastapi(
-    agent_factory=MyEnterpriseAgentFactory()
+# To this:
+bridge = LangchainOpenaiApiBridgeFastAPI(
+    app=app,
+    agent_factory_provider=MyEnterpriseAgentFactory()
 )
-app.include_router(bridge.router)
+
+# And ensure you call the bind method afterwards:
+bridge.bind_openai_chat_completion(path="/v1")
+
