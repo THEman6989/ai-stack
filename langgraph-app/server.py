@@ -12,7 +12,9 @@ from langchain_litellm import ChatLiteLLM
 from langgraph.checkpoint.mongodb import MongoDBSaver
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_redis import RedisCache
-from langchain.globals import set_llm_cache
+# Von: from langchain.globals import set_llm_cache
+# Zu:
+from langchain_core.globals import set_llm_cache
 
 from langchain_fastapi_chat_completion.fastapi.langchain_openai_api_bridge_fastapi import LangchainOpenaiApiBridgeFastapi
 from langchain_fastapi_chat_completion.core.base_agent_factory import BaseAgentFactory
