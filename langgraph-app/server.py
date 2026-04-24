@@ -16,10 +16,11 @@ from langchain_redis import RedisCache
 # Zu:
 from langchain_core.globals import set_llm_cache
 
-# Change "Fastapi" to "FastAPI"
-from langchain_fastapi_chat_completion.fastapi.langchain_openai_api_bridge_fastapi import LangchainOpenaiApiBridgeFastAPI
+# --- DeepAgents & Bridge Imports ---
+from deepagents.backends.local_shell import LocalShellBackend
 from langchain_fastapi_chat_completion.core.base_agent_factory import BaseAgentFactory
 from langchain_fastapi_chat_completion.core.create_agent_dto import CreateAgentDto
+from langchain_fastapi_chat_completion.fastapi.langchain_openai_api_bridge_fastapi import LangchainOpenaiApiBridgeFastAPI
 
 from langmem import create_manage_memory_tool, create_search_memory_tool
 from deepagents import create_deep_agent
@@ -44,11 +45,8 @@ mongo_client = MongoClient("mongodb://mongodb:27017")
 checkpointer = MongoDBSaver(mongo_client, db_name="langgraph_memory")
 store = MongoDBSaver(mongo_client, db_name="langgraph_memory", collection_name="long_term_store")
 
-# FIX: Pass the connection string to RedisCache instead of the client object
 redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
-set_llm_cache(RedisCache(redis_url=redis_url))
-
-# If you need the client for other parts of the app:
+set_llm_cache(RedisCache(redis_url=redis_url)) # URL String übergeben!
 redis_client = Redis.from_url(redis_url)
 
 # --- GEHIRN ---
@@ -169,11 +167,10 @@ def deep_research_agent(topic: str):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global agent_executor, mcp_session_manager
-
     print("🚀 AlphaRavis wird initialisiert...")
 
-    # 1. Native Sandbox für Code
-    sandbox = LocalShellBackend(working_directory="/workspace")
+    # FIX: root_dir statt working_directory
+    sandbox = LocalShellBackend(root_dir="/workspace")
 
     # 2. Remote Pixelle MCP Tools via SSE laden
     mcp_tools = []
@@ -201,7 +198,7 @@ async def lifespan(app: FastAPI):
             create_manage_memory_tool(namespace=("memories",)),
             create_search_memory_tool(namespace=("memories",))
         ] + mcp_tools, # <-- Fügt die nativen MCP Tools von PC B hinzu, falls sie direkt genutzt werden sollen
-        sandbox=sandbox,
+        backend=sandbox,
         checkpointer=checkpointer,
         store=store,
         system_prompt="""You are AlphaRavis, the chief agent of this system.
@@ -226,7 +223,7 @@ app = FastAPI(lifespan=lifespan)
 
 # --- API BRIDGE (Anbindung an LibreChat) ---
 class MyEnterpriseAgentFactory(BaseAgentFactory):
-    # Add ": CreateAgentDto" to the parameter
+    # Das ": CreateAgentDto" ist PFLICHT!
     def create_agent(self, create_agent_dto: CreateAgentDto):
         return agent_executor
 
