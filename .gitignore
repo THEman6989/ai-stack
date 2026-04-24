@@ -14,3 +14,5 @@ config.yaml  # Nur ignorieren, wenn da echte API-Keys (OpenAI etc.) drin stehen!
 # Mac/Windows Systemdateien
 .DS_Store
 Thumbs.db
+
+data

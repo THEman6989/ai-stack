@@ -16,3 +16,4 @@ html2text
 tavily-python
 langmem
 langchain-mcp-adapters
+langchain-community
