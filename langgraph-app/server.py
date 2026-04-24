@@ -279,8 +279,6 @@ async def lifespan(app: FastAPI):
     
     # Worker 3: The Computer Use Agent (Direct GUI control via VNC) 
     computer_worker = create_cua(
-        name="ui_assistant",
-        model=llm,
         prompt="""You are the UI Expert. 
         You have access to a virtual Linux desktop via DISPLAY :0.
         You can use a browser, terminal, and other GUI apps.
