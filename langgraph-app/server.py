@@ -28,7 +28,7 @@ from langchain_fastapi_chat_completion.fastapi.langchain_openai_api_bridge_fasta
 from langmem import create_manage_memory_tool, create_search_memory_tool
 from deepagents import create_deep_agent
 from deepagents.backends.local_shell import LocalShellBackend
-# from langgraphics import LangGraphicsMiddleware
+from langgraphics import watch
 
 # --- NEU: MCP Imports ---
 from mcp import ClientSession
@@ -261,6 +261,7 @@ async def lifespan(app: FastAPI):
         name="research_expert",
         system_prompt="You are the Research Expert. Use 'deep_web_research' (Tavily) for deep web research and ask_documents for local data. You search thoroughly and comprehensively."
     )
+    research_worker = watch(research_worker)
 
     # Worker 2: The Generalist (Fast searches, PC control, Pixelle, Code)
     general_worker = create_deep_agent(
@@ -276,7 +277,8 @@ async def lifespan(app: FastAPI):
         name="general_assistant",
         system_prompt="You are the Generalist. Responsible for quick facts (fast_web_search), Pixelle control, code execution in the sandbox, and memory management."
     )
-    
+    general_worker = watch(general_worker)
+
     # Worker 3: The Computer Use Agent (Direct GUI control via VNC) 
     computer_worker = create_cua(
         prompt="""You are the UI Expert. 
@@ -286,6 +288,8 @@ async def lifespan(app: FastAPI):
         environment="ubuntu"
     )
     computer_worker.name = "ui_assistant"
+    computer_worker = watch(computer_worker)
+
     # --- NEW: Worker 4: The Debugger Agent ---
     debugger_worker = create_deep_agent(
         model=llm,
@@ -316,6 +320,7 @@ async def lifespan(app: FastAPI):
 
 
     )
+    debugger_worker = watch(debugger_worker)
 
     # 4. THE SUPERVISOR (AlphaRavis Chief Logic)
     agent_executor = create_supervisor(
@@ -332,6 +337,12 @@ async def lifespan(app: FastAPI):
         checkpointer=checkpointer,
         store=store
     )
+
+
+    # --- LangGraphics Visualisation ---
+    agent_executor = watch(agent_executor)
+
+
 
     print("✅ AlphaRavis Supervisor Ready.")
     yield
