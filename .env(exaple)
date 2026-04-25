@@ -92,6 +92,8 @@ TAVILY_API_KEY=tvly-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 #
 # Example for OpenAI (if you want to add GPT-4 as a fallback):
 # OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-#
+
+# MASTER_KEY=0123456789
+
 # Example for Anthropic:
 # ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
