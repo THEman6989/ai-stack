@@ -47,8 +47,7 @@ services:
     image: ghcr.io/berriai/litellm:main-latest
     container_name: litellm
     environment:
-      # Wir übergeben die DATABASE_URL direkt als Environment-Eintrag
-      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@vectordb:5432/rag_api
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
     env_file:
       - .env
