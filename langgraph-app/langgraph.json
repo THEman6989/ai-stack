@@ -1,0 +1,13 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": [
+    "."
+  ],
+  "graphs": {
+    "alpha_ravis": "./agent_graph.py:make_graph"
+  },
+  "env": "../.env",
+  "checkpointer": {
+    "backend": "mongo"
+  }
+}

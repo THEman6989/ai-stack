@@ -76,6 +76,19 @@ REDIS_URL=redis://redis:6379
 
 
 # =====================================================================
+# --- LANGGRAPH CLI CHECKPOINTER ---
+# =====================================================================
+# Phase 1 uses LangGraph's native Mongo checkpointer via langgraph.json.
+# For real Mongo checkpointing, LangGraph requires a replica-set capable URI
+# with the database name in the path. A standalone mongo:7.0 container is not
+# enough unless it is configured as a replica set.
+#
+# Example:
+# LS_MONGODB_URI=mongodb://mongodb:27017/langgraph?replicaSet=rs0
+LS_MONGODB_URI=mongodb://mongodb:27017/langgraph?replicaSet=rs0
+
+
+# =====================================================================
 # --- SEARCH (TAVILY) ---
 # =====================================================================
 # Required for the 'deep_web_research' tool (used by the Research Expert agent).
