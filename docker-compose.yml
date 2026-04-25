@@ -68,7 +68,7 @@ services:
       - DB_PORT=5432
       - POSTGRES_DB=rag_api
       - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=mysecretpassword
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - RAG_OPENAI_API_KEY=any-string
       - RAG_OPENAI_BASEURL=http://litellm:4000
     depends_on:
