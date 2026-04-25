@@ -6,6 +6,8 @@ import hashlib
 import inspect
 import json
 import os
+import re
+import shlex
 import time
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,7 @@ from langchain_redis import RedisCache
 from langgraph.func import task
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from langgraph.types import interrupt
 from langgraph_swarm import create_handoff_tool, create_swarm
 from langmem import create_manage_memory_tool, create_search_memory_tool
 from mcp import ClientSession
@@ -83,6 +86,7 @@ def _model() -> ChatLiteLLM:
         api_key=os.getenv("OPENAI_API_KEY", "sk-local-dev"),
         request_timeout=float(os.getenv("ALPHARAVIS_LLM_TIMEOUT_SECONDS", "120")),
         max_retries=int(os.getenv("ALPHARAVIS_LLM_MAX_RETRIES", "0")),
+        streaming=os.getenv("ALPHARAVIS_LLM_STREAMING", "true").lower() in {"1", "true", "yes"},
     )
 
 
@@ -239,6 +243,11 @@ def execute_ssh_command(pc_name: str, command: str):
     if not pc_info or "ip" not in pc_info:
         return f"Error: PC '{pc_name}' not found. Available: {list(REMOTE_PCS.keys())}"
 
+    approval = _require_command_approval("ssh", command, target=pc_name)
+    if not approval["approved"]:
+        return approval["message"]
+    command = approval["command"]
+
     ssh_target = f"{SSH_USER}@{pc_info['ip']}"
     ssh_opts = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
     ssh_pass = pc_info.get("ssh_pass", SSH_PASS_DEFAULT)
@@ -255,6 +264,163 @@ def execute_ssh_command(pc_name: str, command: str):
         return f"Error: SSH command timed out after 45s on '{pc_name}'."
     except Exception as exc:
         return f"SSH connection failed: {exc}"
+
+
+@tool
+def execute_local_command(command: str):
+    """Executes a local diagnostic shell command for Docker, logs, or repo inspection."""
+
+    import subprocess
+
+    approval = _require_command_approval("local", command, target="langgraph-api")
+    if not approval["approved"]:
+        return approval["message"]
+
+    try:
+        result = subprocess.run(
+            approval["command"],
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=int(os.getenv("ALPHARAVIS_LOCAL_COMMAND_TIMEOUT_SECONDS", "45")),
+        )
+        return f"Exit Code {result.returncode}\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    except subprocess.TimeoutExpired:
+        return "Error: local command timed out."
+    except Exception as exc:
+        return f"Local command failed: {exc}"
+
+
+def _first_shell_word(command: str) -> str:
+    try:
+        parts = shlex.split(command, posix=True)
+    except ValueError:
+        return ""
+    return parts[0] if parts else ""
+
+
+def _command_segments(command: str) -> list[str]:
+    return [segment.strip() for segment in re.split(r"\s*(?:&&|\|\||;|\|)\s*", command) if segment.strip()]
+
+
+def _is_read_only_command(command: str) -> bool:
+    command = command.strip()
+    if not command:
+        return False
+
+    dangerous_patterns = [
+        r"\b(rm|rmdir|mv|cp|chmod|chown|dd|mkfs|fdisk|parted|mount|umount|truncate|tee)\b",
+        r"\b(kill|pkill|killall|reboot|shutdown|poweroff)\b",
+        r"\b(apt|apt-get|apk|yum|dnf|pip|pip3|npm|pnpm|yarn)\s+(install|remove|uninstall|upgrade|update|add)\b",
+        r"\b(git)\s+(push|commit|merge|rebase|reset|clean|checkout|switch|restore)\b",
+        r"\b(docker)\s+(restart|stop|start|kill|rm|rmi|compose\s+(up|down|restart|stop|start|pull|build)|system\s+prune)\b",
+        r"\b(systemctl|service)\s+(restart|stop|start|enable|disable|reload)\b",
+        r"\b(pm2)\s+(restart|stop|start|delete|reload|save)\b",
+        r"\bsed\s+-i\b",
+        r"(^|[^<])>(?!>)|>>",
+    ]
+    lowered = command.lower()
+    if any(re.search(pattern, lowered) for pattern in dangerous_patterns):
+        return False
+
+    safe_roots = {
+        "awk",
+        "cat",
+        "curl",
+        "date",
+        "df",
+        "docker",
+        "du",
+        "echo",
+        "file",
+        "find",
+        "free",
+        "git",
+        "grep",
+        "head",
+        "hostname",
+        "id",
+        "journalctl",
+        "less",
+        "ls",
+        "netstat",
+        "pm2",
+        "ps",
+        "pwd",
+        "rg",
+        "service",
+        "ss",
+        "stat",
+        "systemctl",
+        "tail",
+        "top",
+        "uname",
+        "uptime",
+        "which",
+        "whoami",
+    }
+    allowed_subcommands = {
+        "docker": {"ps", "logs", "inspect", "version", "info", "stats", "compose"},
+        "git": {"status", "diff", "log", "show", "branch", "remote", "rev-parse"},
+        "pm2": {"list", "status", "logs", "show", "describe", "monit"},
+        "service": {"status"},
+        "systemctl": {"status", "is-active", "is-enabled", "list-units", "list-timers"},
+    }
+
+    for segment in _command_segments(command):
+        root = _first_shell_word(segment)
+        if root not in safe_roots:
+            return False
+        if root in allowed_subcommands:
+            parts = shlex.split(segment, posix=True)
+            subcommand = parts[1] if len(parts) > 1 else ""
+            if root == "docker" and subcommand == "compose":
+                compose_cmd = parts[2] if len(parts) > 2 else ""
+                if compose_cmd not in {"ps", "logs", "config"}:
+                    return False
+            elif subcommand not in allowed_subcommands[root]:
+                return False
+
+    return True
+
+
+def _require_command_approval(scope: str, command: str, *, target: str) -> dict[str, Any]:
+    if os.getenv("ALPHARAVIS_REQUIRE_COMMAND_APPROVAL", "true").lower() not in {"1", "true", "yes"}:
+        return {"approved": True, "command": command, "message": ""}
+
+    if _is_read_only_command(command):
+        return {"approved": True, "command": command, "message": ""}
+
+    response = interrupt(
+        {
+            "type": "command_approval",
+            "scope": scope,
+            "target": target,
+            "command": command,
+            "risk": "This command can modify state, stop services, delete data, install packages, or is not clearly read-only.",
+            "allowed_replies": [
+                "approve",
+                "reject",
+                "replace: <safer command>",
+            ],
+        }
+    )
+
+    if isinstance(response, str):
+        response = {"action": response}
+    if not isinstance(response, dict):
+        return {"approved": False, "command": command, "message": "Command rejected: invalid approval response."}
+
+    action = str(response.get("action", "")).lower().strip()
+    if action in {"approve", "approved", "yes", "ja", "genehmigt"}:
+        return {"approved": True, "command": command, "message": ""}
+    if action in {"replace", "change", "ersetzen", "ändern", "aendern"} and response.get("command"):
+        replacement = str(response["command"]).strip()
+        if not replacement:
+            return {"approved": False, "command": command, "message": "Command rejected: empty replacement."}
+        return {"approved": True, "command": replacement, "message": ""}
+
+    return {"approved": False, "command": command, "message": "Command rejected by user approval gate."}
 
 
 @tool
@@ -318,6 +484,80 @@ async def search_archived_context(query: str, limit: int = 5):
         lines.append(summary)
 
     return "\n\n".join(lines)
+
+
+@tool
+async def search_debugging_lessons(query: str, limit: int = 5):
+    """Search lessons learned from past debugging failures and successful fixes."""
+
+    if get_store is None:
+        return "LangGraph store access is unavailable in this runtime."
+
+    try:
+        store = get_store()
+    except Exception as exc:
+        return f"No LangGraph store is attached to this run: {exc}"
+
+    try:
+        results = store.search(("alpharavis", "debugging_lessons"), query=query, limit=limit)
+        if inspect.isawaitable(results):
+            results = await results
+    except Exception as exc:
+        return f"Lesson search failed: {exc}"
+
+    if not results:
+        return "No previous debugging lessons matched that query."
+
+    lines = []
+    for item in results:
+        value = getattr(item, "value", item)
+        if isinstance(value, dict):
+            lines.append(
+                "\n".join(
+                    [
+                        f"Problem: {value.get('problem', 'unknown')}",
+                        f"Root cause: {value.get('root_cause', 'unknown')}",
+                        f"Fix: {value.get('fix', 'unknown')}",
+                        f"Signals: {value.get('signals', 'unknown')}",
+                    ]
+                )
+            )
+        else:
+            lines.append(str(value))
+    return "\n\n".join(lines)
+
+
+@tool
+async def record_debugging_lesson(
+    problem: str,
+    root_cause: str,
+    fix: str,
+    signals: str = "",
+    commands: str = "",
+    outcome: str = "",
+):
+    """Store a durable lesson after a debugging issue is understood or fixed."""
+
+    if get_store is None:
+        return "LangGraph store access is unavailable in this runtime."
+
+    try:
+        store = get_store()
+    except Exception as exc:
+        return f"No LangGraph store is attached to this run: {exc}"
+
+    lesson = {
+        "problem": problem,
+        "root_cause": root_cause,
+        "fix": fix,
+        "signals": signals,
+        "commands": commands,
+        "outcome": outcome,
+        "created_at": int(time.time()),
+    }
+    key = hashlib.sha256(json.dumps(lesson, sort_keys=True).encode("utf-8")).hexdigest()[:24]
+    await _maybe_put(store, ("alpharavis", "debugging_lessons"), key, lesson)
+    return f"Stored debugging lesson `{key}`."
 
 
 async def _load_pixelle_mcp_tools(stack: contextlib.AsyncExitStack) -> list[Any]:
@@ -479,7 +719,14 @@ def _create_ui_assistant(llm: ChatLiteLLM, handoff_tools: list[Any]):
 def _create_debugger_subgraph(llm: ChatLiteLLM, handoff_tools: list[Any]):
     debugger_worker = create_deep_agent(
         model=llm,
-        tools=[execute_ssh_command, fast_web_search, *handoff_tools],
+        tools=[
+            execute_ssh_command,
+            execute_local_command,
+            fast_web_search,
+            search_debugging_lessons,
+            record_debugging_lesson,
+            *handoff_tools,
+        ],
         name="debugger_agent_worker",
         system_prompt=(
             "You are the Debugger Agent. Your only job is to investigate "
@@ -489,12 +736,13 @@ def _create_debugger_subgraph(llm: ChatLiteLLM, handoff_tools: list[Any]):
             "`comfyui_production` and ignore `comfyui_test`.\n"
             "Pixelle and LangGraph run as local Docker containers.\n\n"
             "Strict rules:\n"
-            "1. Diagnose first; always read logs before proposing a fix.\n"
-            "2. Never run destructive commands without explicit user approval.\n"
-            "3. If code changes are needed, show the file path, problematic "
+            "1. Search debugging lessons first when an error resembles a past failure.\n"
+            "2. Diagnose first; always read logs before proposing a fix.\n"
+            "3. Destructive or state-changing commands are guarded by a real approval interrupt.\n"
+            "4. If code changes are needed, show the file path, problematic "
             "lines, and proposed fix.\n"
-            "4. After presenting findings, wait for approval before applying "
-            "fixes, restarts, or docker commands."
+            "5. After a useful diagnosis or confirmed fix, record a debugging lesson "
+            "with problem, root cause, fix, signals, and commands."
         ),
     )
 
@@ -603,7 +851,13 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
 
     context_worker = create_deep_agent(
         model=llm,
-        tools=[search_archived_context, transfer_to_generalist, transfer_to_research, transfer_to_debugger],
+        tools=[
+            search_archived_context,
+            search_debugging_lessons,
+            transfer_to_generalist,
+            transfer_to_research,
+            transfer_to_debugger,
+        ],
         name="context_retrieval_agent",
         system_prompt=(
             "You are the Context Retrieval Agent. Search long-term archived "

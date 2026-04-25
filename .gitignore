@@ -16,3 +16,6 @@ config.yaml  # Nur ignorieren, wenn da echte API-Keys (OpenAI etc.) drin stehen!
 Thumbs.db
 
 data
+
+# Lokaler LangGraph-Dev-Cache
+langgraph-app/.langgraph_api/
