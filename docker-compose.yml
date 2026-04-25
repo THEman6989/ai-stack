@@ -39,7 +39,7 @@ services:
       - ./data/pgdata:/var/lib/postgresql/data
     env_file:
       - .env
-    restart: alwayss
+    restart: always
 
   # --- KI INFRASTRUKTUR ---
   litellm:
