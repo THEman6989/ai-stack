@@ -3,7 +3,7 @@ model_list:
   - model_name: edge-gemma
     litellm_params:
       model: ollama/gemma4:e2b # Oder wie auch immer das Modell exakt in Ollama heißt
-      api_base: http://192.168.178.140:11434
+      api_base: http://192.168.178.166:11434
 
   # 2. Dein großer PC (Llama.cpp Server)
   - model_name: big-boss
