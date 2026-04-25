@@ -3,12 +3,19 @@ services:
   mongodb:
     image: mongo:7.0
     container_name: mongodb
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
     ports:
       - "27017:27017" # Debugging-Port für MongoDB Compass
     volumes:
       - ./librechat-data/db:/data/db
     env_file:
       - .env
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval \"try { rs.status().ok } catch (e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongodb:27017'}]}).ok }\" | grep 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 10s
     restart: always
     
 
@@ -47,7 +54,7 @@ services:
     container_name: litellm
     environment:
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@vectordb:5432/rag_api
-      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-local-dev}
     env_file:
       - .env
     volumes:
@@ -87,7 +94,7 @@ services:
       dockerfile: ./langgraph-app/Dockerfile
     container_name: langgraph-api
     ports:
-      - "8123:8123"
+      - "2024:2024"
       - "5900:5900" # VNC Port für die Sandbox
       # --- NEU: LangGraphics Ports freigeben ---
       - "8760:8760" # Research UI
@@ -102,20 +109,49 @@ services:
       - ./:/workspace # WICHTIG: Die Sandbox braucht Zugriff auf deine Files zum Coden!
     environment:
       - TAVILY_API_KEY=${TAVILY_API_KEY}
-      - OPENAI_API_BASE=http://litellm:4000
-      - OPENAI_API_KEY=any-string
+      - OPENAI_API_BASE=http://litellm:4000/v1
+      - OPENAI_API_KEY=${LITELLM_MASTER_KEY:-sk-local-dev}
+      - ALPHARAVIS_MODEL=openai/edge-gemma
       - MONGODB_URI=mongodb://mongodb:27017
+      - LS_MONGODB_URI=mongodb://mongodb:27017/langgraph?replicaSet=rs0
       - REDIS_URL=redis://redis:6379
-      - PORT=8123
+      - PORT=2024
       # --- LANGSMITH OBSERVABILITY (Für LangGraphics & Debugging) ---
       - LANGCHAIN_TRACING_V2=true
       - LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
       - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY:-dein_langsmith_key_hier}
       - LANGCHAIN_PROJECT=AlphaRavis_Stack
     depends_on:
-      - litellm
-      - mongodb
-      - redis
+      litellm:
+        condition: service_started
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    env_file:
+      - .env
+    restart: always
+
+  # --- DER MUND (OpenAI-kompatible Bridge fÃ¼r LibreChat) ---
+  api-bridge:
+    build:
+      context: .
+      dockerfile: ./langgraph-app/Dockerfile
+    container_name: api-bridge
+    command: ["uvicorn", "bridge_server:app", "--host", "0.0.0.0", "--port", "8123"]
+    ports:
+      - "8123:8123"
+    volumes:
+      - ./langgraph-app:/app
+      - ./langchain-bridge-repo/langchain_fastapi_chat_completion:/app/langchain_fastapi_chat_completion
+    environment:
+      - LANGGRAPH_API_URL=http://langgraph-api:2024
+      - LANGGRAPH_ASSISTANT_ID=alpha_ravis
+      - OPENAI_MODEL_NAME=my-agent
+      - BRIDGE_RUN_TIMEOUT_SECONDS=35
+    depends_on:
+      langgraph-api:
+        condition: service_started
     env_file:
       - .env
     restart: always
@@ -131,8 +167,8 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_LANGGRAPH_API_URL=http://localhost:8123
-      - LANGGRAPH_API_URL=http://langgraph-api:8123
+      - NEXT_PUBLIC_LANGGRAPH_API_URL=http://localhost:2024
+      - LANGGRAPH_API_URL=http://langgraph-api:2024
     depends_on:
       - langgraph-api
 
@@ -146,7 +182,7 @@ services:
       - "3001:3000"
     environment:
       - NEXT_PUBLIC_ASSISTANT_ID=agent
-      - LANGGRAPH_API_URL=http://langgraph-api:8123
+      - LANGGRAPH_API_URL=http://langgraph-api:2024
       - NEXT_PUBLIC_API_URL=/api
     depends_on:
       - langgraph-api
@@ -163,13 +199,14 @@ services:
       - redis
       - litellm
       - rag_api
+      - api-bridge
     environment:
       - MONGO_URI=mongodb://mongodb:27017/LibreChat
       - REDIS_URL=redis://redis:6379
       - CONFIG_PATH=/app/librechat.yaml
       - RAG_API_URL=http://rag_api:8000
       # Hier verbindest du LibreChat mit deiner LangGraph Bridge
-      - OPENAI_REVERSE_PROXY=http://langgraph-api:8123/v1
+      - OPENAI_REVERSE_PROXY=http://api-bridge:8123/v1
     volumes:
       - ./librechat.yaml:/app/librechat.yaml
       - ./librechat-data/images:/app/client/public/images

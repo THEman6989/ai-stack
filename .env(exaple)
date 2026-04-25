@@ -87,6 +87,16 @@ REDIS_URL=redis://redis:6379
 # LS_MONGODB_URI=mongodb://mongodb:27017/langgraph?replicaSet=rs0
 LS_MONGODB_URI=mongodb://mongodb:27017/langgraph?replicaSet=rs0
 
+# Native LangGraph API used by the OpenAI-compatible bridge.
+LANGGRAPH_API_URL=http://langgraph-api:2024
+LANGGRAPH_ASSISTANT_ID=alpha_ravis
+OPENAI_MODEL_NAME=my-agent
+BRIDGE_RUN_TIMEOUT_SECONDS=35
+
+# Token budget for the Phase 4 context guard.
+ALPHARAVIS_ACTIVE_TOKEN_LIMIT=10000
+ALPHARAVIS_CONTEXT_KEEP_LAST_MESSAGES=12
+
 
 # =====================================================================
 # --- SEARCH (TAVILY) ---
@@ -101,12 +111,19 @@ TAVILY_API_KEY=tvly-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 # =====================================================================
 # LiteLLM acts as a proxy for all LLM calls.
 # The model name "edge-gemma" is defined in litellm-config/config.yaml.
+# LangGraph calls the LiteLLM proxy through the OpenAI-compatible provider.
+ALPHARAVIS_MODEL=openai/edge-gemma
+OPENAI_API_BASE=http://litellm:4000/v1
+OPENAI_API_KEY=sk-local-dev
+ALPHARAVIS_ENABLE_REDIS_CACHE=false
+ALPHARAVIS_LLM_TIMEOUT_SECONDS=30
+ALPHARAVIS_LLM_MAX_RETRIES=0
 # You can add API keys for cloud models here if needed.
 #
 # Example for OpenAI (if you want to add GPT-4 as a fallback):
 # OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
-# LITELLM_MASTER_KEY=0123456789
+LITELLM_MASTER_KEY=sk-local-dev
 
 # Example for Anthropic:
 # ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

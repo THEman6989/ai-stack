@@ -8,6 +8,7 @@
   },
   "env": "../.env",
   "checkpointer": {
-    "backend": "mongo"
+    "backend": "custom",
+    "path": "./mongo_checkpointer.py:make_checkpointer"
   }
 }

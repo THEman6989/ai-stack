@@ -28,7 +28,7 @@ ENV SCREEN_DEPTH=24
 COPY langgraph-app/requirements.txt .
 RUN pip install uv && uv pip install --system -r requirements.txt && uv pip install --system --no-deps langgraph-cua
 
-# 2. Copy the API-Bridge (Your Custom Fork)
+# 2. Copy optional local packages used by the legacy bridge and future phases
 COPY langchain-bridge-repo/langchain_fastapi_chat_completion /app/langchain_fastapi_chat_completion
 
 # 3. Copy the Deep Researcher
@@ -37,5 +37,5 @@ COPY local-deep-researcher-repo /app/local_deep_researcher
 # 4. Copy your own code
 COPY langgraph-app/ /app/
 
-# Remove any old X11 locks, start Xvfb, Fluxbox, VNC Server, and finally the FastAPI server
-CMD ["sh", "-c", "rm -f /tmp/.X0-lock && Xvfb :0 -screen 0 1280x720x24 & fluxbox & x11vnc -display :0 -forever -nopw -listen 0.0.0.0 & uvicorn server:app --host 0.0.0.0 --port 8123"]
+# Remove old X11 locks, start the GUI helpers, then run the native LangGraph API.
+CMD ["sh", "-c", "rm -f /tmp/.X0-lock && Xvfb :0 -screen 0 1280x720x24 & fluxbox & x11vnc -display :0 -forever -nopw -listen 0.0.0.0 & cd /workspace/langgraph-app && langgraph dev --config langgraph.json --host 0.0.0.0 --port 2024 --no-browser"]

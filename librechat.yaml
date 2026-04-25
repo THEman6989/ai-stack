@@ -3,7 +3,7 @@ endpoints:
   custom:
     - name: "LangGraph Agent"
       apiKey: "sk-1234" # Dummy Key
-      baseURL: "http://langgraph-api:8123/v1"
+      baseURL: "http://api-bridge:8123/v1"
       models:
         default: ["my-agent"]
         fetch: false

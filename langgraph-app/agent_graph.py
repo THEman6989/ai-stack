@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import inspect
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,16 +16,25 @@ from deepagents.backends.local_shell import LocalShellBackend
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.globals import set_llm_cache
+from langchain_core.messages import AIMessage, BaseMessage, RemoveMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langchain_litellm import ChatLiteLLM
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langchain_redis import RedisCache
 from langgraph.func import task
-from langgraph_supervisor import create_supervisor
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from langgraph_swarm import create_handoff_tool, create_swarm
 from langmem import create_manage_memory_tool, create_search_memory_tool
 from mcp import ClientSession
 from mcp.client.sse import sse_client
+from typing_extensions import NotRequired
+
+try:
+    from langgraph.config import get_store
+except Exception:  # pragma: no cover - older local LangGraph imports
+    get_store = None
 
 try:
     from langgraph_cua import create_cua
@@ -36,6 +48,16 @@ try:
     from langgraph_sdk.runtime import ServerRuntime
 except Exception:  # pragma: no cover - older local CLI imports
     ServerRuntime = Any  # type: ignore[misc,assignment]
+
+
+class AlphaRavisState(MessagesState):
+    active_agent: NotRequired[str]
+    context_summary: NotRequired[str]
+    archived_context_keys: NotRequired[list[str]]
+
+
+class DebuggerState(MessagesState):
+    internal_logs: NotRequired[list[str]]
 
 
 pcs_env = os.getenv("REMOTE_PCS", "{}")
@@ -56,8 +78,11 @@ if not COMFY_IP:
 
 def _model() -> ChatLiteLLM:
     return ChatLiteLLM(
-        model=os.getenv("ALPHARAVIS_MODEL", "edge-gemma"),
-        base_url=os.getenv("OPENAI_API_BASE", "http://litellm:4000"),
+        model=os.getenv("ALPHARAVIS_MODEL", "openai/edge-gemma"),
+        api_base=os.getenv("OPENAI_API_BASE", "http://litellm:4000/v1"),
+        api_key=os.getenv("OPENAI_API_KEY", "sk-local-dev"),
+        request_timeout=float(os.getenv("ALPHARAVIS_LLM_TIMEOUT_SECONDS", "30")),
+        max_retries=int(os.getenv("ALPHARAVIS_LLM_MAX_RETRIES", "0")),
     )
 
 
@@ -71,6 +96,9 @@ def _workspace_root() -> str:
 
 
 def _configure_llm_cache() -> None:
+    if os.getenv("ALPHARAVIS_ENABLE_REDIS_CACHE", "false").lower() not in {"1", "true", "yes"}:
+        return
+
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
     try:
         set_llm_cache(RedisCache(redis_url=redis_url))
@@ -152,7 +180,7 @@ def _format_pixelle_failure(job_id: str, logs: str) -> str:
     return (
         f"CRITICAL ERROR: Pixelle job `{job_id}` failed.\n"
         "INSTRUCTION FOR DEBUGGING:\n"
-        "1. Delegate to `debugger_agent` immediately.\n"
+        "1. Transfer to `debugger_agent` immediately.\n"
         "2. Pixelle runs as a local Docker container. Check "
         "`docker logs pixelle --tail 50`.\n"
         "3. Also check the LangGraph app logs: "
@@ -258,6 +286,40 @@ async def ask_documents(query: str):
             return f"Document search failed: {exc}"
 
 
+@tool
+async def search_archived_context(query: str, limit: int = 5):
+    """Search archived conversation summaries and raw-history records."""
+
+    if get_store is None:
+        return "LangGraph store access is unavailable in this runtime."
+
+    try:
+        store = get_store()
+    except Exception as exc:
+        return f"No LangGraph store is attached to this run: {exc}"
+
+    try:
+        results = store.search(("alpharavis", "archives"), query=query, limit=limit)
+        if inspect.isawaitable(results):
+            results = await results
+    except Exception as exc:
+        return f"Archive search failed: {exc}"
+
+    if not results:
+        return "No archived context matched that query."
+
+    lines = []
+    for item in results:
+        value = getattr(item, "value", item)
+        if isinstance(value, dict):
+            summary = value.get("summary") or value.get("content") or str(value)
+        else:
+            summary = str(value)
+        lines.append(summary)
+
+    return "\n\n".join(lines)
+
+
 async def _load_pixelle_mcp_tools(stack: contextlib.AsyncExitStack) -> list[Any]:
     try:
         session_manager = sse_client(f"{PIXELLE_URL}/pixelle/mcp/sse")
@@ -272,7 +334,121 @@ async def _load_pixelle_mcp_tools(stack: contextlib.AsyncExitStack) -> list[Any]
         return []
 
 
-def _create_ui_assistant(llm: ChatLiteLLM):
+def _message_text(message: Any) -> str:
+    if isinstance(message, dict):
+        content = message.get("content", "")
+        role = message.get("role") or message.get("type") or "message"
+    else:
+        content = getattr(message, "content", "")
+        role = getattr(message, "type", getattr(message, "role", "message"))
+
+    if isinstance(content, list):
+        content = " ".join(str(block) for block in content)
+
+    return f"{role}: {content}"
+
+
+def _message_to_json(message: Any) -> dict[str, Any]:
+    if isinstance(message, dict):
+        return dict(message)
+
+    return {
+        "type": getattr(message, "type", None),
+        "name": getattr(message, "name", None),
+        "id": getattr(message, "id", None),
+        "content": getattr(message, "content", ""),
+        "additional_kwargs": getattr(message, "additional_kwargs", {}),
+        "response_metadata": getattr(message, "response_metadata", {}),
+    }
+
+
+def _estimate_tokens(messages: list[Any]) -> int:
+    text = "\n".join(_message_text(message) for message in messages)
+    return max(1, len(text) // 4)
+
+
+async def _maybe_put(store: Any, namespace: tuple[str, ...], key: str, value: dict[str, Any]) -> None:
+    result = store.put(namespace, key, value)
+    if inspect.isawaitable(result):
+        await result
+
+
+async def _summarize_messages(
+    llm: ChatLiteLLM,
+    messages: list[Any],
+    existing_summary: str | None,
+) -> str:
+    history = "\n".join(_message_text(message) for message in messages)
+    previous = existing_summary or "No previous summary."
+    prompt = (
+        "Summarize this conversation history for future retrieval. Preserve "
+        "user preferences, unresolved tasks, exact technical facts, file paths, "
+        "commands, error messages, decisions, and pending approvals. Keep it "
+        "compact but specific.\n\n"
+        f"Previous summary:\n{previous}\n\n"
+        f"History to archive:\n{history}"
+    )
+    response = await llm.ainvoke([SystemMessage(content=prompt)])
+    return str(response.content)
+
+
+async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
+    messages = list(state.get("messages", []))
+    token_limit = int(os.getenv("ALPHARAVIS_ACTIVE_TOKEN_LIMIT", "10000"))
+
+    if _estimate_tokens(messages) <= token_limit:
+        return {}
+
+    keep_last = int(os.getenv("ALPHARAVIS_CONTEXT_KEEP_LAST_MESSAGES", "12"))
+    if len(messages) <= keep_last:
+        return {}
+
+    old_messages = messages[:-keep_last]
+    recent_messages = messages[-keep_last:]
+    summary = await _summarize_messages(
+        _model(),
+        old_messages,
+        state.get("context_summary"),
+    )
+
+    archive_key = hashlib.sha256(
+        f"{time.time()}:{summary}:{len(old_messages)}".encode("utf-8")
+    ).hexdigest()[:24]
+
+    store = getattr(runtime, "store", None) if runtime else None
+    archived_keys = list(state.get("archived_context_keys", []))
+    if store is not None:
+        await _maybe_put(
+            store,
+            ("alpharavis", "archives"),
+            archive_key,
+            {
+                "summary": summary,
+                "token_estimate": _estimate_tokens(old_messages),
+                "archived_at": int(time.time()),
+                "messages": [_message_to_json(message) for message in old_messages],
+            },
+        )
+        archived_keys.append(archive_key)
+
+    return {
+        "messages": [
+            RemoveMessage(id=REMOVE_ALL_MESSAGES),
+            SystemMessage(
+                content=(
+                    "Earlier conversation was archived to long-term memory. "
+                    "Use context_retrieval_agent if exact details are needed.\n\n"
+                    f"Summary:\n{summary}"
+                )
+            ),
+            *recent_messages,
+        ],
+        "context_summary": summary,
+        "archived_context_keys": archived_keys,
+    }
+
+
+def _create_ui_assistant(llm: ChatLiteLLM, handoff_tools: list[Any]):
     if create_cua is not None:
         try:
             computer_worker = create_cua(
@@ -290,60 +466,21 @@ def _create_ui_assistant(llm: ChatLiteLLM):
     reason = f" ({CUA_IMPORT_ERROR})" if CUA_IMPORT_ERROR else ""
     return create_deep_agent(
         model=llm,
-        tools=[],
+        tools=handoff_tools,
         name="ui_assistant",
         system_prompt=(
             "You are the UI Assistant, but direct GUI control is unavailable "
             f"in this runtime{reason}. Explain what UI steps would be needed "
-            "and ask for a runtime with langgraph-cua, DISPLAY, and VNC when "
-            "visual automation is required."
+            "and transfer to another agent when the task is not UI-specific."
         ),
     )
 
 
-def _build_graph(mcp_tools: list[Any] | None = None):
-    _warn_about_mongo_checkpointer()
-    _configure_llm_cache()
-
-    llm = _model()
-    sandbox = LocalShellBackend(root_dir=_workspace_root())
-    mcp_tools = mcp_tools or []
-
-    research_worker = create_deep_agent(
-        model=llm,
-        tools=[deep_web_research, ask_documents],
-        name="research_expert",
-        system_prompt=(
-            "You are the Research Expert. Use deep_web_research for deep web "
-            "research and ask_documents for local data. Search thoroughly and "
-            "return concise, well-sourced conclusions."
-        ),
-    )
-
-    general_worker = create_deep_agent(
-        model=llm,
-        tools=[
-            start_pixelle_remote,
-            wake_on_lan,
-            fast_web_search,
-            create_manage_memory_tool(namespace=("memories",)),
-            create_search_memory_tool(namespace=("memories",)),
-        ]
-        + mcp_tools,
-        backend=sandbox,
-        name="general_assistant",
-        system_prompt=(
-            "You are the Generalist. Handle quick facts, Pixelle control, "
-            "safe code execution in the sandbox, and memory management."
-        ),
-    )
-
-    computer_worker = _create_ui_assistant(llm)
-
+def _create_debugger_subgraph(llm: ChatLiteLLM, handoff_tools: list[Any]):
     debugger_worker = create_deep_agent(
         model=llm,
-        tools=[execute_ssh_command, fast_web_search],
-        name="debugger_agent",
+        tools=[execute_ssh_command, fast_web_search, *handoff_tools],
+        name="debugger_agent_worker",
         system_prompt=(
             "You are the Debugger Agent. Your only job is to investigate "
             "infrastructure problems.\n\n"
@@ -361,24 +498,134 @@ def _build_graph(mcp_tools: list[Any] | None = None):
         ),
     )
 
-    supervisor = create_supervisor(
-        [research_worker, general_worker, computer_worker, debugger_worker],
+    async def run_debugger(state: DebuggerState) -> dict[str, Any]:
+        result = await debugger_worker.ainvoke({"messages": state["messages"]})
+        output_messages = list(result.get("messages", []))
+        if not output_messages:
+            return {
+                "messages": [AIMessage(content="Debugger did not return a result.")],
+                "internal_logs": ["Debugger returned an empty response."],
+            }
+
+        final_message = output_messages[-1]
+        internal_logs = [_message_text(message) for message in output_messages[:-1]]
+        return {"messages": [final_message], "internal_logs": internal_logs}
+
+    builder = StateGraph(DebuggerState)
+    builder.add_node("debugger_investigation", run_debugger)
+    builder.add_edge(START, "debugger_investigation")
+    builder.add_edge("debugger_investigation", END)
+    graph = builder.compile()
+    graph.name = "debugger_agent"
+    return graph
+
+
+def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
+    _warn_about_mongo_checkpointer()
+    _configure_llm_cache()
+
+    llm = _model()
+    sandbox = LocalShellBackend(root_dir=_workspace_root())
+    mcp_tools = mcp_tools or []
+
+    transfer_to_research = create_handoff_tool(
+        agent_name="research_expert",
+        description="Transfer to the research expert for deep web or document research.",
+    )
+    transfer_to_generalist = create_handoff_tool(
+        agent_name="general_assistant",
+        description="Transfer to the general assistant for normal chat, coding, tools, Pixelle, or PC control.",
+    )
+    transfer_to_ui = create_handoff_tool(
+        agent_name="ui_assistant",
+        description="Transfer to the UI assistant for browser, VNC, or desktop automation.",
+    )
+    transfer_to_debugger = create_handoff_tool(
+        agent_name="debugger_agent",
+        description="Transfer to the debugger for failed jobs, logs, SSH, Docker, or infrastructure errors.",
+    )
+    transfer_to_context = create_handoff_tool(
+        agent_name="context_retrieval_agent",
+        description="Transfer to the context retrieval agent to search archived long-term conversation memory.",
+    )
+
+    research_worker = create_deep_agent(
         model=llm,
-        prompt=(
-            "You are AlphaRavis, the Chief Supervisor of this system. "
-            "Delegate tasks to the right specialized worker:\n"
-            "- Simple questions, facts, coding, PC/Pixelle control: "
-            "general_assistant.\n"
-            "- Deep research, complex comparisons, or 5+ sources: "
-            "research_expert.\n"
-            "- GUI automation, browser control, desktop tasks: ui_assistant.\n"
-            "- Errors, failed jobs, infrastructure problems, SSH investigation, "
-            "or container issues: debugger_agent.\n"
-            "Coordinate workers for a final answer, and never bypass the "
-            "debugger_agent approval rule for fixes."
+        tools=[
+            deep_web_research,
+            ask_documents,
+            transfer_to_generalist,
+            transfer_to_debugger,
+            transfer_to_context,
+        ],
+        name="research_expert",
+        system_prompt=(
+            "You are the Research Expert. Use deep_web_research for deep web "
+            "research and ask_documents for local data. Search thoroughly, "
+            "return concise conclusions, and transfer to the correct peer when "
+            "the task is outside research."
         ),
     )
-    return supervisor.compile()
+
+    general_worker = create_deep_agent(
+        model=llm,
+        tools=[
+            start_pixelle_remote,
+            wake_on_lan,
+            fast_web_search,
+            create_manage_memory_tool(namespace=("memories",)),
+            create_search_memory_tool(namespace=("memories",)),
+            transfer_to_research,
+            transfer_to_ui,
+            transfer_to_debugger,
+            transfer_to_context,
+        ]
+        + mcp_tools,
+        backend=sandbox,
+        name="general_assistant",
+        system_prompt=(
+            "You are the Generalist. Handle quick facts, Pixelle control, "
+            "safe code execution in the sandbox, and memory management. "
+            "Transfer directly to specialized peers instead of routing through "
+            "a supervisor."
+        ),
+    )
+
+    computer_worker = _create_ui_assistant(
+        llm,
+        [transfer_to_generalist, transfer_to_research, transfer_to_debugger, transfer_to_context],
+    )
+
+    debugger_worker = _create_debugger_subgraph(
+        llm,
+        [transfer_to_research, transfer_to_generalist, transfer_to_context],
+    )
+
+    context_worker = create_deep_agent(
+        model=llm,
+        tools=[search_archived_context, transfer_to_generalist, transfer_to_research, transfer_to_debugger],
+        name="context_retrieval_agent",
+        system_prompt=(
+            "You are the Context Retrieval Agent. Search long-term archived "
+            "conversation memory and return the precise facts needed by the "
+            "active peer. Do not answer unrelated tasks yourself; transfer back."
+        ),
+    )
+
+    swarm = create_swarm(
+        [research_worker, general_worker, computer_worker, debugger_worker, context_worker],
+        default_active_agent="general_assistant",
+    ).compile(store=store)
+
+    builder = StateGraph(AlphaRavisState)
+    builder.add_node("context_guard_before", context_guard_node)
+    builder.add_node("alpha_ravis_swarm", swarm)
+    builder.add_node("context_guard_after", context_guard_node)
+    builder.add_edge(START, "context_guard_before")
+    builder.add_edge("context_guard_before", "alpha_ravis_swarm")
+    builder.add_edge("alpha_ravis_swarm", "context_guard_after")
+    builder.add_edge("context_guard_after", END)
+    return builder.compile(store=store)
 
 
 def _should_load_mcp(runtime: Any) -> bool:
@@ -392,6 +639,29 @@ def _should_load_mcp(runtime: Any) -> bool:
     return True
 
 
+def _open_mongodb_store(stack: contextlib.AsyncExitStack):
+    if os.getenv("ALPHARAVIS_ENABLE_MONGODB_STORE", "true").lower() not in {"1", "true", "yes"}:
+        return None
+
+    uri = os.getenv("LS_MONGODB_URI") or os.getenv("MONGODB_URI")
+    if not uri:
+        return None
+
+    try:
+        from langgraph.store.mongodb import MongoDBStore
+
+        return stack.enter_context(
+            MongoDBStore.from_conn_string(
+                conn_string=uri,
+                db_name=os.getenv("ALPHARAVIS_STORE_DB", "langgraph_memory"),
+                collection_name=os.getenv("ALPHARAVIS_STORE_COLLECTION", "long_term_store"),
+            )
+        )
+    except Exception as exc:
+        print(f"WARNING: MongoDBStore unavailable, continuing without long-term store: {exc}")
+        return None
+
+
 @contextlib.asynccontextmanager
 async def make_graph(runtime: ServerRuntime | None = None):
     """LangGraph CLI entrypoint for the AlphaRavis brain."""
@@ -401,7 +671,11 @@ async def make_graph(runtime: ServerRuntime | None = None):
         if _should_load_mcp(runtime):
             mcp_tools = await _load_pixelle_mcp_tools(stack)
 
-        yield _build_graph(mcp_tools=mcp_tools)
+        store = getattr(runtime, "store", None) if runtime else None
+        if store is None:
+            store = _open_mongodb_store(stack)
+
+        yield _build_graph(mcp_tools=mcp_tools, store=store)
 
 
 __all__ = ["make_graph", "monitor_pixelle_job", "start_pixelle_remote"]
