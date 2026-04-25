@@ -261,7 +261,7 @@ async def lifespan(app: FastAPI):
         name="research_expert",
         system_prompt="You are the Research Expert. Use 'deep_web_research' (Tavily) for deep web research and ask_documents for local data. You search thoroughly and comprehensively."
     )
-    research_worker = watch(research_worker)
+    research_worker = watch(research_worker, host='0.0.0.0', port=8760, ws_port=8761, open_browser=False)
 
     # Worker 2: The Generalist (Fast searches, PC control, Pixelle, Code)
     general_worker = create_deep_agent(
@@ -277,7 +277,7 @@ async def lifespan(app: FastAPI):
         name="general_assistant",
         system_prompt="You are the Generalist. Responsible for quick facts (fast_web_search), Pixelle control, code execution in the sandbox, and memory management."
     )
-    general_worker = watch(general_worker)
+    general_worker = watch(general_worker, host='0.0.0.0', port=8762, ws_port=8763, open_browser=False)
 
     # Worker 3: The Computer Use Agent (Direct GUI control via VNC) 
     computer_worker = create_cua(
@@ -288,7 +288,7 @@ async def lifespan(app: FastAPI):
         environment="ubuntu"
     )
     computer_worker.name = "ui_assistant"
-    computer_worker = watch(computer_worker)
+    computer_worker = watch(computer_worker, host='0.0.0.0', port=8764, ws_port=8765, open_browser=False)
 
     # --- NEW: Worker 4: The Debugger Agent ---
     debugger_worker = create_deep_agent(
@@ -320,7 +320,7 @@ async def lifespan(app: FastAPI):
 
 
     )
-    debugger_worker = watch(debugger_worker)
+    debugger_worker = watch(debugger_worker, host='0.0.0.0', port=8766, ws_port=8767, open_browser=False)
 
     # 4. THE SUPERVISOR (AlphaRavis Chief Logic)
     agent_executor = create_supervisor(
@@ -334,13 +334,12 @@ async def lifespan(app: FastAPI):
         - ANY error, failed job, infrastructure problem, SSH investigation, container issues: Use 'debugger_agent'.
         - ALWAYS coordinate the workers to give the user a perfect final answer. Do not do the work yourself, delegate it!
         CRITICAL RULE: The 'debugger_agent' must ALWAYS ask the user for approval before applying any fix. Never bypass this rule.""",
-        checkpointer=checkpointer,
-        store=store
     )
+    agent_executor = agent_executor.compile(checkpointer=checkpointer, store=store)
 
 
     # --- LangGraphics Visualisation ---
-    agent_executor = watch(agent_executor)
+    agent_executor = watch(agent_executor, host='0.0.0.0', port=8768, ws_port=8769, open_browser=False)
 
 
 
