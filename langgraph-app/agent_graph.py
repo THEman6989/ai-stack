@@ -55,8 +55,16 @@ except Exception:  # pragma: no cover - older local CLI imports
 
 class AlphaRavisState(MessagesState):
     active_agent: NotRequired[str]
+    active_skill_context: NotRequired[str]
     context_summary: NotRequired[str]
+    archive_summary: NotRequired[str]
     archived_context_keys: NotRequired[list[str]]
+    archive_collection_keys: NotRequired[list[str]]
+    compressed_archive_keys: NotRequired[list[str]]
+    memory_notice: NotRequired[str]
+    memory_notice_key: NotRequired[str]
+    memory_notice_seen_key: NotRequired[str]
+    skill_candidate_keys: NotRequired[list[str]]
 
 
 class DebuggerState(MessagesState):
@@ -74,6 +82,21 @@ SSH_USER = os.getenv("SSH_USER", "root")
 SSH_PASS_DEFAULT = os.getenv("SSH_PASS_DEFAULT", "")
 PIXELLE_URL = os.getenv("PIXELLE_URL", "http://pixelle:9004")
 COMFY_IP = REMOTE_PCS.get("comfy_server", {}).get("ip")
+ARCHIVE_NS = ("alpharavis", "archives")
+ARCHIVE_COLLECTION_NS = ("alpharavis", "archive_collections")
+DEBUGGING_LESSON_NS = ("alpharavis", "debugging_lessons")
+SKILL_LIBRARY_NS = ("alpharavis", "skill_library")
+SKILL_CONTEXT_MESSAGE_ID = "alpharavis_skill_library_context"
+COMPRESSION_PAUSE_PATTERNS = [
+    "keine kompression",
+    "ohne kompression",
+    "nicht komprimieren",
+    "kompression aussetzen",
+    "compression off",
+    "disable compression",
+    "skip compression",
+    "no compression",
+]
 
 if not COMFY_IP:
     print("WARNING: 'comfy_server' IP not found in REMOTE_PCS env variable.")
@@ -464,24 +487,32 @@ async def search_archived_context(query: str, limit: int = 5):
     except Exception as exc:
         return f"No LangGraph store is attached to this run: {exc}"
 
-    try:
-        results = store.search(("alpharavis", "archives"), query=query, limit=limit)
-        if inspect.isawaitable(results):
-            results = await results
-    except Exception as exc:
-        return f"Archive search failed: {exc}"
+    records: list[tuple[str, Any]] = []
+    for namespace, label in [
+        (ARCHIVE_NS, "Archive"),
+        (ARCHIVE_COLLECTION_NS, "Archive collection"),
+    ]:
+        try:
+            results = await _maybe_search(store, namespace, query=query, limit=limit)
+        except Exception as exc:
+            return f"{label} search failed: {exc}"
 
-    if not results:
+        for item in results or []:
+            records.append((label, item))
+
+    if not records:
         return "No archived context matched that query."
 
     lines = []
-    for item in results:
-        value = getattr(item, "value", item)
+    for label, item in records[:limit]:
+        key = _store_item_key(item)
+        value = _store_item_value(item)
         if isinstance(value, dict):
             summary = value.get("summary") or value.get("content") or str(value)
+            token_estimate = value.get("token_estimate", "unknown")
+            lines.append(f"{label} `{key}` ({token_estimate} tokens est.):\n{summary}")
         else:
-            summary = str(value)
-        lines.append(summary)
+            lines.append(f"{label} `{key}`:\n{value}")
 
     return "\n\n".join(lines)
 
@@ -499,9 +530,7 @@ async def search_debugging_lessons(query: str, limit: int = 5):
         return f"No LangGraph store is attached to this run: {exc}"
 
     try:
-        results = store.search(("alpharavis", "debugging_lessons"), query=query, limit=limit)
-        if inspect.isawaitable(results):
-            results = await results
+        results = await _maybe_search(store, DEBUGGING_LESSON_NS, query=query, limit=limit)
     except Exception as exc:
         return f"Lesson search failed: {exc}"
 
@@ -556,8 +585,130 @@ async def record_debugging_lesson(
         "created_at": int(time.time()),
     }
     key = hashlib.sha256(json.dumps(lesson, sort_keys=True).encode("utf-8")).hexdigest()[:24]
-    await _maybe_put(store, ("alpharavis", "debugging_lessons"), key, lesson)
+    await _maybe_put(store, DEBUGGING_LESSON_NS, key, lesson)
     return f"Stored debugging lesson `{key}`."
+
+
+@tool
+async def search_skill_library(query: str, limit: int = 5, include_candidates: bool = False):
+    """Search approved workflow skills, optionally including inactive candidates."""
+
+    if get_store is None:
+        return "LangGraph store access is unavailable in this runtime."
+
+    try:
+        store = get_store()
+    except Exception as exc:
+        return f"No LangGraph store is attached to this run: {exc}"
+
+    try:
+        results = await _maybe_search(store, SKILL_LIBRARY_NS, query=query, limit=limit)
+    except Exception as exc:
+        return f"Skill-library search failed: {exc}"
+
+    lines = []
+    for item in results or []:
+        key = _store_item_key(item)
+        value = _store_item_value(item)
+        if not isinstance(value, dict):
+            continue
+        status = value.get("status", "candidate")
+        if not include_candidates and status != "active":
+            continue
+        lines.append(_format_skill_record(key, value))
+
+    if lines:
+        return "\n\n".join(lines)
+
+    if include_candidates:
+        return "No skill-library records matched that query."
+    return "No approved active skills matched that query."
+
+
+@tool
+async def record_skill_candidate(
+    name: str,
+    trigger: str,
+    steps: str,
+    success_signals: str = "",
+    safety_notes: str = "",
+    evidence: str = "",
+    source_task: str = "",
+    confidence: float = 0.5,
+):
+    """Store a reusable workflow as an inactive skill candidate for later human review."""
+
+    if get_store is None:
+        return "LangGraph store access is unavailable in this runtime."
+
+    try:
+        store = get_store()
+    except Exception as exc:
+        return f"No LangGraph store is attached to this run: {exc}"
+
+    confidence = max(0.0, min(1.0, float(confidence)))
+    skill = {
+        "name": name.strip()[:160],
+        "trigger": trigger.strip()[:1200],
+        "steps": steps.strip()[:4000],
+        "success_signals": success_signals.strip()[:1200],
+        "safety_notes": safety_notes.strip()[:1200],
+        "evidence": evidence.strip()[:2000],
+        "source_task": source_task.strip()[:1200],
+        "confidence": confidence,
+        "status": "candidate",
+        "active": False,
+        "human_approval_required": True,
+        "created_at": int(time.time()),
+    }
+    key = hashlib.sha256(
+        json.dumps(
+            {
+                "name": skill["name"],
+                "trigger": skill["trigger"],
+                "steps": skill["steps"],
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    await _maybe_put(store, SKILL_LIBRARY_NS, key, skill)
+    return (
+        f"Stored inactive skill candidate `{key}`. It will not affect routing "
+        "until a human promotes it to active."
+    )
+
+
+@tool
+async def activate_skill_candidate(skill_id: str, approval_note: str = ""):
+    """Promote a reviewed skill candidate to active when promotion is explicitly enabled."""
+
+    if os.getenv("ALPHARAVIS_ALLOW_SKILL_PROMOTION", "false").lower() not in {"1", "true", "yes"}:
+        return (
+            "Skill promotion is disabled for safety. Set "
+            "ALPHARAVIS_ALLOW_SKILL_PROMOTION=true only while intentionally "
+            "promoting reviewed candidates."
+        )
+
+    if get_store is None:
+        return "LangGraph store access is unavailable in this runtime."
+
+    try:
+        store = get_store()
+    except Exception as exc:
+        return f"No LangGraph store is attached to this run: {exc}"
+
+    item = await _maybe_get(store, SKILL_LIBRARY_NS, skill_id)
+    value = _store_item_value(item)
+    if not isinstance(value, dict):
+        return f"Skill candidate `{skill_id}` was not found."
+
+    value = dict(value)
+    value["status"] = "active"
+    value["active"] = True
+    value["approved_at"] = int(time.time())
+    value["approval_note"] = approval_note.strip()[:1200]
+    await _maybe_put(store, SKILL_LIBRARY_NS, skill_id, value)
+    return f"Activated skill `{skill_id}`."
 
 
 async def _load_pixelle_mcp_tools(stack: contextlib.AsyncExitStack) -> list[Any]:
@@ -608,9 +759,87 @@ def _estimate_tokens(messages: list[Any]) -> int:
 
 
 async def _maybe_put(store: Any, namespace: tuple[str, ...], key: str, value: dict[str, Any]) -> None:
-    result = store.put(namespace, key, value)
+    if hasattr(store, "aput"):
+        result = store.aput(namespace, key, value)
+    else:
+        result = store.put(namespace, key, value)
     if inspect.isawaitable(result):
         await result
+
+
+async def _maybe_get(store: Any, namespace: tuple[str, ...], key: str) -> Any:
+    if hasattr(store, "aget"):
+        result = store.aget(namespace, key)
+    elif hasattr(store, "get"):
+        result = store.get(namespace, key)
+    else:
+        return None
+    if inspect.isawaitable(result):
+        result = await result
+    return result
+
+
+async def _maybe_search(store: Any, namespace: tuple[str, ...], *, query: str, limit: int) -> Any:
+    if hasattr(store, "asearch"):
+        result = store.asearch(namespace, query=query, limit=limit)
+    else:
+        result = store.search(namespace, query=query, limit=limit)
+    if inspect.isawaitable(result):
+        result = await result
+    return result
+
+
+def _store_item_value(item: Any) -> Any:
+    if item is None:
+        return None
+    return getattr(item, "value", item)
+
+
+def _store_item_key(item: Any) -> str:
+    key = getattr(item, "key", None)
+    if key is not None:
+        return str(key)
+    if isinstance(item, dict):
+        return str(item.get("key") or item.get("id") or "unknown")
+    return "unknown"
+
+
+def _format_skill_record(key: str, value: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            f"Skill `{key}` ({value.get('status', 'candidate')}): {value.get('name', 'unnamed')}",
+            f"Trigger: {value.get('trigger', '')}",
+            f"Steps: {value.get('steps', '')}",
+            f"Success signals: {value.get('success_signals', '')}",
+            f"Safety: {value.get('safety_notes', '')}",
+        ]
+    ).strip()
+
+
+def _latest_user_query(messages: list[Any]) -> str:
+    for message in reversed(messages):
+        role = None
+        if isinstance(message, dict):
+            role = message.get("role") or message.get("type")
+        else:
+            role = getattr(message, "type", getattr(message, "role", None))
+
+        if role in {"human", "user"}:
+            return _message_text(message)
+
+    return "\n".join(_message_text(message) for message in messages[-4:])
+
+
+def _compression_paused_by_user(messages: list[Any]) -> bool:
+    if os.getenv("ALPHARAVIS_ALLOW_USER_COMPRESSION_PAUSE", "true").lower() not in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return False
+
+    latest = _latest_user_query(messages).lower()
+    return any(pattern in latest for pattern in COMPRESSION_PAUSE_PATTERNS)
 
 
 async def _summarize_messages(
@@ -632,11 +861,184 @@ async def _summarize_messages(
     return str(response.content)
 
 
+async def _summarize_archive_records(
+    llm: ChatLiteLLM,
+    records: list[tuple[str, dict[str, Any]]],
+    existing_summary: str | None,
+) -> str:
+    previous = existing_summary or "No previous archive summary."
+    archive_text = "\n\n".join(
+        [
+            "\n".join(
+                [
+                    f"Archive key: {key}",
+                    f"Token estimate: {value.get('token_estimate', 'unknown')}",
+                    f"Summary: {value.get('summary', '')}",
+                ]
+            )
+            for key, value in records
+        ]
+    )
+    prompt = (
+        "Create a higher-level memory summary from these conversation archives. "
+        "Preserve durable facts, user preferences, recurring tasks, unresolved "
+        "decisions, reusable workflow patterns, file paths, commands, errors, "
+        "and references to archive keys when exact raw history may be needed. "
+        "Keep this compact enough to retrieve later.\n\n"
+        f"Previous archive summary:\n{previous}\n\n"
+        f"Archives to compress:\n{archive_text}"
+    )
+    response = await llm.ainvoke([SystemMessage(content=prompt)])
+    return str(response.content)
+
+
+async def _maybe_compact_archives(
+    store: Any,
+    archived_keys: list[str],
+    compressed_keys: list[str],
+    collection_keys: list[str],
+    existing_summary: str | None,
+) -> dict[str, Any]:
+    if os.getenv("ALPHARAVIS_ENABLE_HIERARCHICAL_COMPRESSION", "true").lower() not in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return {}
+
+    pending_keys = [key for key in archived_keys if key not in set(compressed_keys)]
+    if not pending_keys:
+        return {}
+
+    records: list[tuple[str, dict[str, Any]]] = []
+    for key in pending_keys:
+        item = await _maybe_get(store, ARCHIVE_NS, key)
+        value = _store_item_value(item)
+        if isinstance(value, dict):
+            records.append((key, value))
+
+    archive_limit = int(os.getenv("ALPHARAVIS_ARCHIVE_TOKEN_LIMIT", "50000"))
+    pending_tokens = sum(int(value.get("token_estimate") or 0) for _, value in records)
+    if pending_tokens <= archive_limit:
+        return {}
+
+    keep_recent = int(os.getenv("ALPHARAVIS_ARCHIVE_KEEP_RECENT_RECORDS", "8"))
+    if len(records) <= keep_recent:
+        return {}
+
+    records_to_compact = records[:-keep_recent]
+    if not records_to_compact:
+        return {}
+
+    summary = await _summarize_archive_records(_model(), records_to_compact, existing_summary)
+    compacted_keys = [key for key, _ in records_to_compact]
+    token_estimate = sum(int(value.get("token_estimate") or 0) for _, value in records_to_compact)
+    collection_key = hashlib.sha256(
+        f"{time.time()}:{summary}:{','.join(compacted_keys)}".encode("utf-8")
+    ).hexdigest()[:24]
+    await _maybe_put(
+        store,
+        ARCHIVE_COLLECTION_NS,
+        collection_key,
+        {
+            "summary": summary,
+            "child_archive_keys": compacted_keys,
+            "token_estimate": token_estimate,
+            "record_count": len(records_to_compact),
+            "compressed_at": int(time.time()),
+        },
+    )
+
+    return {
+        "archive_summary": summary,
+        "archive_collection_keys": [*collection_keys, collection_key],
+        "compressed_archive_keys": [*compressed_keys, *compacted_keys],
+        "archive_compression_notice": (
+            f"Zusätzlich wurden {len(records_to_compact)} ältere Archivblöcke "
+            f"zu einer Hierarchie-Zusammenfassung `{collection_key}` verdichtet."
+        ),
+    }
+
+
+async def skill_library_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
+    if os.getenv("ALPHARAVIS_ENABLE_SKILL_LIBRARY", "true").lower() not in {"1", "true", "yes"}:
+        return {}
+
+    messages = list(state.get("messages", []))
+    store = getattr(runtime, "store", None) if runtime else None
+    if store is None:
+        return {
+            "messages": [
+                SystemMessage(
+                    content="Skill library unavailable for this run; continue without saved workflow hints.",
+                    id=SKILL_CONTEXT_MESSAGE_ID,
+                )
+            ],
+            "active_skill_context": "",
+        }
+
+    query = _latest_user_query(messages)
+    limit = int(os.getenv("ALPHARAVIS_SKILL_LIBRARY_SEARCH_LIMIT", "3"))
+    try:
+        results = await _maybe_search(store, SKILL_LIBRARY_NS, query=query, limit=limit)
+    except Exception as exc:
+        return {
+            "messages": [
+                SystemMessage(
+                    content=f"Skill library search failed: {exc}. Continue without saved workflow hints.",
+                    id=SKILL_CONTEXT_MESSAGE_ID,
+                )
+            ],
+            "active_skill_context": "",
+        }
+
+    active_skills = []
+    for item in results or []:
+        key = _store_item_key(item)
+        value = _store_item_value(item)
+        if isinstance(value, dict) and value.get("status") == "active":
+            active_skills.append((key, value))
+
+    if not active_skills:
+        content = (
+            "Skill library: no approved active workflow skill matched this task. "
+            "Do not invent a saved workflow."
+        )
+    else:
+        max_chars = int(os.getenv("ALPHARAVIS_SKILL_CONTEXT_MAX_CHARS", "2500"))
+        body = "\n\n".join(_format_skill_record(key, value) for key, value in active_skills)
+        content = (
+            "Approved AlphaRavis workflow skills matched this task. Treat them as "
+            "non-binding hints; keep normal reasoning, tool safety, and human "
+            "approval gates in force.\n\n"
+            f"{body[:max_chars]}"
+        )
+
+    return {
+        "messages": [SystemMessage(content=content, id=SKILL_CONTEXT_MESSAGE_ID)],
+        "active_skill_context": content,
+    }
+
+
 async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
     messages = list(state.get("messages", []))
     token_limit = int(os.getenv("ALPHARAVIS_ACTIVE_TOKEN_LIMIT", "10000"))
+    token_estimate = _estimate_tokens(messages)
 
-    if _estimate_tokens(messages) <= token_limit:
+    if _compression_paused_by_user(messages):
+        notice_key = hashlib.sha256(
+            f"compression-paused:{_latest_user_query(messages)}:{token_estimate}".encode("utf-8")
+        ).hexdigest()[:16]
+        return {
+            "memory_notice": (
+                "Kompression wurde fuer diesen Lauf ausgesetzt, weil du es im Chat "
+                "so angefordert hast. Wenn der Verlauf zu gross wird, kann die "
+                "naechste Modellantwort langsamer oder instabiler werden."
+            ),
+            "memory_notice_key": notice_key,
+        }
+
+    if token_estimate <= token_limit:
         return {}
 
     keep_last = int(os.getenv("ALPHARAVIS_CONTEXT_KEEP_LAST_MESSAGES", "12"))
@@ -657,10 +1059,14 @@ async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None)
 
     store = getattr(runtime, "store", None) if runtime else None
     archived_keys = list(state.get("archived_context_keys", []))
+    archive_collection_keys = list(state.get("archive_collection_keys", []))
+    compressed_archive_keys = list(state.get("compressed_archive_keys", []))
+    archive_summary = state.get("archive_summary")
+    hierarchy_notice = ""
     if store is not None:
         await _maybe_put(
             store,
-            ("alpharavis", "archives"),
+            ARCHIVE_NS,
             archive_key,
             {
                 "summary": summary,
@@ -670,6 +1076,27 @@ async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None)
             },
         )
         archived_keys.append(archive_key)
+        compact_update = await _maybe_compact_archives(
+            store,
+            archived_keys,
+            compressed_archive_keys,
+            archive_collection_keys,
+            archive_summary,
+        )
+        archive_summary = compact_update.get("archive_summary", archive_summary)
+        archive_collection_keys = compact_update.get("archive_collection_keys", archive_collection_keys)
+        compressed_archive_keys = compact_update.get("compressed_archive_keys", compressed_archive_keys)
+        hierarchy_notice = compact_update.get("archive_compression_notice", "")
+
+    memory_notice = (
+        f"Ich habe den aktiven Chat-Kontext komprimiert: ca. {_estimate_tokens(old_messages)} "
+        f"alte Tokens wurden als Archiv `{archive_key}` gespeichert, die letzten "
+        f"{len(recent_messages)} Nachrichten bleiben aktiv."
+    )
+    if store is None:
+        memory_notice += " Es war kein LangGraph Store verfuegbar, daher existiert nur die Summary im Thread."
+    if hierarchy_notice:
+        memory_notice += f" {hierarchy_notice}"
 
     return {
         "messages": [
@@ -684,7 +1111,30 @@ async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None)
             *recent_messages,
         ],
         "context_summary": summary,
+        "archive_summary": archive_summary,
         "archived_context_keys": archived_keys,
+        "archive_collection_keys": archive_collection_keys,
+        "compressed_archive_keys": compressed_archive_keys,
+        "memory_notice": memory_notice,
+        "memory_notice_key": archive_key,
+    }
+
+
+async def memory_notice_node(state: AlphaRavisState) -> dict[str, Any]:
+    if os.getenv("ALPHARAVIS_SHOW_MEMORY_NOTICES", "true").lower() not in {"1", "true", "yes"}:
+        return {}
+
+    notice = state.get("memory_notice")
+    notice_key = state.get("memory_notice_key")
+    if not notice or not notice_key:
+        return {}
+    if notice_key == state.get("memory_notice_seen_key"):
+        return {}
+
+    message_id = f"alpharavis_memory_notice_{notice_key}"
+    return {
+        "messages": [AIMessage(content=f"\n\nMemory-Notice: {notice}", id=message_id)],
+        "memory_notice_seen_key": notice_key,
     }
 
 
@@ -723,8 +1173,10 @@ def _create_debugger_subgraph(llm: ChatLiteLLM, handoff_tools: list[Any]):
             execute_ssh_command,
             execute_local_command,
             fast_web_search,
+            search_skill_library,
             search_debugging_lessons,
             record_debugging_lesson,
+            record_skill_candidate,
             *handoff_tools,
         ],
         name="debugger_agent_worker",
@@ -742,7 +1194,9 @@ def _create_debugger_subgraph(llm: ChatLiteLLM, handoff_tools: list[Any]):
             "4. If code changes are needed, show the file path, problematic "
             "lines, and proposed fix.\n"
             "5. After a useful diagnosis or confirmed fix, record a debugging lesson "
-            "with problem, root cause, fix, signals, and commands."
+            "with problem, root cause, fix, signals, and commands.\n"
+            "6. When a reusable multi-agent workflow emerges, store it only as "
+            "an inactive skill candidate; never assume it is approved."
         ),
     )
 
@@ -823,6 +1277,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             fast_web_search,
             create_manage_memory_tool(namespace=("memories",)),
             create_search_memory_tool(namespace=("memories",)),
+            search_skill_library,
+            record_skill_candidate,
+            activate_skill_candidate,
             transfer_to_research,
             transfer_to_ui,
             transfer_to_debugger,
@@ -834,6 +1291,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         system_prompt=(
             "You are the Generalist. Handle quick facts, Pixelle control, "
             "safe code execution in the sandbox, and memory management. "
+            "Use approved skill-library entries only as hints. Store new "
+            "workflows as inactive skill candidates for human review. "
             "Transfer directly to specialized peers instead of routing through "
             "a supervisor."
         ),
@@ -854,6 +1313,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         tools=[
             search_archived_context,
             search_debugging_lessons,
+            search_skill_library,
             transfer_to_generalist,
             transfer_to_research,
             transfer_to_debugger,
@@ -873,12 +1333,16 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
 
     builder = StateGraph(AlphaRavisState)
     builder.add_node("context_guard_before", context_guard_node)
+    builder.add_node("skill_library", skill_library_node)
     builder.add_node("alpha_ravis_swarm", swarm)
     builder.add_node("context_guard_after", context_guard_node)
+    builder.add_node("memory_notice", memory_notice_node)
     builder.add_edge(START, "context_guard_before")
-    builder.add_edge("context_guard_before", "alpha_ravis_swarm")
+    builder.add_edge("context_guard_before", "skill_library")
+    builder.add_edge("skill_library", "alpha_ravis_swarm")
     builder.add_edge("alpha_ravis_swarm", "context_guard_after")
-    builder.add_edge("context_guard_after", END)
+    builder.add_edge("context_guard_after", "memory_notice")
+    builder.add_edge("memory_notice", END)
     return builder.compile(store=store)
 
 

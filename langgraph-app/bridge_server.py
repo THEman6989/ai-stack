@@ -108,12 +108,29 @@ def _message_content(message: Any) -> str:
     return str(content)
 
 
+def _message_type(message: Any) -> str:
+    if isinstance(message, dict):
+        return str(message.get("type") or message.get("role") or "").lower()
+    return str(getattr(message, "type", getattr(message, "role", ""))).lower()
+
+
+def _is_ai_message(message: Any) -> bool:
+    message_type = _message_type(message)
+    return message_type in {"ai", "assistant"} or "aimessage" in message_type
+
+
 def _last_ai_content(state: Any) -> str:
     messages = state.get("messages", []) if isinstance(state, dict) else []
+    memory_notices: list[str] = []
     for message in reversed(messages):
-        message_type = message.get("type") or message.get("role") if isinstance(message, dict) else getattr(message, "type", "")
-        if message_type in {"ai", "assistant"}:
-            return _message_content(message)
+        if _is_ai_message(message):
+            content = _message_content(message)
+            if content.lstrip().startswith("Memory-Notice:"):
+                memory_notices.append(content)
+                continue
+            if memory_notices:
+                return f"{content}\n\n" + "\n".join(reversed(memory_notices))
+            return content
     if messages:
         return _message_content(messages[-1])
     return ""
@@ -273,16 +290,21 @@ def _extract_stream_text(part: Any) -> str:
         data = part.get("data")
 
     if isinstance(data, tuple) and data:
-        return _message_content(data[0])
+        return _message_content(data[0]) if _is_ai_message(data[0]) else ""
 
     if isinstance(data, list) and data:
-        return _message_content(data[0])
+        for message in reversed(data):
+            if _is_ai_message(message):
+                return _message_content(message)
+        return ""
 
     if isinstance(data, dict):
         if "chunk" in data:
-            return _message_content(data["chunk"])
+            return _message_content(data["chunk"]) if _is_ai_message(data["chunk"]) else ""
         if "messages" in data and data["messages"]:
-            return _message_content(data["messages"][-1])
+            for message in reversed(data["messages"]):
+                if _is_ai_message(message):
+                    return _message_content(message)
 
     return ""
 
