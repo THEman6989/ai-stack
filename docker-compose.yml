@@ -24,32 +24,39 @@ services:
     restart: always
     #command: redis-server --save 60 1 --loglevel warning
 
+  services:
+  # --- DATENBANKEN ---
   vectordb:
     image: ankane/pgvector:latest
     container_name: vectordb
     environment:
-      POSTGRES_DB: rag_api
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: mysecretpassword
+      - POSTGRES_DB=rag_api
+      - POSTGRES_USER=postgres
+      # Hier wird die Variable aus deiner .env eingesetzt
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     ports:
       - "5432:5432"
     volumes:
       - ./data/pgdata:/var/lib/postgresql/data
     env_file:
       - .env
-    restart: always
+    restart: alwayss
 
   # --- KI INFRASTRUKTUR ---
   litellm:
     image: ghcr.io/berriai/litellm:main-latest
     container_name: litellm
+    environment:
+      # Wir übergeben die DATABASE_URL direkt als Environment-Eintrag
+      - DATABASE_URL=${DATABASE_URL}
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+    env_file:
+      - .env
     volumes:
       - ./litellm-config/config.yaml:/app/config.yaml
     ports:
       - "4000:4000"
     command: [ "--config", "/app/config.yaml", "--port", "4000" ]
-    env_file:
-      - .env
     restart: always
 
   rag_api:
