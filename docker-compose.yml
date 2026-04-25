@@ -70,6 +70,12 @@ services:
     ports:
       - "8123:8123"
       - "5900:5900" # VNC Port für die Sandbox
+      # --- NEU: LangGraphics Ports freigeben ---
+      - "8760:8760" # Research UI
+      - "8762:8762" # General UI
+      - "8764:8764" # Computer/CUA UI
+      - "8766:8766" # Debugger UI
+      - "8768:8768" # Main Supervisor UI
     volumes:
       - ./langgraph-app:/app
       - ./langchain-bridge-repo/langchain_fastapi_chat_completion:/app/langchain_fastapi_chat_completion
