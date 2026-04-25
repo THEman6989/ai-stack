@@ -24,7 +24,6 @@ services:
     restart: always
     #command: redis-server --save 60 1 --loglevel warning
 
-  services:
   # --- DATENBANKEN ---
   vectordb:
     image: ankane/pgvector:latest
