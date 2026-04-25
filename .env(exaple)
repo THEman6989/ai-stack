@@ -12,6 +12,8 @@
 # JWT_SECRET: Any long random string (used for session tokens)
 # Generate with: openssl rand -hex 32
 JWT_SECRET=88f98a728b7e4c9e8d1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p
+JWT_REFRESH_SECRET=ein_anderer_langer_zufallscode_der_sicher_ist_12345
+
 
 # CREDS_KEY: Must be EXACTLY 32 characters (hex recommended)
 # Generate with: openssl rand -hex 16
