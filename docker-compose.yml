@@ -7,14 +7,22 @@ services:
       - "27017:27017" # Debugging-Port für MongoDB Compass
     volumes:
       - ./librechat-data/db:/data/db
+    env_file:
+      - .env
     restart: always
+    
 
   redis:
     image: redis:alpine
     container_name: redis
     ports:
       - "6379:6379" # Debugging-Port für Redis
+    #volumes:
+      #- ./librechat-data/redis:/data
+    env_file:
+      - .env
     restart: always
+    #command: redis-server --save 60 1 --loglevel warning
 
   vectordb:
     image: ankane/pgvector:latest
@@ -27,6 +35,8 @@ services:
       - "5432:5432"
     volumes:
       - ./data/pgdata:/var/lib/postgresql/data
+    env_file:
+      - .env
     restart: always
 
   # --- KI INFRASTRUKTUR ---
@@ -38,6 +48,8 @@ services:
     ports:
       - "4000:4000"
     command: [ "--config", "/app/config.yaml", "--port", "4000" ]
+    env_file:
+      - .env
     restart: always
 
   rag_api:
@@ -59,6 +71,8 @@ services:
       - litellm
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     restart: always
 
   # --- DER BRAIN (AlphaRavis LangGraph API) ---
@@ -97,6 +111,8 @@ services:
       - litellm
       - mongodb
       - redis
+    env_file:
+      - .env
     restart: always
 
   # --- FRONTENDS ---
