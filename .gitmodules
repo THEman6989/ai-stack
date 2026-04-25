@@ -1,9 +1,11 @@
 [submodule "langchain-bridge-repo"]
 	path = langchain-bridge-repo
 	url = https://github.com/THEman6989/langchain-fastapi-chat-completion
+	branch = master
 [submodule "agent-custom-ui"]
 	path = agent-custom-ui
 	url = https://github.com/THEman6989/agent-chat-ui-costom
+	branch = main
 [submodule "local-deep-researcher-repo"]
 	path = local-deep-researcher-repo
 	url = https://github.com/langchain-ai/local-deep-researcher
@@ -16,3 +18,4 @@
 [submodule "pixelle-mcp-custom"]
 	path = pixelle-mcp-custom
 	url = https://github.com/theman6989/pixelle-mcp-costom
+	branch = main
