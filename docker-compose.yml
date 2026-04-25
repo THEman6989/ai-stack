@@ -111,7 +111,7 @@ services:
       - TAVILY_API_KEY=${TAVILY_API_KEY}
       - OPENAI_API_BASE=http://litellm:4000/v1
       - OPENAI_API_KEY=${LITELLM_MASTER_KEY:-sk-local-dev}
-      - ALPHARAVIS_MODEL=openai/edge-gemma
+      - ALPHARAVIS_MODEL=${ALPHARAVIS_MODEL:-openai/big-boss}
       - MONGODB_URI=mongodb://mongodb:27017
       - LS_MONGODB_URI=mongodb://mongodb:27017/langgraph?replicaSet=rs0
       - REDIS_URL=redis://redis:6379
@@ -148,7 +148,7 @@ services:
       - LANGGRAPH_API_URL=http://langgraph-api:2024
       - LANGGRAPH_ASSISTANT_ID=alpha_ravis
       - OPENAI_MODEL_NAME=my-agent
-      - BRIDGE_RUN_TIMEOUT_SECONDS=35
+      - BRIDGE_RUN_TIMEOUT_SECONDS=${BRIDGE_RUN_TIMEOUT_SECONDS:-180}
     depends_on:
       langgraph-api:
         condition: service_started

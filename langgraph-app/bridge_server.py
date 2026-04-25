@@ -82,7 +82,21 @@ def _message_content(message: Any) -> str:
         content = getattr(message, "content", "")
 
     if isinstance(content, list):
-        return "".join(str(part) for part in content)
+        text_parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                text_parts.append(part)
+            elif isinstance(part, dict):
+                block_type = part.get("type")
+                if block_type in {"thinking", "reasoning"}:
+                    continue
+                if isinstance(part.get("text"), str):
+                    text_parts.append(part["text"])
+                elif isinstance(part.get("content"), str):
+                    text_parts.append(part["content"])
+            else:
+                text_parts.append(str(part))
+        return "".join(text_parts)
     return str(content)
 
 

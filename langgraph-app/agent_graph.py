@@ -78,10 +78,10 @@ if not COMFY_IP:
 
 def _model() -> ChatLiteLLM:
     return ChatLiteLLM(
-        model=os.getenv("ALPHARAVIS_MODEL", "openai/edge-gemma"),
+        model=os.getenv("ALPHARAVIS_MODEL", "openai/big-boss"),
         api_base=os.getenv("OPENAI_API_BASE", "http://litellm:4000/v1"),
         api_key=os.getenv("OPENAI_API_KEY", "sk-local-dev"),
-        request_timeout=float(os.getenv("ALPHARAVIS_LLM_TIMEOUT_SECONDS", "30")),
+        request_timeout=float(os.getenv("ALPHARAVIS_LLM_TIMEOUT_SECONDS", "120")),
         max_retries=int(os.getenv("ALPHARAVIS_LLM_MAX_RETRIES", "0")),
     )
 

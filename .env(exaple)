@@ -91,7 +91,7 @@ LS_MONGODB_URI=mongodb://mongodb:27017/langgraph?replicaSet=rs0
 LANGGRAPH_API_URL=http://langgraph-api:2024
 LANGGRAPH_ASSISTANT_ID=alpha_ravis
 OPENAI_MODEL_NAME=my-agent
-BRIDGE_RUN_TIMEOUT_SECONDS=35
+BRIDGE_RUN_TIMEOUT_SECONDS=180
 
 # Token budget for the Phase 4 context guard.
 ALPHARAVIS_ACTIVE_TOKEN_LIMIT=10000
@@ -112,11 +112,11 @@ TAVILY_API_KEY=tvly-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 # LiteLLM acts as a proxy for all LLM calls.
 # The model name "edge-gemma" is defined in litellm-config/config.yaml.
 # LangGraph calls the LiteLLM proxy through the OpenAI-compatible provider.
-ALPHARAVIS_MODEL=openai/edge-gemma
+ALPHARAVIS_MODEL=openai/big-boss
 OPENAI_API_BASE=http://litellm:4000/v1
 OPENAI_API_KEY=sk-local-dev
 ALPHARAVIS_ENABLE_REDIS_CACHE=false
-ALPHARAVIS_LLM_TIMEOUT_SECONDS=30
+ALPHARAVIS_LLM_TIMEOUT_SECONDS=120
 ALPHARAVIS_LLM_MAX_RETRIES=0
 # You can add API keys for cloud models here if needed.
 #
