@@ -1,105 +1,122 @@
 # =====================================================================
-# AlphaRavis AI Stack — Environment Configuration
+# AlphaRavis AI Stack - Environment Configuration
 # Copy this file to .env and fill in your values.
-# DO NOT commit your real .env to Git!
+# DO NOT commit your real .env to Git.
 # =====================================================================
+#
+# How to use this file:
+#   1. Fill the MUST-HAVE section first.
+#   2. Keep Docker defaults unless your ports/containers differ.
+#   3. Tune optional sections only when you know what behavior you want.
+#
+# Section map:
+#   MUST-HAVE                          -> secrets, database password, model route
+#   CORE DOCKER URLS                   -> internal service URLs, usually unchanged
+#   OPTIONAL REMOTE PC / SSH           -> Wake-on-LAN and SSH debugging
+#   OPTIONAL BRIDGE SETTINGS           -> LibreChat <-> LangGraph behavior
+#   OPTIONAL MEMORY SETTINGS           -> compression, archives, architecture doc
+#   OPTIONAL SKILL LIBRARY             -> reusable workflow skill candidates
+#   OPTIONAL SEARCH                    -> Tavily / research tools
+#   OPTIONAL OBSERVABILITY             -> LangSmith tracing
+#   OPTIONAL LLM / CACHE / SAFETY      -> LiteLLM, Redis cache, approval gates
 
 
 # =====================================================================
-# --- LIBRECHAT ---
+# MUST-HAVE - FILL THESE FIRST
 # =====================================================================
 
-# JWT_SECRET: Any long random string (used for session tokens)
-# Generate with: openssl rand -hex 32
+# LibreChat JWT secrets. Use long random strings.
+# Generate examples:
+#   openssl rand -hex 32
 JWT_SECRET=88f98a728b7e4c9e8d1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p
 JWT_REFRESH_SECRET=ein_anderer_langer_zufallscode_der_sicher_ist_12345
 
-
-# CREDS_KEY: Must be EXACTLY 32 characters (hex recommended)
-# Generate with: openssl rand -hex 16
+# LibreChat credential encryption.
+# CREDS_KEY must be exactly 32 characters. Generate with:
+#   openssl rand -hex 16
 CREDS_KEY=f3423f423f423f423f423f423f423f42
 
-# CREDS_IV: Must be EXACTLY 16 characters
-# Generate with: openssl rand -hex 8
+# CREDS_IV must be exactly 16 characters. Generate with:
+#   openssl rand -hex 8
 CREDS_IV=a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
 
+# LibreChat user registration switch.
+# Allowed values: true, false
 ALLOW_REGISTRATION=true
 
+# Postgres password for LibreChat's database container.
+POSTGRES_PASSWORD=f3423f423f423f423f423f423f423f42
 
-# =====================================================================
-# --- REMOTE PC CONFIGURATION ---
-# =====================================================================
-# Format: JSON object where each key is a PC name (used by the agent).
-# Required fields per PC:
-#   "ip"  — Local IP address of the PC
-#   "mac" — MAC address for Wake-on-LAN (format: AA:BB:CC:DD:EE:FF)
-#
-# Optional fields per PC:
-#   "ssh_pass" — SSH password for THIS specific PC.
-#                If not set, SSH_PASS_DEFAULT is used as fallback.
-#
-# Add as many PCs as you want — the agent will know all of them automatically.
-#
-# Example with 2 PCs (one uses default password, one has its own):
-# REMOTE_PCS='{"main_pc": {"ip": "192.168.178.140", "mac": "AA:BB:CC:DD:EE:FF"}, "comfy_server": {"ip": "192.168.178.50", "mac": "11:22:33:44:55:66", "ssh_pass": "myOtherPassword"}}'
-#
-REMOTE_PCS='{"main_pc": {"ip": "192.168.178.140", "mac": "AA:BB:CC:DD:EE:FF"}, "comfy_server": {"ip": "192.168.178.50", "mac": "11:22:33:44:55:66"}}'
+# LiteLLM master key used by AlphaRavis/OpenAI-compatible clients.
+# Keep this in sync with OPENAI_API_KEY if you use the local LiteLLM proxy.
+LITELLM_MASTER_KEY=sk-local-dev
 
+# Main AlphaRavis model. This points to a LiteLLM model name.
+# Current important value:
+#   openai/big-boss = LiteLLM model `big-boss`, routed to llama.cpp
+ALPHARAVIS_MODEL=openai/big-boss
 
-# =====================================================================
-# --- SSH CREDENTIALS ---
-# =====================================================================
+# OpenAI-compatible base URL used by LangGraph to call LiteLLM.
+# Inside Docker, keep this as http://litellm:4000/v1.
+OPENAI_API_BASE=http://litellm:4000/v1
 
-# SSH_USER: The Linux username used for all SSH connections.
-# Default: root
-SSH_USER=root
+# API key used by LangGraph when calling LiteLLM.
+# For the local stack, this normally equals LITELLM_MASTER_KEY.
+OPENAI_API_KEY=sk-local-dev
 
-# SSH_PASS_DEFAULT: The default SSH password used for ALL PCs
-# unless a PC has its own "ssh_pass" set in REMOTE_PCS above.
-#
-# To use SSH key auth instead (more secure):
-#   1. Leave SSH_PASS_DEFAULT empty
-#   2. Mount your SSH keys into the container in docker-compose.yml:
-#      volumes:
-#        - ~/.ssh:/root/.ssh:ro
-#
-SSH_PASS_DEFAULT=yourPasswordHere
+# MongoDB checkpointer URI for LangGraph.
+# Must include a database name and replica-set query when using the Mongo saver.
+# Docker default:
+#   mongodb://mongodb:27017/langgraph?replicaSet=rs0
+LS_MONGODB_URI=mongodb://mongodb:27017/langgraph?replicaSet=rs0
 
 
 # =====================================================================
-# --- REDIS ---
+# CORE DOCKER URLS - USUALLY DO NOT CHANGE
 # =====================================================================
-# Used for LLM response caching (speeds up repeated questions).
-# Default points to the Redis container in docker-compose.yml.
-# Only change if you use an external Redis instance.
+
+# Native LangGraph API ("brain") called by the FastAPI bridge.
+LANGGRAPH_API_URL=http://langgraph-api:2024
+
+# Graph/assistant id exposed by langgraph.json.
+# Must match graph id `alpha_ravis`.
+LANGGRAPH_ASSISTANT_ID=alpha_ravis
+
+# Model name shown to LibreChat through /v1/models.
+# This is only the bridge-facing display id, not the real LiteLLM model id.
+OPENAI_MODEL_NAME=my-agent
+
+# Redis URL used by optional LLM caching.
+# Inside Docker, keep this as redis://redis:6379.
 REDIS_URL=redis://redis:6379
 
 
 # =====================================================================
-# --- LANGGRAPH CLI CHECKPOINTER ---
+# OPTIONAL REMOTE PC / SSH
 # =====================================================================
-# Phase 1 uses LangGraph's native Mongo checkpointer via langgraph.json.
-# For real Mongo checkpointing, LangGraph requires a replica-set capable URI
-# with the database name in the path. A standalone mongo:7.0 container is not
-# enough unless it is configured as a replica set.
+
+# JSON object of remote PCs known to the agent.
+# Required per PC:
+#   ip  = IP address
+#   mac = MAC address for Wake-on-LAN
+# Optional per PC:
+#   ssh_pass = password for this one PC, overriding SSH_PASS_DEFAULT
 #
 # Example:
-# LS_MONGODB_URI=mongodb://mongodb:27017/langgraph?replicaSet=rs0
-LS_MONGODB_URI=mongodb://mongodb:27017/langgraph?replicaSet=rs0
+# REMOTE_PCS='{"main_pc":{"ip":"192.168.178.140","mac":"AA:BB:CC:DD:EE:FF"},"comfy_server":{"ip":"192.168.178.50","mac":"11:22:33:44:55:66","ssh_pass":"myOtherPassword"}}'
+REMOTE_PCS='{"main_pc":{"ip":"192.168.178.140","mac":"AA:BB:CC:DD:EE:FF"},"comfy_server":{"ip":"192.168.178.50","mac":"11:22:33:44:55:66"}}'
+
+# Linux username used for SSH diagnostics.
+SSH_USER=root
+
+# Default SSH password for all PCs unless a PC has its own ssh_pass.
+# Leave empty if using mounted SSH keys instead.
+SSH_PASS_DEFAULT=yourPasswordHere
+
 
 # =====================================================================
-# --- OPENAI BRIDGE <-> LANGGRAPH ---
+# OPTIONAL BRIDGE SETTINGS - LIBRECHAT <-> LANGGRAPH
 # =====================================================================
-# URL of the native LangGraph API ("brain") that the FastAPI bridge calls.
-LANGGRAPH_API_URL=http://langgraph-api:2024
-
-# Graph/assistant id exposed by langgraph.json. Keep this in sync with the
-# graph id `alpha_ravis`.
-LANGGRAPH_ASSISTANT_ID=alpha_ravis
-
-# Model name shown to LibreChat through /v1/models. This is a bridge-facing
-# display id, not the real LiteLLM model id.
-OPENAI_MODEL_NAME=my-agent
 
 # Max seconds the bridge waits for one LangGraph run before returning a clean
 # timeout message to LibreChat.
@@ -107,21 +124,21 @@ BRIDGE_RUN_TIMEOUT_SECONDS=180
 
 # Streaming mode for LibreChat.
 # Allowed values:
-#   events = stream LangGraph message events as OpenAI SSE chunks
-#   final or messages = wait for final content and stream it as one OpenAI SSE reply
+#   events          = stream LangGraph message events as OpenAI SSE chunks
+#   final, messages = wait for final content and stream one OpenAI SSE reply
 BRIDGE_STREAM_MODE=events
 
-# How the bridge syncs LibreChat messages into LangGraph:
+# How the bridge syncs LibreChat messages into LangGraph.
 # Allowed values:
 #   delta = after the first thread sync, send only new user messages
 #   full  = send the whole LibreChat message array every request
-# Delta keeps LangGraph compression useful because LibreChat's full UI history
-# does not get re-injected on every turn.
+#
+# Recommended: delta. It keeps LangGraph compression useful because LibreChat's
+# full visible UI history is not re-injected on every turn.
 BRIDGE_MESSAGE_SYNC_MODE=delta
 
-# If true, the bridge emits short visible "Status:" chunks during streaming
-# runs. This is OpenAI-SSE compatible content, so LibreChat should display it
-# like normal assistant text. Keep false if you want quiet responses.
+# If true, the bridge emits short visible "Status:" chunks during streaming.
+# Allowed values: true, false
 BRIDGE_SHOW_ACTIVITY_EVENTS=false
 
 # Activity detail level when BRIDGE_SHOW_ACTIVITY_EVENTS=true.
@@ -131,126 +148,128 @@ BRIDGE_SHOW_ACTIVITY_EVENTS=false
 #   off     = suppress activity chunks even if the boolean is true
 BRIDGE_ACTIVITY_DETAIL=summary
 
+
 # =====================================================================
-# --- MEMORY + CONTEXT COMPRESSION ---
+# OPTIONAL MEMORY + CONTEXT COMPRESSION
 # =====================================================================
+
 # Approximate active message-window token limit. If the current LangGraph
 # thread goes above this, older messages are summarized and archived.
 ALPHARAVIS_ACTIVE_TOKEN_LIMIT=10000
 
-# Number of most recent messages kept verbatim in the active thread after
-# chat compression. Older messages become an archive summary plus raw archive.
+# Number of most recent messages kept verbatim after chat compression.
 ALPHARAVIS_CONTEXT_KEEP_LAST_MESSAGES=12
 
-# Enables the second compression tier for old archive blocks. This keeps long
-# running chats searchable without deleting raw archive records.
+# Enables second-tier compression for old archive blocks.
+# Allowed values: true, false
 ALPHARAVIS_ENABLE_HIERARCHICAL_COMPRESSION=true
 
-# Approximate token budget for uncompressed archive records within one chat
-# thread. Above this, older archive records are summarized into a collection.
+# Approximate token budget for uncompressed archive records inside one chat.
+# Above this, older archive records are summarized into an archive collection.
 ALPHARAVIS_ARCHIVE_TOKEN_LIMIT=50000
 
-# Number of newest archive records kept as separate records when creating an
-# archive collection. These remain easy to inspect individually.
+# Number of newest archive records kept separate during archive collection
+# compression.
 ALPHARAVIS_ARCHIVE_KEEP_RECENT_RECORDS=8
 
-# Allows the user to pause compression for one run by saying things like
-# "keine Kompression", "nicht komprimieren", or "skip compression".
+# Allows the user to pause compression for one run by saying things like:
+#   keine Kompression
+#   nicht komprimieren
+#   skip compression
+# Allowed values: true, false
 ALPHARAVIS_ALLOW_USER_COMPRESSION_PAUSE=true
 
 # If true, AlphaRavis adds a visible Memory-Notice to LibreChat whenever
 # compression happens or when compression was explicitly paused.
 ALPHARAVIS_SHOW_MEMORY_NOTICES=true
 
-# Max archive-search hits returned to the context retriever inside the current
-# chat thread. This keeps retrieved memory bounded instead of dumping history.
+# Max archive-search hits returned inside the current chat thread.
+# This keeps retrieval bounded instead of dumping history.
 ALPHARAVIS_ARCHIVE_SEARCH_LIMIT=5
 
 # Max archive-search hits when the user explicitly asks to search other chats
-# / all archives through include_other_threads=true.
+# through include_other_threads=true.
 ALPHARAVIS_CROSS_THREAD_ARCHIVE_SEARCH_LIMIT=3
 
 # Editable on-demand self-description. Agents do not inject this into every
-# chat; they read it only via read_alpha_ravis_architecture when the user asks
-# about AlphaRavis architecture, capabilities, memory, bridge, or safety.
+# chat; they read it only when asked about AlphaRavis itself.
 ALPHARAVIS_ARCHITECTURE_DOC_PATH=/workspace/docs/ALPHARAVIS_ARCHITECTURE.md
 
-# Max characters the architecture-doc tool may return in one call. This keeps
-# "what can you do?" answers useful without dumping the whole document.
+# Max characters returned by the architecture-doc tool in one call.
 ALPHARAVIS_ARCHITECTURE_DOC_MAX_CHARS=6000
 
+
 # =====================================================================
-# --- SAFE WORKFLOW SKILL LIBRARY ---
+# OPTIONAL SAFE WORKFLOW SKILL LIBRARY
 # =====================================================================
+
 # Enables retrieval/storage of reusable workflow skills in MongoDBStore.
 # Active skills are non-binding hints only; they do not execute tools directly.
+# Allowed values: true, false
 ALPHARAVIS_ENABLE_SKILL_LIBRARY=true
 
-# Max number of approved active skills to retrieve for the current user task.
+# Max number of approved active skills retrieved for the current user task.
 ALPHARAVIS_SKILL_LIBRARY_SEARCH_LIMIT=3
 
 # Max characters from retrieved active skills injected into the graph prompt.
 ALPHARAVIS_SKILL_CONTEXT_MAX_CHARS=2500
 
-# Safety switch for turning an inactive skill candidate into an active skill.
-# Keep false by default. Temporarily set true only when intentionally reviewing
-# and promoting a specific skill candidate.
+# Safety switch for promoting an inactive skill candidate into an active skill.
+# Keep false by default. Temporarily set true only while intentionally reviewing
+# and promoting a specific candidate.
+# Allowed values: true, false
 ALPHARAVIS_ALLOW_SKILL_PROMOTION=false
 
 
 # =====================================================================
-# --- SEARCH (TAVILY) ---
+# OPTIONAL SEARCH / RESEARCH
 # =====================================================================
-# Required for the 'deep_web_research' tool (used by the Research Expert agent).
-# Get your free API key at: https://tavily.com
+
+# Required only for the deep_web_research tool.
+# Get a key at: https://tavily.com
 TAVILY_API_KEY=tvly-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 
 # =====================================================================
-# --- LITELLM (LLM GATEWAY) ---
+# OPTIONAL OBSERVABILITY
 # =====================================================================
-# LiteLLM acts as a proxy for all LLM calls.
-# The model name "edge-gemma" is defined in litellm-config/config.yaml.
-# LangGraph calls the LiteLLM proxy through the OpenAI-compatible provider.
-ALPHARAVIS_MODEL=openai/big-boss
-OPENAI_API_BASE=http://litellm:4000/v1
-OPENAI_API_KEY=sk-local-dev
 
-# Enables Redis-backed LLM cache for repeated identical LLM calls. Disabled by
-# default to avoid surprising stale responses during development.
+# LangSmith API key for LangGraph/LangChain tracing.
+# Optional for local development. If missing or invalid, the stack still runs,
+# but logs may show 403 warnings from LangSmith metadata/run submission.
+LANGCHAIN_API_KEY=dein_langsmith_key_hier
+
+
+# =====================================================================
+# OPTIONAL LITELLM / LLM / CACHE / SAFETY
+# =====================================================================
+
+# Enables Redis-backed LLM cache for repeated identical LLM calls.
+# Recommended during development: false, so responses do not feel stale.
+# Allowed values: true, false
 ALPHARAVIS_ENABLE_REDIS_CACHE=false
 
 # Timeout in seconds for individual LLM requests made by AlphaRavis.
 ALPHARAVIS_LLM_TIMEOUT_SECONDS=120
 
-# Number of model-call retries inside ChatLiteLLM. 0 keeps failures visible
-# instead of silently retrying for a long time.
+# Number of model-call retries inside ChatLiteLLM.
+# Recommended during development: 0, so failures stay visible.
 ALPHARAVIS_LLM_MAX_RETRIES=0
 
 # Enables streaming mode on the LLM client so LangGraph can expose token/message
 # events when the upstream model/provider supports them.
+# Allowed values: true, false
 ALPHARAVIS_LLM_STREAMING=true
 
 # If true, SSH/local debugger commands that look destructive or state-changing
 # trigger a LangGraph human approval interrupt before execution.
+# Allowed values: true, false
 ALPHARAVIS_REQUIRE_COMMAND_APPROVAL=true
 
 # Max seconds allowed for local diagnostic shell commands in the LangGraph
 # container, such as read-only docker logs/ps checks.
 ALPHARAVIS_LOCAL_COMMAND_TIMEOUT_SECONDS=45
-# You can add API keys for cloud models here if needed.
-#
-# Example for OpenAI (if you want to add GPT-4 as a fallback):
+
+# Optional cloud model keys, only needed if you add cloud fallback models.
 # OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-
-LITELLM_MASTER_KEY=sk-local-dev
-
-# Example for Anthropic:
 # ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-
-
-# =====================================================================
-# --- POSTGRES ---
-# =====================================================================
-
-POSTGRES_PASSWORD=f3423f423f423f423f423f423f423f42
