@@ -87,28 +87,83 @@ REDIS_URL=redis://redis:6379
 # LS_MONGODB_URI=mongodb://mongodb:27017/langgraph?replicaSet=rs0
 LS_MONGODB_URI=mongodb://mongodb:27017/langgraph?replicaSet=rs0
 
-# Native LangGraph API used by the OpenAI-compatible bridge.
+# =====================================================================
+# --- OPENAI BRIDGE <-> LANGGRAPH ---
+# =====================================================================
+# URL of the native LangGraph API ("brain") that the FastAPI bridge calls.
 LANGGRAPH_API_URL=http://langgraph-api:2024
+
+# Graph/assistant id exposed by langgraph.json. Keep this in sync with the
+# graph id `alpha_ravis`.
 LANGGRAPH_ASSISTANT_ID=alpha_ravis
+
+# Model name shown to LibreChat through /v1/models. This is a bridge-facing
+# display id, not the real LiteLLM model id.
 OPENAI_MODEL_NAME=my-agent
+
+# Max seconds the bridge waits for one LangGraph run before returning a clean
+# timeout message to LibreChat.
 BRIDGE_RUN_TIMEOUT_SECONDS=180
+
+# Streaming mode for LibreChat:
+#   events = stream LangGraph message events as OpenAI SSE chunks
+#   final/messages = wait for final content and stream it as one OpenAI SSE reply
 BRIDGE_STREAM_MODE=events
+
+# How the bridge syncs LibreChat messages into LangGraph:
+#   delta = after the first thread sync, send only new user messages
+#   full  = send the whole LibreChat message array every request
+# Delta keeps LangGraph compression useful because LibreChat's full UI history
+# does not get re-injected on every turn.
 BRIDGE_MESSAGE_SYNC_MODE=delta
 
-# Token budget for the Phase 4 context guard.
+# =====================================================================
+# --- MEMORY + CONTEXT COMPRESSION ---
+# =====================================================================
+# Approximate active message-window token limit. If the current LangGraph
+# thread goes above this, older messages are summarized and archived.
 ALPHARAVIS_ACTIVE_TOKEN_LIMIT=10000
+
+# Number of most recent messages kept verbatim in the active thread after
+# chat compression. Older messages become an archive summary plus raw archive.
 ALPHARAVIS_CONTEXT_KEEP_LAST_MESSAGES=12
+
+# Enables the second compression tier for old archive blocks. This keeps long
+# running chats searchable without deleting raw archive records.
 ALPHARAVIS_ENABLE_HIERARCHICAL_COMPRESSION=true
+
+# Approximate token budget for uncompressed archive records within one chat
+# thread. Above this, older archive records are summarized into a collection.
 ALPHARAVIS_ARCHIVE_TOKEN_LIMIT=50000
+
+# Number of newest archive records kept as separate records when creating an
+# archive collection. These remain easy to inspect individually.
 ALPHARAVIS_ARCHIVE_KEEP_RECENT_RECORDS=8
+
+# Allows the user to pause compression for one run by saying things like
+# "keine Kompression", "nicht komprimieren", or "skip compression".
 ALPHARAVIS_ALLOW_USER_COMPRESSION_PAUSE=true
+
+# If true, AlphaRavis adds a visible Memory-Notice to LibreChat whenever
+# compression happens or when compression was explicitly paused.
 ALPHARAVIS_SHOW_MEMORY_NOTICES=true
 
-# Safe workflow skill library. Candidates can be recorded automatically, but
-# promotion to active skills is disabled by default.
+# =====================================================================
+# --- SAFE WORKFLOW SKILL LIBRARY ---
+# =====================================================================
+# Enables retrieval/storage of reusable workflow skills in MongoDBStore.
+# Active skills are non-binding hints only; they do not execute tools directly.
 ALPHARAVIS_ENABLE_SKILL_LIBRARY=true
+
+# Max number of approved active skills to retrieve for the current user task.
 ALPHARAVIS_SKILL_LIBRARY_SEARCH_LIMIT=3
+
+# Max characters from retrieved active skills injected into the graph prompt.
 ALPHARAVIS_SKILL_CONTEXT_MAX_CHARS=2500
+
+# Safety switch for turning an inactive skill candidate into an active skill.
+# Keep false by default. Temporarily set true only when intentionally reviewing
+# and promoting a specific skill candidate.
 ALPHARAVIS_ALLOW_SKILL_PROMOTION=false
 
 
@@ -129,11 +184,28 @@ TAVILY_API_KEY=tvly-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ALPHARAVIS_MODEL=openai/big-boss
 OPENAI_API_BASE=http://litellm:4000/v1
 OPENAI_API_KEY=sk-local-dev
+
+# Enables Redis-backed LLM cache for repeated identical LLM calls. Disabled by
+# default to avoid surprising stale responses during development.
 ALPHARAVIS_ENABLE_REDIS_CACHE=false
+
+# Timeout in seconds for individual LLM requests made by AlphaRavis.
 ALPHARAVIS_LLM_TIMEOUT_SECONDS=120
+
+# Number of model-call retries inside ChatLiteLLM. 0 keeps failures visible
+# instead of silently retrying for a long time.
 ALPHARAVIS_LLM_MAX_RETRIES=0
+
+# Enables streaming mode on the LLM client so LangGraph can expose token/message
+# events when the upstream model/provider supports them.
 ALPHARAVIS_LLM_STREAMING=true
+
+# If true, SSH/local debugger commands that look destructive or state-changing
+# trigger a LangGraph human approval interrupt before execution.
 ALPHARAVIS_REQUIRE_COMMAND_APPROVAL=true
+
+# Max seconds allowed for local diagnostic shell commands in the LangGraph
+# container, such as read-only docker logs/ps checks.
 ALPHARAVIS_LOCAL_COMMAND_TIMEOUT_SECONDS=45
 # You can add API keys for cloud models here if needed.
 #
