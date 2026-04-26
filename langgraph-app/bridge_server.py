@@ -17,6 +17,7 @@ LANGGRAPH_ASSISTANT_ID = os.getenv("LANGGRAPH_ASSISTANT_ID", "alpha_ravis")
 OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "my-agent")
 BRIDGE_RUN_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_RUN_TIMEOUT_SECONDS", "180"))
 BRIDGE_STREAM_MODE = os.getenv("BRIDGE_STREAM_MODE", "events").lower()
+BRIDGE_MESSAGE_SYNC_MODE = os.getenv("BRIDGE_MESSAGE_SYNC_MODE", "delta").lower()
 
 app = FastAPI(title="AlphaRavis OpenAI Bridge")
 
@@ -119,6 +120,11 @@ def _is_ai_message(message: Any) -> bool:
     return message_type in {"ai", "assistant"} or "aimessage" in message_type
 
 
+def _is_human_message(message: Any) -> bool:
+    message_type = _message_type(message)
+    return message_type in {"human", "user"} or "humanmessage" in message_type
+
+
 def _last_ai_content(state: Any) -> str:
     messages = state.get("messages", []) if isinstance(state, dict) else []
     memory_notices: list[str] = []
@@ -134,6 +140,79 @@ def _last_ai_content(state: Any) -> str:
     if messages:
         return _message_content(messages[-1])
     return ""
+
+
+def _state_values(state: Any) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        return {}
+    values = state.get("values")
+    return values if isinstance(values, dict) else state
+
+
+def _state_messages(state: Any) -> list[Any]:
+    values = _state_values(state)
+    messages = values.get("messages", [])
+    return messages if isinstance(messages, list) else []
+
+
+def _last_human_content_from_state(state: Any) -> str:
+    for message in reversed(_state_messages(state)):
+        if _is_human_message(message):
+            return _message_content(message).strip()
+    return ""
+
+
+def _latest_human_message(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for message in reversed(messages):
+        if message.get("role") == "human":
+            return message
+    return None
+
+
+def _messages_after_last_human(messages: list[dict[str, Any]], last_human_content: str) -> list[dict[str, Any]]:
+    if not last_human_content:
+        return messages
+
+    last_seen = -1
+    for index, message in enumerate(messages):
+        if message.get("role") == "human" and str(message.get("content") or "").strip() == last_human_content:
+            last_seen = index
+
+    if last_seen < 0:
+        latest = _latest_human_message(messages)
+        return [latest] if latest else messages
+
+    new_human_messages = [
+        message for message in messages[last_seen + 1 :] if message.get("role") == "human"
+    ]
+    if new_human_messages:
+        return new_human_messages
+
+    latest = _latest_human_message(messages)
+    return [latest] if latest else []
+
+
+def _build_input_payload(
+    raw_messages: list[dict[str, Any]],
+    state: Any,
+    *,
+    thread_id: str,
+    thread_key: str,
+) -> dict[str, Any]:
+    normalized = _normalize_messages(raw_messages)
+    if BRIDGE_MESSAGE_SYNC_MODE in {"full", "all"}:
+        selected = normalized
+    else:
+        last_human = _last_human_content_from_state(state)
+        selected = _messages_after_last_human(normalized, last_human)
+        if not selected and normalized:
+            selected = [normalized[-1]]
+
+    return {
+        "messages": selected,
+        "thread_id": thread_id,
+        "thread_key": thread_key,
+    }
 
 
 def _chat_completion_response(content: str, model: str) -> dict[str, Any]:
@@ -266,8 +345,8 @@ def _approval_prompt(interrupt_value: dict[str, Any]) -> str:
 async def _prepare_run_payload(
     client: Any,
     thread_id: str,
+    thread_key: str,
     messages: list[dict[str, Any]],
-    input_payload: dict[str, Any],
 ) -> dict[str, Any]:
     try:
         state = await client.threads.get_state(thread_id)
@@ -281,6 +360,12 @@ async def _prepare_run_payload(
             return {"direct_response": _approval_prompt(interrupt_value)}
         return {"command": {"resume": resume}}
 
+    input_payload = _build_input_payload(
+        messages,
+        state,
+        thread_id=thread_id,
+        thread_key=thread_key,
+    )
     return {"input": input_payload}
 
 
@@ -385,8 +470,7 @@ async def _stream_chat(body: dict[str, Any], request: Request) -> AsyncIterator[
     client = _client()
     thread_key = _extract_thread_key(body, request)
     thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
-    input_payload = {"messages": _normalize_messages(body.get("messages", []))}
-    run_payload = await _prepare_run_payload(client, thread_id, body.get("messages", []), input_payload)
+    run_payload = await _prepare_run_payload(client, thread_id, thread_key, body.get("messages", []))
 
     if run_payload.get("direct_response"):
         for chunk in _openai_stream_response(str(run_payload["direct_response"]), model):
@@ -447,8 +531,7 @@ async def chat_completions(request: Request):
     client = _client()
     thread_key = _extract_thread_key(body, request)
     thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
-    input_payload = {"messages": _normalize_messages(body.get("messages", []))}
-    run_payload = await _prepare_run_payload(client, thread_id, body.get("messages", []), input_payload)
+    run_payload = await _prepare_run_payload(client, thread_id, thread_key, body.get("messages", []))
 
     if run_payload.get("direct_response"):
         content = str(run_payload["direct_response"])

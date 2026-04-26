@@ -162,6 +162,7 @@ services:
       - OPENAI_MODEL_NAME=my-agent
       - BRIDGE_RUN_TIMEOUT_SECONDS=${BRIDGE_RUN_TIMEOUT_SECONDS:-180}
       - BRIDGE_STREAM_MODE=${BRIDGE_STREAM_MODE:-events}
+      - BRIDGE_MESSAGE_SYNC_MODE=${BRIDGE_MESSAGE_SYNC_MODE:-delta}
     depends_on:
       langgraph-api:
         condition: service_started

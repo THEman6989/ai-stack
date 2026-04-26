@@ -35,8 +35,9 @@ from mcp.client.sse import sse_client
 from typing_extensions import NotRequired
 
 try:
-    from langgraph.config import get_store
+    from langgraph.config import get_config, get_store
 except Exception:  # pragma: no cover - older local LangGraph imports
+    get_config = None
     get_store = None
 
 try:
@@ -56,6 +57,8 @@ except Exception:  # pragma: no cover - older local CLI imports
 class AlphaRavisState(MessagesState):
     active_agent: NotRequired[str]
     active_skill_context: NotRequired[str]
+    thread_id: NotRequired[str]
+    thread_key: NotRequired[str]
     context_summary: NotRequired[str]
     archive_summary: NotRequired[str]
     archived_context_keys: NotRequired[list[str]]
@@ -82,8 +85,8 @@ SSH_USER = os.getenv("SSH_USER", "root")
 SSH_PASS_DEFAULT = os.getenv("SSH_PASS_DEFAULT", "")
 PIXELLE_URL = os.getenv("PIXELLE_URL", "http://pixelle:9004")
 COMFY_IP = REMOTE_PCS.get("comfy_server", {}).get("ip")
-ARCHIVE_NS = ("alpharavis", "archives")
-ARCHIVE_COLLECTION_NS = ("alpharavis", "archive_collections")
+ARCHIVE_INDEX_NS = ("alpharavis", "archive_index")
+ARCHIVE_COLLECTION_INDEX_NS = ("alpharavis", "archive_collection_index")
 DEBUGGING_LESSON_NS = ("alpharavis", "debugging_lessons")
 SKILL_LIBRARY_NS = ("alpharavis", "skill_library")
 SKILL_CONTEXT_MESSAGE_ID = "alpharavis_skill_library_context"
@@ -476,8 +479,8 @@ async def ask_documents(query: str):
 
 
 @tool
-async def search_archived_context(query: str, limit: int = 5):
-    """Search archived conversation summaries and raw-history records."""
+async def search_archived_context(query: str, limit: int = 5, include_other_threads: bool = False):
+    """Search archived memory. Defaults to the current chat thread only."""
 
     if get_store is None:
         return "LangGraph store access is unavailable in this runtime."
@@ -487,11 +490,20 @@ async def search_archived_context(query: str, limit: int = 5):
     except Exception as exc:
         return f"No LangGraph store is attached to this run: {exc}"
 
+    thread_id = _state_thread_id()
+    if include_other_threads:
+        namespaces = [
+            (ARCHIVE_INDEX_NS, "Cross-thread archive"),
+            (ARCHIVE_COLLECTION_INDEX_NS, "Cross-thread archive collection"),
+        ]
+    else:
+        namespaces = [
+            (_thread_archive_ns(thread_id), "Thread archive"),
+            (_thread_archive_collection_ns(thread_id), "Thread archive collection"),
+        ]
+
     records: list[tuple[str, Any]] = []
-    for namespace, label in [
-        (ARCHIVE_NS, "Archive"),
-        (ARCHIVE_COLLECTION_NS, "Archive collection"),
-    ]:
+    for namespace, label in namespaces:
         try:
             results = await _maybe_search(store, namespace, query=query, limit=limit)
         except Exception as exc:
@@ -501,7 +513,9 @@ async def search_archived_context(query: str, limit: int = 5):
             records.append((label, item))
 
     if not records:
-        return "No archived context matched that query."
+        if include_other_threads:
+            return "No archived context matched that query across threads."
+        return "No archived context matched that query in the current chat thread."
 
     lines = []
     for label, item in records[:limit]:
@@ -510,7 +524,10 @@ async def search_archived_context(query: str, limit: int = 5):
         if isinstance(value, dict):
             summary = value.get("summary") or value.get("content") or str(value)
             token_estimate = value.get("token_estimate", "unknown")
-            lines.append(f"{label} `{key}` ({token_estimate} tokens est.):\n{summary}")
+            source_thread = value.get("thread_key") or value.get("thread_id") or "unknown"
+            lines.append(
+                f"{label} `{key}` from `{source_thread}` ({token_estimate} tokens est.):\n{summary}"
+            )
         else:
             lines.append(f"{label} `{key}`:\n{value}")
 
@@ -816,6 +833,52 @@ def _format_skill_record(key: str, value: dict[str, Any]) -> str:
     ).strip()
 
 
+def _thread_id_from_config() -> str | None:
+    if get_config is None:
+        return None
+
+    try:
+        config = get_config()
+    except Exception:
+        return None
+
+    if not isinstance(config, dict):
+        return None
+
+    configurable = config.get("configurable")
+    metadata = config.get("metadata")
+    for source in [configurable, metadata, config]:
+        if isinstance(source, dict):
+            for key in ["thread_id", "thread_key", "conversation_id", "conversationId"]:
+                value = source.get(key)
+                if value:
+                    return str(value)
+    return None
+
+
+def _state_thread_id(state: dict[str, Any] | None = None) -> str:
+    if state:
+        for key in ["thread_id", "thread_key"]:
+            value = state.get(key)
+            if value:
+                return str(value)
+    return _thread_id_from_config() or "global"
+
+
+def _state_thread_key(state: dict[str, Any] | None = None) -> str:
+    if state and state.get("thread_key"):
+        return str(state["thread_key"])
+    return _state_thread_id(state)
+
+
+def _thread_archive_ns(thread_id: str) -> tuple[str, ...]:
+    return ("alpharavis", "threads", thread_id, "archives")
+
+
+def _thread_archive_collection_ns(thread_id: str) -> tuple[str, ...]:
+    return ("alpharavis", "threads", thread_id, "archive_collections")
+
+
 def _latest_user_query(messages: list[Any]) -> str:
     for message in reversed(messages):
         role = None
@@ -894,6 +957,8 @@ async def _summarize_archive_records(
 
 async def _maybe_compact_archives(
     store: Any,
+    thread_id: str,
+    thread_key: str,
     archived_keys: list[str],
     compressed_keys: list[str],
     collection_keys: list[str],
@@ -911,8 +976,9 @@ async def _maybe_compact_archives(
         return {}
 
     records: list[tuple[str, dict[str, Any]]] = []
+    archive_ns = _thread_archive_ns(thread_id)
     for key in pending_keys:
-        item = await _maybe_get(store, ARCHIVE_NS, key)
+        item = await _maybe_get(store, archive_ns, key)
         value = _store_item_value(item)
         if isinstance(value, dict):
             records.append((key, value))
@@ -936,18 +1002,17 @@ async def _maybe_compact_archives(
     collection_key = hashlib.sha256(
         f"{time.time()}:{summary}:{','.join(compacted_keys)}".encode("utf-8")
     ).hexdigest()[:24]
-    await _maybe_put(
-        store,
-        ARCHIVE_COLLECTION_NS,
-        collection_key,
-        {
-            "summary": summary,
-            "child_archive_keys": compacted_keys,
-            "token_estimate": token_estimate,
-            "record_count": len(records_to_compact),
-            "compressed_at": int(time.time()),
-        },
-    )
+    collection_record = {
+        "summary": summary,
+        "child_archive_keys": compacted_keys,
+        "token_estimate": token_estimate,
+        "record_count": len(records_to_compact),
+        "compressed_at": int(time.time()),
+        "thread_id": thread_id,
+        "thread_key": thread_key,
+    }
+    await _maybe_put(store, _thread_archive_collection_ns(thread_id), collection_key, collection_record)
+    await _maybe_put(store, ARCHIVE_COLLECTION_INDEX_NS, collection_key, collection_record)
 
     return {
         "archive_summary": summary,
@@ -1062,22 +1127,30 @@ async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None)
     archive_collection_keys = list(state.get("archive_collection_keys", []))
     compressed_archive_keys = list(state.get("compressed_archive_keys", []))
     archive_summary = state.get("archive_summary")
+    thread_id = _state_thread_id(state)
+    thread_key = _state_thread_key(state)
     hierarchy_notice = ""
     if store is not None:
+        archive_record = {
+            "summary": summary,
+            "token_estimate": _estimate_tokens(old_messages),
+            "archived_at": int(time.time()),
+            "messages": [_message_to_json(message) for message in old_messages],
+            "thread_id": thread_id,
+            "thread_key": thread_key,
+        }
+        await _maybe_put(store, _thread_archive_ns(thread_id), archive_key, archive_record)
         await _maybe_put(
             store,
-            ARCHIVE_NS,
+            ARCHIVE_INDEX_NS,
             archive_key,
-            {
-                "summary": summary,
-                "token_estimate": _estimate_tokens(old_messages),
-                "archived_at": int(time.time()),
-                "messages": [_message_to_json(message) for message in old_messages],
-            },
+            {key: value for key, value in archive_record.items() if key != "messages"},
         )
         archived_keys.append(archive_key)
         compact_update = await _maybe_compact_archives(
             store,
+            thread_id,
+            thread_key,
             archived_keys,
             compressed_archive_keys,
             archive_collection_keys,
@@ -1322,7 +1395,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         system_prompt=(
             "You are the Context Retrieval Agent. Search long-term archived "
             "conversation memory and return the precise facts needed by the "
-            "active peer. Do not answer unrelated tasks yourself; transfer back."
+            "active peer. By default, search only the current chat thread. "
+            "Set include_other_threads=true only when the user explicitly asks "
+            "to search other chats or all archives. Do not answer unrelated "
+            "tasks yourself; transfer back."
         ),
     )
 
