@@ -243,6 +243,50 @@ Pixelle failures should first check job status before SSH debugging.
 
 Long logs, reports, or implementation notes should go to artifacts instead.
 
+## Semantic Vector Memory
+
+Optional pgvector memory is a search index, not a second source of truth.
+MongoDB/LangGraph still own checkpoints, store data, archives, and thread state.
+pgvector stores only compact search cards with a preview, metadata, source key,
+thread id, and embedding.
+
+Default:
+
+```text
+ALPHARAVIS_VECTOR_BACKEND=off
+ALPHARAVIS_ENABLE_PGVECTOR_MEMORY=false
+```
+
+Enable:
+
+```text
+ALPHARAVIS_VECTOR_BACKEND=pgvector
+```
+
+Requirements:
+
+```text
+ALPHARAVIS_PGVECTOR_DATABASE_URL=postgresql://postgres:<password>@vectordb:5432/rag_api
+ALPHARAVIS_PGVECTOR_EMBEDDING_BASE_URL=http://litellm:4000/v1
+ALPHARAVIS_PGVECTOR_EMBEDDING_MODEL=memory-embed
+```
+
+`memory-embed` is a LiteLLM route. The default example routes to an
+OpenAI-compatible Ollama embedding model such as `nomic-embed-text`. Pull or
+configure that model before enabling vector memory.
+
+Agents can call:
+
+```text
+semantic_memory_search
+```
+
+It searches the current thread plus global memories by default. It searches
+other threads only when `include_other_threads=true` is explicitly requested.
+After enabling pgvector memory, new records are indexed automatically. Old
+MongoDB/store history is not bulk-backfilled by default, to avoid a surprise
+embedding job over many chats.
+
 ## Session Search And Artifacts
 
 AlphaRavis now keeps an indexed per-turn history, similar in spirit to Hermes

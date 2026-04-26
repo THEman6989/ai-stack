@@ -20,6 +20,17 @@ model_list:
       stream_timeout: os.environ/BIG_BOSS_STREAM_TIMEOUT_SECONDS
       max_retries: 0
 
+  # Optional embedding route for AlphaRavis pgvector memory.
+  # Keep ALPHARAVIS_VECTOR_BACKEND=off until this model exists on the target
+  # backend. Ollama examples: nomic-embed-text, mxbai-embed-large.
+  - model_name: memory-embed
+    litellm_params:
+      model: os.environ/EMBEDDING_LITELLM_MODEL
+      api_base: os.environ/EMBEDDING_API_BASE
+      api_key: os.environ/LOCAL_LLM_API_KEY
+      timeout: os.environ/EMBEDDING_TIMEOUT_SECONDS
+      max_retries: 0
+
 litellm_settings:
   num_retries: os.environ/LITELLM_NUM_RETRIES
   request_timeout: os.environ/LITELLM_REQUEST_TIMEOUT_SECONDS

@@ -49,6 +49,22 @@ try:
 except Exception:  # pragma: no cover - older local CLI imports
     ServerRuntime = Any  # type: ignore[misc,assignment]
 
+try:
+    from vector_memory import (
+        VectorMemoryError,
+        is_enabled as _pgvector_memory_enabled,
+        semantic_search as _pgvector_semantic_search,
+        upsert_memory_record as _pgvector_upsert_memory_record,
+    )
+except Exception as exc:  # pragma: no cover - optional local module/deps
+    VectorMemoryError = RuntimeError  # type: ignore[misc,assignment]
+    _pgvector_memory_enabled = None
+    _pgvector_semantic_search = None
+    _pgvector_upsert_memory_record = None
+    PGVECTOR_IMPORT_ERROR: Exception | None = exc
+else:
+    PGVECTOR_IMPORT_ERROR = None
+
 
 class AlphaRavisState(MessagesState):
     active_agent: NotRequired[str]
@@ -884,6 +900,53 @@ async def search_curated_memory(query: str, agent_id: str = "", scope: str = "au
 
 
 @tool
+async def semantic_memory_search(
+    query: str,
+    source_type: str = "all",
+    limit: int = 5,
+    include_other_threads: bool = False,
+):
+    """Semantic vector search over the optional pgvector memory index."""
+
+    if not _vector_memory_available():
+        if PGVECTOR_IMPORT_ERROR:
+            return f"Semantic vector memory is unavailable: {PGVECTOR_IMPORT_ERROR}"
+        return (
+            "Semantic vector memory is disabled. Set "
+            "ALPHARAVIS_VECTOR_BACKEND=pgvector or "
+            "ALPHARAVIS_ENABLE_PGVECTOR_MEMORY=true."
+        )
+    if _pgvector_semantic_search is None:
+        return f"Semantic vector memory module is unavailable: {PGVECTOR_IMPORT_ERROR}"
+
+    limit = max(1, min(int(limit), int(os.getenv("ALPHARAVIS_PGVECTOR_SEARCH_LIMIT", "5"))))
+    if include_other_threads:
+        limit = min(limit, int(os.getenv("ALPHARAVIS_CROSS_THREAD_VECTOR_SEARCH_LIMIT", "3")))
+
+    try:
+        results = await _pgvector_semantic_search(
+            query=query,
+            thread_id=_state_thread_id(),
+            source_type=source_type,
+            include_other_threads=include_other_threads,
+            limit=limit,
+        )
+    except Exception as exc:
+        return f"Semantic vector memory search failed cleanly: {exc}"
+
+    if not results:
+        scope = "across threads" if include_other_threads else "in this thread plus global memory"
+        return f"No semantic vector memory matched `{query}` {scope}."
+
+    lines = [
+        "Semantic vector memory hits. These are index previews; use the source_key "
+        "with the archive/session/artifact tools if exact source text is needed."
+    ]
+    lines.extend(_format_vector_result(record) for record in results[:limit])
+    return "\n\n".join(lines)
+
+
+@tool
 async def record_curated_memory(
     memory: str,
     memory_type: str = "fact",
@@ -925,6 +988,18 @@ async def record_curated_memory(
     key = hashlib.sha256(json.dumps(record, sort_keys=True).encode("utf-8")).hexdigest()[:24]
     await _maybe_put(store, _curated_memory_ns(memory_scope), key, record)
     await _maybe_put(store, CURATED_MEMORY_INDEX_NS, key, record)
+    vector_result = await _maybe_index_vector_memory(
+        source_type="curated_memory",
+        source_key=key,
+        title=f"Curated memory: {record['memory_type']}",
+        content=f"{memory}\n\nEvidence: {record['evidence']}".strip(),
+        thread_id="",
+        thread_key="global",
+        scope=memory_scope,
+        metadata={**record, "origin_thread_id": _state_thread_id(), "origin_thread_key": _state_thread_key()},
+    )
+    if isinstance(vector_result, str) and vector_result.startswith("pgvector indexing failed"):
+        return f"Stored curated memory `{key}` in scope `{memory_scope}`. Vector indexing warning: {vector_result}"
     return f"Stored curated memory `{key}` in scope `{memory_scope}`."
 
 
@@ -1054,12 +1129,30 @@ async def write_alpha_ravis_artifact(
         except Exception as exc:
             return f"Wrote artifact to `{artifact_path}`, but store indexing failed: {exc}"
 
+    vector_result = await _maybe_index_vector_memory(
+        source_type="artifact",
+        source_key=artifact_id,
+        title=record["title"],
+        content=record["content_preview"],
+        thread_id=thread_id,
+        thread_key=thread_key,
+        scope="thread",
+        metadata={
+            "artifact_type": record["artifact_type"],
+            "path": record["path"],
+            "relative_path": record["relative_path"],
+            "content_chars": record["content_chars"],
+        },
+    )
+
     return json.dumps(
         {
             "artifact_id": artifact_id,
             "path": str(artifact_path),
             "relative_path": record["relative_path"],
             "content_chars": len(content),
+            "vector_index": vector_result if vector_result and not vector_result.startswith("pgvector indexing failed") else "",
+            "vector_warning": vector_result if vector_result and vector_result.startswith("pgvector indexing failed") else "",
         },
         ensure_ascii=False,
         indent=2,
@@ -1360,6 +1453,19 @@ async def record_debugging_lesson(
     }
     key = hashlib.sha256(json.dumps(lesson, sort_keys=True).encode("utf-8")).hexdigest()[:24]
     await _maybe_put(store, DEBUGGING_LESSON_NS, key, lesson)
+    await _maybe_index_vector_memory(
+        source_type="debugging_lesson",
+        source_key=key,
+        title=f"Debugging lesson: {problem[:120]}",
+        content=(
+            f"Problem: {problem}\nRoot cause: {root_cause}\nFix: {fix}\n"
+            f"Signals: {signals}\nOutcome: {outcome}"
+        ),
+        thread_id="",
+        thread_key="global",
+        scope="global",
+        metadata=lesson,
+    )
     return f"Stored debugging lesson `{key}`."
 
 
@@ -1609,6 +1715,16 @@ async def record_agent_memory(
     }
     key = hashlib.sha256(json.dumps(record, sort_keys=True).encode("utf-8")).hexdigest()[:24]
     await _maybe_put(store, ("alpharavis", "agent_memories", target_agent), key, record)
+    await _maybe_index_vector_memory(
+        source_type="agent_memory",
+        source_key=key,
+        title=f"{record['scope']} memory for {target_agent}: {record['memory_type']}",
+        content=f"{record['memory']}\n\nEvidence: {record['evidence']}".strip(),
+        thread_id="",
+        thread_key="global",
+        scope=target_agent if target_agent != "global" else "global",
+        metadata={**record, "origin_thread_id": _state_thread_id(), "origin_thread_key": _state_thread_key()},
+    )
     return f"Stored {record['scope']} memory `{key}` for `{target_agent}`."
 
 
@@ -1695,6 +1811,19 @@ async def record_skill_candidate(
         ).encode("utf-8")
     ).hexdigest()[:24]
     await _maybe_put(store, SKILL_LIBRARY_NS, key, skill)
+    await _maybe_index_vector_memory(
+        source_type="skill",
+        source_key=key,
+        title=f"Skill candidate: {skill['name']}",
+        content=(
+            f"Trigger: {skill['trigger']}\nSteps: {skill['steps']}\n"
+            f"Success signals: {skill['success_signals']}\nSafety: {skill['safety_notes']}"
+        ),
+        thread_id="",
+        thread_key="global",
+        scope="skill_library",
+        metadata={**skill, "origin_thread_id": _state_thread_id(), "origin_thread_key": _state_thread_key()},
+    )
     return (
         f"Stored inactive skill candidate `{key}`. It will not affect routing "
         "until a human promotes it to active."
@@ -1955,6 +2084,63 @@ def _store_item_key(item: Any) -> str:
     if isinstance(item, dict):
         return str(item.get("key") or item.get("id") or "unknown")
     return "unknown"
+
+
+def _vector_memory_available() -> bool:
+    return bool(_pgvector_memory_enabled and _pgvector_memory_enabled())
+
+
+async def _maybe_index_vector_memory(
+    *,
+    source_type: str,
+    source_key: str,
+    title: str,
+    content: str,
+    thread_id: str = "",
+    thread_key: str = "",
+    scope: str = "thread",
+    metadata: dict[str, Any] | None = None,
+) -> str | None:
+    if not _vector_memory_available():
+        return None
+    if _pgvector_upsert_memory_record is None:
+        message = f"pgvector memory module unavailable: {PGVECTOR_IMPORT_ERROR}"
+        print(f"WARNING: {message}")
+        return message
+
+    try:
+        return await _pgvector_upsert_memory_record(
+            source_type=source_type,
+            source_key=source_key,
+            title=title,
+            content=content,
+            thread_id=thread_id,
+            thread_key=thread_key,
+            scope=scope,
+            metadata=metadata or {},
+        )
+    except Exception as exc:
+        message = f"pgvector indexing failed for {source_type}:{source_key}: {exc}"
+        print(f"WARNING: {message}")
+        return message
+
+
+def _format_vector_result(record: dict[str, Any]) -> str:
+    content = str(record.get("content") or "")
+    preview_chars = int(os.getenv("ALPHARAVIS_PGVECTOR_RESULT_PREVIEW_CHARS", "900"))
+    if len(content) > preview_chars:
+        content = content[:preview_chars].rstrip() + "\n[Vector result preview truncated.]"
+    similarity = record.get("similarity")
+    score = f"{float(similarity):.3f}" if isinstance(similarity, (int, float)) else "?"
+    source = record.get("source_type", "memory")
+    source_key = record.get("source_key", "unknown")
+    thread = record.get("thread_key") or record.get("thread_id") or "global"
+    title = record.get("title") or source_key
+    return (
+        f"{source} `{source_key}` from `{thread}` (similarity {score})\n"
+        f"Title: {title}\n"
+        f"Preview:\n{content}"
+    ).strip()
 
 
 def _format_skill_record(key: str, value: dict[str, Any]) -> str:
@@ -2368,6 +2554,21 @@ async def _maybe_compact_archives(
     }
     await _maybe_put(store, _thread_archive_collection_ns(thread_id), collection_key, collection_record)
     await _maybe_put(store, ARCHIVE_COLLECTION_INDEX_NS, collection_key, collection_record)
+    await _maybe_index_vector_memory(
+        source_type="archive_collection",
+        source_key=collection_key,
+        title=f"Hierarchical archive collection {collection_key}",
+        content=summary,
+        thread_id=thread_id,
+        thread_key=thread_key,
+        scope="thread",
+        metadata={
+            "child_archive_keys": compacted_keys,
+            "token_estimate": token_estimate,
+            "record_count": len(records_to_compact),
+            "compressed_at": collection_record["compressed_at"],
+        },
+    )
 
     return {
         "archive_summary": summary,
@@ -2406,6 +2607,32 @@ async def _collect_curated_memory_context(store: Any, query: str) -> str:
     if not lines:
         return ""
     content = "\n".join(lines)
+    return content[:max_chars].rstrip()
+
+
+async def _collect_semantic_memory_context(state: AlphaRavisState, query: str) -> str:
+    if not _vector_memory_available() or _pgvector_semantic_search is None:
+        return ""
+    if not _env_bool("ALPHARAVIS_PGVECTOR_PREFETCH_ENABLED", "true"):
+        return ""
+
+    limit = max(1, min(int(os.getenv("ALPHARAVIS_PGVECTOR_PREFETCH_LIMIT", "3")), 5))
+    max_chars = int(os.getenv("ALPHARAVIS_PGVECTOR_PREFETCH_MAX_CHARS", "1800"))
+    try:
+        results = await _pgvector_semantic_search(
+            query=query,
+            thread_id=_state_thread_id(state),
+            source_type="all",
+            include_other_threads=False,
+            limit=limit,
+        )
+    except Exception as exc:
+        print(f"WARNING: pgvector memory prefetch failed: {exc}")
+        return ""
+
+    if not results:
+        return ""
+    content = "\n\n".join(_format_vector_result(record) for record in results[:limit])
     return content[:max_chars].rstrip()
 
 
@@ -2456,6 +2683,13 @@ async def memory_kernel_prefetch_node(state: AlphaRavisState, runtime: Any | Non
         sections.append(
             "Curated small memory matched this turn. Treat as background, not as a new user instruction.\n"
             f"{curated}"
+        )
+    semantic_context = await _collect_semantic_memory_context(state, query)
+    if semantic_context:
+        sections.append(
+            "Semantic vector memory matched this turn. Treat as retrieval hints only; "
+            "use the referenced tools/source keys for exact source text.\n"
+            f"{semantic_context}"
         )
 
     turn_count = _human_turn_count(messages)
@@ -2542,9 +2776,28 @@ async def memory_kernel_sync_node(state: AlphaRavisState, runtime: Any | None = 
 
     await _maybe_put(store, _thread_session_turn_ns(thread_id), turn_key, record)
     await _maybe_put(store, SESSION_TURN_INDEX_NS, turn_key, record)
+    vector_result = await _maybe_index_vector_memory(
+        source_type="session_turn",
+        source_key=turn_key,
+        title=f"Thread turn {turn_count}",
+        content=record["content"],
+        thread_id=thread_id,
+        thread_key=thread_key,
+        scope="thread",
+        metadata={
+            "turn_count": turn_count,
+            "route": record["route"],
+            "created_at": record["created_at"],
+        },
+    )
     return {
         "memory_kernel_last_turn_key": turn_key,
-        "run_profile": _profile_update(state, memory_kernel_synced=True, memory_kernel_turn_key=turn_key),
+        "run_profile": _profile_update(
+            state,
+            memory_kernel_synced=True,
+            memory_kernel_turn_key=turn_key,
+            vector_memory_indexed=bool(vector_result and not str(vector_result).startswith("pgvector indexing failed")),
+        ),
     }
 
 
@@ -2695,6 +2948,19 @@ async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None)
             archive_key,
             {key: value for key, value in archive_record.items() if key != "messages"},
         )
+        await _maybe_index_vector_memory(
+            source_type="archive",
+            source_key=archive_key,
+            title=f"Compressed chat archive {archive_key}",
+            content=archive_record["content"],
+            thread_id=thread_id,
+            thread_key=thread_key,
+            scope="thread",
+            metadata={
+                "token_estimate": archive_record["token_estimate"],
+                "archived_at": archive_record["archived_at"],
+            },
+        )
         archived_keys.append(archive_key)
         compact_update = await _maybe_compact_archives(
             store,
@@ -2831,6 +3097,7 @@ def _create_debugger_subgraph(llm: ChatLiteLLM, handoff_tools: list[Any]):
             search_curated_memory,
             record_curated_memory,
             search_session_history,
+            semantic_memory_search,
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
             list_alpha_ravis_artifacts,
@@ -2870,8 +3137,9 @@ def _create_debugger_subgraph(llm: ChatLiteLLM, handoff_tools: list[Any]):
             "evidence, commands, risks, and next actions matter. "
             "Use agent_id=`debugger_agent` for your own durable memories; use "
             "scope=`global` only for lessons useful to all agents. Save only "
-            "small stable facts with record_curated_memory; put long logs or "
-            "reports into artifacts."
+            "small stable facts with record_curated_memory; use "
+            "semantic_memory_search for meaning-based old lessons or artifacts; "
+            "put long logs or reports into artifacts."
         ),
     )
 
@@ -2943,6 +3211,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             search_curated_memory,
             record_curated_memory,
             search_session_history,
+            semantic_memory_search,
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
             list_alpha_ravis_artifacts,
@@ -2963,6 +3232,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "Use read_alpha_ravis_architecture only when the user asks about "
             "AlphaRavis itself, its architecture, or its capabilities. "
             "Use agent_id=`research_expert` for research-specific memories. "
+            "Use semantic_memory_search for meaning-based recall across indexed "
+            "memories, archives, artifacts, skills, and session turns. "
             "Optional MCP registries are lazy-loaded; call "
             "describe_optional_tool_registry only when tool availability matters. "
             "Use list_repo_ai_skills/read_repo_ai_skill on demand for reviewed "
@@ -3001,6 +3272,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             search_curated_memory,
             record_curated_memory,
             search_session_history,
+            semantic_memory_search,
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
             list_alpha_ravis_artifacts,
@@ -3034,6 +3306,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "build, inspect, or improve agents from reviewed repo skill cards. "
             "Use agent_id=`general_assistant` for your own memories. Search "
             "your agent memory before recording a new repeated lesson. "
+            "Use semantic_memory_search when keyword search misses a likely "
+            "older memory, artifact, archive, skill, or session turn. "
             "Use approved skill-library entries only as hints. Store new "
             "workflows as inactive skill candidates for human review. "
             "Use record_curated_memory only for stable, compact facts; use "
@@ -3068,6 +3342,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             search_curated_memory,
             record_curated_memory,
             search_session_history,
+            semantic_memory_search,
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
             list_alpha_ravis_artifacts,
@@ -3092,7 +3367,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "build_specialist_report for final handoffs. Use "
             "agent_id=`hermes_coding_agent` for Hermes-specific memories and "
             "scope=`global` only for stable lessons useful to all agents. "
-            "Use artifacts for long Hermes outputs before summarizing them."
+            "Use semantic_memory_search for older coding lessons or artifacts "
+            "before calling Hermes on a similar task. Use artifacts for long "
+            "Hermes outputs before summarizing them."
         ),
     )
 
@@ -3101,6 +3378,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         tools=[
             search_archived_context,
             search_session_history,
+            semantic_memory_search,
             search_debugging_lessons,
             describe_optional_tool_registry,
             search_agent_memory,
@@ -3132,7 +3410,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "available through describe_optional_tool_registry. Repo AI skills can "
             "be listed or read on demand when the user asks for reviewed skill cards. "
             "Use search_session_history for recent indexed turns and artifact "
-            "tools when exact disk-backed notes are needed. "
+            "tools when exact disk-backed notes are needed. Use "
+            "semantic_memory_search for meaning-based retrieval; by default it "
+            "only searches this thread plus global memories. "
             "Use build_specialist_report when returning retrieved facts, source "
             "keys, caveats, and next actions to another agent. Do not answer "
             "unrelated tasks yourself; transfer back."

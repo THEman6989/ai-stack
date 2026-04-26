@@ -20,6 +20,7 @@ Important current behavior:
 - MCP uses DeepAgents-style `mcp.json` config, with stdio servers disabled by default.
 - Hermes can be used directly from LibreChat or as an optional bounded coding/system sub-agent inside AlphaRavis.
 - A Hermes-inspired MemoryKernel keeps curated always-memory small, indexes turns for search, and writes large notes to artifacts.
+- Optional pgvector semantic memory can index previews/source keys for memories, turns, archives, artifacts, skills, and lessons while MongoDB remains the source of truth.
 - Agents can inspect a lazy optional-tool manifest and use scoped agent/global memories.
 - Reviewed repo skill cards live in `ai-skills/`, starting with DeepAgents agent-building and research workflows, and can be read on demand by AlphaRavis.
 - Risky local or SSH commands require approval before execution.
@@ -40,7 +41,7 @@ AlphaRavis is composed of several microservices orchestrated via Docker Compose:
 1. **Frontend:** `librechat` (main interface) and `agent-custom-ui` (specialized agent view).
 2. **Logic Layer:** `langgraph-api` (The Python-based agentic server managing workflows).
 3. **Model Gateway:** `litellm` (Distributes prompts to local servers or cloud providers).
-4. **Data & Cache:** `mongodb` (State & Long-Term Memory) and `redis` (Semantic Caching).
+4. **Data & Cache:** `mongodb` (State & Long-Term Memory), `vectordb`/pgvector (optional semantic memory/search index), and `redis` (Semantic Caching).
 5. **Tools:** `opencode-server` (Headless code worker) and `rag_api` (Document embedding service).
 
 ## 🚀 Quickstart

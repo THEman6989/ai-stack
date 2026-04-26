@@ -15,6 +15,7 @@
 #   OPTIONAL REMOTE PC / SSH           -> Wake-on-LAN and SSH debugging
 #   OPTIONAL BRIDGE SETTINGS           -> LibreChat <-> LangGraph behavior
 #   OPTIONAL MEMORY SETTINGS           -> compression, archives, architecture doc
+#   OPTIONAL VECTOR MEMORY             -> pgvector semantic memory sidecar
 #   OPTIONAL SKILL LIBRARY             -> reusable workflow skill candidates
 #   OPTIONAL SEARCH                    -> Tavily / research tools
 #   OPTIONAL OBSERVABILITY             -> LangSmith tracing
@@ -84,6 +85,15 @@ EDGE_GEMMA_LITELLM_MODEL=openai/gemma4:e2b
 EDGE_GEMMA_API_BASE=http://192.168.178.140:11434/v1
 EDGE_GEMMA_TIMEOUT_SECONDS=60
 EDGE_GEMMA_STREAM_TIMEOUT_SECONDS=15
+
+# Optional embedding model used only when pgvector semantic memory is enabled.
+# EMBEDDING_API_BASE should expose an OpenAI-compatible /v1 API.
+# Example Ollama model after `ollama pull nomic-embed-text`:
+#   EMBEDDING_LITELLM_MODEL=openai/nomic-embed-text
+#   EMBEDDING_API_BASE=http://192.168.178.140:11434/v1
+EMBEDDING_LITELLM_MODEL=openai/nomic-embed-text
+EMBEDDING_API_BASE=http://192.168.178.140:11434/v1
+EMBEDDING_TIMEOUT_SECONDS=30
 
 # LiteLLM fallback policy.
 # Global LiteLLM fallbacks are intentionally off. edge-gemma is a small
@@ -316,6 +326,61 @@ ALPHARAVIS_ARCHITECTURE_DOC_PATH=/workspace/docs/ALPHARAVIS_ARCHITECTURE.md
 
 # Max characters returned by the architecture-doc tool in one call.
 ALPHARAVIS_ARCHITECTURE_DOC_MAX_CHARS=6000
+
+
+# =====================================================================
+# OPTIONAL VECTOR MEMORY - PGVECTOR SEMANTIC SEARCH SIDECAR
+# =====================================================================
+
+# Vector backend switch.
+# Allowed values:
+#   off      = no semantic vector indexing/search
+#   pgvector = use the existing Postgres/pgvector container as a search index
+#
+# MongoDB remains the source of truth for LangGraph checkpoints/store. pgvector
+# stores only search cards: source_key, metadata, preview text, and embedding.
+# The exact long content stays in MongoDB/store/artifacts and is retrieved by
+# source_key when needed.
+ALPHARAVIS_VECTOR_BACKEND=off
+
+# Legacy boolean alias for enabling pgvector memory.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_PGVECTOR_MEMORY=false
+
+# Postgres/pgvector connection used by LangGraph. Docker default points to the
+# existing `vectordb` service.
+ALPHARAVIS_PGVECTOR_DATABASE_URL=postgresql://postgres:f3423f423f423f423f423f423f423f42@vectordb:5432/rag_api
+
+# Table name for AlphaRavis vector index records.
+ALPHARAVIS_PGVECTOR_TABLE=alpharavis_memory_vectors
+
+# OpenAI-compatible embedding endpoint used to create vectors.
+# Inside Docker, LiteLLM exposes the `memory-embed` route at this URL.
+ALPHARAVIS_PGVECTOR_EMBEDDING_BASE_URL=http://litellm:4000/v1
+ALPHARAVIS_PGVECTOR_EMBEDDING_API_KEY=sk-local-dev
+ALPHARAVIS_PGVECTOR_EMBEDDING_MODEL=memory-embed
+ALPHARAVIS_PGVECTOR_EMBEDDING_TIMEOUT_SECONDS=20
+
+# Max characters embedded per indexed record. The original source can be longer
+# in MongoDB/store/artifacts; this is only the semantic search card.
+ALPHARAVIS_PGVECTOR_MAX_CONTENT_CHARS=8000
+
+# Create a pgvector HNSW index automatically. If creation fails, exact vector
+# search still works but may be slower on large memory collections.
+# Allowed values: true, false
+ALPHARAVIS_PGVECTOR_CREATE_HNSW_INDEX=true
+
+# Search limits for semantic_memory_search.
+ALPHARAVIS_PGVECTOR_SEARCH_LIMIT=5
+ALPHARAVIS_CROSS_THREAD_VECTOR_SEARCH_LIMIT=3
+ALPHARAVIS_PGVECTOR_RESULT_PREVIEW_CHARS=900
+
+# Automatic MemoryKernel semantic prefetch. This only runs when vector backend
+# is enabled; it never searches other threads unless a tool call explicitly does.
+# Allowed values: true, false
+ALPHARAVIS_PGVECTOR_PREFETCH_ENABLED=true
+ALPHARAVIS_PGVECTOR_PREFETCH_LIMIT=3
+ALPHARAVIS_PGVECTOR_PREFETCH_MAX_CHARS=1800
 
 
 # =====================================================================

@@ -26,6 +26,8 @@ The current Docker architecture is split into these main roles:
 - `api-bridge`: the mouth. Exposes OpenAI-compatible `/v1/models` and `/v1/chat/completions` for LibreChat.
 - `litellm`: model gateway. Routes AlphaRavis model calls to configured backends such as llama.cpp or Ollama.
 - `mongodb`: LangGraph checkpointing and long-term store backing.
+- `vectordb`: Postgres with pgvector. It can act as an optional semantic
+  search sidecar for AlphaRavis memory; it does not replace MongoDB.
 - `redis`: optional LLM cache, not the primary checkpointer in this phase.
 - `deep-agents-ui`: visual UI for DeepAgents/LangGraph-style inspection.
 - `librechat`: the normal chat UI for the user.
@@ -288,12 +290,20 @@ On the normal agent path it does four small jobs:
 
 Fast Path skips the MemoryKernel so simple chat stays cheap.
 
+When `ALPHARAVIS_VECTOR_BACKEND=pgvector`, the MemoryKernel also writes small
+semantic search cards to pgvector for newly saved memories, session turns,
+archives, archive collections, artifacts, debugging lessons, and skill
+candidates. These cards contain a preview, metadata, source type, source key,
+thread id, and embedding. They are an index only; MongoDB/store/artifact files
+remain the source of truth.
+
 Relevant settings:
 
 ```text
 ALPHARAVIS_ENABLE_MEMORY_KERNEL=true
 ALPHARAVIS_MEMORY_NUDGE_INTERVAL=10
 ALPHARAVIS_MEMORY_KERNEL_PRECOMPRESS_NOTES=true
+ALPHARAVIS_VECTOR_BACKEND=off
 ```
 
 ### LangGraph Checkpoints
@@ -522,6 +532,48 @@ list_alpha_ravis_artifacts
 Artifacts are thread-scoped by default, with optional cross-thread listing only
 when explicitly requested. The artifact index stores metadata and a small
 preview; the full content stays on disk.
+
+### Optional Semantic Vector Memory
+
+AlphaRavis can use the existing `vectordb` Postgres/pgvector service as a
+semantic memory index. This is disabled by default:
+
+```text
+ALPHARAVIS_VECTOR_BACKEND=off
+ALPHARAVIS_ENABLE_PGVECTOR_MEMORY=false
+```
+
+Enable it with:
+
+```text
+ALPHARAVIS_VECTOR_BACKEND=pgvector
+```
+
+The vector backend stores search cards, not full duplicated chat truth. A card
+contains:
+
+- `source_type`, such as `session_turn`, `archive`, `artifact`, `skill`,
+  `curated_memory`, `agent_memory`, or `debugging_lesson`
+- `source_key`, which points back to the MongoDB/store/artifact source
+- `thread_id` and `thread_key`
+- short preview text
+- metadata
+- the embedding vector
+
+This keeps retrieval fast without turning Postgres into the primary memory
+database. If semantic search finds a match, agents use the source key with the
+normal archive/session/artifact tools when exact text is needed.
+
+The tool exposed to agents is:
+
+```text
+semantic_memory_search
+```
+
+By default it searches the current thread plus global memories. It searches
+other threads only when a tool call explicitly sets `include_other_threads=true`.
+Enabling this backend indexes new records from that point onward. Existing
+MongoDB/store history is intentionally not bulk-backfilled automatically.
 
 ## Thread Isolation
 
