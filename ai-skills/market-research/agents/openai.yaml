@@ -1,0 +1,4 @@
+interface:
+  display_name: "Market Research"
+  short_description: "Market, TAM/SAM/SOM, GTM research"
+  default_prompt: "Use $market-research to analyze this market and recommend a go-to-market direction."

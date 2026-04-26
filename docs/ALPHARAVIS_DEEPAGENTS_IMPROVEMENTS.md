@@ -37,10 +37,13 @@ AlphaRavis already uses some of this: `create_deep_agent`, swarm agents, a debug
 
 ## New Skill Card
 
-The reusable DeepAgents builder skill lives at:
+The reusable DeepAgents-derived skill cards live at:
 
 ```text
 ai-skills/deepagents-agent-builder/SKILL.md
+ai-skills/deep-research-report/SKILL.md
+ai-skills/market-research/SKILL.md
+ai-skills/competitor-analysis/SKILL.md
 ```
 
 Detailed reference:

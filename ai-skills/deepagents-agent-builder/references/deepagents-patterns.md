@@ -173,6 +173,19 @@ The new `ai-skills/` folder should become a static approved skill source. AlphaR
 - Mongo skill candidates: inactive until promoted,
 - agent memories: scoped lessons, not workflow definitions.
 
+Current DeepAgents-derived repo skills:
+
+- `deepagents-agent-builder`: build new AlphaRavis agents with DeepAgents primitives.
+- `deep-research-report`: plan, research, synthesize, cite, and verify deep research.
+- `market-research`: define markets, estimate TAM/SAM/SOM, map trends and GTM risks.
+- `competitor-analysis`: compare competitors, substitutes, positioning, pricing, and opportunities.
+
+These came from the local DeepAgents examples:
+
+- `examples/deep_research`: research orchestration, subagent delegation, search budgets, citation consolidation.
+- `examples/deploy-gtm-agent`: market researcher as a sync subagent, content work as async follow-up, GTM synthesis.
+- `examples/deploy-gtm-agent/skills/competitor-analysis`: compact competitive analysis workflow.
+
 ### P1: Add an on-demand skill reader
 
 Expose a narrow tool such as `read_repo_skill(skill_name)` that can read only:

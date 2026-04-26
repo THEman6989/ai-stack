@@ -1,0 +1,4 @@
+interface:
+  display_name: "Competitor Analysis"
+  short_description: "Competitive landscape and positioning"
+  default_prompt: "Use $competitor-analysis to compare competitors and find positioning opportunities."

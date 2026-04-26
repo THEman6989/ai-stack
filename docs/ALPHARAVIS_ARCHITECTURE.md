@@ -217,9 +217,16 @@ The first reviewed skill card is:
 ai-skills/deepagents-agent-builder/SKILL.md
 ```
 
-It explains how to build new AlphaRavis agents using DeepAgents patterns. It is
-not injected into every chat by default; agents should read it only when the user
-asks to design, add, or refactor agents.
+Additional reviewed research skill cards include:
+
+```text
+ai-skills/deep-research-report/SKILL.md
+ai-skills/market-research/SKILL.md
+ai-skills/competitor-analysis/SKILL.md
+```
+
+These cards are not injected into every chat by default; agents should read them
+only when the user asks for matching agent-building or research workflows.
 
 Agents can use:
 

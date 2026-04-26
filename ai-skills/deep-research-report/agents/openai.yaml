@@ -1,0 +1,4 @@
+interface:
+  display_name: "Deep Research Report"
+  short_description: "Structured research with citations"
+  default_prompt: "Use $deep-research-report to research this topic and produce a concise cited report."
