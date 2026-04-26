@@ -93,6 +93,7 @@ services:
       context: .
       dockerfile: ./langgraph-app/Dockerfile
     container_name: langgraph-api
+    command: ["sh", "-c", "rm -f /tmp/.X0-lock && Xvfb :0 -screen 0 1280x720x24 & fluxbox & x11vnc -display :0 -forever -nopw -listen 0.0.0.0 & cd /workspace/langgraph-app && langgraph dev --config langgraph.json --host 0.0.0.0 --port 2024 --no-browser"]
     ports:
       - "2024:2024"
       - "5900:5900" # VNC Port für die Sandbox
@@ -158,6 +159,12 @@ services:
       - LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
       - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY:-dein_langsmith_key_hier}
       - LANGCHAIN_PROJECT=AlphaRavis_Stack
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sS http://localhost:2024 >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
     depends_on:
       litellm:
         condition: service_started
@@ -198,7 +205,7 @@ services:
       - BRIDGE_LLM_HEALTH_PROMPT=${BRIDGE_LLM_HEALTH_PROMPT:-Antworte nur mit OK.}
     depends_on:
       langgraph-api:
-        condition: service_started
+        condition: service_healthy
     env_file:
       - .env
     restart: always
