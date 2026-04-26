@@ -126,6 +126,20 @@ skip compression
 no compression
 ```
 
+To force compression for one run, say one of:
+
+```text
+komprimiere jetzt
+archiviere jetzt
+compress now
+```
+
+The force phrases can be replaced with a pipe-separated ENV value:
+
+```text
+ALPHARAVIS_MANUAL_COMPRESSION_PATTERNS=komprimiere jetzt|archive now
+```
+
 Archive search is thread-scoped by default. Other chat archives are searched
 only when you explicitly ask for cross-thread archive search.
 
@@ -177,6 +191,14 @@ Activation/deactivation is blocked unless review mode is enabled:
 ALPHARAVIS_ALLOW_SKILL_PROMOTION=true
 ```
 
+Reviewed repo skill cards under `ai-skills/` are different from Mongo skill
+candidates. AlphaRavis may inject only a tiny metadata hint when a card seems
+relevant. It reads the full card only through `read_repo_ai_skill` when needed.
+
+```text
+ALPHARAVIS_REPO_SKILL_HINT_LIMIT=3
+```
+
 ## Run Profile
 
 Every run stores timing and routing data in LangGraph state as `run_profile`.
@@ -203,11 +225,15 @@ Already available:
 - fast path for simple chat
 - run profile state
 - skill-library candidate listing and review-mode activation/deactivation
+- reviewed repo skill-card hints and on-demand skill-card reading
 - optional MCP loading disabled by default for faster simple chat
 - fast-path hidden-thinking disable for llama.cpp/Qwen-style models
 - visible fast-path notices and thread lockout after agent path
 - agent-specific and global memory tools
 - thread-scoped memory archives
+- manual one-run chat compression
+- structured specialist reports for research/debug/context handoffs
+- async Pixelle start/status tools for long image jobs
 - visible memory notices
 - command approval gate
 - LLM generation health endpoint

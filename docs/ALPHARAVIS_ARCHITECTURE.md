@@ -81,11 +81,14 @@ The graph is built as:
 
 ```text
 START
+  -> run_profile_start
   -> context_guard_before
-  -> skill_library
-  -> alpha_ravis_swarm
+  -> route_decision
+  -> fast_chat OR skill_library
+  -> alpha_ravis_swarm when the agent path is selected
   -> context_guard_after
   -> memory_notice
+  -> run_profile_finish
   -> END
 ```
 
@@ -100,12 +103,18 @@ Default agent for normal tasks.
 Capabilities:
 
 - General chat.
-- Pixelle image job start.
+- Pixelle image job start and async status checks.
 - Wake-on-LAN for configured remote PCs.
 - Fast web search.
 - LangMem manage/search memory tools.
 - Skill candidate creation.
 - Safe handoff to specialists.
+
+Safety:
+
+- The General Assistant does not get a raw DeepAgents shell backend.
+- Local and SSH command diagnostics are routed to the Debugger Agent, where
+  AlphaRavis command approval gates are enforced.
 
 ### Research Expert
 
@@ -237,6 +246,10 @@ read_repo_ai_skill
 
 These tools are restricted to the repo `ai-skills/` directory.
 
+Before the agent path, AlphaRavis may inject a tiny metadata hint for matching
+repo skill cards. This hint contains only names and descriptions. Full skill
+instructions are loaded only when an agent calls `read_repo_ai_skill`.
+
 ## Context Compression
 
 AlphaRavis uses two compression tiers.
@@ -269,6 +282,14 @@ The user can pause compression for one run by saying things such as:
 - `nicht komprimieren`
 - `skip compression`
 - `no compression`
+
+The user can force compression for one run by saying things such as:
+
+- `komprimiere jetzt`
+- `archiviere jetzt`
+- `compress now`
+
+Custom force phrases can be set with `ALPHARAVIS_MANUAL_COMPRESSION_PATTERNS`.
 
 ### Archive Collection Compression
 
@@ -326,7 +347,12 @@ If approval is needed, LangGraph interrupts the run and asks the user.
 
 ## Pixelle
 
-Pixelle image jobs can be started through the `start_pixelle_remote` tool.
+Pixelle image jobs can be started through either:
+
+- `start_pixelle_remote`, which starts and waits through a durable LangGraph
+  monitoring task.
+- `start_pixelle_async`, which returns a job id immediately.
+- `check_pixelle_job`, which checks the job id later.
 
 Monitoring is implemented as a LangGraph `@task`, so it is visible and resumable
 inside LangGraph execution rather than being a loose FastAPI background task.

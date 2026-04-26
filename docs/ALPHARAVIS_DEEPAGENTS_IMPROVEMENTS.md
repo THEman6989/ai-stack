@@ -15,25 +15,25 @@ DeepAgents is useful because it standardizes long-running agent work:
 
 AlphaRavis already uses some of this: `create_deep_agent`, swarm agents, a debugger subgraph, compression, skill candidates, and agent-specific memories.
 
-## Best Next Improvements
+## Implemented Improvement Set
 
 1. Close the raw DeepAgents `execute` risk.
-   The General Assistant uses a shell-capable backend, so DeepAgents can expose its built-in `execute` tool. That should be guarded or removed so shell commands always go through AlphaRavis approval.
+   The General Assistant no longer receives a shell-capable DeepAgents backend. Shell and SSH diagnostics now stay on the Debugger Agent tools, where AlphaRavis approval interrupts apply.
 
 2. Make `ai-skills/` a static reviewed skill source.
-   Version-controlled skill cards should be treated as approved reference workflows. Mongo skill candidates should stay inactive until promoted.
+   Version-controlled skill cards are treated as approved reference workflows. Mongo skill candidates stay inactive until promoted.
 
 3. Keep `list_repo_ai_skills` and `read_repo_ai_skill(skill_name)` narrow.
-   These tools read only from `ai-skills/<skill-name>/...`, so AlphaRavis can use skill cards on demand without loading every skill into every chat.
+   These tools read only from `ai-skills/<skill-name>/...`, so AlphaRavis can use skill cards on demand without loading every skill into every chat. The graph also injects only tiny metadata hints for matching repo skill cards.
 
 4. Add structured reports for specialists.
-   Debugger and research agents should return fields like `summary`, `evidence`, `commands_run`, `risks`, and `next_actions`.
+   Debugger, research, and context agents can return fields like `summary`, `evidence`, `commands_run`, `risks`, and `next_actions` through `build_specialist_report`.
 
 5. Use async subagents for long work.
-   Pixelle jobs, deep research, and large audits can run as background tasks with task ids instead of blocking LibreChat.
+   Pixelle now has an async start/status tool pair, so the agent can return a job id instead of blocking LibreChat.
 
 6. Consider a manual `compact_conversation` command.
-   AlphaRavis already compresses automatically. A user-visible manual command would make compression feel controlled and inspectable.
+   AlphaRavis now supports one-run manual compression phrases such as `komprimiere jetzt` and returns the normal visible Memory-Notice.
 
 ## New Skill Card
 

@@ -216,6 +216,13 @@ ALPHARAVIS_ARCHIVE_KEEP_RECENT_RECORDS=8
 # Allowed values: true, false
 ALPHARAVIS_ALLOW_USER_COMPRESSION_PAUSE=true
 
+# Optional pipe-separated phrases that force manual compression for one run.
+# Leave empty to use built-in German/English phrases such as:
+#   komprimiere jetzt
+#   archiviere jetzt
+#   compress now
+ALPHARAVIS_MANUAL_COMPRESSION_PATTERNS=
+
 # If true, AlphaRavis adds a visible Memory-Notice to LibreChat whenever
 # compression happens or when compression was explicitly paused.
 ALPHARAVIS_SHOW_MEMORY_NOTICES=true
@@ -250,6 +257,11 @@ ALPHARAVIS_SKILL_LIBRARY_SEARCH_LIMIT=3
 
 # Max characters from retrieved active skills injected into the graph prompt.
 ALPHARAVIS_SKILL_CONTEXT_MAX_CHARS=2500
+
+# Max reviewed repo skill-card metadata hints injected before the agent path.
+# These are short names/descriptions only; the full SKILL.md is loaded only when
+# the agent calls read_repo_ai_skill.
+ALPHARAVIS_REPO_SKILL_HINT_LIMIT=3
 
 # Safety switch for promoting an inactive skill candidate into an active skill.
 # Keep false by default. Temporarily set true only while intentionally reviewing

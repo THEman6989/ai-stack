@@ -14,7 +14,6 @@ from typing import Any
 
 import httpx
 from deepagents import create_deep_agent
-from deepagents.backends.local_shell import LocalShellBackend
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.globals import set_llm_cache
@@ -94,6 +93,16 @@ ARCHIVE_COLLECTION_INDEX_NS = ("alpharavis", "archive_collection_index")
 DEBUGGING_LESSON_NS = ("alpharavis", "debugging_lessons")
 SKILL_LIBRARY_NS = ("alpharavis", "skill_library")
 SKILL_CONTEXT_MESSAGE_ID = "alpharavis_skill_library_context"
+MANUAL_COMPRESSION_PATTERNS = [
+    "archive diesen abschnitt",
+    "archiviere diesen abschnitt",
+    "archiviere jetzt",
+    "compress now",
+    "komprimiere jetzt",
+    "komprimiere den chat",
+    "komprimier jetzt",
+    "manual compression",
+]
 COMPRESSION_PAUSE_PATTERNS = [
     "keine kompression",
     "ohne kompression",
@@ -310,6 +319,48 @@ async def start_pixelle_remote(prompt: str, config: RunnableConfig):
         return f"Image ready. Job `{job_id}` completed.\n\n{result['message']}"
 
     return result["message"]
+
+
+@tool
+async def start_pixelle_async(prompt: str):
+    """Start a Pixelle image job and return immediately with a job id."""
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            response = await client.post(f"{PIXELLE_URL}/api/run", json={"prompt": prompt})
+            response.raise_for_status()
+            job_id = response.json().get("job_id")
+        except Exception as exc:
+            return f"Error: Could not reach Pixelle. ({exc})"
+
+    if not job_id:
+        return "Error: Pixelle did not return a job_id."
+
+    return (
+        f"Pixelle job started. job_id: {job_id}\n"
+        "Use check_pixelle_job with this exact job_id to get the current status. "
+        "Do not poll automatically unless the user asks."
+    )
+
+
+@tool
+async def check_pixelle_job(job_id: str):
+    """Check the current status of a Pixelle image job."""
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            response = await client.get(f"{PIXELLE_URL}/api/status/{job_id.strip()}")
+            response.raise_for_status()
+            data = response.json()
+        except Exception as exc:
+            return f"Pixelle status check failed for `{job_id}`: {exc}"
+
+    status = data.get("status", "running")
+    if status == "completed":
+        return f"Pixelle job `{job_id}` completed.\n\n{data.get('result', '')}"
+    if status == "failed":
+        return _format_pixelle_failure(job_id, data.get("logs", "No logs returned."))
+    return f"Pixelle job `{job_id}` status: {status}\n\n{data.get('logs', '')}"
 
 
 @tool
@@ -591,6 +642,20 @@ def read_alpha_ravis_architecture(query: str = "", max_chars: int = 6000):
 def list_repo_ai_skills(max_chars: int = 4000):
     """List reviewed repo skill cards available under ai-skills/."""
 
+    skills = _list_repo_ai_skill_metadata()
+    if isinstance(skills, str):
+        return skills
+    if not skills:
+        return "No valid repo AI skill cards found."
+
+    output = "\n".join(
+        f"- {skill['name']}: {skill['description']}\n  Path: {skill['path']}" for skill in skills
+    )
+    max_chars = max(1000, min(int(max_chars), 8000))
+    return output[:max_chars].rstrip()
+
+
+def _list_repo_ai_skill_metadata() -> list[dict[str, str]] | str:
     skills_dir = Path(_workspace_root()) / "ai-skills"
     try:
         workspace = Path(_workspace_root()).resolve()
@@ -598,11 +663,11 @@ def list_repo_ai_skills(max_chars: int = 4000):
         if workspace not in [resolved, *resolved.parents]:
             return f"AI skills path is outside the workspace: {resolved}"
         if not resolved.exists():
-            return "No repo AI skills directory exists yet."
+            return []
     except Exception as exc:
         return f"Could not inspect repo AI skills: {exc}"
 
-    lines = []
+    skills = []
     for skill_md in sorted(resolved.glob("*/SKILL.md")):
         try:
             text = skill_md.read_text(encoding="utf-8")
@@ -612,13 +677,40 @@ def list_repo_ai_skills(max_chars: int = 4000):
         desc_match = re.search(r"(?ms)^description:\s*(.+?)\n---", text)
         name = (name_match.group(1).strip().strip('"') if name_match else skill_md.parent.name)
         description = " ".join((desc_match.group(1).strip().strip('"') if desc_match else "").split())
-        lines.append(f"- {name}: {description}\n  Path: ai-skills/{skill_md.parent.name}/SKILL.md")
+        skills.append(
+            {
+                "name": name,
+                "description": description,
+                "path": f"ai-skills/{skill_md.parent.name}/SKILL.md",
+            }
+        )
+    return skills
 
-    if not lines:
-        return "No valid repo AI skill cards found."
-    output = "\n".join(lines)
-    max_chars = max(1000, min(int(max_chars), 8000))
-    return output[:max_chars].rstrip()
+
+def _repo_skill_hint_context(query: str, limit: int) -> str:
+    skills = _list_repo_ai_skill_metadata()
+    if isinstance(skills, str) or not skills:
+        return ""
+
+    query_terms = {term for term in re.split(r"[^a-zA-Z0-9]+", query.lower()) if len(term) >= 4}
+    scored: list[tuple[int, dict[str, str]]] = []
+    for skill in skills:
+        haystack = f"{skill['name']} {skill['description']}".lower()
+        score = sum(1 for term in query_terms if term in haystack)
+        if score:
+            scored.append((score, skill))
+
+    scored.sort(key=lambda item: (-item[0], item[1]["name"]))
+    selected = [skill for _, skill in scored[: max(1, limit)]]
+    if not selected:
+        return ""
+
+    lines = [
+        "Reviewed repo AI skill cards may match this task. They are metadata hints only; "
+        "read the full card with read_repo_ai_skill only if needed."
+    ]
+    lines.extend(f"- {skill['name']}: {skill['description']}" for skill in selected)
+    return "\n".join(lines)
 
 
 @tool
@@ -654,6 +746,54 @@ def read_repo_ai_skill(skill_name: str, reference_name: str = "", max_chars: int
     if len(content) > max_chars:
         return content[:max_chars].rstrip() + "\n\n[Truncated. Ask for a narrower skill reference if needed.]"
     return content
+
+
+@tool
+def normalize_research_sources(source_notes: str, max_sources: int = 20):
+    """Extract unique URLs from research notes and return stable citation numbers."""
+
+    urls = []
+    seen = set()
+    for match in re.finditer(r"https?://[^\s\]\)>,]+", source_notes):
+        url = match.group(0).rstrip(".,;:")
+        if url not in seen:
+            seen.add(url)
+            urls.append(url)
+
+    max_sources = max(1, min(int(max_sources), 50))
+    if not urls:
+        return "No URLs found. Do not invent citations; mark unsupported claims as uncited or search again."
+
+    lines = ["Use these stable citation numbers for this answer:"]
+    for index, url in enumerate(urls[:max_sources], start=1):
+        lines.append(f"[{index}] {url}")
+    if len(urls) > max_sources:
+        lines.append(f"[Truncated {len(urls) - max_sources} additional URLs.]")
+    return "\n".join(lines)
+
+
+@tool
+def build_specialist_report(
+    agent_id: str,
+    summary: str,
+    evidence: str = "",
+    sources: str = "",
+    commands_run: str = "",
+    risks: str = "",
+    next_actions: str = "",
+):
+    """Format a specialist handoff report with stable fields."""
+
+    report = {
+        "agent_id": agent_id,
+        "summary": summary,
+        "evidence": evidence,
+        "sources": sources,
+        "commands_run": commands_run,
+        "risks": risks,
+        "next_actions": next_actions,
+    }
+    return json.dumps(report, ensure_ascii=False, indent=2)
 
 
 @tool
@@ -1250,6 +1390,17 @@ def _compression_paused_by_user(messages: list[Any]) -> bool:
     return any(pattern in latest for pattern in COMPRESSION_PAUSE_PATTERNS)
 
 
+def _compression_forced_by_user(messages: list[Any]) -> bool:
+    latest = _latest_user_query(messages).lower()
+    configured = os.getenv("ALPHARAVIS_MANUAL_COMPRESSION_PATTERNS", "")
+    patterns = [
+        pattern.strip().lower()
+        for pattern in configured.split("|")
+        if pattern.strip()
+    ] or MANUAL_COMPRESSION_PATTERNS
+    return any(pattern in latest for pattern in patterns)
+
+
 def _profile_update(state: AlphaRavisState, **updates: Any) -> dict[str, Any]:
     profile = dict(state.get("run_profile") or {})
     profile.update(updates)
@@ -1542,19 +1693,22 @@ async def skill_library_node(state: AlphaRavisState, runtime: Any | None = None)
         return {}
 
     messages = list(state.get("messages", []))
+    query = _latest_user_query(messages)
+    repo_hint_limit = int(os.getenv("ALPHARAVIS_REPO_SKILL_HINT_LIMIT", "3"))
+    repo_skill_context = _repo_skill_hint_context(query, repo_hint_limit)
     store = getattr(runtime, "store", None) if runtime else None
     if store is None:
+        content = repo_skill_context or "Skill library unavailable for this run; continue without saved workflow hints."
         return {
             "messages": [
                 SystemMessage(
-                    content="Skill library unavailable for this run; continue without saved workflow hints.",
+                    content=content,
                     id=SKILL_CONTEXT_MESSAGE_ID,
                 )
             ],
-            "active_skill_context": "",
+            "active_skill_context": content,
         }
 
-    query = _latest_user_query(messages)
     limit = int(os.getenv("ALPHARAVIS_SKILL_LIBRARY_SEARCH_LIMIT", "3"))
     try:
         results = await _maybe_search(store, SKILL_LIBRARY_NS, query=query, limit=limit)
@@ -1576,20 +1730,25 @@ async def skill_library_node(state: AlphaRavisState, runtime: Any | None = None)
         if isinstance(value, dict) and value.get("status") == "active":
             active_skills.append((key, value))
 
+    sections = []
+    if repo_skill_context:
+        sections.append(repo_skill_context)
+
     if not active_skills:
-        content = (
+        sections.append(
             "Skill library: no approved active workflow skill matched this task. "
             "Do not invent a saved workflow."
         )
     else:
         max_chars = int(os.getenv("ALPHARAVIS_SKILL_CONTEXT_MAX_CHARS", "2500"))
         body = "\n\n".join(_format_skill_record(key, value) for key, value in active_skills)
-        content = (
+        sections.append(
             "Approved AlphaRavis workflow skills matched this task. Treat them as "
             "non-binding hints; keep normal reasoning, tool safety, and human "
             "approval gates in force.\n\n"
             f"{body[:max_chars]}"
         )
+    content = "\n\n".join(sections)
 
     return {
         "messages": [SystemMessage(content=content, id=SKILL_CONTEXT_MESSAGE_ID)],
@@ -1601,6 +1760,7 @@ async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None)
     messages = list(state.get("messages", []))
     token_limit = int(os.getenv("ALPHARAVIS_ACTIVE_TOKEN_LIMIT", "10000"))
     token_estimate = _estimate_tokens(messages)
+    force_compression = _compression_forced_by_user(messages)
 
     if _compression_paused_by_user(messages):
         notice_key = hashlib.sha256(
@@ -1615,11 +1775,22 @@ async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None)
             "memory_notice_key": notice_key,
         }
 
-    if token_estimate <= token_limit:
+    if token_estimate <= token_limit and not force_compression:
         return {}
 
     keep_last = int(os.getenv("ALPHARAVIS_CONTEXT_KEEP_LAST_MESSAGES", "12"))
     if len(messages) <= keep_last:
+        if force_compression:
+            notice_key = hashlib.sha256(
+                f"compression-skipped-small:{_latest_user_query(messages)}:{len(messages)}".encode("utf-8")
+            ).hexdigest()[:16]
+            return {
+                "memory_notice": (
+                    "Manuelle Kompression wurde angefragt, aber der aktive Verlauf "
+                    "ist noch zu kurz, um sinnvoll alte Nachrichten zu archivieren."
+                ),
+                "memory_notice_key": notice_key,
+            }
         return {}
 
     old_messages = messages[:-keep_last]
@@ -1673,8 +1844,9 @@ async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None)
         compressed_archive_keys = compact_update.get("compressed_archive_keys", compressed_archive_keys)
         hierarchy_notice = compact_update.get("archive_compression_notice", "")
 
+    prefix = "Manuelle Kompression: " if force_compression else ""
     memory_notice = (
-        f"Ich habe den aktiven Chat-Kontext komprimiert: ca. {_estimate_tokens(old_messages)} "
+        f"{prefix}Ich habe den aktiven Chat-Kontext komprimiert: ca. {_estimate_tokens(old_messages)} "
         f"alte Tokens wurden als Archiv `{archive_key}` gespeichert, die letzten "
         f"{len(recent_messages)} Nachrichten bleiben aktiv."
     )
@@ -1792,6 +1964,7 @@ def _create_debugger_subgraph(llm: ChatLiteLLM, handoff_tools: list[Any]):
             record_agent_memory,
             list_repo_ai_skills,
             read_repo_ai_skill,
+            build_specialist_report,
             search_skill_library,
             list_skill_candidates,
             search_debugging_lessons,
@@ -1821,6 +1994,8 @@ def _create_debugger_subgraph(llm: ChatLiteLLM, handoff_tools: list[Any]):
             "describe_optional_tool_registry when you need to know what exists. "
             "Use read_repo_ai_skill when the user asks to build or refactor "
             "AlphaRavis agents from reviewed repo skill cards. "
+            "Use build_specialist_report for final handoff reports when "
+            "evidence, commands, risks, and next actions matter. "
             "Use agent_id=`debugger_agent` for your own durable memories; use "
             "scope=`global` only for lessons useful to all agents."
         ),
@@ -1853,7 +2028,6 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     _configure_llm_cache()
 
     llm = _model()
-    sandbox = LocalShellBackend(root_dir=_workspace_root())
     mcp_tools = mcp_tools or []
 
     transfer_to_research = create_handoff_tool(
@@ -1888,6 +2062,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             read_alpha_ravis_architecture,
             list_repo_ai_skills,
             read_repo_ai_skill,
+            normalize_research_sources,
+            build_specialist_report,
             transfer_to_generalist,
             transfer_to_debugger,
             transfer_to_context,
@@ -1904,6 +2080,12 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "Use list_repo_ai_skills/read_repo_ai_skill on demand for reviewed "
             "research workflows such as deep-research-report, market-research, "
             "and competitor-analysis. "
+            "For substantial research, follow the DeepAgents research pattern: "
+            "plan, choose focused passes, search broadly then narrowly, "
+            "normalize citations with normalize_research_sources, synthesize "
+            "with caveats, and verify the answer covers the request. Use "
+            "build_specialist_report when returning evidence-heavy results to "
+            "another AlphaRavis agent. "
             "Use global memories only for stable cross-agent preferences. "
             "return concise conclusions, and transfer to the correct peer when "
             "the task is outside research."
@@ -1914,12 +2096,15 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         model=llm,
         tools=[
             start_pixelle_remote,
+            start_pixelle_async,
+            check_pixelle_job,
             wake_on_lan,
             fast_web_search,
             describe_optional_tool_registry,
             read_alpha_ravis_architecture,
             list_repo_ai_skills,
             read_repo_ai_skill,
+            build_specialist_report,
             search_agent_memory,
             record_agent_memory,
             create_manage_memory_tool(namespace=("memories",)),
@@ -1935,11 +2120,14 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_context,
         ]
         + mcp_tools,
-        backend=sandbox,
         name="general_assistant",
         system_prompt=(
             "You are AlphaRavis's Generalist. Handle quick facts, Pixelle control, "
-            "safe code execution in the sandbox, and memory management. "
+            "approved tool orchestration, and memory management. Do not use a "
+            "raw shell execute path; transfer to debugger_agent for local or "
+            "SSH command diagnostics so the approval gate stays in force. "
+            "For long Pixelle jobs, prefer start_pixelle_async and return the "
+            "job_id unless the user explicitly wants to wait. "
             "Use read_alpha_ravis_architecture only when the user asks what "
             "AlphaRavis is, what it can do, or how the stack works. "
             "Optional MCP registries are lazy-loaded; call "
@@ -1978,6 +2166,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             list_repo_ai_skills,
             read_repo_ai_skill,
             read_alpha_ravis_architecture,
+            build_specialist_report,
             transfer_to_generalist,
             transfer_to_research,
             transfer_to_debugger,
@@ -1992,8 +2181,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "only for questions about AlphaRavis itself. Use agent_id=`context_retrieval_agent` "
             "for retrieval-specific memories. Optional MCP registry details are "
             "available through describe_optional_tool_registry. Repo AI skills can "
-            "be listed or read on demand when the user asks for reviewed skill cards. Do not answer unrelated "
-            "tasks yourself; transfer back."
+            "be listed or read on demand when the user asks for reviewed skill cards. "
+            "Use build_specialist_report when returning retrieved facts, source "
+            "keys, caveats, and next actions to another agent. Do not answer "
+            "unrelated tasks yourself; transfer back."
         ),
     )
 
