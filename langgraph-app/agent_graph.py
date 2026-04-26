@@ -490,8 +490,10 @@ async def search_archived_context(query: str, limit: int = 5, include_other_thre
     except Exception as exc:
         return f"No LangGraph store is attached to this run: {exc}"
 
+    limit = max(1, min(int(limit), int(os.getenv("ALPHARAVIS_ARCHIVE_SEARCH_LIMIT", "5"))))
     thread_id = _state_thread_id()
     if include_other_threads:
+        limit = min(limit, int(os.getenv("ALPHARAVIS_CROSS_THREAD_ARCHIVE_SEARCH_LIMIT", "3")))
         namespaces = [
             (ARCHIVE_INDEX_NS, "Cross-thread archive"),
             (ARCHIVE_COLLECTION_INDEX_NS, "Cross-thread archive collection"),

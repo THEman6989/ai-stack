@@ -18,6 +18,12 @@ OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "my-agent")
 BRIDGE_RUN_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_RUN_TIMEOUT_SECONDS", "180"))
 BRIDGE_STREAM_MODE = os.getenv("BRIDGE_STREAM_MODE", "events").lower()
 BRIDGE_MESSAGE_SYNC_MODE = os.getenv("BRIDGE_MESSAGE_SYNC_MODE", "delta").lower()
+BRIDGE_SHOW_ACTIVITY_EVENTS = os.getenv("BRIDGE_SHOW_ACTIVITY_EVENTS", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+BRIDGE_ACTIVITY_DETAIL = os.getenv("BRIDGE_ACTIVITY_DETAIL", "summary").lower()
 
 app = FastAPI(title="AlphaRavis OpenAI Bridge")
 
@@ -251,6 +257,10 @@ def _stream_data(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _activity_chunk(text: str, model: str) -> str:
+    return _stream_data(_chunk(f"\n\nStatus: {text}\n", model))
+
+
 def _openai_stream_response(content: str, model: str) -> list[str]:
     return [
         _stream_data(_chunk("", model, role="assistant")),
@@ -394,6 +404,37 @@ def _extract_stream_text(part: Any) -> str:
     return ""
 
 
+def _stream_event_name(part: Any) -> str:
+    if isinstance(part, dict):
+        return str(part.get("event") or "")
+    return str(getattr(part, "event", ""))
+
+
+def _stream_event_data(part: Any) -> Any:
+    if isinstance(part, dict):
+        return part.get("data")
+    return getattr(part, "data", None)
+
+
+def _extract_activity_text(part: Any) -> str:
+    if not BRIDGE_SHOW_ACTIVITY_EVENTS or BRIDGE_ACTIVITY_DETAIL == "off":
+        return ""
+
+    event = _stream_event_name(part)
+    data = _stream_event_data(part)
+
+    if event == "updates" and isinstance(data, dict):
+        node_names = [str(name) for name in data.keys() if not str(name).startswith("__")]
+        if node_names:
+            joined = ", ".join(node_names[:3])
+            return f"LangGraph-Schritt abgeschlossen: {joined}."
+
+    if BRIDGE_ACTIVITY_DETAIL == "debug" and event and event not in {"messages", "metadata"}:
+        return f"LangGraph-Event: {event}."
+
+    return ""
+
+
 def _delta_text(text: str, emitted: str) -> str:
     if not text:
         return ""
@@ -420,11 +461,15 @@ async def _stream_chat_events(
     model: str,
 ) -> AsyncIterator[str]:
     yield _stream_data(_chunk("", model, role="assistant"))
+    if BRIDGE_SHOW_ACTIVITY_EVENTS and BRIDGE_ACTIVITY_DETAIL != "off":
+        yield _activity_chunk("AlphaRavis startet den LangGraph-Run.", model)
+
     saw_token = False
     emitted = ""
+    emitted_activity: set[str] = set()
 
     stream_kwargs = {
-        "stream_mode": "messages",
+        "stream_mode": ["messages", "updates"] if BRIDGE_SHOW_ACTIVITY_EVENTS else "messages",
         "multitask_strategy": "interrupt",
     }
     if "command" in run_payload:
@@ -435,6 +480,11 @@ async def _stream_chat_events(
     try:
         async with asyncio.timeout(BRIDGE_RUN_TIMEOUT_SECONDS):
             async for part in client.runs.stream(thread_id, LANGGRAPH_ASSISTANT_ID, **stream_kwargs):
+                activity = _extract_activity_text(part)
+                if activity and activity not in emitted_activity:
+                    emitted_activity.add(activity)
+                    yield _activity_chunk(activity, model)
+
                 text = _extract_stream_text(part)
                 delta = _delta_text(text, emitted)
                 if delta:

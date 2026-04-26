@@ -105,17 +105,31 @@ OPENAI_MODEL_NAME=my-agent
 # timeout message to LibreChat.
 BRIDGE_RUN_TIMEOUT_SECONDS=180
 
-# Streaming mode for LibreChat:
+# Streaming mode for LibreChat.
+# Allowed values:
 #   events = stream LangGraph message events as OpenAI SSE chunks
-#   final/messages = wait for final content and stream it as one OpenAI SSE reply
+#   final or messages = wait for final content and stream it as one OpenAI SSE reply
 BRIDGE_STREAM_MODE=events
 
 # How the bridge syncs LibreChat messages into LangGraph:
+# Allowed values:
 #   delta = after the first thread sync, send only new user messages
 #   full  = send the whole LibreChat message array every request
 # Delta keeps LangGraph compression useful because LibreChat's full UI history
 # does not get re-injected on every turn.
 BRIDGE_MESSAGE_SYNC_MODE=delta
+
+# If true, the bridge emits short visible "Status:" chunks during streaming
+# runs. This is OpenAI-SSE compatible content, so LibreChat should display it
+# like normal assistant text. Keep false if you want quiet responses.
+BRIDGE_SHOW_ACTIVITY_EVENTS=false
+
+# Activity detail level when BRIDGE_SHOW_ACTIVITY_EVENTS=true.
+# Allowed values:
+#   summary = show short LangGraph step summaries
+#   debug   = also show raw non-message event names
+#   off     = suppress activity chunks even if the boolean is true
+BRIDGE_ACTIVITY_DETAIL=summary
 
 # =====================================================================
 # --- MEMORY + CONTEXT COMPRESSION ---
@@ -147,6 +161,14 @@ ALPHARAVIS_ALLOW_USER_COMPRESSION_PAUSE=true
 # If true, AlphaRavis adds a visible Memory-Notice to LibreChat whenever
 # compression happens or when compression was explicitly paused.
 ALPHARAVIS_SHOW_MEMORY_NOTICES=true
+
+# Max archive-search hits returned to the context retriever inside the current
+# chat thread. This keeps retrieved memory bounded instead of dumping history.
+ALPHARAVIS_ARCHIVE_SEARCH_LIMIT=5
+
+# Max archive-search hits when the user explicitly asks to search other chats
+# / all archives through include_other_threads=true.
+ALPHARAVIS_CROSS_THREAD_ARCHIVE_SEARCH_LIMIT=3
 
 # =====================================================================
 # --- SAFE WORKFLOW SKILL LIBRARY ---
