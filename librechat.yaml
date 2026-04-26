@@ -7,3 +7,9 @@ endpoints:
       models:
         default: ["my-agent"]
         fetch: false
+    - name: "Hermes Agent"
+      apiKey: "${HERMES_API_KEY}"
+      baseURL: "${HERMES_API_BASE}"
+      models:
+        default: ["${HERMES_MODEL}"]
+        fetch: false

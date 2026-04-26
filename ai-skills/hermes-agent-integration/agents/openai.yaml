@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hermes Agent Integration"
+  short_description: "Integrate Hermes with AlphaRavis"
+  default_prompt: "Use $hermes-agent-integration to add or improve Hermes Agent integration in AlphaRavis."

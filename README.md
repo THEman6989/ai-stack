@@ -8,6 +8,7 @@ This repository combines RAG, agentic workflows (LangGraph), model routing (Lite
 
 - Human usage guide: [`docs/ALPHARAVIS_USAGE_NOTES.md`](docs/ALPHARAVIS_USAGE_NOTES.md)
 - Architecture/capability guide: [`docs/ALPHARAVIS_ARCHITECTURE.md`](docs/ALPHARAVIS_ARCHITECTURE.md)
+- Hermes integration guide: [`docs/HERMES_INTEGRATION.md`](docs/HERMES_INTEGRATION.md)
 
 Important current behavior:
 
@@ -17,6 +18,7 @@ Important current behavior:
 - Fast-path replies are visibly marked, and a thread is locked out of fast path after it uses the normal agent path.
 - Optional MCP tool loading is off by default to avoid slowing every chat.
 - MCP uses DeepAgents-style `mcp.json` config, with stdio servers disabled by default.
+- Hermes can be used directly from LibreChat or as an optional bounded coding/system sub-agent inside AlphaRavis.
 - Agents can inspect a lazy optional-tool manifest and use scoped agent/global memories.
 - Reviewed repo skill cards live in `ai-skills/`, starting with DeepAgents agent-building and research workflows, and can be read on demand by AlphaRavis.
 - Risky local or SSH commands require approval before execution.

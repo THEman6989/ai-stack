@@ -103,6 +103,8 @@ services:
       - "8764:8764" # Computer/CUA UI
       - "8766:8766" # Debugger UI
       - "8768:8768" # Main Supervisor UI
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./langgraph-app:/app
       - ./langchain-bridge-repo/langchain_fastapi_chat_completion:/app/langchain_fastapi_chat_completion
@@ -113,6 +115,13 @@ services:
       - OPENAI_API_BASE=http://litellm:4000/v1
       - OPENAI_API_KEY=${LITELLM_MASTER_KEY:-sk-local-dev}
       - PIXELLE_URL=${PIXELLE_URL:-http://pixelle:9004}
+      - HERMES_API_BASE=${HERMES_API_BASE:-http://host.docker.internal:8642/v1}
+      - HERMES_API_KEY=${HERMES_API_KEY:-sk-hermes-local}
+      - HERMES_MODEL=${HERMES_MODEL:-hermes-agent}
+      - HERMES_TIMEOUT_SECONDS=${HERMES_TIMEOUT_SECONDS:-180}
+      - HERMES_MAX_OUTPUT_CHARS=${HERMES_MAX_OUTPUT_CHARS:-8000}
+      - HERMES_TEMPERATURE=${HERMES_TEMPERATURE:-0.2}
+      - ALPHARAVIS_ENABLE_HERMES_AGENT=${ALPHARAVIS_ENABLE_HERMES_AGENT:-false}
       - ALPHARAVIS_MODEL=${ALPHARAVIS_MODEL:-openai/big-boss}
       - ALPHARAVIS_LLM_STREAMING=${ALPHARAVIS_LLM_STREAMING:-true}
       - ALPHARAVIS_ENABLE_FAST_PATH=${ALPHARAVIS_ENABLE_FAST_PATH:-true}
@@ -185,6 +194,8 @@ services:
     command: ["uvicorn", "bridge_server:app", "--host", "0.0.0.0", "--port", "8123"]
     ports:
       - "8123:8123"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./langgraph-app:/app
       - ./langchain-bridge-repo/langchain_fastapi_chat_completion:/app/langchain_fastapi_chat_completion
@@ -203,6 +214,9 @@ services:
       - BRIDGE_LLM_HEALTH_FALLBACK_MODEL=${BRIDGE_LLM_HEALTH_FALLBACK_MODEL:-edge-gemma}
       - BRIDGE_LLM_HEALTH_TIMEOUT_SECONDS=${BRIDGE_LLM_HEALTH_TIMEOUT_SECONDS:-10}
       - BRIDGE_LLM_HEALTH_PROMPT=${BRIDGE_LLM_HEALTH_PROMPT:-Antworte nur mit OK.}
+      - BRIDGE_ENABLE_LANGGRAPH_TOOL=${BRIDGE_ENABLE_LANGGRAPH_TOOL:-false}
+      - BRIDGE_LANGGRAPH_TOOL_API_KEY=${BRIDGE_LANGGRAPH_TOOL_API_KEY:-}
+      - BRIDGE_LANGGRAPH_TOOL_TIMEOUT_SECONDS=${BRIDGE_LANGGRAPH_TOOL_TIMEOUT_SECONDS:-120}
     depends_on:
       langgraph-api:
         condition: service_healthy
@@ -261,6 +275,11 @@ services:
       - RAG_API_URL=http://rag_api:8000
       # Hier verbindest du LibreChat mit deiner LangGraph Bridge
       - OPENAI_REVERSE_PROXY=http://api-bridge:8123/v1
+      - HERMES_API_BASE=${HERMES_API_BASE:-http://host.docker.internal:8642/v1}
+      - HERMES_API_KEY=${HERMES_API_KEY:-sk-hermes-local}
+      - HERMES_MODEL=${HERMES_MODEL:-hermes-agent}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./librechat.yaml:/app/librechat.yaml
       - ./librechat-data/images:/app/client/public/images

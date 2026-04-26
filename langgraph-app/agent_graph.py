@@ -84,6 +84,9 @@ except Exception as exc:
 SSH_USER = os.getenv("SSH_USER", "root")
 SSH_PASS_DEFAULT = os.getenv("SSH_PASS_DEFAULT", "")
 PIXELLE_URL = os.getenv("PIXELLE_URL", "http://pixelle:9004")
+HERMES_API_BASE = os.getenv("HERMES_API_BASE", "http://host.docker.internal:8642/v1").rstrip("/")
+HERMES_API_KEY = os.getenv("HERMES_API_KEY", "")
+HERMES_MODEL = os.getenv("HERMES_MODEL", "hermes-agent")
 COMFY_IP = REMOTE_PCS.get("comfy_server", {}).get("ip")
 ARCHIVE_INDEX_NS = ("alpharavis", "archive_index")
 ARCHIVE_COLLECTION_INDEX_NS = ("alpharavis", "archive_collection_index")
@@ -126,6 +129,7 @@ FAST_PATH_DENY_PATTERNS = [
     "datei",
     "fehl",
     "git",
+    "hermes",
     "image",
     "install",
     "kompression",
@@ -793,6 +797,93 @@ def build_specialist_report(
         "next_actions": next_actions,
     }
     return json.dumps(report, ensure_ascii=False, indent=2)
+
+
+@tool
+async def check_hermes_agent():
+    """Check whether the Hermes OpenAI-compatible API server is reachable."""
+
+    if not _env_bool("ALPHARAVIS_ENABLE_HERMES_AGENT", "false"):
+        return "Hermes integration is disabled. Set ALPHARAVIS_ENABLE_HERMES_AGENT=true."
+
+    headers = {}
+    if HERMES_API_KEY:
+        headers["Authorization"] = f"Bearer {HERMES_API_KEY}"
+
+    try:
+        async with httpx.AsyncClient(timeout=float(os.getenv("HERMES_TIMEOUT_SECONDS", "90"))) as client:
+            response = await client.get(f"{HERMES_API_BASE}/models", headers=headers)
+        if response.status_code >= 400:
+            return f"Hermes API returned HTTP {response.status_code}: {response.text[:500]}"
+        return {
+            "status": "ok",
+            "base_url": HERMES_API_BASE,
+            "models": response.json(),
+        }
+    except Exception as exc:
+        return f"Hermes API is not reachable at {HERMES_API_BASE}: {exc}"
+
+
+@tool
+async def call_hermes_agent(task: str, context: str = "", max_output_chars: int = 6000):
+    """Call Hermes as a bounded coding/system sub-agent via its OpenAI API."""
+
+    if not _env_bool("ALPHARAVIS_ENABLE_HERMES_AGENT", "false"):
+        return "Hermes integration is disabled. Set ALPHARAVIS_ENABLE_HERMES_AGENT=true."
+
+    max_output_chars = max(1000, min(int(max_output_chars), int(os.getenv("HERMES_MAX_OUTPUT_CHARS", "8000"))))
+    system_prompt = (
+        "You are Hermes called as a bounded AlphaRavis coding/system sub-agent. "
+        "Focus on code, files, terminal-oriented diagnosis, project structure, "
+        "patch suggestions, and implementation guidance. Do not call LangGraph, "
+        "AlphaRavis, MCP LangGraph tools, or any custom-agent flow from this run. "
+        "Return a concise structured result with: summary, actions taken or "
+        "recommended, files/commands involved, risks, and next step. If a task "
+        "would require destructive commands, ask the parent AlphaRavis agent to "
+        "handle approval instead of executing blindly."
+    )
+    user_content = task.strip()
+    if context.strip():
+        user_content += f"\n\nContext from AlphaRavis:\n{context.strip()[:12000]}"
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-AlphaRavis-Origin": "langgraph",
+        "X-AlphaRavis-Disable-LangGraph-Tool": "true",
+    }
+    if HERMES_API_KEY:
+        headers["Authorization"] = f"Bearer {HERMES_API_KEY}"
+
+    payload = {
+        "model": HERMES_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        "stream": False,
+        "temperature": float(os.getenv("HERMES_TEMPERATURE", "0.2")),
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=float(os.getenv("HERMES_TIMEOUT_SECONDS", "180"))) as client:
+            response = await client.post(
+                f"{HERMES_API_BASE}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+        if response.status_code >= 400:
+            return f"Hermes API returned HTTP {response.status_code}: {response.text[:1000]}"
+        data = response.json()
+        choice = data.get("choices", [{}])[0]
+        message = choice.get("message", {}) if isinstance(choice, dict) else {}
+        content = str(message.get("content") or "").strip()
+        if not content:
+            return f"Hermes returned no assistant content. Raw response: {json.dumps(data)[:1000]}"
+        if len(content) > max_output_chars:
+            content = content[:max_output_chars].rstrip() + "\n\n[Hermes output truncated by AlphaRavis.]"
+        return content
+    except Exception as exc:
+        return f"Hermes call failed at {HERMES_API_BASE}: {exc}"
 
 
 @tool
@@ -2255,6 +2346,13 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         agent_name="debugger_agent",
         description="Transfer to the debugger for failed jobs, logs, SSH, Docker, or infrastructure errors.",
     )
+    transfer_to_hermes = create_handoff_tool(
+        agent_name="hermes_coding_agent",
+        description=(
+            "Transfer to Hermes for coding, file-analysis, terminal-oriented "
+            "diagnosis, project-structure inspection, or implementation guidance."
+        ),
+    )
     transfer_to_context = create_handoff_tool(
         agent_name="context_retrieval_agent",
         description="Transfer to the context retrieval agent to search archived long-term conversation memory.",
@@ -2275,6 +2373,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             build_specialist_report,
             transfer_to_generalist,
             transfer_to_debugger,
+            transfer_to_hermes,
             transfer_to_context,
         ],
         name="research_expert",
@@ -2297,7 +2396,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "another AlphaRavis agent. "
             "Use global memories only for stable cross-agent preferences. "
             "return concise conclusions, and transfer to the correct peer when "
-            "the task is outside research."
+            "the task is outside research. Transfer coding or terminal-oriented "
+            "project work to hermes_coding_agent when Hermes is the better fit."
         ),
     )
 
@@ -2326,6 +2426,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_research,
             transfer_to_ui,
             transfer_to_debugger,
+            transfer_to_hermes,
             transfer_to_context,
         ]
         + mcp_tools,
@@ -2347,6 +2448,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "your agent memory before recording a new repeated lesson. "
             "Use approved skill-library entries only as hints. Store new "
             "workflows as inactive skill candidates for human review. "
+            "Transfer coding, file-analysis, terminal-oriented diagnosis, and "
+            "patch-planning tasks to hermes_coding_agent when the user wants a "
+            "coding/system agent. "
             "Transfer directly to specialized peers instead of routing through "
             "a supervisor."
         ),
@@ -2354,12 +2458,44 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
 
     computer_worker = _create_ui_assistant(
         llm,
-        [transfer_to_generalist, transfer_to_research, transfer_to_debugger, transfer_to_context],
+        [transfer_to_generalist, transfer_to_research, transfer_to_debugger, transfer_to_hermes, transfer_to_context],
     )
 
     debugger_worker = _create_debugger_subgraph(
         llm,
-        [transfer_to_research, transfer_to_generalist, transfer_to_context],
+        [transfer_to_research, transfer_to_generalist, transfer_to_hermes, transfer_to_context],
+    )
+
+    hermes_worker = create_deep_agent(
+        model=llm,
+        tools=[
+            check_hermes_agent,
+            call_hermes_agent,
+            build_specialist_report,
+            search_agent_memory,
+            record_agent_memory,
+            list_repo_ai_skills,
+            read_repo_ai_skill,
+            transfer_to_generalist,
+            transfer_to_debugger,
+            transfer_to_research,
+            transfer_to_context,
+        ],
+        name="hermes_coding_agent",
+        system_prompt=(
+            "You are the Hermes Coding Agent bridge inside AlphaRavis. Your job "
+            "is to decide whether a coding/system task should be delegated to "
+            "the external Hermes Agent API and then summarize the result for "
+            "the swarm. Use check_hermes_agent if reachability is uncertain. "
+            "Use call_hermes_agent for bounded coding, file analysis, terminal "
+            "diagnosis, repo inspection, patch planning, or implementation "
+            "guidance. Never ask Hermes to call LangGraph or AlphaRavis back. "
+            "No recursive loops: if Hermes says it needs LangGraph, transfer "
+            "back to general_assistant with a clear reason. Use "
+            "build_specialist_report for final handoffs. Use "
+            "agent_id=`hermes_coding_agent` for Hermes-specific memories and "
+            "scope=`global` only for stable lessons useful to all agents."
+        ),
     )
 
     context_worker = create_deep_agent(
@@ -2379,6 +2515,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_generalist,
             transfer_to_research,
             transfer_to_debugger,
+            transfer_to_hermes,
         ],
         name="context_retrieval_agent",
         system_prompt=(
@@ -2398,7 +2535,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     )
 
     swarm = create_swarm(
-        [research_worker, general_worker, computer_worker, debugger_worker, context_worker],
+        [research_worker, general_worker, computer_worker, debugger_worker, hermes_worker, context_worker],
         default_active_agent="general_assistant",
     ).compile(store=store)
 

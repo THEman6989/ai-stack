@@ -31,6 +31,54 @@ The current Docker architecture is split into these main roles:
 - `librechat`: the normal chat UI for the user.
 - `rag_api`: local document search backend when available.
 - Pixelle/MCP services: image generation and Pixelle tool integration when available.
+- `hermes-agent`: optional external coding/system agent reached through its
+  OpenAI-compatible API on the host.
+
+## Hermes Integration
+
+Hermes is integrated as an optional external coding/system agent, not as a
+replacement for the AlphaRavis LangGraph brain.
+
+Supported paths:
+
+```text
+LibreChat -> Hermes Agent
+LibreChat -> AlphaRavis LangGraph bridge
+AlphaRavis LangGraph -> Hermes coding sub-agent
+Hermes -> AlphaRavis LangGraph tool endpoint, only when explicitly enabled
+```
+
+LibreChat has a separate custom endpoint for Hermes in `librechat.yaml`.
+The default Docker-side base URL is:
+
+```text
+HERMES_API_BASE=http://host.docker.internal:8642/v1
+HERMES_MODEL=hermes-agent
+```
+
+For containers to reach a host-running Hermes gateway on Linux, Hermes should
+bind to `API_SERVER_HOST=0.0.0.0` rather than only `127.0.0.1`.
+
+LangGraph can call Hermes through the `hermes_coding_agent` swarm worker when:
+
+```text
+ALPHARAVIS_ENABLE_HERMES_AGENT=true
+```
+
+The Hermes worker is meant for coding, file analysis, terminal-oriented
+diagnosis, project-structure inspection, and implementation guidance. It calls
+Hermes with a system guard that forbids calling LangGraph back from that run.
+
+The reverse path is optional and disabled by default:
+
+```text
+BRIDGE_ENABLE_LANGGRAPH_TOOL=false
+POST /tools/langgraph/run
+```
+
+That endpoint requires `explicit_user_request=true` in the request body. This
+prevents Hermes from silently invoking LangGraph unless the user explicitly asks
+for AlphaRavis/LangGraph/custom-agent flow.
 
 ## MCP Integration
 
@@ -184,6 +232,26 @@ Safety:
 - Destructive or state-changing commands trigger a LangGraph human approval interrupt.
 - Read-only diagnostics such as logs and status checks can run without approval.
 
+### Hermes Coding Agent
+
+Optional specialist that delegates bounded coding/system tasks to an external
+Hermes Agent API.
+
+Capabilities:
+
+- Check Hermes API reachability.
+- Ask Hermes for coding, file-analysis, terminal-oriented diagnosis, project
+  inspection, patch planning, or implementation guidance.
+- Return structured handoff reports to the swarm.
+
+Safety:
+
+- Disabled until `ALPHARAVIS_ENABLE_HERMES_AGENT=true`.
+- Calls Hermes with an anti-recursion system prompt.
+- Does not expose AlphaRavis command approval bypasses.
+- If Hermes needs LangGraph, the request is transferred back inside AlphaRavis
+  instead of recursively calling Hermes again.
+
 ### UI Assistant
 
 Handles browser, VNC, and desktop-style tasks when the optional UI stack is available.
@@ -273,6 +341,7 @@ Additional reviewed research skill cards include:
 ai-skills/deep-research-report/SKILL.md
 ai-skills/market-research/SKILL.md
 ai-skills/competitor-analysis/SKILL.md
+ai-skills/hermes-agent-integration/SKILL.md
 ```
 
 These cards are not injected into every chat by default; agents should read them

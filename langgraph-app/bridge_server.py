@@ -31,6 +31,13 @@ BRIDGE_LLM_HEALTH_MODEL = os.getenv("BRIDGE_LLM_HEALTH_MODEL", "big-boss")
 BRIDGE_LLM_HEALTH_FALLBACK_MODEL = os.getenv("BRIDGE_LLM_HEALTH_FALLBACK_MODEL", "edge-gemma")
 BRIDGE_LLM_HEALTH_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_LLM_HEALTH_TIMEOUT_SECONDS", "10"))
 BRIDGE_LLM_HEALTH_PROMPT = os.getenv("BRIDGE_LLM_HEALTH_PROMPT", "Antworte nur mit OK.")
+BRIDGE_ENABLE_LANGGRAPH_TOOL = os.getenv("BRIDGE_ENABLE_LANGGRAPH_TOOL", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+BRIDGE_LANGGRAPH_TOOL_API_KEY = os.getenv("BRIDGE_LANGGRAPH_TOOL_API_KEY", "")
+BRIDGE_LANGGRAPH_TOOL_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_LANGGRAPH_TOOL_TIMEOUT_SECONDS", "120"))
 
 app = FastAPI(title="AlphaRavis OpenAI Bridge")
 
@@ -292,6 +299,22 @@ def _clean_error_message(exc: Exception) -> str:
             "Pruefe LiteLLM und den in `litellm-config/config.yaml` eingetragenen Modellserver."
         )
     return f"AlphaRavis konnte den LangGraph-Run nicht abschliessen: {text}"
+
+
+def _require_langgraph_tool_access(request: Request) -> None:
+    if not BRIDGE_ENABLE_LANGGRAPH_TOOL:
+        raise HTTPException(status_code=404, detail="LangGraph tool endpoint is disabled.")
+
+    if not BRIDGE_LANGGRAPH_TOOL_API_KEY:
+        return
+
+    expected = f"Bearer {BRIDGE_LANGGRAPH_TOOL_API_KEY}"
+    if request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Invalid LangGraph tool API key.")
+
+
+def _tool_thread_id_for_key(thread_key: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"alpharavis:hermes-tool:{thread_key}"))
 
 
 async def _smoke_test_litellm_model(model: str) -> dict[str, Any]:
@@ -648,6 +671,70 @@ async def llm_generation_health():
             ),
         },
         status_code=http_status,
+    )
+
+
+@app.post("/tools/langgraph/run")
+async def langgraph_tool_run(request: Request):
+    _require_langgraph_tool_access(request)
+    body = await request.json()
+    if body.get("explicit_user_request") is not True:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Hermes may call this tool only when the user explicitly asked "
+                "to use LangGraph or AlphaRavis custom-agent flow."
+            ),
+        )
+
+    message = str(body.get("message") or body.get("input") or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+
+    thread_key = str(body.get("thread_key") or body.get("session_id") or "hermes-langgraph-tool")
+    timeout = min(
+        max(float(body.get("timeout_seconds") or BRIDGE_LANGGRAPH_TOOL_TIMEOUT_SECONDS), 5.0),
+        BRIDGE_LANGGRAPH_TOOL_TIMEOUT_SECONDS,
+    )
+
+    client = _client()
+    thread_id = await _ensure_thread(
+        client,
+        _tool_thread_id_for_key(thread_key),
+        f"hermes-tool:{thread_key}",
+    )
+    payload = {
+        "input": {
+            "messages": [
+                {
+                    "role": "human",
+                    "content": (
+                        "Hermes explicitly asked AlphaRavis/LangGraph to run this "
+                        "bounded subflow. Do not call Hermes back from this run.\n\n"
+                        f"{message}"
+                    ),
+                }
+            ],
+            "thread_id": thread_id,
+            "thread_key": f"hermes-tool:{thread_key}",
+        }
+    }
+
+    try:
+        content = await asyncio.wait_for(_run_wait_content(client, thread_id, payload), timeout=timeout)
+    except TimeoutError:
+        content = (
+            "LangGraph tool run timed out. Hermes should summarize the timeout "
+            "and ask the user whether to continue in AlphaRavis directly."
+        )
+
+    return JSONResponse(
+        {
+            "result": content,
+            "thread_id": thread_id,
+            "thread_key": f"hermes-tool:{thread_key}",
+            "next_action": "Return this result to the user. Do not recursively call Hermes or LangGraph.",
+        }
     )
 
 

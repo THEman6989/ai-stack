@@ -102,6 +102,58 @@ normal swarm/tool path stays on big-boss
 If the big server is down, complex requests should fail visibly instead of
 silently running on the weaker model.
 
+## Hermes Mode
+
+Hermes is available as a separate optional coding/system agent.
+
+Direct mode:
+
+```text
+LibreChat -> Hermes Agent
+```
+
+Use this for coding, terminal-oriented work, file operations, and direct agent
+tasks when Hermes gateway is running.
+
+AlphaRavis mode:
+
+```text
+LibreChat -> AlphaRavis -> hermes_coding_agent -> Hermes
+```
+
+Use this when AlphaRavis should stay the main supervisor but delegate a bounded
+coding/system subtask to Hermes.
+
+Required Hermes gateway settings:
+
+```text
+API_SERVER_ENABLED=true
+API_SERVER_HOST=0.0.0.0
+API_SERVER_PORT=8642
+API_SERVER_KEY=<same as HERMES_API_KEY>
+```
+
+AlphaRavis settings:
+
+```text
+HERMES_API_BASE=http://host.docker.internal:8642/v1
+HERMES_API_KEY=sk-hermes-local
+HERMES_MODEL=hermes-agent
+ALPHARAVIS_ENABLE_HERMES_AGENT=false
+```
+
+Keep `ALPHARAVIS_ENABLE_HERMES_AGENT=false` until Hermes is actually reachable.
+
+Reverse mode is disabled by default:
+
+```text
+BRIDGE_ENABLE_LANGGRAPH_TOOL=false
+```
+
+When enabled, Hermes can call `POST /tools/langgraph/run`, but only with
+`explicit_user_request=true`. This is the loop guard: Hermes may use LangGraph
+only when you explicitly ask it to.
+
 ## Tools
 
 Tools are used only when an agent chooses them for the task.
@@ -242,6 +294,7 @@ Already available:
 - skill-library candidate listing and review-mode activation/deactivation
 - reviewed repo skill-card hints and on-demand skill-card reading
 - DeepAgents-style MCP config loading, disabled by default for faster simple chat
+- optional Hermes direct endpoint for LibreChat and Hermes coding sub-agent for AlphaRavis
 - fast-path hidden-thinking disable for llama.cpp/Qwen-style models
 - visible fast-path notices and thread lockout after agent path
 - agent-specific and global memory tools
