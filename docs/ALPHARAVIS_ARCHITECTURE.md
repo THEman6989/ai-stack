@@ -293,10 +293,37 @@ AlphaRavis talks to LiteLLM through an OpenAI-compatible client.
 LiteLLM routes `big-boss` to the configured llama.cpp server and can also route
 other configured models such as Ollama models.
 
+The current fallback path is:
+
+```text
+big-boss -> edge-gemma
+```
+
+`big-boss` uses the llama.cpp OpenAI-compatible `/v1` endpoint.
+`edge-gemma` uses the Ollama OpenAI-compatible `/v1` endpoint.
+
+LiteLLM can switch to `edge-gemma` when `big-boss` times out or fails. This is
+configured in `litellm-config/config.yaml` and controlled by the model endpoint
+and timeout variables in `.env`.
+
+The bridge also exposes:
+
+```text
+GET /health/llm-generation
+```
+
+This endpoint performs a real tiny generation against the primary model and the
+fallback model. It is meant to detect the "server is online but generation is
+stuck" failure mode.
+
 If the bridge returns a timeout but `/v1/models` and health endpoints work, the
 most likely cause is that the model generation backend is busy, stuck, or too
 slow for the current timeout. That does not automatically mean the bridge is
 broken.
+
+Automatic power actions such as SSH shutdown or Wake-on-LAN are intentionally
+not run by a hidden background watchdog. They stay available through debugger
+tools and the approval gate so destructive recovery remains visible to the user.
 
 ## Observability
 

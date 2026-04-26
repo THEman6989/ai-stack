@@ -1,15 +1,31 @@
 model_list:
-  # 1. Dein kleiner Server (Ollama mit Gemma)
+  # Small fallback model. Ollama's OpenAI-compatible /v1 API is used because
+  # it responds quickly and avoids provider-specific Ollama hangs in LiteLLM.
   - model_name: edge-gemma
     litellm_params:
-      model: ollama/gemma4:e2b # Oder wie auch immer das Modell exakt in Ollama heißt
-      api_base: http://192.168.178.140:11434
-      timeout: 120
+      model: os.environ/EDGE_GEMMA_LITELLM_MODEL
+      api_base: os.environ/EDGE_GEMMA_API_BASE
+      api_key: os.environ/LOCAL_LLM_API_KEY
+      timeout: os.environ/EDGE_GEMMA_TIMEOUT_SECONDS
+      stream_timeout: os.environ/EDGE_GEMMA_STREAM_TIMEOUT_SECONDS
+      max_retries: 0
 
-  # 2. Dein großer PC (Llama.cpp Server)
+  # Main large model on the llama.cpp server.
   - model_name: big-boss
     litellm_params:
-      # Llama.cpp hat eine OpenAI-kompatible API, daher das "openai/" Präfix für LiteLLM
-      model: openai/unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q8_K_XL
-      api_base: http://100.71.57.22:8033/v1
-      timeout: 120
+      model: os.environ/BIG_BOSS_LITELLM_MODEL
+      api_base: os.environ/BIG_BOSS_API_BASE
+      api_key: os.environ/LOCAL_LLM_API_KEY
+      timeout: os.environ/BIG_BOSS_TIMEOUT_SECONDS
+      stream_timeout: os.environ/BIG_BOSS_STREAM_TIMEOUT_SECONDS
+      max_retries: 0
+
+router_settings:
+  fallbacks: [{"big-boss": ["edge-gemma"]}]
+  cooldown_time: os.environ/LITELLM_COOLDOWN_TIME_SECONDS
+  allowed_fails_policy:
+    TimeoutErrorAllowedFails: 1
+
+litellm_settings:
+  num_retries: os.environ/LITELLM_NUM_RETRIES
+  request_timeout: os.environ/LITELLM_REQUEST_TIMEOUT_SECONDS

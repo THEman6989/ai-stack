@@ -7,6 +7,7 @@ import time
 import uuid
 from typing import Any, AsyncIterator
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from langgraph_sdk import get_client
@@ -24,6 +25,12 @@ BRIDGE_SHOW_ACTIVITY_EVENTS = os.getenv("BRIDGE_SHOW_ACTIVITY_EVENTS", "false").
     "yes",
 }
 BRIDGE_ACTIVITY_DETAIL = os.getenv("BRIDGE_ACTIVITY_DETAIL", "summary").lower()
+BRIDGE_LLM_HEALTH_URL = os.getenv("BRIDGE_LLM_HEALTH_URL", "http://litellm:4000/v1").rstrip("/")
+BRIDGE_LLM_HEALTH_API_KEY = os.getenv("BRIDGE_LLM_HEALTH_API_KEY", os.getenv("OPENAI_API_KEY", "sk-local-dev"))
+BRIDGE_LLM_HEALTH_MODEL = os.getenv("BRIDGE_LLM_HEALTH_MODEL", "big-boss")
+BRIDGE_LLM_HEALTH_FALLBACK_MODEL = os.getenv("BRIDGE_LLM_HEALTH_FALLBACK_MODEL", "edge-gemma")
+BRIDGE_LLM_HEALTH_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_LLM_HEALTH_TIMEOUT_SECONDS", "10"))
+BRIDGE_LLM_HEALTH_PROMPT = os.getenv("BRIDGE_LLM_HEALTH_PROMPT", "Antworte nur mit OK.")
 
 app = FastAPI(title="AlphaRavis OpenAI Bridge")
 
@@ -284,6 +291,58 @@ def _clean_error_message(exc: Exception) -> str:
             "Pruefe LiteLLM und den in `litellm-config/config.yaml` eingetragenen Modellserver."
         )
     return f"AlphaRavis konnte den LangGraph-Run nicht abschliessen: {text}"
+
+
+async def _smoke_test_litellm_model(model: str) -> dict[str, Any]:
+    started = time.perf_counter()
+    headers = {"Content-Type": "application/json"}
+    if BRIDGE_LLM_HEALTH_API_KEY:
+        headers["Authorization"] = f"Bearer {BRIDGE_LLM_HEALTH_API_KEY}"
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": BRIDGE_LLM_HEALTH_PROMPT}],
+        "max_tokens": 4,
+        "temperature": 0,
+        "stream": False,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=BRIDGE_LLM_HEALTH_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                f"{BRIDGE_LLM_HEALTH_URL}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+        elapsed = round(time.perf_counter() - started, 3)
+        if response.status_code >= 400:
+            return {
+                "ok": False,
+                "model": model,
+                "status_code": response.status_code,
+                "elapsed_seconds": elapsed,
+                "error": response.text[:500],
+            }
+
+        data = response.json()
+        choice = data.get("choices", [{}])[0]
+        message = choice.get("message", {}) if isinstance(choice, dict) else {}
+        content = str(message.get("content") or "").strip()
+        reasoning = str(message.get("reasoning_content") or "").strip()
+        return {
+            "ok": bool(content or reasoning),
+            "model": model,
+            "status_code": response.status_code,
+            "elapsed_seconds": elapsed,
+            "content_preview": (content or reasoning)[:120],
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "model": model,
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "error": str(exc),
+        }
 
 
 def _approval_resume_from_messages(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -558,6 +617,37 @@ async def _run_wait_content(client: Any, thread_id: str, run_payload: dict[str, 
 @app.get("/health")
 async def health():
     return {"status": "ok", "langgraph_api_url": LANGGRAPH_API_URL}
+
+
+@app.get("/health/llm-generation")
+async def llm_generation_health():
+    primary = await _smoke_test_litellm_model(BRIDGE_LLM_HEALTH_MODEL)
+    fallback = None
+    if BRIDGE_LLM_HEALTH_FALLBACK_MODEL and BRIDGE_LLM_HEALTH_FALLBACK_MODEL != BRIDGE_LLM_HEALTH_MODEL:
+        fallback = await _smoke_test_litellm_model(BRIDGE_LLM_HEALTH_FALLBACK_MODEL)
+
+    status = "ok"
+    http_status = 200
+    if not primary["ok"]:
+        if fallback and fallback["ok"]:
+            status = "degraded"
+        else:
+            status = "error"
+            http_status = 503
+
+    return JSONResponse(
+        {
+            "status": status,
+            "litellm_url": BRIDGE_LLM_HEALTH_URL,
+            "primary": primary,
+            "fallback": fallback,
+            "note": (
+                "This checks real token generation, not only process health. "
+                "Power actions remain manual/debugger-approved."
+            ),
+        },
+        status_code=http_status,
+    )
 
 
 @app.get("/v1/models")
