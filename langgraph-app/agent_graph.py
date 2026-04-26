@@ -479,6 +479,48 @@ async def ask_documents(query: str):
 
 
 @tool
+def read_alpha_ravis_architecture(query: str = "", max_chars: int = 6000):
+    """Read the editable AlphaRavis architecture/capabilities document on demand."""
+
+    configured_path = os.getenv("ALPHARAVIS_ARCHITECTURE_DOC_PATH")
+    if configured_path:
+        doc_path = Path(configured_path)
+    else:
+        doc_path = Path(_workspace_root()) / "docs" / "ALPHARAVIS_ARCHITECTURE.md"
+
+    try:
+        resolved = doc_path.resolve()
+        workspace = Path(_workspace_root()).resolve()
+        if workspace not in [resolved, *resolved.parents]:
+            return f"Architecture document path is outside the workspace: {resolved}"
+        content = resolved.read_text(encoding="utf-8")
+    except Exception as exc:
+        return f"Could not read AlphaRavis architecture document: {exc}"
+
+    max_allowed = int(os.getenv("ALPHARAVIS_ARCHITECTURE_DOC_MAX_CHARS", "6000"))
+    max_chars = max(1000, min(int(max_chars), max_allowed))
+
+    if query:
+        lowered_terms = [term for term in re.split(r"\W+", query.lower()) if len(term) >= 4]
+        sections = re.split(r"(?m)^## ", content)
+        matches = []
+        for section in sections:
+            haystack = section.lower()
+            if any(term in haystack for term in lowered_terms):
+                prefix = "" if section.startswith("#") else "## "
+                matches.append(prefix + section.strip())
+        if matches:
+            content = "\n\n".join(matches)
+
+    if len(content) > max_chars:
+        return (
+            content[:max_chars].rstrip()
+            + "\n\n[Truncated. Ask for a narrower AlphaRavis architecture topic if more detail is needed.]"
+        )
+    return content
+
+
+@tool
 async def search_archived_context(query: str, limit: int = 5, include_other_threads: bool = False):
     """Search archived memory. Defaults to the current chat thread only."""
 
@@ -1331,6 +1373,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         tools=[
             deep_web_research,
             ask_documents,
+            read_alpha_ravis_architecture,
             transfer_to_generalist,
             transfer_to_debugger,
             transfer_to_context,
@@ -1339,6 +1382,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         system_prompt=(
             "You are the Research Expert. Use deep_web_research for deep web "
             "research and ask_documents for local data. Search thoroughly, "
+            "Use read_alpha_ravis_architecture only when the user asks about "
+            "AlphaRavis itself, its architecture, or its capabilities. "
             "return concise conclusions, and transfer to the correct peer when "
             "the task is outside research."
         ),
@@ -1350,6 +1395,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             start_pixelle_remote,
             wake_on_lan,
             fast_web_search,
+            read_alpha_ravis_architecture,
             create_manage_memory_tool(namespace=("memories",)),
             create_search_memory_tool(namespace=("memories",)),
             search_skill_library,
@@ -1364,8 +1410,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         backend=sandbox,
         name="general_assistant",
         system_prompt=(
-            "You are the Generalist. Handle quick facts, Pixelle control, "
+            "You are AlphaRavis's Generalist. Handle quick facts, Pixelle control, "
             "safe code execution in the sandbox, and memory management. "
+            "Use read_alpha_ravis_architecture only when the user asks what "
+            "AlphaRavis is, what it can do, or how the stack works. "
             "Use approved skill-library entries only as hints. Store new "
             "workflows as inactive skill candidates for human review. "
             "Transfer directly to specialized peers instead of routing through "
@@ -1389,6 +1437,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             search_archived_context,
             search_debugging_lessons,
             search_skill_library,
+            read_alpha_ravis_architecture,
             transfer_to_generalist,
             transfer_to_research,
             transfer_to_debugger,
@@ -1399,7 +1448,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "conversation memory and return the precise facts needed by the "
             "active peer. By default, search only the current chat thread. "
             "Set include_other_threads=true only when the user explicitly asks "
-            "to search other chats or all archives. Do not answer unrelated "
+            "to search other chats or all archives. Use read_alpha_ravis_architecture "
+            "only for questions about AlphaRavis itself. Do not answer unrelated "
             "tasks yourself; transfer back."
         ),
     )

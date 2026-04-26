@@ -170,6 +170,15 @@ ALPHARAVIS_ARCHIVE_SEARCH_LIMIT=5
 # / all archives through include_other_threads=true.
 ALPHARAVIS_CROSS_THREAD_ARCHIVE_SEARCH_LIMIT=3
 
+# Editable on-demand self-description. Agents do not inject this into every
+# chat; they read it only via read_alpha_ravis_architecture when the user asks
+# about AlphaRavis architecture, capabilities, memory, bridge, or safety.
+ALPHARAVIS_ARCHITECTURE_DOC_PATH=/workspace/docs/ALPHARAVIS_ARCHITECTURE.md
+
+# Max characters the architecture-doc tool may return in one call. This keeps
+# "what can you do?" answers useful without dumping the whole document.
+ALPHARAVIS_ARCHITECTURE_DOC_MAX_CHARS=6000
+
 # =====================================================================
 # --- SAFE WORKFLOW SKILL LIBRARY ---
 # =====================================================================
