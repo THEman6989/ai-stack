@@ -207,6 +207,29 @@ Important safety rule:
 - Candidate listing is available for review. Activation and deactivation require
   `ALPHARAVIS_ALLOW_SKILL_PROMOTION=true`.
 
+### Repo AI Skills
+
+Version-controlled skill cards can live under `ai-skills/`.
+
+The first reviewed skill card is:
+
+```text
+ai-skills/deepagents-agent-builder/SKILL.md
+```
+
+It explains how to build new AlphaRavis agents using DeepAgents patterns. It is
+not injected into every chat by default; agents should read it only when the user
+asks to design, add, or refactor agents.
+
+Agents can use:
+
+```text
+list_repo_ai_skills
+read_repo_ai_skill
+```
+
+These tools are restricted to the repo `ai-skills/` directory.
+
 ## Context Compression
 
 AlphaRavis uses two compression tiers.

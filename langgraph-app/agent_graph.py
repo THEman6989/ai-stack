@@ -588,6 +588,75 @@ def read_alpha_ravis_architecture(query: str = "", max_chars: int = 6000):
 
 
 @tool
+def list_repo_ai_skills(max_chars: int = 4000):
+    """List reviewed repo skill cards available under ai-skills/."""
+
+    skills_dir = Path(_workspace_root()) / "ai-skills"
+    try:
+        workspace = Path(_workspace_root()).resolve()
+        resolved = skills_dir.resolve()
+        if workspace not in [resolved, *resolved.parents]:
+            return f"AI skills path is outside the workspace: {resolved}"
+        if not resolved.exists():
+            return "No repo AI skills directory exists yet."
+    except Exception as exc:
+        return f"Could not inspect repo AI skills: {exc}"
+
+    lines = []
+    for skill_md in sorted(resolved.glob("*/SKILL.md")):
+        try:
+            text = skill_md.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        name_match = re.search(r"(?m)^name:\s*(.+?)\s*$", text)
+        desc_match = re.search(r"(?ms)^description:\s*(.+?)\n---", text)
+        name = (name_match.group(1).strip().strip('"') if name_match else skill_md.parent.name)
+        description = " ".join((desc_match.group(1).strip().strip('"') if desc_match else "").split())
+        lines.append(f"- {name}: {description}\n  Path: ai-skills/{skill_md.parent.name}/SKILL.md")
+
+    if not lines:
+        return "No valid repo AI skill cards found."
+    output = "\n".join(lines)
+    max_chars = max(1000, min(int(max_chars), 8000))
+    return output[:max_chars].rstrip()
+
+
+@tool
+def read_repo_ai_skill(skill_name: str, reference_name: str = "", max_chars: int = 8000):
+    """Read one reviewed repo AI skill card or one of its markdown references."""
+
+    normalized = re.sub(r"[^a-z0-9-]+", "-", skill_name.lower()).strip("-")
+    if not normalized:
+        return "Provide a skill_name such as `deepagents-agent-builder`."
+
+    base_dir = Path(_workspace_root()) / "ai-skills" / normalized
+    if reference_name:
+        safe_reference = Path(reference_name).name
+        if not safe_reference.endswith(".md"):
+            safe_reference = f"{safe_reference}.md"
+        target = base_dir / "references" / safe_reference
+    else:
+        target = base_dir / "SKILL.md"
+
+    try:
+        workspace = Path(_workspace_root()).resolve()
+        resolved = target.resolve()
+        allowed_root = base_dir.resolve()
+        if workspace not in [resolved, *resolved.parents]:
+            return f"Skill path is outside the workspace: {resolved}"
+        if allowed_root not in [resolved, *resolved.parents]:
+            return f"Skill path is outside the requested skill directory: {resolved}"
+        content = resolved.read_text(encoding="utf-8")
+    except Exception as exc:
+        return f"Could not read repo AI skill `{normalized}`: {exc}"
+
+    max_chars = max(1000, min(int(max_chars), 16000))
+    if len(content) > max_chars:
+        return content[:max_chars].rstrip() + "\n\n[Truncated. Ask for a narrower skill reference if needed.]"
+    return content
+
+
+@tool
 async def search_archived_context(query: str, limit: int = 5, include_other_threads: bool = False):
     """Search archived memory. Defaults to the current chat thread only."""
 
@@ -1721,6 +1790,8 @@ def _create_debugger_subgraph(llm: ChatLiteLLM, handoff_tools: list[Any]):
             describe_optional_tool_registry,
             search_agent_memory,
             record_agent_memory,
+            list_repo_ai_skills,
+            read_repo_ai_skill,
             search_skill_library,
             list_skill_candidates,
             search_debugging_lessons,
@@ -1748,6 +1819,8 @@ def _create_debugger_subgraph(llm: ChatLiteLLM, handoff_tools: list[Any]):
             "an inactive skill candidate; never assume it is approved. "
             "Optional MCP registries are lazy-loaded; call "
             "describe_optional_tool_registry when you need to know what exists. "
+            "Use read_repo_ai_skill when the user asks to build or refactor "
+            "AlphaRavis agents from reviewed repo skill cards. "
             "Use agent_id=`debugger_agent` for your own durable memories; use "
             "scope=`global` only for lessons useful to all agents."
         ),
@@ -1813,6 +1886,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             search_agent_memory,
             record_agent_memory,
             read_alpha_ravis_architecture,
+            list_repo_ai_skills,
+            read_repo_ai_skill,
             transfer_to_generalist,
             transfer_to_debugger,
             transfer_to_context,
@@ -1826,6 +1901,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "Use agent_id=`research_expert` for research-specific memories. "
             "Optional MCP registries are lazy-loaded; call "
             "describe_optional_tool_registry only when tool availability matters. "
+            "Use read_repo_ai_skill only when the user asks about reviewed "
+            "repo skills or agent-building procedures. "
             "Use global memories only for stable cross-agent preferences. "
             "return concise conclusions, and transfer to the correct peer when "
             "the task is outside research."
@@ -1840,6 +1917,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             fast_web_search,
             describe_optional_tool_registry,
             read_alpha_ravis_architecture,
+            list_repo_ai_skills,
+            read_repo_ai_skill,
             search_agent_memory,
             record_agent_memory,
             create_manage_memory_tool(namespace=("memories",)),
@@ -1864,6 +1943,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "AlphaRavis is, what it can do, or how the stack works. "
             "Optional MCP registries are lazy-loaded; call "
             "describe_optional_tool_registry when a task may need optional tools. "
+            "Use list_repo_ai_skills/read_repo_ai_skill when the user asks to "
+            "build, inspect, or improve agents from reviewed repo skill cards. "
             "Use agent_id=`general_assistant` for your own memories. Search "
             "your agent memory before recording a new repeated lesson. "
             "Use approved skill-library entries only as hints. Store new "
@@ -1893,6 +1974,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             record_agent_memory,
             search_skill_library,
             list_skill_candidates,
+            list_repo_ai_skills,
+            read_repo_ai_skill,
             read_alpha_ravis_architecture,
             transfer_to_generalist,
             transfer_to_research,
@@ -1907,7 +1990,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "to search other chats or all archives. Use read_alpha_ravis_architecture "
             "only for questions about AlphaRavis itself. Use agent_id=`context_retrieval_agent` "
             "for retrieval-specific memories. Optional MCP registry details are "
-            "available through describe_optional_tool_registry. Do not answer unrelated "
+            "available through describe_optional_tool_registry. Repo AI skills can "
+            "be listed or read on demand when the user asks for reviewed skill cards. Do not answer unrelated "
             "tasks yourself; transfer back."
         ),
     )

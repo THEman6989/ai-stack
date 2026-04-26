@@ -1,0 +1,4 @@
+interface:
+  display_name: "DeepAgents Agent Builder"
+  short_description: "Build agents with DeepAgents patterns"
+  default_prompt: "Use $deepagents-agent-builder to design a new AlphaRavis agent using DeepAgents patterns."

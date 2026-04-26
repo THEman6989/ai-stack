@@ -17,6 +17,7 @@ Important current behavior:
 - Fast-path replies are visibly marked, and a thread is locked out of fast path after it uses the normal agent path.
 - Optional MCP tool loading is off by default to avoid slowing every chat.
 - Agents can inspect a lazy optional-tool manifest and use scoped agent/global memories.
+- Reviewed repo skill cards live in `ai-skills/`, starting with the DeepAgents agent-builder skill, and can be read on demand by AlphaRavis.
 - Risky local or SSH commands require approval before execution.
 
 ## ✨ Key Features
