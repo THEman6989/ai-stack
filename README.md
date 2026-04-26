@@ -14,7 +14,9 @@ Important current behavior:
 - Simple non-tool chat can use the fast path and skip the swarm.
 - Complex tool, debug, memory, research, Pixelle, code, SSH, Docker, and PC-control tasks use the agent path.
 - `edge-gemma` is only a small starter/crisis fallback for simple fast-path chat, not a second boss for complex workflows.
+- Fast-path replies are visibly marked, and a thread is locked out of fast path after it uses the normal agent path.
 - Optional MCP tool loading is off by default to avoid slowing every chat.
+- Agents can inspect a lazy optional-tool manifest and use scoped agent/global memories.
 - Risky local or SSH commands require approval before execution.
 
 ## ✨ Key Features

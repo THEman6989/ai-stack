@@ -22,6 +22,22 @@ Short non-tool questions can take the fast path. This path:
 - calls the model directly,
 - can fall back to `edge-gemma` only for simple chat.
 
+Fast-path replies are visibly marked by default:
+
+```text
+ALPHARAVIS_SHOW_FAST_PATH_NOTICE=true
+```
+
+Once one turn in a chat thread uses the normal agent/swarm path, that thread is
+locked out of fast path by default:
+
+```text
+ALPHARAVIS_FAST_PATH_LOCK_AFTER_SWARM=true
+```
+
+This prevents a complex conversation from bouncing back into the simple route
+later.
+
 The fast path is not used when the message looks like it needs tools, research,
 debugging, Docker, SSH, Pixelle, code/files, memory/archive search, PC control,
 or AlphaRavis architecture details.
@@ -35,6 +51,10 @@ ALPHARAVIS_LOAD_MCP_TOOLS=false
 That prevents slow MCP startup from affecting every chat. The native Pixelle
 HTTP tool can still start Pixelle jobs without loading the extra MCP registry.
 
+Agents can still see a short manifest of optional registries through the
+`describe_optional_tool_registry` tool, so they know Pixelle MCP exists and how
+it can be enabled without paying the startup cost by default.
+
 For llama.cpp/Qwen-style models, fast path also disables hidden thinking with:
 
 ```text
@@ -42,6 +62,7 @@ ALPHARAVIS_FAST_PATH_DISABLE_THINKING=true
 ```
 
 This keeps tiny replies from spending seconds on invisible reasoning tokens.
+Set it to `false` if you explicitly want hidden thinking even in fast path.
 
 To force the normal agent path for one message, write:
 
@@ -108,6 +129,29 @@ no compression
 Archive search is thread-scoped by default. Other chat archives are searched
 only when you explicitly ask for cross-thread archive search.
 
+## Agent-Specific Memories
+
+Agents also have scoped durable memories:
+
+```text
+alpharavis / agent_memories / general_assistant
+alpharavis / agent_memories / research_expert
+alpharavis / agent_memories / debugger_agent
+alpharavis / agent_memories / context_retrieval_agent
+alpharavis / agent_memories / global
+```
+
+The intended rule is:
+
+- search the active agent's own memory first,
+- include global memories for stable cross-agent preferences,
+- record new memories only after a useful lesson or repeated preference is clear,
+- keep thread archives separate from reusable agent memories.
+
+The agent knows which memory to use from its role prompt. For example, the
+debugger uses `agent_id=debugger_agent`, while cross-agent lessons use
+`scope=global`.
+
 ## Skill Library
 
 The skill library stores reusable workflow patterns.
@@ -161,6 +205,8 @@ Already available:
 - skill-library candidate listing and review-mode activation/deactivation
 - optional MCP loading disabled by default for faster simple chat
 - fast-path hidden-thinking disable for llama.cpp/Qwen-style models
+- visible fast-path notices and thread lockout after agent path
+- agent-specific and global memory tools
 - thread-scoped memory archives
 - visible memory notices
 - command approval gate

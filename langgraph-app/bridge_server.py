@@ -145,7 +145,7 @@ def _last_ai_content(state: Any) -> str:
         if _is_ai_message(message):
             content = _message_content(message)
             stripped = content.lstrip()
-            if stripped.startswith(("Memory-Notice:", "Run-Profile:")):
+            if stripped.startswith(("Memory-Notice:", "Run-Profile:", "Fast-Path-Notice:")):
                 trailing_notices.append(content)
                 continue
             if trailing_notices:

@@ -165,6 +165,22 @@ The checkpointer is configured through `langgraph.json` and MongoDB.
 LangMem tools are available for normal durable memories. They are separate from
 the raw chat history and can store user preferences or useful persistent facts.
 
+### Agent-Specific Memories
+
+AlphaRavis also has explicit agent-scoped memories:
+
+```text
+alpharavis / agent_memories / general_assistant
+alpharavis / agent_memories / research_expert
+alpharavis / agent_memories / debugger_agent
+alpharavis / agent_memories / context_retrieval_agent
+alpharavis / agent_memories / global
+```
+
+Agents are instructed to search their own memory first and global memory second.
+Global memory is for stable cross-agent preferences or lessons. Agent-specific
+memory is for habits, recurring issues, or lessons that belong to one role.
+
 ### Debugging Lessons
 
 The debugger can store lessons learned from infrastructure failures:
@@ -350,6 +366,16 @@ chat, wording, translation, or short explanations. It is not used for debugging,
 tools, files, Pixelle, memory/archive retrieval, research, Docker, SSH, PC
 control, or architecture questions.
 
+Fast-path replies are visibly marked when:
+
+```text
+ALPHARAVIS_SHOW_FAST_PATH_NOTICE=true
+```
+
+When `ALPHARAVIS_FAST_PATH_LOCK_AFTER_SWARM=true`, a thread that once routes to
+the normal agent/swarm path is locked out of fast path for future turns. This
+keeps mixed complex threads from later falling back to the simple route.
+
 For llama.cpp/Qwen-style models, fast path passes:
 
 ```json
@@ -358,6 +384,9 @@ For llama.cpp/Qwen-style models, fast path passes:
 
 This prevents simple replies from spending seconds generating hidden reasoning
 tokens before returning a tiny answer.
+
+Set `ALPHARAVIS_FAST_PATH_DISABLE_THINKING=false` to allow hidden thinking in
+fast path again.
 
 Optional MCP tools are also not loaded by default during graph construction:
 
@@ -369,6 +398,9 @@ This avoids paying MCP startup cost on every simple chat. Native tools such as
 `start_pixelle_remote` remain available without loading the Pixelle MCP tool
 registry. Set the flag to `true` only when those extra MCP-provided tools are
 needed.
+
+Agents can call `describe_optional_tool_registry` to see that Pixelle MCP exists
+and how it is enabled without loading the registry during normal graph startup.
 
 The normal agent path remains:
 

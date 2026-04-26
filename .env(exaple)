@@ -309,8 +309,19 @@ ALPHARAVIS_FAST_PATH_TEMPERATURE=0
 
 # Passes llama.cpp/Qwen chat template kwargs to disable hidden thinking only in
 # fast path. This is what makes simple "OK" style replies actually fast.
+# Set false if you want hidden thinking even when Fast Path is active.
 # Allowed values: true, false
 ALPHARAVIS_FAST_PATH_DISABLE_THINKING=true
+
+# If true, fast-path replies visibly say that Fast Path was used.
+# Allowed values: true, false
+ALPHARAVIS_SHOW_FAST_PATH_NOTICE=true
+
+# If true, once a thread uses the normal swarm/agent path, future turns in that
+# same thread cannot return to Fast Path. This prevents mixed simple/complex
+# state from bouncing between execution modes.
+# Allowed values: true, false
+ALPHARAVIS_FAST_PATH_LOCK_AFTER_SWARM=true
 
 # If true, appends a visible Run-Profile message after replies. Normally keep
 # false and inspect run_profile in LangGraph Studio/DeepAgents UI instead.

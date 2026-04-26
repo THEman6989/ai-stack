@@ -58,6 +58,8 @@ class AlphaRavisState(MessagesState):
     active_agent: NotRequired[str]
     active_skill_context: NotRequired[str]
     fast_path_route: NotRequired[str]
+    fast_path_locked: NotRequired[bool]
+    fast_path_lock_reason: NotRequired[str]
     run_profile: NotRequired[dict[str, Any]]
     thread_id: NotRequired[str]
     thread_key: NotRequired[str]
@@ -149,6 +151,17 @@ FAST_PATH_FORCE_PATTERNS = [
     "ohne tools",
     "nur chat",
     "simple chat",
+]
+OPTIONAL_TOOL_MANIFEST = [
+    {
+        "name": "Pixelle MCP",
+        "status": "lazy",
+        "env_flag": "ALPHARAVIS_LOAD_MCP_TOOLS",
+        "description": (
+            "Optional Pixelle MCP registry for extra Pixelle/workflow/config tools. "
+            "Native Pixelle image jobs still work through start_pixelle_remote without loading it."
+        ),
+    }
 ]
 
 if not COMFY_IP:
@@ -705,6 +718,109 @@ async def record_debugging_lesson(
 
 
 @tool
+def describe_optional_tool_registry():
+    """Describe optional lazy-loaded tool registries without loading them."""
+
+    lines = [
+        "Optional lazy tool registries known to AlphaRavis:",
+    ]
+    for entry in OPTIONAL_TOOL_MANIFEST:
+        enabled = _env_bool(entry["env_flag"], "false")
+        lines.append(
+            "\n".join(
+                [
+                    f"- {entry['name']} ({'enabled' if enabled else 'disabled/lazy'})",
+                    f"  Env: {entry['env_flag']}={'true' if enabled else 'false'}",
+                    f"  Use: {entry['description']}",
+                ]
+            )
+        )
+    return "\n\n".join(lines)
+
+
+@tool
+async def search_agent_memory(agent_id: str, query: str, limit: int = 5, include_global: bool = True):
+    """Search durable memories for one agent, optionally including global memories."""
+
+    if get_store is None:
+        return "LangGraph store access is unavailable in this runtime."
+
+    try:
+        store = get_store()
+    except Exception as exc:
+        return f"No LangGraph store is attached to this run: {exc}"
+
+    agent_id = re.sub(r"[^a-zA-Z0-9_-]+", "_", agent_id.strip().lower())[:80] or "global"
+    limit = max(1, min(int(limit), 10))
+    namespaces = [
+        (("alpharavis", "agent_memories", agent_id), f"Agent memory `{agent_id}`"),
+    ]
+    if include_global and agent_id != "global":
+        namespaces.append((("alpharavis", "agent_memories", "global"), "Global agent memory"))
+
+    lines = []
+    for namespace, label in namespaces:
+        try:
+            results = await _maybe_search(store, namespace, query=query, limit=limit)
+        except Exception as exc:
+            return f"{label} search failed: {exc}"
+
+        for item in results or []:
+            key = _store_item_key(item)
+            value = _store_item_value(item)
+            if isinstance(value, dict):
+                lines.append(
+                    "\n".join(
+                        [
+                            f"{label} `{key}`:",
+                            f"Type: {value.get('memory_type', 'note')}",
+                            f"Memory: {value.get('memory', '')}",
+                            f"Evidence: {value.get('evidence', '')}",
+                        ]
+                    )
+                )
+            elif value:
+                lines.append(f"{label} `{key}`:\n{value}")
+
+    if not lines:
+        return f"No agent memories matched `{query}` for `{agent_id}`."
+    return "\n\n".join(lines[:limit])
+
+
+@tool
+async def record_agent_memory(
+    agent_id: str,
+    memory: str,
+    memory_type: str = "lesson",
+    evidence: str = "",
+    scope: str = "agent",
+):
+    """Store a durable agent-specific or global memory after a useful lesson is confirmed."""
+
+    if get_store is None:
+        return "LangGraph store access is unavailable in this runtime."
+
+    try:
+        store = get_store()
+    except Exception as exc:
+        return f"No LangGraph store is attached to this run: {exc}"
+
+    target_agent = "global" if scope.lower().strip() == "global" else agent_id
+    target_agent = re.sub(r"[^a-zA-Z0-9_-]+", "_", target_agent.strip().lower())[:80] or "global"
+    record = {
+        "agent_id": target_agent,
+        "memory": memory.strip()[:2500],
+        "memory_type": memory_type.strip()[:80] or "lesson",
+        "evidence": evidence.strip()[:1500],
+        "scope": "global" if target_agent == "global" else "agent",
+        "created_at": int(time.time()),
+    }
+    key = hashlib.sha256(json.dumps(record, sort_keys=True).encode("utf-8")).hexdigest()[:24]
+    await _maybe_put(store, ("alpharavis", "agent_memories", target_agent), key, record)
+    return f"Stored {record['scope']} memory `{key}` for `{target_agent}`."
+
+
+@tool
 async def search_skill_library(query: str, limit: int = 5, include_candidates: bool = False):
     """Search approved workflow skills, optionally including inactive candidates."""
 
@@ -1071,10 +1187,14 @@ def _profile_update(state: AlphaRavisState, **updates: Any) -> dict[str, Any]:
     return profile
 
 
-def _fast_path_decision(messages: list[Any]) -> tuple[bool, str]:
+def _fast_path_decision(state: AlphaRavisState) -> tuple[bool, str]:
     if not _env_bool("ALPHARAVIS_ENABLE_FAST_PATH", "true"):
         return False, "fast path disabled"
 
+    if _env_bool("ALPHARAVIS_FAST_PATH_LOCK_AFTER_SWARM", "true") and state.get("fast_path_locked"):
+        return False, f"thread already used agent path: {state.get('fast_path_lock_reason', 'locked')}"
+
+    messages = list(state.get("messages", []))
     query = _latest_user_query(messages).strip()
     if not query:
         return False, "no user query"
@@ -1110,17 +1230,30 @@ async def run_profile_start_node(state: AlphaRavisState) -> dict[str, Any]:
 
 
 async def route_decision_node(state: AlphaRavisState) -> dict[str, Any]:
-    use_fast_path, reason = _fast_path_decision(list(state.get("messages", [])))
+    use_fast_path, reason = _fast_path_decision(state)
     route = "fast_path" if use_fast_path else "swarm"
-    return {
+    lock_thread = (
+        route == "swarm"
+        and _env_bool("ALPHARAVIS_FAST_PATH_LOCK_AFTER_SWARM", "true")
+        and reason != "fast path disabled"
+    )
+    updates: dict[str, Any] = {
         "fast_path_route": route,
         "run_profile": _profile_update(
             state,
             route=route,
             route_reason=reason,
+            fast_path_locked=bool(state.get("fast_path_locked") or lock_thread),
             route_decided_at=time.time(),
         ),
     }
+    if lock_thread:
+        updates["fast_path_locked"] = True
+        updates["fast_path_lock_reason"] = reason
+    elif state.get("fast_path_locked"):
+        updates["fast_path_locked"] = True
+        updates["fast_path_lock_reason"] = state.get("fast_path_lock_reason", reason)
+    return updates
 
 
 def route_after_decision(state: AlphaRavisState) -> str:
@@ -1183,11 +1316,27 @@ async def fast_chat_node(state: AlphaRavisState) -> dict[str, Any]:
                 "Agentenpfad genutzt werden soll."
             )
         )
+        response_content = response.content
+
+    if _env_bool("ALPHARAVIS_SHOW_FAST_PATH_NOTICE", "true"):
+        model_label = f"{used_model} fallback" if fallback_used else f"{used_model} direct"
+        lock_text = (
+            "Dieser Thread bleibt im Fast Path, bis er einmal den Agentenpfad benutzt."
+            if _env_bool("ALPHARAVIS_FAST_PATH_LOCK_AFTER_SWARM", "true")
+            else "Thread-Lock nach Agentenpfad ist deaktiviert."
+        )
+        response = AIMessage(
+            content=(
+                f"Fast-Path aktiv ({model_label}). {lock_text}\n\n"
+                f"{str(response_content).strip()}"
+            )
+        )
 
     profile_updates: dict[str, Any] = {
         "route": "fast_path",
         "fast_path_model": used_model,
         "fast_path_fallback_used": fallback_used,
+        "fast_path_notice_shown": _env_bool("ALPHARAVIS_SHOW_FAST_PATH_NOTICE", "true"),
         "fast_path_seconds": round(time.time() - started, 3),
     }
     if fallback_error:
@@ -1569,6 +1718,9 @@ def _create_debugger_subgraph(llm: ChatLiteLLM, handoff_tools: list[Any]):
             execute_ssh_command,
             execute_local_command,
             fast_web_search,
+            describe_optional_tool_registry,
+            search_agent_memory,
+            record_agent_memory,
             search_skill_library,
             list_skill_candidates,
             search_debugging_lessons,
@@ -1585,7 +1737,7 @@ def _create_debugger_subgraph(llm: ChatLiteLLM, handoff_tools: list[Any]):
             "`comfyui_production` and ignore `comfyui_test`.\n"
             "Pixelle and LangGraph run as local Docker containers.\n\n"
             "Strict rules:\n"
-            "1. Search debugging lessons first when an error resembles a past failure.\n"
+            "1. Search debugger_agent memory and debugging lessons first when an error resembles a past failure.\n"
             "2. Diagnose first; always read logs before proposing a fix.\n"
             "3. Destructive or state-changing commands are guarded by a real approval interrupt.\n"
             "4. If code changes are needed, show the file path, problematic "
@@ -1593,7 +1745,11 @@ def _create_debugger_subgraph(llm: ChatLiteLLM, handoff_tools: list[Any]):
             "5. After a useful diagnosis or confirmed fix, record a debugging lesson "
             "with problem, root cause, fix, signals, and commands.\n"
             "6. When a reusable multi-agent workflow emerges, store it only as "
-            "an inactive skill candidate; never assume it is approved."
+            "an inactive skill candidate; never assume it is approved. "
+            "Optional MCP registries are lazy-loaded; call "
+            "describe_optional_tool_registry when you need to know what exists. "
+            "Use agent_id=`debugger_agent` for your own durable memories; use "
+            "scope=`global` only for lessons useful to all agents."
         ),
     )
 
@@ -1653,6 +1809,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         tools=[
             deep_web_research,
             ask_documents,
+            describe_optional_tool_registry,
+            search_agent_memory,
+            record_agent_memory,
             read_alpha_ravis_architecture,
             transfer_to_generalist,
             transfer_to_debugger,
@@ -1664,6 +1823,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "research and ask_documents for local data. Search thoroughly, "
             "Use read_alpha_ravis_architecture only when the user asks about "
             "AlphaRavis itself, its architecture, or its capabilities. "
+            "Use agent_id=`research_expert` for research-specific memories. "
+            "Optional MCP registries are lazy-loaded; call "
+            "describe_optional_tool_registry only when tool availability matters. "
+            "Use global memories only for stable cross-agent preferences. "
             "return concise conclusions, and transfer to the correct peer when "
             "the task is outside research."
         ),
@@ -1675,7 +1838,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             start_pixelle_remote,
             wake_on_lan,
             fast_web_search,
+            describe_optional_tool_registry,
             read_alpha_ravis_architecture,
+            search_agent_memory,
+            record_agent_memory,
             create_manage_memory_tool(namespace=("memories",)),
             create_search_memory_tool(namespace=("memories",)),
             search_skill_library,
@@ -1696,6 +1862,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "safe code execution in the sandbox, and memory management. "
             "Use read_alpha_ravis_architecture only when the user asks what "
             "AlphaRavis is, what it can do, or how the stack works. "
+            "Optional MCP registries are lazy-loaded; call "
+            "describe_optional_tool_registry when a task may need optional tools. "
+            "Use agent_id=`general_assistant` for your own memories. Search "
+            "your agent memory before recording a new repeated lesson. "
             "Use approved skill-library entries only as hints. Store new "
             "workflows as inactive skill candidates for human review. "
             "Transfer directly to specialized peers instead of routing through "
@@ -1718,6 +1888,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         tools=[
             search_archived_context,
             search_debugging_lessons,
+            describe_optional_tool_registry,
+            search_agent_memory,
+            record_agent_memory,
             search_skill_library,
             list_skill_candidates,
             read_alpha_ravis_architecture,
@@ -1732,7 +1905,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "active peer. By default, search only the current chat thread. "
             "Set include_other_threads=true only when the user explicitly asks "
             "to search other chats or all archives. Use read_alpha_ravis_architecture "
-            "only for questions about AlphaRavis itself. Do not answer unrelated "
+            "only for questions about AlphaRavis itself. Use agent_id=`context_retrieval_agent` "
+            "for retrieval-specific memories. Optional MCP registry details are "
+            "available through describe_optional_tool_registry. Do not answer unrelated "
             "tasks yourself; transfer back."
         ),
     )
