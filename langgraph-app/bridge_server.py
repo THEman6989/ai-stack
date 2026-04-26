@@ -140,15 +140,16 @@ def _is_human_message(message: Any) -> bool:
 
 def _last_ai_content(state: Any) -> str:
     messages = state.get("messages", []) if isinstance(state, dict) else []
-    memory_notices: list[str] = []
+    trailing_notices: list[str] = []
     for message in reversed(messages):
         if _is_ai_message(message):
             content = _message_content(message)
-            if content.lstrip().startswith("Memory-Notice:"):
-                memory_notices.append(content)
+            stripped = content.lstrip()
+            if stripped.startswith(("Memory-Notice:", "Run-Profile:")):
+                trailing_notices.append(content)
                 continue
-            if memory_notices:
-                return f"{content}\n\n" + "\n".join(reversed(memory_notices))
+            if trailing_notices:
+                return f"{content}\n\n" + "\n".join(reversed(trailing_notices))
             return content
     if messages:
         return _message_content(messages[-1])

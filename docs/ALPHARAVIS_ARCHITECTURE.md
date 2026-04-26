@@ -188,6 +188,8 @@ Important safety rule:
 - Candidates do not affect routing.
 - Promotion to active skill is disabled by default.
 - Active skills are still non-binding hints, not automatic execution.
+- Candidate listing is available for review. Activation and deactivation require
+  `ALPHARAVIS_ALLOW_SKILL_PROMOTION=true`.
 
 ## Context Compression
 
@@ -293,18 +295,20 @@ AlphaRavis talks to LiteLLM through an OpenAI-compatible client.
 LiteLLM routes `big-boss` to the configured llama.cpp server and can also route
 other configured models such as Ollama models.
 
-The current fallback path is:
+The current controlled fallback path is:
 
 ```text
-big-boss -> edge-gemma
+fast path only: big-boss -> edge-gemma
 ```
 
 `big-boss` uses the llama.cpp OpenAI-compatible `/v1` endpoint.
 `edge-gemma` uses the Ollama OpenAI-compatible `/v1` endpoint.
 
-LiteLLM can switch to `edge-gemma` when `big-boss` times out or fails. This is
-configured in `litellm-config/config.yaml` and controlled by the model endpoint
-and timeout variables in `.env`.
+Global LiteLLM fallback is intentionally not enabled for every request.
+`edge-gemma` is treated as a small starter/crisis model, not as a second boss.
+Complex swarm/tool workflows stay on `big-boss` and should fail visibly if the
+large backend is unavailable. Only the direct fast-chat path can fall back to
+`edge-gemma`, controlled by the `ALPHARAVIS_FAST_PATH_*` variables in `.env`.
 
 The bridge also exposes:
 
@@ -324,6 +328,60 @@ broken.
 Automatic power actions such as SSH shutdown or Wake-on-LAN are intentionally
 not run by a hidden background watchdog. They stay available through debugger
 tools and the approval gate so destructive recovery remains visible to the user.
+
+## Fast Path And Run Profile
+
+Short non-tool chat requests can use a direct fast path:
+
+```text
+START
+  -> run_profile_start
+  -> context_guard_before
+  -> route_decision
+  -> fast_chat
+  -> context_guard_after
+  -> memory_notice
+  -> run_profile_finish
+  -> END
+```
+
+Fast path skips skill-library retrieval and the swarm. It is meant for simple
+chat, wording, translation, or short explanations. It is not used for debugging,
+tools, files, Pixelle, memory/archive retrieval, research, Docker, SSH, PC
+control, or architecture questions.
+
+For llama.cpp/Qwen-style models, fast path passes:
+
+```json
+{"chat_template_kwargs": {"enable_thinking": false}}
+```
+
+This prevents simple replies from spending seconds generating hidden reasoning
+tokens before returning a tiny answer.
+
+Optional MCP tools are also not loaded by default during graph construction:
+
+```text
+ALPHARAVIS_LOAD_MCP_TOOLS=false
+```
+
+This avoids paying MCP startup cost on every simple chat. Native tools such as
+`start_pixelle_remote` remain available without loading the Pixelle MCP tool
+registry. Set the flag to `true` only when those extra MCP-provided tools are
+needed.
+
+The normal agent path remains:
+
+```text
+route_decision
+  -> skill_library
+  -> alpha_ravis_swarm
+```
+
+Every run stores a `run_profile` object in LangGraph state with route, reason,
+message count, estimated tokens, timing, and fast-path fallback information.
+Set `ALPHARAVIS_SHOW_RUN_PROFILE=true` only when you want this profile appended
+visibly in chat; otherwise inspect it in LangGraph Studio or DeepAgents UI.
 
 ## Observability
 

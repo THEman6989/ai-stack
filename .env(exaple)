@@ -86,11 +86,10 @@ EDGE_GEMMA_TIMEOUT_SECONDS=60
 EDGE_GEMMA_STREAM_TIMEOUT_SECONDS=15
 
 # LiteLLM fallback policy.
-# big-boss falls back to edge-gemma after timeouts/failures. Cooldown prevents
-# repeatedly hammering a stuck big server.
+# Global LiteLLM fallbacks are intentionally off. edge-gemma is a small
+# starter/crisis model and should not handle complex agent workflows.
 LITELLM_NUM_RETRIES=0
 LITELLM_REQUEST_TIMEOUT_SECONDS=90
-LITELLM_COOLDOWN_TIME_SECONDS=60
 
 # MongoDB checkpointer URI for LangGraph.
 # Must include a database name and replica-set query when using the Mongo saver.
@@ -281,6 +280,48 @@ LANGCHAIN_API_KEY=dein_langsmith_key_hier
 # =====================================================================
 # OPTIONAL LITELLM / LLM / CACHE / SAFETY
 # =====================================================================
+
+# Enables the direct fast-chat route for short non-tool questions. This skips
+# skill retrieval and the swarm, but still runs through LangGraph state.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_FAST_PATH=true
+
+# Max latest-user-message length eligible for fast path.
+ALPHARAVIS_FAST_PATH_MAX_CHARS=360
+
+# Fast-path timeout for the primary big-boss model.
+ALPHARAVIS_FAST_PATH_PRIMARY_TIMEOUT_SECONDS=20
+
+# Allows only the fast path to fall back to edge-gemma if big-boss is stuck.
+# Complex tool/agent workflows do not use this fallback.
+# Allowed values: true, false
+ALPHARAVIS_FAST_PATH_ENABLE_FALLBACK=true
+
+# LiteLLM model id for the small starter/crisis fallback.
+ALPHARAVIS_FAST_PATH_FALLBACK_MODEL=openai/edge-gemma
+
+# Timeout for the small fallback model in fast path.
+ALPHARAVIS_FAST_PATH_FALLBACK_TIMEOUT_SECONDS=45
+
+# Output cap and temperature for fast-path direct answers.
+ALPHARAVIS_FAST_PATH_MAX_TOKENS=256
+ALPHARAVIS_FAST_PATH_TEMPERATURE=0
+
+# Passes llama.cpp/Qwen chat template kwargs to disable hidden thinking only in
+# fast path. This is what makes simple "OK" style replies actually fast.
+# Allowed values: true, false
+ALPHARAVIS_FAST_PATH_DISABLE_THINKING=true
+
+# If true, appends a visible Run-Profile message after replies. Normally keep
+# false and inspect run_profile in LangGraph Studio/DeepAgents UI instead.
+# Allowed values: true, false
+ALPHARAVIS_SHOW_RUN_PROFILE=false
+
+# Loads optional MCP tools during graph construction.
+# Default false because MCP loading can add seconds to every request. The native
+# Pixelle HTTP tool still works without this.
+# Allowed values: true, false
+ALPHARAVIS_LOAD_MCP_TOOLS=false
 
 # Enables Redis-backed LLM cache for repeated identical LLM calls.
 # Recommended during development: false, so responses do not feel stale.

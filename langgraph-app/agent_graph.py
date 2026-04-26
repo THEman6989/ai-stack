@@ -57,6 +57,8 @@ except Exception:  # pragma: no cover - older local CLI imports
 class AlphaRavisState(MessagesState):
     active_agent: NotRequired[str]
     active_skill_context: NotRequired[str]
+    fast_path_route: NotRequired[str]
+    run_profile: NotRequired[dict[str, Any]]
     thread_id: NotRequired[str]
     thread_key: NotRequired[str]
     context_summary: NotRequired[str]
@@ -100,19 +102,71 @@ COMPRESSION_PAUSE_PATTERNS = [
     "skip compression",
     "no compression",
 ]
+FAST_PATH_DENY_PATTERNS = [
+    "agent",
+    "alpha ravis",
+    "alpharavis",
+    "archiv",
+    "architecture",
+    "code",
+    "comfy",
+    "context",
+    "debug",
+    "deepagents",
+    "docker",
+    "dokument",
+    "datei",
+    "fehl",
+    "git",
+    "image",
+    "install",
+    "kompression",
+    "log",
+    "memory",
+    "mcp",
+    "pc",
+    "pdf",
+    "pixelle",
+    "python",
+    "recherche",
+    "research",
+    "server",
+    "shell",
+    "ssh",
+    "starte",
+    "starten",
+    "shutdown",
+    "suche",
+    "terminal",
+    "tool",
+    "wake",
+    "was kannst du",
+    "wer bist",
+    "wol",
+]
+FAST_PATH_FORCE_PATTERNS = [
+    "fast path",
+    "ohne tools",
+    "nur chat",
+    "simple chat",
+]
 
 if not COMFY_IP:
     print("WARNING: 'comfy_server' IP not found in REMOTE_PCS env variable.")
 
 
-def _model() -> ChatLiteLLM:
+def _env_bool(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).lower() in {"1", "true", "yes"}
+
+
+def _model(model_name: str | None = None, timeout_seconds: float | None = None) -> ChatLiteLLM:
     return ChatLiteLLM(
-        model=os.getenv("ALPHARAVIS_MODEL", "openai/big-boss"),
+        model=model_name or os.getenv("ALPHARAVIS_MODEL", "openai/big-boss"),
         api_base=os.getenv("OPENAI_API_BASE", "http://litellm:4000/v1"),
         api_key=os.getenv("OPENAI_API_KEY", "sk-local-dev"),
-        request_timeout=float(os.getenv("ALPHARAVIS_LLM_TIMEOUT_SECONDS", "120")),
+        request_timeout=timeout_seconds or float(os.getenv("ALPHARAVIS_LLM_TIMEOUT_SECONDS", "120")),
         max_retries=int(os.getenv("ALPHARAVIS_LLM_MAX_RETRIES", "0")),
-        streaming=os.getenv("ALPHARAVIS_LLM_STREAMING", "true").lower() in {"1", "true", "yes"},
+        streaming=_env_bool("ALPHARAVIS_LLM_STREAMING", "true"),
     )
 
 
@@ -740,10 +794,43 @@ async def record_skill_candidate(
 
 
 @tool
+async def list_skill_candidates(query: str = "", limit: int = 20, include_active: bool = True):
+    """List workflow skill candidates for human review."""
+
+    if get_store is None:
+        return "LangGraph store access is unavailable in this runtime."
+
+    try:
+        store = get_store()
+    except Exception as exc:
+        return f"No LangGraph store is attached to this run: {exc}"
+
+    limit = max(1, min(int(limit), 50))
+    try:
+        results = await _maybe_search(store, SKILL_LIBRARY_NS, query=query, limit=limit)
+    except Exception as exc:
+        return f"Skill-library listing failed: {exc}"
+
+    lines = []
+    for item in results or []:
+        key = _store_item_key(item)
+        value = _store_item_value(item)
+        if not isinstance(value, dict):
+            continue
+        if not include_active and value.get("status") == "active":
+            continue
+        lines.append(_format_skill_record(key, value))
+
+    if not lines:
+        return "No skill candidates matched that review query."
+    return "\n\n".join(lines)
+
+
+@tool
 async def activate_skill_candidate(skill_id: str, approval_note: str = ""):
     """Promote a reviewed skill candidate to active when promotion is explicitly enabled."""
 
-    if os.getenv("ALPHARAVIS_ALLOW_SKILL_PROMOTION", "false").lower() not in {"1", "true", "yes"}:
+    if not _env_bool("ALPHARAVIS_ALLOW_SKILL_PROMOTION", "false"):
         return (
             "Skill promotion is disabled for safety. Set "
             "ALPHARAVIS_ALLOW_SKILL_PROMOTION=true only while intentionally "
@@ -770,6 +857,39 @@ async def activate_skill_candidate(skill_id: str, approval_note: str = ""):
     value["approval_note"] = approval_note.strip()[:1200]
     await _maybe_put(store, SKILL_LIBRARY_NS, skill_id, value)
     return f"Activated skill `{skill_id}`."
+
+
+@tool
+async def deactivate_skill(skill_id: str, reason: str = ""):
+    """Deactivate an active workflow skill during explicit review mode."""
+
+    if not _env_bool("ALPHARAVIS_ALLOW_SKILL_PROMOTION", "false"):
+        return (
+            "Skill activation/deactivation is disabled for safety. Set "
+            "ALPHARAVIS_ALLOW_SKILL_PROMOTION=true only while intentionally "
+            "reviewing skills."
+        )
+
+    if get_store is None:
+        return "LangGraph store access is unavailable in this runtime."
+
+    try:
+        store = get_store()
+    except Exception as exc:
+        return f"No LangGraph store is attached to this run: {exc}"
+
+    item = await _maybe_get(store, SKILL_LIBRARY_NS, skill_id)
+    value = _store_item_value(item)
+    if not isinstance(value, dict):
+        return f"Skill `{skill_id}` was not found."
+
+    value = dict(value)
+    value["status"] = "candidate"
+    value["active"] = False
+    value["deactivated_at"] = int(time.time())
+    value["deactivation_reason"] = reason.strip()[:1200]
+    await _maybe_put(store, SKILL_LIBRARY_NS, skill_id, value)
+    return f"Deactivated skill `{skill_id}`."
 
 
 async def _load_pixelle_mcp_tools(stack: contextlib.AsyncExitStack) -> list[Any]:
@@ -938,15 +1058,145 @@ def _latest_user_query(messages: list[Any]) -> str:
 
 
 def _compression_paused_by_user(messages: list[Any]) -> bool:
-    if os.getenv("ALPHARAVIS_ALLOW_USER_COMPRESSION_PAUSE", "true").lower() not in {
-        "1",
-        "true",
-        "yes",
-    }:
+    if not _env_bool("ALPHARAVIS_ALLOW_USER_COMPRESSION_PAUSE", "true"):
         return False
 
     latest = _latest_user_query(messages).lower()
     return any(pattern in latest for pattern in COMPRESSION_PAUSE_PATTERNS)
+
+
+def _profile_update(state: AlphaRavisState, **updates: Any) -> dict[str, Any]:
+    profile = dict(state.get("run_profile") or {})
+    profile.update(updates)
+    return profile
+
+
+def _fast_path_decision(messages: list[Any]) -> tuple[bool, str]:
+    if not _env_bool("ALPHARAVIS_ENABLE_FAST_PATH", "true"):
+        return False, "fast path disabled"
+
+    query = _latest_user_query(messages).strip()
+    if not query:
+        return False, "no user query"
+
+    lowered = query.lower()
+    if "kein fast path" in lowered or "no fast path" in lowered:
+        return False, "user disabled fast path"
+
+    deny_hits = [pattern for pattern in FAST_PATH_DENY_PATTERNS if pattern in lowered]
+    if deny_hits:
+        return False, f"agent/tool keyword: {deny_hits[0]}"
+
+    max_chars = int(os.getenv("ALPHARAVIS_FAST_PATH_MAX_CHARS", "360"))
+    if len(query) > max_chars:
+        return False, f"query too long: {len(query)} chars"
+
+    if any(pattern in lowered for pattern in FAST_PATH_FORCE_PATTERNS):
+        return True, "explicit simple chat request"
+
+    return True, "short non-tool chat"
+
+
+async def run_profile_start_node(state: AlphaRavisState) -> dict[str, Any]:
+    messages = list(state.get("messages", []))
+    return {
+        "run_profile": {
+            "started_at": time.time(),
+            "latest_user_chars": len(_latest_user_query(messages)),
+            "message_count": len(messages),
+            "token_estimate": _estimate_tokens(messages),
+        }
+    }
+
+
+async def route_decision_node(state: AlphaRavisState) -> dict[str, Any]:
+    use_fast_path, reason = _fast_path_decision(list(state.get("messages", [])))
+    route = "fast_path" if use_fast_path else "swarm"
+    return {
+        "fast_path_route": route,
+        "run_profile": _profile_update(
+            state,
+            route=route,
+            route_reason=reason,
+            route_decided_at=time.time(),
+        ),
+    }
+
+
+def route_after_decision(state: AlphaRavisState) -> str:
+    return "fast_path" if state.get("fast_path_route") == "fast_path" else "swarm"
+
+
+def _fast_path_bind_kwargs(*, allow_chat_template_kwargs: bool) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "max_tokens": int(os.getenv("ALPHARAVIS_FAST_PATH_MAX_TOKENS", "256")),
+        "temperature": float(os.getenv("ALPHARAVIS_FAST_PATH_TEMPERATURE", "0")),
+    }
+    if allow_chat_template_kwargs and _env_bool("ALPHARAVIS_FAST_PATH_DISABLE_THINKING", "true"):
+        kwargs["chat_template_kwargs"] = {"enable_thinking": False}
+    return kwargs
+
+
+async def fast_chat_node(state: AlphaRavisState) -> dict[str, Any]:
+    messages = list(state.get("messages", []))
+    prompt = SystemMessage(
+        content=(
+            "You are AlphaRavis in direct fast-chat mode. Answer the user "
+            "normally and concisely. Do not claim to browse, inspect files, "
+            "use tools, control PCs, or access archives in this mode. If the "
+            "request requires tools, say it needs the agent path."
+        )
+    )
+    started = time.time()
+    primary_model = os.getenv("ALPHARAVIS_MODEL", "openai/big-boss")
+    used_model = primary_model
+    fallback_used = False
+    fallback_error = ""
+
+    try:
+        primary_llm = _model(
+            model_name=primary_model,
+            timeout_seconds=float(os.getenv("ALPHARAVIS_FAST_PATH_PRIMARY_TIMEOUT_SECONDS", "20")),
+        ).bind(**_fast_path_bind_kwargs(allow_chat_template_kwargs=True))
+        response = await primary_llm.ainvoke([prompt, *messages])
+    except Exception as exc:
+        fallback_error = str(exc)
+        fallback_model = os.getenv("ALPHARAVIS_FAST_PATH_FALLBACK_MODEL", "openai/edge-gemma")
+        if not _env_bool("ALPHARAVIS_FAST_PATH_ENABLE_FALLBACK", "true") or not fallback_model:
+            raise
+        fallback_used = True
+        used_model = fallback_model
+        fallback_llm = _model(
+            model_name=fallback_model,
+            timeout_seconds=float(os.getenv("ALPHARAVIS_FAST_PATH_FALLBACK_TIMEOUT_SECONDS", "45")),
+        ).bind(**_fast_path_bind_kwargs(allow_chat_template_kwargs=False))
+        response = await fallback_llm.ainvoke([prompt, *messages])
+
+    response_content = getattr(response, "content", "")
+    if isinstance(response_content, list):
+        response_content = " ".join(str(block) for block in response_content)
+    if not str(response_content).strip():
+        response = AIMessage(
+            content=(
+                "Der schnelle Chat-Pfad hat keine finale Modellantwort erhalten. "
+                "Bitte wiederhole die Anfrage mit `kein fast path`, falls der "
+                "Agentenpfad genutzt werden soll."
+            )
+        )
+
+    profile_updates: dict[str, Any] = {
+        "route": "fast_path",
+        "fast_path_model": used_model,
+        "fast_path_fallback_used": fallback_used,
+        "fast_path_seconds": round(time.time() - started, 3),
+    }
+    if fallback_error:
+        profile_updates["fast_path_primary_error"] = fallback_error[:300]
+
+    return {
+        "messages": [response],
+        "run_profile": _profile_update(state, **profile_updates),
+    }
 
 
 async def _summarize_messages(
@@ -1238,7 +1488,7 @@ async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None)
 
 
 async def memory_notice_node(state: AlphaRavisState) -> dict[str, Any]:
-    if os.getenv("ALPHARAVIS_SHOW_MEMORY_NOTICES", "true").lower() not in {"1", "true", "yes"}:
+    if not _env_bool("ALPHARAVIS_SHOW_MEMORY_NOTICES", "true"):
         return {}
 
     notice = state.get("memory_notice")
@@ -1252,6 +1502,35 @@ async def memory_notice_node(state: AlphaRavisState) -> dict[str, Any]:
     return {
         "messages": [AIMessage(content=f"\n\nMemory-Notice: {notice}", id=message_id)],
         "memory_notice_seen_key": notice_key,
+    }
+
+
+async def run_profile_finish_node(state: AlphaRavisState) -> dict[str, Any]:
+    profile = dict(state.get("run_profile") or {})
+    started_at = profile.get("started_at")
+    if isinstance(started_at, (int, float)):
+        profile["total_seconds"] = round(time.time() - started_at, 3)
+    profile["finished_at"] = time.time()
+
+    if not _env_bool("ALPHARAVIS_SHOW_RUN_PROFILE", "false"):
+        return {"run_profile": profile}
+
+    summary = (
+        "\n\nRun-Profile: "
+        f"route={profile.get('route', 'unknown')}; "
+        f"total={profile.get('total_seconds', '?')}s; "
+        f"reason={profile.get('route_reason', 'n/a')}; "
+        f"messages={profile.get('message_count', '?')}; "
+        f"tokens~={profile.get('token_estimate', '?')}"
+    )
+    if profile.get("fast_path_seconds") is not None:
+        summary += f"; fast_path_llm={profile['fast_path_seconds']}s"
+    if profile.get("fast_path_fallback_used"):
+        summary += f"; fallback={profile.get('fast_path_model')}"
+
+    return {
+        "run_profile": profile,
+        "messages": [AIMessage(content=summary, id=f"alpharavis_run_profile_{int(time.time())}")],
     }
 
 
@@ -1291,6 +1570,7 @@ def _create_debugger_subgraph(llm: ChatLiteLLM, handoff_tools: list[Any]):
             execute_local_command,
             fast_web_search,
             search_skill_library,
+            list_skill_candidates,
             search_debugging_lessons,
             record_debugging_lesson,
             record_skill_candidate,
@@ -1399,8 +1679,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             create_manage_memory_tool(namespace=("memories",)),
             create_search_memory_tool(namespace=("memories",)),
             search_skill_library,
+            list_skill_candidates,
             record_skill_candidate,
             activate_skill_candidate,
+            deactivate_skill,
             transfer_to_research,
             transfer_to_ui,
             transfer_to_debugger,
@@ -1437,6 +1719,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             search_archived_context,
             search_debugging_lessons,
             search_skill_library,
+            list_skill_candidates,
             read_alpha_ravis_architecture,
             transfer_to_generalist,
             transfer_to_research,
@@ -1460,21 +1743,36 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     ).compile(store=store)
 
     builder = StateGraph(AlphaRavisState)
+    builder.add_node("run_profile_start", run_profile_start_node)
     builder.add_node("context_guard_before", context_guard_node)
+    builder.add_node("route_decision", route_decision_node)
+    builder.add_node("fast_chat", fast_chat_node)
     builder.add_node("skill_library", skill_library_node)
     builder.add_node("alpha_ravis_swarm", swarm)
     builder.add_node("context_guard_after", context_guard_node)
     builder.add_node("memory_notice", memory_notice_node)
-    builder.add_edge(START, "context_guard_before")
-    builder.add_edge("context_guard_before", "skill_library")
+    builder.add_node("run_profile_finish", run_profile_finish_node)
+    builder.add_edge(START, "run_profile_start")
+    builder.add_edge("run_profile_start", "context_guard_before")
+    builder.add_edge("context_guard_before", "route_decision")
+    builder.add_conditional_edges(
+        "route_decision",
+        route_after_decision,
+        {"fast_path": "fast_chat", "swarm": "skill_library"},
+    )
+    builder.add_edge("fast_chat", "context_guard_after")
     builder.add_edge("skill_library", "alpha_ravis_swarm")
     builder.add_edge("alpha_ravis_swarm", "context_guard_after")
     builder.add_edge("context_guard_after", "memory_notice")
-    builder.add_edge("memory_notice", END)
+    builder.add_edge("memory_notice", "run_profile_finish")
+    builder.add_edge("run_profile_finish", END)
     return builder.compile(store=store)
 
 
 def _should_load_mcp(runtime: Any) -> bool:
+    if not _env_bool("ALPHARAVIS_LOAD_MCP_TOOLS", "false"):
+        return False
+
     if runtime is None:
         return True
 

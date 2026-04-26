@@ -20,12 +20,6 @@ model_list:
       stream_timeout: os.environ/BIG_BOSS_STREAM_TIMEOUT_SECONDS
       max_retries: 0
 
-router_settings:
-  fallbacks: [{"big-boss": ["edge-gemma"]}]
-  cooldown_time: os.environ/LITELLM_COOLDOWN_TIME_SECONDS
-  allowed_fails_policy:
-    TimeoutErrorAllowedFails: 1
-
 litellm_settings:
   num_retries: os.environ/LITELLM_NUM_RETRIES
   request_timeout: os.environ/LITELLM_REQUEST_TIMEOUT_SECONDS

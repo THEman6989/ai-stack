@@ -4,6 +4,19 @@
 
 This repository combines RAG, agentic workflows (LangGraph), model routing (LiteLLM), code execution (MCP/OpenCode), and a modern chat interface (LibreChat / LangFlow).
 
+## Current AlphaRavis Notes
+
+- Human usage guide: [`docs/ALPHARAVIS_USAGE_NOTES.md`](docs/ALPHARAVIS_USAGE_NOTES.md)
+- Architecture/capability guide: [`docs/ALPHARAVIS_ARCHITECTURE.md`](docs/ALPHARAVIS_ARCHITECTURE.md)
+
+Important current behavior:
+
+- Simple non-tool chat can use the fast path and skip the swarm.
+- Complex tool, debug, memory, research, Pixelle, code, SSH, Docker, and PC-control tasks use the agent path.
+- `edge-gemma` is only a small starter/crisis fallback for simple fast-path chat, not a second boss for complex workflows.
+- Optional MCP tool loading is off by default to avoid slowing every chat.
+- Risky local or SSH commands require approval before execution.
+
 ## ✨ Key Features
 
 - 💬 **LibreChat Frontend:** A ChatGPT-like UI acting as the primary interface for all your agents.
