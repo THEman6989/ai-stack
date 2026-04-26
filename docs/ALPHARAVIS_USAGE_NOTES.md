@@ -210,6 +210,70 @@ ALPHARAVIS_MANUAL_COMPRESSION_PATTERNS=komprimiere jetzt|archive now
 Archive search is thread-scoped by default. Other chat archives are searched
 only when you explicitly ask for cross-thread archive search.
 
+## MemoryKernel
+
+The MemoryKernel is the small learning layer inspired by Hermes.
+
+It runs only on the normal agent path. It does not run on Fast Path.
+
+What it does:
+
+- loads tiny curated memories when they match the current turn,
+- reminds agents every few turns to save useful durable facts,
+- indexes finished turns for later search,
+- helps compression preserve memory-worthy details.
+
+Useful settings:
+
+```text
+ALPHARAVIS_ENABLE_MEMORY_KERNEL=true
+ALPHARAVIS_MEMORY_NUDGE_INTERVAL=10
+ALPHARAVIS_ALWAYS_MEMORY_MAX_ITEMS=6
+ALPHARAVIS_ALWAYS_MEMORY_MAX_CHARS=2200
+```
+
+Curated memory is for compact stable facts, not full chat history. Good
+examples:
+
+```text
+User prefers concise German explanations.
+The big llama.cpp server is the preferred backend for complex work.
+Pixelle failures should first check job status before SSH debugging.
+```
+
+Long logs, reports, or implementation notes should go to artifacts instead.
+
+## Session Search And Artifacts
+
+AlphaRavis now keeps an indexed per-turn history, similar in spirit to Hermes
+session search.
+
+Agents can search it with:
+
+```text
+search_session_history
+```
+
+Current-thread search is default. Other threads are searched only when the user
+explicitly asks for it.
+
+Artifacts are disk-backed files for large outputs:
+
+```text
+write_alpha_ravis_artifact
+read_alpha_ravis_artifact
+list_alpha_ravis_artifacts
+```
+
+Default artifact root:
+
+```text
+/workspace/artifacts/alpharavis
+```
+
+Use artifacts when a result is too large for chat but should still be
+recoverable later.
+
 ## Agent-Specific Memories
 
 Agents also have scoped durable memories:
@@ -298,6 +362,9 @@ Already available:
 - fast-path hidden-thinking disable for llama.cpp/Qwen-style models
 - visible fast-path notices and thread lockout after agent path
 - agent-specific and global memory tools
+- MemoryKernel with curated always-memory, turn indexing, and compression hints
+- session-history search over indexed turns
+- disk-backed AlphaRavis artifacts for large reports/logs/plans
 - thread-scoped memory archives
 - manual one-run chat compression
 - structured specialist reports for research/debug/context handoffs

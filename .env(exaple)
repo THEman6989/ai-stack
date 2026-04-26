@@ -271,6 +271,45 @@ ALPHARAVIS_ARCHIVE_SEARCH_LIMIT=5
 # through include_other_threads=true.
 ALPHARAVIS_CROSS_THREAD_ARCHIVE_SEARCH_LIMIT=3
 
+# Enables the Hermes-inspired AlphaRavis MemoryKernel.
+# The kernel only runs on the normal agent path, not on Fast Path.
+# It prefetches small curated memories, adds memory nudges, indexes finished
+# turns for later search, and feeds durable hints into compression.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_MEMORY_KERNEL=true
+
+# Number of user turns between invisible memory nudges to the agents.
+# Set 0 to disable nudges.
+ALPHARAVIS_MEMORY_NUDGE_INTERVAL=10
+
+# If true, possible durable facts from old messages are passed into the
+# compression prompt so summaries preserve memory-worthy details.
+# Allowed values: true, false
+ALPHARAVIS_MEMORY_KERNEL_PRECOMPRESS_NOTES=true
+
+# Curated memory is the small always-retrievable layer inspired by Hermes
+# MEMORY.md/USER.md. It is separate from raw chat archives and from LangMem.
+ALPHARAVIS_ALWAYS_MEMORY_MAX_ITEMS=6
+ALPHARAVIS_ALWAYS_MEMORY_MAX_CHARS=2200
+ALPHARAVIS_CURATED_MEMORY_ENTRY_MAX_CHARS=1200
+ALPHARAVIS_CURATED_MEMORY_SEARCH_LIMIT=5
+
+# Indexed session-history search, inspired by Hermes SQLite/FTS5 session search.
+# Current-thread search is default; cross-thread search only happens when a tool
+# call explicitly sets include_other_threads=true.
+ALPHARAVIS_SESSION_SEARCH_LIMIT=5
+ALPHARAVIS_CROSS_THREAD_SESSION_SEARCH_LIMIT=3
+
+# Disk-backed artifacts for long reports, logs, plans, or intermediate notes.
+# Agents should write large material here and keep only a short summary in chat.
+# Inside Docker, /workspace/artifacts/alpharavis is the default.
+ALPHARAVIS_ENABLE_ARTIFACTS=true
+ALPHARAVIS_ARTIFACT_ROOT=/workspace/artifacts/alpharavis
+ALPHARAVIS_ARTIFACT_MAX_CHARS=120000
+ALPHARAVIS_ARTIFACT_INDEX_PREVIEW_CHARS=4000
+ALPHARAVIS_ARTIFACT_READ_MAX_CHARS=24000
+ALPHARAVIS_ARTIFACT_LIST_LIMIT=10
+
 # Editable on-demand self-description. Agents do not inject this into every
 # chat; they read it only when asked about AlphaRavis itself.
 ALPHARAVIS_ARCHITECTURE_DOC_PATH=/workspace/docs/ALPHARAVIS_ARCHITECTURE.md

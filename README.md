@@ -19,6 +19,7 @@ Important current behavior:
 - Optional MCP tool loading is off by default to avoid slowing every chat.
 - MCP uses DeepAgents-style `mcp.json` config, with stdio servers disabled by default.
 - Hermes can be used directly from LibreChat or as an optional bounded coding/system sub-agent inside AlphaRavis.
+- A Hermes-inspired MemoryKernel keeps curated always-memory small, indexes turns for search, and writes large notes to artifacts.
 - Agents can inspect a lazy optional-tool manifest and use scoped agent/global memories.
 - Reviewed repo skill cards live in `ai-skills/`, starting with DeepAgents agent-building and research workflows, and can be read on demand by AlphaRavis.
 - Risky local or SSH commands require approval before execution.

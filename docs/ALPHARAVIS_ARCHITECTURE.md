@@ -173,8 +173,10 @@ START
   -> run_profile_start
   -> context_guard_before
   -> route_decision
-  -> fast_chat OR skill_library
+  -> fast_chat OR memory_kernel_before
+  -> skill_library when the agent path is selected
   -> alpha_ravis_swarm when the agent path is selected
+  -> memory_kernel_after when the agent path is selected
   -> context_guard_after
   -> memory_notice
   -> run_profile_finish
@@ -271,6 +273,29 @@ Capabilities:
 
 AlphaRavis has multiple memory layers.
 
+### MemoryKernel
+
+The MemoryKernel is the Hermes-inspired learning layer around the LangGraph
+swarm. It is not a replacement for checkpointing.
+
+On the normal agent path it does four small jobs:
+
+1. Prefetches tiny curated memories that match the current turn.
+2. Adds an invisible memory nudge every `ALPHARAVIS_MEMORY_NUDGE_INTERVAL`
+   user turns.
+3. Indexes completed turns into a thread-scoped session-history namespace.
+4. Gives compression a small list of memory-worthy details to preserve.
+
+Fast Path skips the MemoryKernel so simple chat stays cheap.
+
+Relevant settings:
+
+```text
+ALPHARAVIS_ENABLE_MEMORY_KERNEL=true
+ALPHARAVIS_MEMORY_NUDGE_INTERVAL=10
+ALPHARAVIS_MEMORY_KERNEL_PRECOMPRESS_NOTES=true
+```
+
 ### LangGraph Checkpoints
 
 LangGraph checkpointing stores thread state. This includes message state,
@@ -298,6 +323,65 @@ alpharavis / agent_memories / global
 Agents are instructed to search their own memory first and global memory second.
 Global memory is for stable cross-agent preferences or lessons. Agent-specific
 memory is for habits, recurring issues, or lessons that belong to one role.
+
+### Curated Always Memory
+
+Curated memory is the small Hermes-style memory layer. It is separate from raw
+chat archives and separate from long LangMem memories.
+
+Curated memory should contain only stable facts:
+
+- user preferences,
+- environment facts,
+- recurring tool quirks,
+- lessons that reduce future correction.
+
+It should not contain long logs, one-off task progress, or full procedures.
+Those belong in thread archives, artifacts, or skills.
+
+Agents can use:
+
+```text
+search_curated_memory
+record_curated_memory
+```
+
+The MemoryKernel may inject a tiny matching curated-memory block into the
+agent path. It is fenced as background context, not user input.
+
+Default limits:
+
+```text
+ALPHARAVIS_ALWAYS_MEMORY_MAX_ITEMS=6
+ALPHARAVIS_ALWAYS_MEMORY_MAX_CHARS=2200
+ALPHARAVIS_CURATED_MEMORY_ENTRY_MAX_CHARS=1200
+```
+
+### Session-History Search
+
+Hermes uses SQLite + FTS5 for past-session recall. AlphaRavis now mirrors that
+pattern through the LangGraph Store:
+
+```text
+alpharavis / threads / <thread_id> / session_turns
+alpharavis / session_turn_index
+```
+
+The normal search mode is current-thread only. Cross-thread search is available
+only when a tool call explicitly sets `include_other_threads=true`.
+
+The implementation uses LangGraph Store search, so it can benefit from the
+active store backend's text or vector search behavior without dumping whole
+threads into the prompt.
+
+Agents can use:
+
+```text
+search_session_history
+```
+
+This is useful when the user says things like "what did we do earlier in this
+chat?" without loading the whole raw archive.
 
 ### Debugging Lessons
 
@@ -415,6 +499,29 @@ ALPHARAVIS_ARCHIVE_KEEP_RECENT_RECORDS=8
 
 Raw archive records are not deleted. Archive collections are summaries with
 references to child archive keys.
+
+### Artifacts
+
+Long reports, logs, plans, and intermediate notes should go to artifacts
+instead of chat. Artifacts are disk-backed and indexed in the LangGraph Store.
+
+Default root:
+
+```text
+/workspace/artifacts/alpharavis
+```
+
+Agents can use:
+
+```text
+write_alpha_ravis_artifact
+read_alpha_ravis_artifact
+list_alpha_ravis_artifacts
+```
+
+Artifacts are thread-scoped by default, with optional cross-thread listing only
+when explicitly requested. The artifact index stores metadata and a small
+preview; the full content stays on disk.
 
 ## Thread Isolation
 
