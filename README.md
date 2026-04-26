@@ -16,6 +16,7 @@ Important current behavior:
 - `edge-gemma` is only a small starter/crisis fallback for simple fast-path chat, not a second boss for complex workflows.
 - Fast-path replies are visibly marked, and a thread is locked out of fast path after it uses the normal agent path.
 - Optional MCP tool loading is off by default to avoid slowing every chat.
+- MCP uses DeepAgents-style `mcp.json` config, with stdio servers disabled by default.
 - Agents can inspect a lazy optional-tool manifest and use scoped agent/global memories.
 - Reviewed repo skill cards live in `ai-skills/`, starting with DeepAgents agent-building and research workflows, and can be read on demand by AlphaRavis.
 - Risky local or SSH commands require approval before execution.

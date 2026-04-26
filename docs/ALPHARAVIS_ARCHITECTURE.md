@@ -32,6 +32,47 @@ The current Docker architecture is split into these main roles:
 - `rag_api`: local document search backend when available.
 - Pixelle/MCP services: image generation and Pixelle tool integration when available.
 
+## MCP Integration
+
+AlphaRavis uses a DeepAgents-style MCP configuration pattern.
+
+Default config:
+
+```text
+langgraph-app/mcp.json
+```
+
+The config uses the familiar shape:
+
+```json
+{
+  "mcpServers": {
+    "pixelle": {
+      "type": "sse",
+      "url": "${PIXELLE_URL}/pixelle/mcp/sse"
+    }
+  }
+}
+```
+
+MCP tools remain lazy by default:
+
+```text
+ALPHARAVIS_LOAD_MCP_TOOLS=false
+```
+
+When enabled, AlphaRavis loads configured MCP servers through
+`MultiServerMCPClient`, prefixes tool names by server when supported, records
+server/tool metadata for `describe_optional_tool_registry`, and keeps stdio MCP
+servers disabled unless explicitly trusted:
+
+```text
+ALPHARAVIS_MCP_ALLOW_STDIO=false
+```
+
+This keeps the useful DeepAgents MCP pattern without letting arbitrary project
+MCP configs start local processes by accident.
+
 ## Core Request Flow
 
 1. The user chats in LibreChat.
@@ -451,12 +492,13 @@ ALPHARAVIS_LOAD_MCP_TOOLS=false
 ```
 
 This avoids paying MCP startup cost on every simple chat. Native tools such as
-`start_pixelle_remote` remain available without loading the Pixelle MCP tool
-registry. Set the flag to `true` only when those extra MCP-provided tools are
-needed.
+`start_pixelle_remote`, `start_pixelle_async`, and `check_pixelle_job` remain
+available without loading the Pixelle MCP tool registry. Set the flag to `true`
+only when those extra MCP-provided tools are needed.
 
-Agents can call `describe_optional_tool_registry` to see that Pixelle MCP exists
-and how it is enabled without loading the registry during normal graph startup.
+Agents can call `describe_optional_tool_registry` to see configured MCP servers,
+load status, warning messages, and loaded tool names without loading the
+registry during normal graph startup.
 
 The normal agent path remains:
 

@@ -21,7 +21,6 @@ from langchain_core.messages import AIMessage, BaseMessage, RemoveMessage, Syste
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langchain_litellm import ChatLiteLLM
-from langchain_mcp_adapters.tools import load_mcp_tools
 from langchain_redis import RedisCache
 from langgraph.func import task
 from langgraph.graph import END, START, MessagesState, StateGraph
@@ -29,8 +28,6 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import interrupt
 from langgraph_swarm import create_handoff_tool, create_swarm
 from langmem import create_manage_memory_tool, create_search_memory_tool
-from mcp import ClientSession
-from mcp.client.sse import sse_client
 from typing_extensions import NotRequired
 
 try:
@@ -172,6 +169,8 @@ OPTIONAL_TOOL_MANIFEST = [
         ),
     }
 ]
+MCP_SERVER_INFOS: list[dict[str, Any]] = []
+MCP_LOAD_WARNINGS: list[str] = []
 
 if not COMFY_IP:
     print("WARNING: 'comfy_server' IP not found in REMOTE_PCS env variable.")
@@ -944,7 +943,153 @@ def describe_optional_tool_registry():
                 ]
             )
         )
+
+    config, config_paths, config_warnings = _load_mcp_config_from_paths()
+    servers = config.get("mcpServers", {})
+    if config_paths:
+        lines.append("\nMCP config files:")
+        lines.extend(f"- {path}" for path in config_paths)
+
+    if servers:
+        loaded_by_name = {info["name"]: info for info in MCP_SERVER_INFOS}
+        lines.append("\nConfigured MCP servers:")
+        for name, server_config in servers.items():
+            transport = _mcp_transport(server_config)
+            loaded = loaded_by_name.get(name)
+            if loaded:
+                tool_names = [tool_info["name"] for tool_info in loaded.get("tools", [])]
+                shown = ", ".join(tool_names[:10]) if tool_names else "no tools"
+                if len(tool_names) > 10:
+                    shown += f", and {len(tool_names) - 10} more"
+                lines.append(f"- {name} ({transport}, loaded): {shown}")
+            else:
+                status = (
+                    "configured; not loaded because ALPHARAVIS_LOAD_MCP_TOOLS=false"
+                    if not _env_bool("ALPHARAVIS_LOAD_MCP_TOOLS", "false")
+                    else "configured; load failed or not connected"
+                )
+                lines.append(f"- {name} ({transport}): {status}")
+
+    warnings = list(dict.fromkeys([*config_warnings, *MCP_LOAD_WARNINGS]))
+    if warnings:
+        lines.append("\nMCP warnings:")
+        lines.extend(f"- {warning}" for warning in warnings[:8])
     return "\n\n".join(lines)
+
+
+def _mcp_transport(server_config: dict[str, Any]) -> str:
+    return str(server_config.get("type", server_config.get("transport", "stdio"))).lower()
+
+
+def _resolve_mcp_path(value: str) -> Path:
+    expanded = os.path.expandvars(value.strip())
+    path = Path(expanded).expanduser()
+    if path.is_absolute():
+        return path
+    return Path(_workspace_root()) / path
+
+
+def _mcp_config_candidate_paths() -> list[Path]:
+    paths: list[Path] = [
+        Path.home() / ".deepagents" / ".mcp.json",
+        Path(_workspace_root()) / ".deepagents" / ".mcp.json",
+        Path(_workspace_root()) / ".mcp.json",
+        Path(__file__).resolve().with_name("mcp.json"),
+    ]
+
+    extra_paths = os.getenv("ALPHARAVIS_MCP_CONFIG_PATHS", "")
+    for value in extra_paths.split("|"):
+        if value.strip():
+            paths.append(_resolve_mcp_path(value))
+
+    explicit_path = os.getenv("ALPHARAVIS_MCP_CONFIG_PATH", "")
+    if explicit_path.strip():
+        paths.append(_resolve_mcp_path(explicit_path))
+
+    unique: list[Path] = []
+    seen = set()
+    for path in paths:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
+
+
+def _expand_mcp_config_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return os.path.expandvars(value.replace("${PIXELLE_URL}", PIXELLE_URL.rstrip("/")))
+    if isinstance(value, list):
+        return [_expand_mcp_config_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _expand_mcp_config_value(item) for key, item in value.items()}
+    return value
+
+
+def _load_mcp_config_from_paths() -> tuple[dict[str, Any], list[str], list[str]]:
+    allow_stdio = _env_bool("ALPHARAVIS_MCP_ALLOW_STDIO", "false")
+    servers: dict[str, dict[str, Any]] = {}
+    config_paths: list[str] = []
+    warnings: list[str] = []
+
+    for path in _mcp_config_candidate_paths():
+        if not path.is_file():
+            continue
+        config_paths.append(str(path))
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            warnings.append(f"{path}: could not parse MCP config: {exc}")
+            continue
+
+        raw_servers = raw.get("mcpServers", {})
+        if not isinstance(raw_servers, dict):
+            warnings.append(f"{path}: MCP config must contain object field `mcpServers`.")
+            continue
+
+        for name, server_config in raw_servers.items():
+            if not isinstance(server_config, dict):
+                warnings.append(f"{path}: MCP server `{name}` config must be an object.")
+                continue
+            server_config = _expand_mcp_config_value(server_config)
+            transport = _mcp_transport(server_config)
+            if transport == "stdio" and not allow_stdio:
+                warnings.append(
+                    f"{path}: skipped stdio MCP server `{name}`. "
+                    "Set ALPHARAVIS_MCP_ALLOW_STDIO=true only for trusted configs."
+                )
+                continue
+            if transport in {"http", "sse"} and not server_config.get("url"):
+                warnings.append(f"{path}: MCP server `{name}` missing `url`.")
+                continue
+            if transport == "stdio" and not server_config.get("command"):
+                warnings.append(f"{path}: MCP server `{name}` missing `command`.")
+                continue
+            if transport not in {"http", "sse", "stdio", "streamable_http"}:
+                warnings.append(f"{path}: MCP server `{name}` has unsupported transport `{transport}`.")
+                continue
+            servers[str(name)] = server_config
+
+    return {"mcpServers": servers}, config_paths, warnings
+
+
+def _mcp_connection_from_config(server_config: dict[str, Any]) -> dict[str, Any]:
+    transport = _mcp_transport(server_config)
+    if transport == "http":
+        transport = "streamable_http"
+
+    if transport in {"sse", "streamable_http"}:
+        connection = {"transport": transport, "url": server_config["url"]}
+        if server_config.get("headers"):
+            connection["headers"] = server_config["headers"]
+        return connection
+
+    return {
+        "transport": "stdio",
+        "command": server_config["command"],
+        "args": server_config.get("args", []),
+        "env": server_config.get("env") or None,
+    }
 
 
 @tool
@@ -1217,17 +1362,81 @@ async def deactivate_skill(skill_id: str, reason: str = ""):
     return f"Deactivated skill `{skill_id}`."
 
 
-async def _load_pixelle_mcp_tools(stack: contextlib.AsyncExitStack) -> list[Any]:
+async def _load_configured_mcp_tools(stack: contextlib.AsyncExitStack) -> list[Any]:
+    """Load configured MCP tools with DeepAgents-style config semantics."""
+
+    global MCP_LOAD_WARNINGS, MCP_SERVER_INFOS
+
+    MCP_LOAD_WARNINGS = []
+    MCP_SERVER_INFOS = []
+    strict = _env_bool("ALPHARAVIS_MCP_STRICT", "false")
+    tool_prefix = _env_bool("ALPHARAVIS_MCP_TOOL_PREFIX", "true")
+
+    config, _, warnings = _load_mcp_config_from_paths()
+    MCP_LOAD_WARNINGS.extend(warnings)
+    if strict and warnings:
+        raise RuntimeError("Invalid MCP config:\n" + "\n".join(warnings))
+
+    servers = config.get("mcpServers", {})
+    if not servers:
+        return []
+
+    connections = {
+        name: _mcp_connection_from_config(server_config)
+        for name, server_config in servers.items()
+    }
+
     try:
-        session_manager = sse_client(f"{PIXELLE_URL}/pixelle/mcp/sse")
-        streams = await stack.enter_async_context(session_manager)
-        session = ClientSession(*streams)
-        await session.initialize()
-        tools = await load_mcp_tools(session)
-        print(f"Loaded {len(tools)} Pixelle MCP tools.")
-        return list(tools)
+        from langchain_mcp_adapters.client import MultiServerMCPClient
+        from langchain_mcp_adapters.tools import load_mcp_tools
+
+        client = MultiServerMCPClient(connections)
+        all_tools = []
+        for server_name in sorted(connections):
+            server_config = servers[server_name]
+            try:
+                session = await stack.enter_async_context(client.session(server_name))
+                try:
+                    tools = await load_mcp_tools(
+                        session,
+                        server_name=server_name,
+                        tool_name_prefix=tool_prefix,
+                    )
+                except TypeError:
+                    tools = await load_mcp_tools(session)
+                tool_list = list(tools)
+                all_tools.extend(tool_list)
+                MCP_SERVER_INFOS.append(
+                    {
+                        "name": server_name,
+                        "transport": _mcp_transport(server_config),
+                        "tools": [
+                            {
+                                "name": getattr(mcp_tool, "name", "unknown"),
+                                "description": getattr(mcp_tool, "description", "") or "",
+                            }
+                            for mcp_tool in tool_list
+                        ],
+                    }
+                )
+            except Exception as exc:
+                message = f"MCP server `{server_name}` could not be loaded: {exc}"
+                MCP_LOAD_WARNINGS.append(message)
+                if strict:
+                    raise RuntimeError(message) from exc
+
+        all_tools.sort(key=lambda mcp_tool: getattr(mcp_tool, "name", ""))
+        if all_tools:
+            print(
+                f"Loaded {len(all_tools)} MCP tools from {len(MCP_SERVER_INFOS)} server(s)."
+            )
+        return all_tools
     except Exception as exc:
-        print(f"WARNING: Pixelle MCP tools unavailable: {exc}")
+        message = f"Configured MCP tools unavailable: {exc}"
+        MCP_LOAD_WARNINGS.append(message)
+        print(f"WARNING: {message}")
+        if strict:
+            raise
         return []
 
 
@@ -2264,7 +2473,7 @@ async def make_graph(runtime: ServerRuntime | None = None):
     async with contextlib.AsyncExitStack() as stack:
         mcp_tools = []
         if _should_load_mcp(runtime):
-            mcp_tools = await _load_pixelle_mcp_tools(stack)
+            mcp_tools = await _load_configured_mcp_tools(stack)
 
         store = getattr(runtime, "store", None) if runtime else None
         if store is None:

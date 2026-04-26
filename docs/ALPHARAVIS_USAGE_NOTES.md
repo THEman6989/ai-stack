@@ -48,12 +48,27 @@ Optional MCP tool loading is off by default:
 ALPHARAVIS_LOAD_MCP_TOOLS=false
 ```
 
-That prevents slow MCP startup from affecting every chat. The native Pixelle
-HTTP tool can still start Pixelle jobs without loading the extra MCP registry.
+That prevents slow MCP startup from affecting every chat. AlphaRavis now uses a
+DeepAgents-style MCP config loader: `mcp.json` / `.mcp.json` files describe
+servers, while the agent can inspect the server manifest before tools are
+loaded. The native Pixelle HTTP tool can still start Pixelle jobs without
+loading the extra MCP registry.
 
 Agents can still see a short manifest of optional registries through the
 `describe_optional_tool_registry` tool, so they know Pixelle MCP exists and how
 it can be enabled without paying the startup cost by default.
+
+Default MCP config:
+
+```text
+ALPHARAVIS_MCP_CONFIG_PATH=/workspace/langgraph-app/mcp.json
+ALPHARAVIS_MCP_TOOL_PREFIX=true
+ALPHARAVIS_MCP_ALLOW_STDIO=false
+ALPHARAVIS_MCP_STRICT=false
+```
+
+`ALPHARAVIS_MCP_ALLOW_STDIO=false` is intentional: stdio MCP can start local
+processes, so only remote HTTP/SSE MCP servers are trusted by default.
 
 For llama.cpp/Qwen-style models, fast path also disables hidden thinking with:
 
@@ -226,7 +241,7 @@ Already available:
 - run profile state
 - skill-library candidate listing and review-mode activation/deactivation
 - reviewed repo skill-card hints and on-demand skill-card reading
-- optional MCP loading disabled by default for faster simple chat
+- DeepAgents-style MCP config loading, disabled by default for faster simple chat
 - fast-path hidden-thinking disable for llama.cpp/Qwen-style models
 - visible fast-path notices and thread lockout after agent path
 - agent-specific and global memory tools

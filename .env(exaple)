@@ -117,6 +117,10 @@ OPENAI_MODEL_NAME=my-agent
 # Inside Docker, keep this as redis://redis:6379.
 REDIS_URL=redis://redis:6379
 
+# Pixelle service base URL used by native Pixelle tools and the default
+# DeepAgents-style MCP config at langgraph-app/mcp.json.
+PIXELLE_URL=http://pixelle:9004
+
 
 # =====================================================================
 # OPTIONAL REMOTE PC / SSH
@@ -345,6 +349,32 @@ ALPHARAVIS_SHOW_RUN_PROFILE=false
 # Pixelle HTTP tool still works without this.
 # Allowed values: true, false
 ALPHARAVIS_LOAD_MCP_TOOLS=false
+
+# Primary DeepAgents-style MCP config file.
+# Default in Docker:
+#   /workspace/langgraph-app/mcp.json
+# The default config exposes Pixelle MCP through SSE when MCP loading is enabled.
+ALPHARAVIS_MCP_CONFIG_PATH=/workspace/langgraph-app/mcp.json
+
+# Optional extra MCP config files, pipe-separated. Later files override earlier
+# server names. Example:
+#   /workspace/.mcp.json|/workspace/private-mcp.json
+ALPHARAVIS_MCP_CONFIG_PATHS=
+
+# Allows stdio MCP servers from config files. Keep false unless the config is
+# trusted, because stdio MCP can start local processes.
+# Allowed values: true, false
+ALPHARAVIS_MCP_ALLOW_STDIO=false
+
+# Prefix MCP tool names with the server name when the adapter supports it.
+# This avoids collisions when several MCP servers expose similar tool names.
+# Allowed values: true, false
+ALPHARAVIS_MCP_TOOL_PREFIX=true
+
+# If true, a broken MCP config/server fails graph startup. If false, AlphaRavis
+# logs the MCP warning and continues without those optional tools.
+# Allowed values: true, false
+ALPHARAVIS_MCP_STRICT=false
 
 # Enables Redis-backed LLM cache for repeated identical LLM calls.
 # Recommended during development: false, so responses do not feel stale.

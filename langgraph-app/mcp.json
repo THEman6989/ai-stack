@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "pixelle": {
+      "type": "sse",
+      "url": "${PIXELLE_URL}/pixelle/mcp/sse"
+    }
+  }
+}

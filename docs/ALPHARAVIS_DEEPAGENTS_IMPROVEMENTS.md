@@ -35,6 +35,12 @@ AlphaRavis already uses some of this: `create_deep_agent`, swarm agents, a debug
 6. Consider a manual `compact_conversation` command.
    AlphaRavis now supports one-run manual compression phrases such as `komprimiere jetzt` and returns the normal visible Memory-Notice.
 
+7. Adopt the DeepAgents MCP config pattern.
+   AlphaRavis now reads `mcp.json` / `.mcp.json` style MCP configs, loads tools
+   with `MultiServerMCPClient` only when lazy MCP loading is enabled, prefixes
+   tools by server where supported, exposes MCP metadata in
+   `describe_optional_tool_registry`, and keeps stdio MCP disabled by default.
+
 ## New Skill Card
 
 The reusable DeepAgents-derived skill cards live at:
