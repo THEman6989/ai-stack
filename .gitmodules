@@ -19,3 +19,7 @@
 	path = pixelle-mcp-custom
 	url = https://github.com/theman6989/pixelle-mcp-costom
 	branch = main
+[submodule "hermes-agent"]
+	path = hermes-agent
+	url = https://github.com/NousResearch/hermes-agent
+	branch = main

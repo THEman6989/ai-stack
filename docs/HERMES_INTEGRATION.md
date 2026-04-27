@@ -3,6 +3,35 @@
 Hermes is optional. AlphaRavis stays the LangGraph supervisor; Hermes is added
 as a strong coding/system specialist.
 
+## Docker Service
+
+Hermes is now part of the main Docker Compose stack as `hermes-agent`.
+The service is built from the `hermes-agent` Git submodule because no stable
+public Docker image was available under the expected GHCR name.
+
+Default endpoints:
+
+```text
+inside Docker: http://hermes-agent:8642/v1
+from host:     http://localhost:8642/v1
+```
+
+Important `.env` values:
+
+```text
+HERMES_API_BASE=http://hermes-agent:8642/v1
+HERMES_EXTERNAL_API_BASE=http://localhost:8642/v1
+HERMES_API_KEY=sk-hermes-local
+HERMES_MODEL=hermes-agent
+HERMES_INFERENCE_PROVIDER=custom
+HERMES_INFERENCE_MODEL=big-boss
+HERMES_OPENAI_BASE_URL=http://litellm:4000/v1
+HERMES_OPENAI_API_KEY=sk-local-dev
+```
+
+`HERMES_MODEL` is the model id advertised to LibreChat and AlphaRavis.
+`HERMES_INFERENCE_MODEL` is the real model Hermes uses behind the scenes.
+
 ## Modes
 
 ### Mode A: LibreChat To Hermes
@@ -10,16 +39,10 @@ as a strong coding/system specialist.
 LibreChat can talk directly to Hermes through the `Hermes Agent` custom endpoint
 in `librechat.yaml`.
 
-Start Hermes outside the stack:
-
-```bash
-API_SERVER_ENABLED=true API_SERVER_HOST=0.0.0.0 API_SERVER_PORT=8642 API_SERVER_KEY=sk-hermes-local hermes gateway
-```
-
 Docker-side config:
 
 ```text
-HERMES_API_BASE=http://host.docker.internal:8642/v1
+HERMES_API_BASE=http://hermes-agent:8642/v1
 HERMES_API_KEY=sk-hermes-local
 HERMES_MODEL=hermes-agent
 ```
@@ -91,17 +114,44 @@ Authorization: Bearer <BRIDGE_LANGGRAPH_TOOL_API_KEY>
 This endpoint rejects calls unless `explicit_user_request=true`, so Hermes can
 use LangGraph only when the user explicitly asks for it.
 
-## Windows Networking Note
+## LibreChat OpenAI Bucket
 
-The Docker services use `host.docker.internal` to reach Hermes on the host. On
-Linux this is mapped through `extra_hosts: host-gateway`.
+If LibreChat shows a separate `OpenAI` provider in addition to `LangGraph Agent`
+and `Hermes Agent`, it is usually because LibreChat inherited `OPENAI_API_KEY`
+from `.env` or has `OPENAI_REVERSE_PROXY` set.
 
-If Hermes binds only to `127.0.0.1`, Linux containers usually cannot reach it
-through the host-gateway address. Start Hermes with:
+The current Compose file keeps that generic bucket hidden by default:
 
 ```text
-API_SERVER_HOST=0.0.0.0
+LIBRECHAT_OPENAI_API_KEY=
+LIBRECHAT_OPENAI_REVERSE_PROXY=
 ```
 
-On Windows, if Hermes is running but unreachable from containers, check Windows
-Firewall rules for the Hermes Python process and port `8642`.
+The OpenAI-compatible bridge is still externally available at:
+
+```text
+http://localhost:8123/v1
+```
+
+If you intentionally want the generic LibreChat `OpenAI` entry to point at the
+AlphaRavis bridge, set:
+
+```text
+LIBRECHAT_OPENAI_API_KEY=sk-1234
+LIBRECHAT_OPENAI_REVERSE_PROXY=http://api-bridge:8123/v1
+```
+
+## Windows Networking Note
+
+The default Docker setup no longer needs `host.docker.internal` for Hermes
+because Hermes runs inside the same Compose network.
+
+If you run Hermes outside Docker instead, set:
+
+```text
+HERMES_API_BASE=http://host.docker.internal:8642/v1
+```
+
+and start Hermes with `API_SERVER_HOST=0.0.0.0`. On Windows, if a host-run
+Hermes is still unreachable from containers, check Windows Firewall rules for
+the Hermes Python process and port `8642`.

@@ -135,17 +135,36 @@ REDIS_URL=redis://redis:6379
 PIXELLE_URL=http://pixelle:9004
 
 # Hermes Agent OpenAI-compatible API.
-# Start Hermes separately, for example:
-#   API_SERVER_ENABLED=true API_SERVER_HOST=0.0.0.0 API_SERVER_PORT=8642 API_SERVER_KEY=sk-hermes-local hermes gateway
-# Docker services reach the host through host.docker.internal.
-HERMES_API_BASE=http://host.docker.internal:8642/v1
+# Docker default uses the built-in hermes-agent service. Host/browser clients
+# should use HERMES_EXTERNAL_API_BASE instead.
+HERMES_API_BASE=http://hermes-agent:8642/v1
+HERMES_EXTERNAL_API_BASE=http://localhost:8642/v1
 HERMES_API_KEY=sk-hermes-local
+
+# Model name advertised by the Hermes OpenAI-compatible API and used by
+# LibreChat/AlphaRavis when they call Hermes. This is not the underlying LLM.
 HERMES_MODEL=hermes-agent
 
 # Enables LangGraph -> Hermes as a bounded coding/system sub-agent.
 # Keep false until Hermes gateway is running and reachable.
 # Allowed values: true, false
 ALPHARAVIS_ENABLE_HERMES_AGENT=false
+
+# Docker Hermes runtime settings.
+# HERMES_INFERENCE_MODEL is the real model Hermes uses through LiteLLM.
+# HERMES_OPENAI_BASE_URL should normally stay on the internal LiteLLM URL.
+HERMES_HOME_DIR=./hermes-data
+HERMES_UID=10000
+HERMES_GID=10000
+HERMES_API_SERVER_ENABLED=true
+HERMES_API_SERVER_HOST=0.0.0.0
+HERMES_API_SERVER_PORT=8642
+HERMES_API_SERVER_CORS_ORIGINS=http://localhost:3080,http://127.0.0.1:3080
+HERMES_INFERENCE_PROVIDER=custom
+HERMES_INFERENCE_MODEL=big-boss
+HERMES_OPENAI_BASE_URL=http://litellm:4000/v1
+HERMES_OPENAI_API_KEY=sk-local-dev
+HERMES_MAX_ITERATIONS=30
 
 # Hermes call controls used by the LangGraph Hermes sub-agent.
 HERMES_TIMEOUT_SECONDS=180
@@ -233,6 +252,15 @@ BRIDGE_LANGGRAPH_TOOL_API_KEY=sk-langgraph-tool-local
 
 # Max seconds a Hermes-triggered LangGraph tool run may wait.
 BRIDGE_LANGGRAPH_TOOL_TIMEOUT_SECONDS=120
+
+# Optional generic LibreChat "OpenAI" provider.
+# Leave both empty to avoid a duplicate OpenAI bucket in the model picker.
+# The named "LangGraph Agent" and "Hermes Agent" custom endpoints still work.
+# To intentionally expose the bridge as LibreChat's generic OpenAI endpoint:
+#   LIBRECHAT_OPENAI_API_KEY=sk-1234
+#   LIBRECHAT_OPENAI_REVERSE_PROXY=http://api-bridge:8123/v1
+LIBRECHAT_OPENAI_API_KEY=
+LIBRECHAT_OPENAI_REVERSE_PROXY=
 
 
 # =====================================================================

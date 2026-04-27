@@ -26,6 +26,32 @@ Important current behavior:
 - Reviewed repo skill cards live in `ai-skills/`, starting with DeepAgents agent-building and research workflows, and can be read on demand by AlphaRavis.
 - Risky local or SSH commands require approval before execution.
 
+## Makefile Workflow
+
+Use the Makefile for the common stack operations:
+
+```bash
+make install      # create/sync .env, optionally configure important values, init submodules
+make update       # git pull, optional submodule update, optional env edit
+make status       # show URLs and docker compose ps
+make up           # docker compose up -d --build
+make down         # docker compose down
+make bridge-smoke # one small OpenAI-compatible request against api-bridge
+make hermes-smoke # one small OpenAI-compatible request against Hermes
+```
+
+Important endpoints:
+
+- LibreChat: `http://localhost:3080`
+- LangGraph API: `http://localhost:2024`
+- OpenAI-compatible AlphaRavis bridge: `http://localhost:8123/v1`
+- Hermes OpenAI-compatible API: `http://localhost:8642/v1`
+
+LibreChat has named custom endpoints for `LangGraph Agent` and `Hermes Agent`.
+If a separate `OpenAI` provider appears, it comes from LibreChat's generic
+OpenAI integration. By default this stack hides that extra bucket with
+`LIBRECHAT_OPENAI_API_KEY=` and `LIBRECHAT_OPENAI_REVERSE_PROXY=`.
+
 ## ✨ Key Features
 
 - 💬 **LibreChat Frontend:** A ChatGPT-like UI acting as the primary interface for all your agents.

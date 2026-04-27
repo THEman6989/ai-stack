@@ -108,7 +108,7 @@ except Exception as exc:
 SSH_USER = os.getenv("SSH_USER", "root")
 SSH_PASS_DEFAULT = os.getenv("SSH_PASS_DEFAULT", "")
 PIXELLE_URL = os.getenv("PIXELLE_URL", "http://pixelle:9004")
-HERMES_API_BASE = os.getenv("HERMES_API_BASE", "http://host.docker.internal:8642/v1").rstrip("/")
+HERMES_API_BASE = os.getenv("HERMES_API_BASE", "http://hermes-agent:8642/v1").rstrip("/")
 HERMES_API_KEY = os.getenv("HERMES_API_KEY", "")
 HERMES_MODEL = os.getenv("HERMES_MODEL", "hermes-agent")
 COMFY_IP = REMOTE_PCS.get("comfy_server", {}).get("ip")
