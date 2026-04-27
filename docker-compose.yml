@@ -358,6 +358,8 @@ services:
     volumes:
       - ./pixelle-data:/app/data
       - ./pixelle-mcp-custom/.env:/app/.env:ro
+    env_file:
+      - ./pixelle-mcp-custom/.env
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9004/health"]
       interval: 30s
