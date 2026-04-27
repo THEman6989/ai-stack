@@ -530,6 +530,20 @@ ALPHARAVIS_ENABLE_PLANNER_NODE=true
 ALPHARAVIS_PLANNER_MIN_QUERY_CHARS=500
 ALPHARAVIS_PLANNER_MAX_CHARS=1800
 ALPHARAVIS_PLANNER_TIMEOUT_SECONDS=45
+ALPHARAVIS_TASK_BRIEF_MAX_CHARS=2000
+
+# Agent handoff safety. Before the swarm starts, AlphaRavis can shrink an
+# oversized active context into a handoff summary while preserving the current
+# task brief, skill/memory hints, latest handoff packet, and recent messages.
+# Agents are instructed to create build_specialist_report handoff packets before
+# transfer_to_* calls.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_HANDOFF_CONTEXT_GUARD=true
+ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT=8500
+ALPHARAVIS_HANDOFF_CONTEXT_KEEP_LAST_MESSAGES=16
+ALPHARAVIS_HANDOFF_PACKET_MAX_CHARS=4000
+ALPHARAVIS_HANDOFF_SUMMARY_MAX_CHARS=2600
+ALPHARAVIS_HANDOFF_SUMMARY_TIMEOUT_SECONDS=45
 
 # If true, appends a visible Run-Profile message after replies. Normally keep
 # false and inspect run_profile in LangGraph Studio/DeepAgents UI instead.

@@ -71,6 +71,10 @@ class AlphaRavisState(MessagesState):
     active_skill_context: NotRequired[str]
     planner_context: NotRequired[str]
     planner_last_key: NotRequired[str]
+    current_task_brief: NotRequired[str]
+    handoff_context_summary: NotRequired[str]
+    handoff_packet: NotRequired[str]
+    handoff_packet_key: NotRequired[str]
     memory_kernel_context: NotRequired[str]
     memory_kernel_last_turn_key: NotRequired[str]
     fast_path_route: NotRequired[str]
@@ -114,6 +118,9 @@ DEBUGGING_LESSON_NS = ("alpharavis", "debugging_lessons")
 SKILL_LIBRARY_NS = ("alpharavis", "skill_library")
 SKILL_CONTEXT_MESSAGE_ID = "alpharavis_skill_library_context"
 PLANNER_CONTEXT_MESSAGE_ID = "alpharavis_planner_context"
+CURRENT_TASK_BRIEF_MESSAGE_ID = "alpharavis_current_task_brief"
+HANDOFF_CONTEXT_MESSAGE_ID = "alpharavis_handoff_context_summary"
+HANDOFF_PACKET_MESSAGE_ID = "alpharavis_handoff_packet"
 MEMORY_KERNEL_CONTEXT_MESSAGE_ID = "alpharavis_memory_kernel_context"
 CURATED_MEMORY_INDEX_NS = ("alpharavis", "curated_memory_index")
 SESSION_TURN_INDEX_NS = ("alpharavis", "session_turn_index")
@@ -138,6 +145,13 @@ COMPRESSION_PAUSE_PATTERNS = [
     "skip compression",
     "no compression",
 ]
+HANDOFF_POLICY_PROMPT = (
+    "Handoff policy: before you transfer to another AlphaRavis agent, create a "
+    "handoff packet with build_specialist_report. The packet must state what is "
+    "done, what remains open, evidence/source keys, files/commands/tools used, "
+    "verification status, risks, and the exact next-agent instruction. Do not "
+    "put long logs in the packet; store them as artifacts and cite the artifact key."
+)
 FAST_PATH_DENY_PATTERNS = [
     "agent",
     "alpha ravis",
@@ -242,7 +256,11 @@ def _scan_persistent_context(content: str) -> str | None:
     return None
 
 
-def _model(model_name: str | None = None, timeout_seconds: float | None = None) -> ChatLiteLLM:
+def _model(
+    model_name: str | None = None,
+    timeout_seconds: float | None = None,
+    model_kwargs: dict[str, Any] | None = None,
+) -> ChatLiteLLM:
     return ChatLiteLLM(
         model=model_name or os.getenv("ALPHARAVIS_MODEL", "openai/big-boss"),
         api_base=os.getenv("OPENAI_API_BASE", "http://litellm:4000/v1"),
@@ -250,6 +268,7 @@ def _model(model_name: str | None = None, timeout_seconds: float | None = None) 
         request_timeout=timeout_seconds or float(os.getenv("ALPHARAVIS_LLM_TIMEOUT_SECONDS", "120")),
         max_retries=int(os.getenv("ALPHARAVIS_LLM_MAX_RETRIES", "0")),
         streaming=_env_bool("ALPHARAVIS_LLM_STREAMING", "true"),
+        model_kwargs=model_kwargs or {},
     )
 
 
@@ -265,9 +284,8 @@ def _agent_thinking_bind_kwargs() -> dict[str, Any]:
 
 
 def _agent_model() -> Any:
-    llm = _model()
     kwargs = _agent_thinking_bind_kwargs()
-    return llm.bind(**kwargs) if kwargs else llm
+    return _model(model_kwargs=kwargs)
 
 
 def _workspace_root() -> str:
@@ -859,17 +877,30 @@ def build_specialist_report(
     commands_run: str = "",
     risks: str = "",
     next_actions: str = "",
+    target_agent: str = "",
+    completed: str = "",
+    open_tasks: str = "",
+    verification: str = "",
+    handoff_instruction: str = "",
 ):
-    """Format a specialist handoff report with stable fields."""
+    """Format a specialist handoff packet with stable fields for agent transfer."""
 
     report = {
+        "report_type": "handoff_packet",
         "agent_id": agent_id,
+        "target_agent": target_agent,
         "summary": summary,
+        "completed": completed,
+        "open_tasks": open_tasks or next_actions,
         "evidence": evidence,
         "sources": sources,
         "commands_run": commands_run,
         "risks": risks,
         "next_actions": next_actions,
+        "verification": verification,
+        "handoff_instruction": handoff_instruction,
+        "preserve_verbatim": True,
+        "created_at": int(time.time()),
     }
     return json.dumps(report, ensure_ascii=False, indent=2)
 
@@ -2143,6 +2174,84 @@ def _estimate_tokens(messages: list[Any]) -> int:
     return max(1, len(text) // 4)
 
 
+def _message_id(message: Any) -> str:
+    if isinstance(message, dict):
+        return str(message.get("id") or "")
+    return str(getattr(message, "id", "") or "")
+
+
+def _message_content_text(message: Any) -> str:
+    if isinstance(message, dict):
+        content = message.get("content", "")
+    else:
+        content = getattr(message, "content", "")
+    if isinstance(content, list):
+        return " ".join(str(block) for block in content)
+    return str(content or "")
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    text = str(text or "").strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n[Truncated.]"
+
+
+def _latest_handoff_packet(messages: list[Any]) -> str:
+    max_chars = int(os.getenv("ALPHARAVIS_HANDOFF_PACKET_MAX_CHARS", "4000"))
+    for message in reversed(messages):
+        content = _message_content_text(message)
+        if '"report_type": "handoff_packet"' in content or "<handoff-packet>" in content:
+            return _truncate_text(content, max_chars)
+    return ""
+
+
+def _current_task_brief_from_state(state: AlphaRavisState) -> str:
+    brief = str(state.get("current_task_brief") or "").strip()
+    if brief:
+        return brief
+    planner = str(state.get("planner_context") or "").strip()
+    if planner:
+        return (
+            "<current-task-brief>\n"
+            "This task brief must stay active across agent handoffs and context "
+            "compression.\n\n"
+            f"{planner}\n"
+            "</current-task-brief>"
+        )
+    latest = _latest_user_query(list(state.get("messages", []))).strip()
+    if latest:
+        return (
+            "<current-task-brief>\n"
+            "User request:\n"
+            f"{_truncate_text(latest, int(os.getenv('ALPHARAVIS_TASK_BRIEF_MAX_CHARS', '2000')))}\n"
+            "</current-task-brief>"
+        )
+    return ""
+
+
+def _protected_context_messages(messages: list[Any]) -> list[Any]:
+    protected_ids = {
+        CURRENT_TASK_BRIEF_MESSAGE_ID,
+        PLANNER_CONTEXT_MESSAGE_ID,
+        MEMORY_KERNEL_CONTEXT_MESSAGE_ID,
+        SKILL_CONTEXT_MESSAGE_ID,
+        HANDOFF_CONTEXT_MESSAGE_ID,
+        HANDOFF_PACKET_MESSAGE_ID,
+    }
+    protected: list[Any] = []
+    seen: set[str] = set()
+    for message in messages:
+        message_id = _message_id(message)
+        content = _message_content_text(message)
+        key = message_id or hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+        if message_id in protected_ids or '"report_type": "handoff_packet"' in content or "<handoff-packet>" in content:
+            if key not in seen:
+                seen.add(key)
+                protected.append(message)
+    return protected
+
+
 async def _maybe_put(store: Any, namespace: tuple[str, ...], key: str, value: dict[str, Any]) -> None:
     if hasattr(store, "aput"):
         result = store.aput(namespace, key, value)
@@ -2560,8 +2669,20 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
         f"{plan[: int(os.getenv('ALPHARAVIS_PLANNER_MAX_CHARS', '1800'))]}\n"
         "</execution-plan>"
     )
+    task_brief = (
+        "<current-task-brief>\n"
+        "This brief must remain active across agent handoffs and context "
+        "compression. Agents should use it as the stable task contract.\n\n"
+        f"User request:\n{_truncate_text(latest, int(os.getenv('ALPHARAVIS_TASK_BRIEF_MAX_CHARS', '2000')))}\n\n"
+        f"{content}\n"
+        "</current-task-brief>"
+    )
     return {
-        "messages": [SystemMessage(content=content, id=PLANNER_CONTEXT_MESSAGE_ID)],
+        "messages": [
+            SystemMessage(content=task_brief, id=CURRENT_TASK_BRIEF_MESSAGE_ID),
+            SystemMessage(content=content, id=PLANNER_CONTEXT_MESSAGE_ID),
+        ],
+        "current_task_brief": task_brief,
         "planner_context": content,
         "planner_last_key": plan_key,
         "run_profile": _profile_update(state, planner_used=True),
@@ -2680,6 +2801,189 @@ async def _summarize_messages(
     )
     response = await llm.ainvoke([SystemMessage(content=prompt)])
     return str(response.content)
+
+
+def _message_stable_key(message: Any) -> str:
+    message_id = _message_id(message)
+    if message_id:
+        return f"id:{message_id}"
+    return "hash:" + hashlib.sha256(_message_text(message).encode("utf-8")).hexdigest()[:24]
+
+
+async def handoff_context_guard_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
+    if not _env_bool("ALPHARAVIS_ENABLE_HANDOFF_CONTEXT_GUARD", "true"):
+        return {}
+
+    messages = list(state.get("messages", []))
+    current_task_brief = _current_task_brief_from_state(state)
+    latest_packet = _latest_handoff_packet(messages) or str(state.get("handoff_packet") or "")
+    packet_key = hashlib.sha256(latest_packet.encode("utf-8")).hexdigest()[:16] if latest_packet else ""
+    updates: dict[str, Any] = {}
+    inject_messages: list[Any] = []
+
+    if current_task_brief and not state.get("current_task_brief"):
+        updates["current_task_brief"] = current_task_brief
+        inject_messages.append(SystemMessage(content=current_task_brief, id=CURRENT_TASK_BRIEF_MESSAGE_ID))
+    if latest_packet:
+        updates["handoff_packet"] = latest_packet
+        updates["handoff_packet_key"] = packet_key
+
+    token_limit = int(os.getenv("ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT", "8500"))
+    token_estimate = _estimate_tokens([*messages, *inject_messages])
+    if token_estimate <= token_limit:
+        if inject_messages:
+            updates["messages"] = inject_messages
+        return updates
+
+    keep_last = int(os.getenv("ALPHARAVIS_HANDOFF_CONTEXT_KEEP_LAST_MESSAGES", "16"))
+    keep_last = max(4, keep_last)
+    recent_messages = messages[-keep_last:]
+    protected_messages = _protected_context_messages([*messages, *inject_messages])
+    protected_keys = {_message_stable_key(message) for message in protected_messages}
+    recent_keys = {_message_stable_key(message) for message in recent_messages}
+    old_messages = [
+        message
+        for message in messages
+        if _message_stable_key(message) not in protected_keys and _message_stable_key(message) not in recent_keys
+    ]
+
+    if not old_messages:
+        if inject_messages:
+            updates["messages"] = inject_messages
+        return updates
+
+    precompress_context = "\n\n".join(
+        part
+        for part in [
+            f"Current task brief to preserve verbatim:\n{current_task_brief}" if current_task_brief else "",
+            f"Latest handoff packet to preserve verbatim:\n{latest_packet}" if latest_packet else "",
+            "This is a handoff-context budget summary before the swarm runs. "
+            "Preserve completed work, open tasks, verification status, tool/file facts, "
+            "pending approvals, exact errors, and which agent should continue.",
+        ]
+        if part
+    )
+
+    try:
+        summary = await _summarize_messages(
+            _model(timeout_seconds=float(os.getenv("ALPHARAVIS_HANDOFF_SUMMARY_TIMEOUT_SECONDS", "45"))),
+            old_messages,
+            state.get("handoff_context_summary") or state.get("context_summary"),
+            precompress_context,
+        )
+    except Exception as exc:
+        warning = (
+            "Handoff context guard could not summarize oversized context. "
+            f"Continuing with original context. Error: {exc}"
+        )
+        return {
+            **updates,
+            "memory_notice": warning,
+            "memory_notice_key": hashlib.sha256(warning.encode("utf-8")).hexdigest()[:16],
+            "run_profile": _profile_update(state, handoff_context_guard_error=str(exc)[:300]),
+        }
+
+    summary = _truncate_text(summary, int(os.getenv("ALPHARAVIS_HANDOFF_SUMMARY_MAX_CHARS", "2600")))
+    thread_id = _state_thread_id(state)
+    thread_key = _state_thread_key(state)
+    archive_key = hashlib.sha256(
+        f"handoff:{time.time()}:{summary}:{len(old_messages)}".encode("utf-8")
+    ).hexdigest()[:24]
+
+    store = getattr(runtime, "store", None) if runtime else None
+    if store is not None:
+        archived_messages_text = "\n\n".join(_message_text(message) for message in old_messages)
+        archive_record = {
+            "summary": summary,
+            "content": (
+                f"Handoff context budget summary:\n{summary}\n\n"
+                f"Current task brief:\n{current_task_brief}\n\n"
+                f"Latest handoff packet:\n{latest_packet}\n\n"
+                f"Archived original messages:\n{archived_messages_text}"
+            ).strip(),
+            "token_estimate": _estimate_tokens(old_messages),
+            "archived_at": int(time.time()),
+            "archive_kind": "handoff_context_budget",
+            "messages": [_message_to_json(message) for message in old_messages],
+            "thread_id": thread_id,
+            "thread_key": thread_key,
+        }
+        await _maybe_put(store, _thread_archive_ns(thread_id), archive_key, archive_record)
+        await _maybe_put(
+            store,
+            ARCHIVE_INDEX_NS,
+            archive_key,
+            {key: value for key, value in archive_record.items() if key != "messages"},
+        )
+        await _maybe_index_vector_memory(
+            source_type="handoff_context_archive",
+            source_key=archive_key,
+            title=f"Handoff context archive {archive_key}",
+            content=archive_record["content"],
+            thread_id=thread_id,
+            thread_key=thread_key,
+            scope="thread",
+            metadata={
+                "token_estimate": archive_record["token_estimate"],
+                "archived_at": archive_record["archived_at"],
+                "archive_kind": "handoff_context_budget",
+            },
+        )
+
+    rebuilt_messages: list[Any] = [RemoveMessage(id=REMOVE_ALL_MESSAGES)]
+    seen: set[str] = set()
+    if current_task_brief:
+        rebuilt_messages.append(SystemMessage(content=current_task_brief, id=CURRENT_TASK_BRIEF_MESSAGE_ID))
+        seen.add(f"id:{CURRENT_TASK_BRIEF_MESSAGE_ID}")
+    rebuilt_messages.append(
+        SystemMessage(
+            content=(
+                "<handoff-context-summary>\n"
+                "The earlier beginning of this run was compressed before agent "
+                "handoff because the active context exceeded "
+                f"{token_limit} tokens. Exact source is archived"
+                f"{f' as `{archive_key}`' if store is not None else ''}.\n\n"
+                f"{summary}\n"
+                "</handoff-context-summary>"
+            ),
+            id=HANDOFF_CONTEXT_MESSAGE_ID,
+        )
+    )
+    seen.add(f"id:{HANDOFF_CONTEXT_MESSAGE_ID}")
+    if latest_packet:
+        rebuilt_messages.append(
+            SystemMessage(
+                content=f"<handoff-packet>\n{latest_packet}\n</handoff-packet>",
+                id=HANDOFF_PACKET_MESSAGE_ID,
+            )
+        )
+        seen.add(f"id:{HANDOFF_PACKET_MESSAGE_ID}")
+
+    for message in [*protected_messages, *recent_messages]:
+        key = _message_stable_key(message)
+        if key in seen:
+            continue
+        seen.add(key)
+        rebuilt_messages.append(message)
+
+    notice = (
+        f"Handoff Context Guard: Der Anfang dieses Runs wurde vor dem Swarm "
+        f"komprimiert, weil ca. {token_estimate} Tokens ueber dem Limit "
+        f"{token_limit} lagen. Task-Brief und letztes Handoff-Paket bleiben aktiv."
+    )
+    return {
+        **updates,
+        "messages": rebuilt_messages,
+        "handoff_context_summary": summary,
+        "memory_notice": notice,
+        "memory_notice_key": archive_key,
+        "run_profile": _profile_update(
+            state,
+            handoff_context_guard_used=True,
+            handoff_context_tokens=token_estimate,
+            handoff_context_archive_key=archive_key,
+        ),
+    }
 
 
 async def _summarize_archive_records(
@@ -3030,7 +3334,7 @@ async def skill_library_node(state: AlphaRavisState, runtime: Any | None = None)
     messages = list(state.get("messages", []))
     query = _latest_user_query(messages)
     repo_hint_limit = int(os.getenv("ALPHARAVIS_REPO_SKILL_HINT_LIMIT", "3"))
-    repo_skill_context = _repo_skill_hint_context(query, repo_hint_limit)
+    repo_skill_context = await asyncio.to_thread(_repo_skill_hint_context, query, repo_hint_limit)
     store = getattr(runtime, "store", None) if runtime else None
     if store is None:
         content = repo_skill_context or "Skill library unavailable for this run; continue without saved workflow hints."
@@ -3214,9 +3518,20 @@ async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None)
     if hierarchy_notice:
         memory_notice += f" {hierarchy_notice}"
 
+    current_task_brief = _current_task_brief_from_state(state)
+    latest_packet = _latest_handoff_packet(messages) or str(state.get("handoff_packet") or "")
+    preserved_prefix_messages: list[Any] = []
+    if current_task_brief:
+        preserved_prefix_messages.append(SystemMessage(content=current_task_brief, id=CURRENT_TASK_BRIEF_MESSAGE_ID))
+    if latest_packet:
+        preserved_prefix_messages.append(
+            SystemMessage(content=f"<handoff-packet>\n{latest_packet}\n</handoff-packet>", id=HANDOFF_PACKET_MESSAGE_ID)
+        )
+
     return {
         "messages": [
             RemoveMessage(id=REMOVE_ALL_MESSAGES),
+            *preserved_prefix_messages,
             SystemMessage(
                 content=(
                     "Earlier conversation was archived to long-term memory. "
@@ -3226,6 +3541,9 @@ async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None)
             ),
             *recent_messages,
         ],
+        "current_task_brief": current_task_brief,
+        "handoff_packet": latest_packet,
+        "handoff_packet_key": hashlib.sha256(latest_packet.encode("utf-8")).hexdigest()[:16] if latest_packet else "",
         "context_summary": summary,
         "archive_summary": archive_summary,
         "archived_context_keys": archived_keys,
@@ -3307,7 +3625,9 @@ def _create_ui_assistant(llm: ChatLiteLLM, handoff_tools: list[Any]):
             "You are the UI Assistant, but direct GUI control is unavailable "
             f"in this runtime{reason}. Explain what UI steps would be needed "
             "and transfer to another agent when the task is not UI-specific."
-        ),
+        )
+        + " "
+        + HANDOFF_POLICY_PROMPT,
     )
 
 
@@ -3367,7 +3687,9 @@ def _create_debugger_subgraph(llm: ChatLiteLLM, handoff_tools: list[Any]):
             "small stable facts with record_curated_memory; use "
             "semantic_memory_search for meaning-based old lessons or artifacts; "
             "put long logs or reports into artifacts."
-        ),
+        )
+        + " "
+        + HANDOFF_POLICY_PROMPT,
     )
 
     async def run_debugger(state: DebuggerState) -> dict[str, Any]:
@@ -3398,33 +3720,48 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
 
     llm = _agent_model()
     mcp_tools = mcp_tools or []
+    handoff_requirement = (
+        "Before calling this transfer tool, create a handoff packet with "
+        "build_specialist_report. Include completed work, evidence, commands/files, "
+        "verification status, risks, open tasks, and the exact instruction for "
+        "the next agent. Keep long logs in artifacts and reference their keys."
+    )
 
     transfer_to_research = create_handoff_tool(
         agent_name="research_expert",
-        description="Transfer to the research expert for deep web or document research.",
+        description=f"Transfer to the research expert for deep web or document research. {handoff_requirement}",
     )
     transfer_to_generalist = create_handoff_tool(
         agent_name="general_assistant",
-        description="Transfer to the general assistant for normal chat, coding, tools, Pixelle, or PC control.",
+        description=(
+            "Transfer to the general assistant for normal chat, coding, tools, "
+            f"Pixelle, or PC control. {handoff_requirement}"
+        ),
     )
     transfer_to_ui = create_handoff_tool(
         agent_name="ui_assistant",
-        description="Transfer to the UI assistant for browser, VNC, or desktop automation.",
+        description=f"Transfer to the UI assistant for browser, VNC, or desktop automation. {handoff_requirement}",
     )
     transfer_to_debugger = create_handoff_tool(
         agent_name="debugger_agent",
-        description="Transfer to the debugger for failed jobs, logs, SSH, Docker, or infrastructure errors.",
+        description=(
+            "Transfer to the debugger for failed jobs, logs, SSH, Docker, or "
+            f"infrastructure errors. {handoff_requirement}"
+        ),
     )
     transfer_to_hermes = create_handoff_tool(
         agent_name="hermes_coding_agent",
         description=(
             "Transfer to Hermes for coding, file-analysis, terminal-oriented "
-            "diagnosis, project-structure inspection, or implementation guidance."
+            f"diagnosis, project-structure inspection, or implementation guidance. {handoff_requirement}"
         ),
     )
     transfer_to_context = create_handoff_tool(
         agent_name="context_retrieval_agent",
-        description="Transfer to the context retrieval agent to search archived long-term conversation memory.",
+        description=(
+            "Transfer to the context retrieval agent to search archived long-term "
+            f"conversation memory. {handoff_requirement}"
+        ),
     )
 
     research_worker = create_deep_agent(
@@ -3478,7 +3815,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "return concise conclusions, and transfer to the correct peer when "
             "the task is outside research. Transfer coding or terminal-oriented "
             "project work to hermes_coding_agent when Hermes is the better fit."
-        ),
+        )
+        + " "
+        + HANDOFF_POLICY_PROMPT,
     )
 
     general_worker = create_deep_agent(
@@ -3545,7 +3884,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "coding/system agent. "
             "Transfer directly to specialized peers instead of routing through "
             "a supervisor."
-        ),
+        )
+        + " "
+        + HANDOFF_POLICY_PROMPT,
     )
 
     computer_worker = _create_ui_assistant(
@@ -3597,7 +3938,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "Use semantic_memory_search for older coding lessons or artifacts "
             "before calling Hermes on a similar task. Use artifacts for long "
             "Hermes outputs before summarizing them."
-        ),
+        )
+        + " "
+        + HANDOFF_POLICY_PROMPT,
     )
 
     context_worker = create_deep_agent(
@@ -3643,7 +3986,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "Use build_specialist_report when returning retrieved facts, source "
             "keys, caveats, and next actions to another agent. Do not answer "
             "unrelated tasks yourself; transfer back."
-        ),
+        )
+        + " "
+        + HANDOFF_POLICY_PROMPT,
     )
 
     swarm = create_swarm(
@@ -3658,6 +4003,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     builder.add_node("planner", planner_node)
     builder.add_node("memory_kernel_before", memory_kernel_prefetch_node)
     builder.add_node("skill_library", skill_library_node)
+    builder.add_node("handoff_context_guard", handoff_context_guard_node)
     builder.add_node("alpha_ravis_swarm", swarm)
     builder.add_node("memory_kernel_after", memory_kernel_sync_node)
     builder.add_node("context_guard_after", context_guard_node)
@@ -3673,7 +4019,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     builder.add_edge("fast_chat", "context_guard_after")
     builder.add_edge("planner", "memory_kernel_before")
     builder.add_edge("memory_kernel_before", "skill_library")
-    builder.add_edge("skill_library", "alpha_ravis_swarm")
+    builder.add_edge("skill_library", "handoff_context_guard")
+    builder.add_edge("handoff_context_guard", "alpha_ravis_swarm")
     builder.add_edge("alpha_ravis_swarm", "memory_kernel_after")
     builder.add_edge("memory_kernel_after", "context_guard_after")
     builder.add_edge("context_guard_after", "memory_notice")

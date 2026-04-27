@@ -20,6 +20,7 @@ Important current behavior:
 - MCP uses DeepAgents-style `mcp.json` config, with stdio servers disabled by default.
 - Hermes can be used directly from LibreChat or as an optional bounded coding/system sub-agent inside AlphaRavis.
 - A Hermes-inspired MemoryKernel keeps curated always-memory small, indexes turns for search, and writes large notes to artifacts.
+- Agent handoffs now use structured packets plus a handoff-context guard so long workflows keep the task brief, open work, and verification state active.
 - Optional pgvector semantic memory stores a source catalog plus full retrieval chunks for memories, turns, archives, artifacts, skills, lessons, and federated RAG hits while MongoDB remains the source of truth.
 - Agents can inspect a lazy optional-tool manifest and use scoped agent/global memories.
 - Reviewed repo skill cards live in `ai-skills/`, starting with DeepAgents agent-building and research workflows, and can be read on demand by AlphaRavis.

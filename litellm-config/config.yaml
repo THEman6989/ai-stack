@@ -1,4 +1,7 @@
 model_list:
+  # LiteLLM expects timeout/retry values as YAML numbers here. Do not use
+  # os.environ/VAR for these numeric fields unless LiteLLM starts casting them;
+  # otherwise some async paths compare strings to ints.
   # Small fallback model. Ollama's OpenAI-compatible /v1 API is used because
   # it responds quickly and avoids provider-specific Ollama hangs in LiteLLM.
   - model_name: edge-gemma
@@ -6,8 +9,8 @@ model_list:
       model: os.environ/EDGE_GEMMA_LITELLM_MODEL
       api_base: os.environ/EDGE_GEMMA_API_BASE
       api_key: os.environ/LOCAL_LLM_API_KEY
-      timeout: os.environ/EDGE_GEMMA_TIMEOUT_SECONDS
-      stream_timeout: os.environ/EDGE_GEMMA_STREAM_TIMEOUT_SECONDS
+      timeout: 60
+      stream_timeout: 15
       max_retries: 0
 
   # Main large model on the llama.cpp server.
@@ -16,8 +19,8 @@ model_list:
       model: os.environ/BIG_BOSS_LITELLM_MODEL
       api_base: os.environ/BIG_BOSS_API_BASE
       api_key: os.environ/LOCAL_LLM_API_KEY
-      timeout: os.environ/BIG_BOSS_TIMEOUT_SECONDS
-      stream_timeout: os.environ/BIG_BOSS_STREAM_TIMEOUT_SECONDS
+      timeout: 180
+      stream_timeout: 30
       max_retries: 0
 
   # Optional embedding route for AlphaRavis pgvector memory.
@@ -28,7 +31,7 @@ model_list:
       model: os.environ/EMBEDDING_LITELLM_MODEL
       api_base: os.environ/EMBEDDING_API_BASE
       api_key: os.environ/LOCAL_LLM_API_KEY
-      timeout: os.environ/EMBEDDING_TIMEOUT_SECONDS
+      timeout: 30
       max_retries: 0
 
   # Smaller embedding fallback if the primary Qwen embedding route has trouble.
@@ -37,9 +40,9 @@ model_list:
       model: os.environ/EMBEDDING_FALLBACK_LITELLM_MODEL
       api_base: os.environ/EMBEDDING_API_BASE
       api_key: os.environ/LOCAL_LLM_API_KEY
-      timeout: os.environ/EMBEDDING_TIMEOUT_SECONDS
+      timeout: 30
       max_retries: 0
 
 litellm_settings:
-  num_retries: os.environ/LITELLM_NUM_RETRIES
-  request_timeout: os.environ/LITELLM_REQUEST_TIMEOUT_SECONDS
+  num_retries: 0
+  request_timeout: 180

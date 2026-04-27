@@ -183,6 +183,28 @@ Active chat compression happens automatically after the current LangGraph run
 finishes when the thread grows above `ALPHARAVIS_ACTIVE_TOKEN_LIMIT`.
 
 When compression happens, AlphaRavis can show a visible `Memory-Notice`.
+The current task brief and latest handoff packet are preserved verbatim when
+available, so the next run still knows the plan, completed work, open tasks,
+and verification state.
+
+Before the swarm starts, AlphaRavis also has a handoff-context guard. If the
+context is already too large, it compresses the beginning of the current run
+into a handoff summary and archives the exact original messages, while keeping
+the task brief, memory/skill hints, latest handoff packet, and recent messages
+active.
+
+Useful handoff settings:
+
+```text
+ALPHARAVIS_ENABLE_HANDOFF_CONTEXT_GUARD=true
+ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT=8500
+ALPHARAVIS_HANDOFF_CONTEXT_KEEP_LAST_MESSAGES=16
+ALPHARAVIS_HANDOFF_PACKET_MAX_CHARS=4000
+ALPHARAVIS_HANDOFF_SUMMARY_MAX_CHARS=2600
+```
+
+Agents are instructed to call `build_specialist_report` before `transfer_to_*`.
+That JSON report is the handoff packet.
 
 To pause compression for one run, say one of:
 

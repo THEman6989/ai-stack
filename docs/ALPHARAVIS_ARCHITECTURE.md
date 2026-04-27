@@ -177,6 +177,7 @@ START
   -> fast_chat OR planner
   -> memory_kernel_before when the agent path is selected
   -> skill_library when the agent path is selected
+  -> handoff_context_guard when the agent path is selected
   -> alpha_ravis_swarm when the agent path is selected
   -> memory_kernel_after when the agent path is selected
   -> context_guard_after
@@ -201,7 +202,7 @@ Capabilities:
 - Fast web search.
 - LangMem manage/search memory tools.
 - Skill candidate creation.
-- Safe handoff to specialists.
+- Safe handoff to specialists through structured handoff packets.
 
 Safety:
 
@@ -474,12 +475,45 @@ ALPHARAVIS_ENABLE_POST_RUN_COMPRESSION=true
 What happens:
 
 1. Older messages are summarized.
-2. Recent messages are kept verbatim.
-3. A thread-specific archive record is stored.
-4. The active LangGraph message list is replaced by:
+2. The current task brief and latest handoff packet are preserved verbatim when
+   available.
+3. Recent messages are kept verbatim.
+4. A thread-specific archive record is stored.
+5. The active LangGraph message list is replaced by:
+   - the current task brief, if present
+   - the latest handoff packet, if present
    - one summary system message
    - the recent messages
-5. A visible Memory-Notice can be returned to LibreChat.
+6. A visible Memory-Notice can be returned to LibreChat.
+
+### Handoff Context Guard
+
+Before the swarm starts, AlphaRavis can run a lighter handoff-context guard. It
+does not wait until the final post-run compression threshold. If the active
+message window is already too large, the guard compresses the beginning of the
+run into a handoff summary, archives the exact original messages, and keeps the
+important coordination material active:
+
+- current task brief
+- planner execution plan
+- MemoryKernel and skill hints
+- latest handoff packet
+- recent messages
+
+Default:
+
+```text
+ALPHARAVIS_ENABLE_HANDOFF_CONTEXT_GUARD=true
+ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT=8500
+ALPHARAVIS_HANDOFF_CONTEXT_KEEP_LAST_MESSAGES=16
+ALPHARAVIS_HANDOFF_PACKET_MAX_CHARS=4000
+ALPHARAVIS_HANDOFF_SUMMARY_MAX_CHARS=2600
+```
+
+Agents are instructed to call `build_specialist_report` before `transfer_to_*`.
+That report is the handoff packet and should state completed work, evidence,
+commands/files/tools, verification status, risks, open tasks, and the exact
+next-agent instruction.
 
 The user can pause compression for one run by saying things such as:
 
