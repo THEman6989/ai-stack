@@ -173,9 +173,9 @@ The graph is built as:
 ```text
 START
   -> run_profile_start
-  -> context_guard_before
   -> route_decision
-  -> fast_chat OR memory_kernel_before
+  -> fast_chat OR planner
+  -> memory_kernel_before when the agent path is selected
   -> skill_library when the agent path is selected
   -> alpha_ravis_swarm when the agent path is selected
   -> memory_kernel_after when the agent path is selected
@@ -290,12 +290,11 @@ On the normal agent path it does four small jobs:
 
 Fast Path skips the MemoryKernel so simple chat stays cheap.
 
-When `ALPHARAVIS_VECTOR_BACKEND=pgvector`, the MemoryKernel also writes small
-semantic search cards to pgvector for newly saved memories, session turns,
-archives, archive collections, artifacts, debugging lessons, and skill
-candidates. These cards contain a preview, metadata, source type, source key,
-thread id, and embedding. They are an index only; MongoDB/store/artifact files
-remain the source of truth.
+When `ALPHARAVIS_VECTOR_BACKEND=pgvector`, the MemoryKernel also writes a source
+catalog and full retrieval chunks to pgvector for newly saved memories, session
+turns, archives, archive collections, artifacts, debugging lessons, and skill
+candidates. MongoDB/store/artifact files remain the source of truth, while
+pgvector is the searchable Inhaltsverzeichnis and chunk index.
 
 Relevant settings:
 
@@ -303,7 +302,7 @@ Relevant settings:
 ALPHARAVIS_ENABLE_MEMORY_KERNEL=true
 ALPHARAVIS_MEMORY_NUDGE_INTERVAL=10
 ALPHARAVIS_MEMORY_KERNEL_PRECOMPRESS_NOTES=true
-ALPHARAVIS_VECTOR_BACKEND=off
+ALPHARAVIS_VECTOR_BACKEND=pgvector
 ```
 
 ### LangGraph Checkpoints
@@ -461,13 +460,15 @@ AlphaRavis uses two compression tiers.
 ### Chat Compression
 
 When the active LangGraph message window exceeds `ALPHARAVIS_ACTIVE_TOKEN_LIMIT`,
-older messages are summarized.
+older messages are summarized after the current run has produced its answer.
+Compression no longer runs before the task starts.
 
 Default:
 
 ```text
 ALPHARAVIS_ACTIVE_TOKEN_LIMIT=10000
 ALPHARAVIS_CONTEXT_KEEP_LAST_MESSAGES=12
+ALPHARAVIS_ENABLE_POST_RUN_COMPRESSION=true
 ```
 
 What happens:
@@ -533,36 +534,53 @@ Artifacts are thread-scoped by default, with optional cross-thread listing only
 when explicitly requested. The artifact index stores metadata and a small
 preview; the full content stays on disk.
 
-### Optional Semantic Vector Memory
+### Semantic Vector Memory And Source Catalog
 
-AlphaRavis can use the existing `vectordb` Postgres/pgvector service as a
-semantic memory index. This is disabled by default:
+AlphaRavis uses the existing `vectordb` Postgres/pgvector service as a semantic
+retrieval index. MongoDB remains the ground truth for checkpoints, Store data,
+archives, and thread state; pgvector stores a searchable index built from the
+complete original source data.
 
-```text
-ALPHARAVIS_VECTOR_BACKEND=off
-ALPHARAVIS_ENABLE_PGVECTOR_MEMORY=false
-```
-
-Enable it with:
+Default:
 
 ```text
 ALPHARAVIS_VECTOR_BACKEND=pgvector
+ALPHARAVIS_ENABLE_PGVECTOR_MEMORY=true
 ```
 
-The vector backend stores search cards, not full duplicated chat truth. A card
-contains:
+For each new source, AlphaRavis writes:
 
+- one catalog/Inhaltsverzeichnis row generated from the full original data
+- full overlapping retrieval chunks
 - `source_type`, such as `session_turn`, `archive`, `artifact`, `skill`,
-  `curated_memory`, `agent_memory`, or `debugging_lesson`
-- `source_key`, which points back to the MongoDB/store/artifact source
-- `thread_id` and `thread_key`
-- short preview text
-- metadata
-- the embedding vector
+  `curated_memory`, `agent_memory`, `debugging_lesson`, or `external_document`
+- `source_key`, which points back to MongoDB/Store/artifact/RAG source
+- `thread_id`, `thread_key`, chunk position, metadata, embedding model, and
+  embedding vector
 
-This keeps retrieval fast without turning Postgres into the primary memory
-database. If semantic search finds a match, agents use the source key with the
-normal archive/session/artifact tools when exact text is needed.
+The catalog row lists source metadata, headings, file paths, URLs, code symbols,
+database/RAG topics, and a chunk map. It is not model-invented memory; it is
+extracted from the original data so retrieval can later answer "what was in
+this conversation/source?" without loading every raw record first.
+
+Session turns use a sliding window by default:
+
+```text
+ALPHARAVIS_PGVECTOR_SESSION_WINDOW_TURNS=2
+```
+
+That means the indexed text for a new turn includes the previous completed turn
+plus the current one, so references such as "that bug" keep their context.
+
+Artifacts and archives are chunked with overlap:
+
+```text
+ALPHARAVIS_PGVECTOR_CHUNK_MAX_CHARS=6000
+ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_CHARS=800
+```
+
+This means long code, logs, reports, and compressed archives are fully
+retrievable without becoming one oversized embedding input.
 
 The tool exposed to agents is:
 
@@ -570,10 +588,11 @@ The tool exposed to agents is:
 semantic_memory_search
 ```
 
-By default it searches the current thread plus global memories. It searches
-other threads only when a tool call explicitly sets `include_other_threads=true`.
-Enabling this backend indexes new records from that point onward. Existing
-MongoDB/store history is intentionally not bulk-backfilled automatically.
+By default it searches the current thread plus global memories and federates
+with `rag_api` for external document hits. It searches other AlphaRavis threads
+only when a tool call explicitly sets `include_other_threads=true`. Enabling
+this backend indexes new records from that point onward. Existing MongoDB/store
+history is intentionally not bulk-backfilled automatically.
 
 ## Thread Isolation
 
@@ -677,7 +696,6 @@ Short non-tool chat requests can use a direct fast path:
 ```text
 START
   -> run_profile_start
-  -> context_guard_before
   -> route_decision
   -> fast_chat
   -> context_guard_after

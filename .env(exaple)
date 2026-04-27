@@ -86,12 +86,15 @@ EDGE_GEMMA_API_BASE=http://192.168.178.140:11434/v1
 EDGE_GEMMA_TIMEOUT_SECONDS=60
 EDGE_GEMMA_STREAM_TIMEOUT_SECONDS=15
 
-# Optional embedding model used only when pgvector semantic memory is enabled.
-# EMBEDDING_API_BASE should expose an OpenAI-compatible /v1 API.
-# Example Ollama model after `ollama pull nomic-embed-text`:
-#   EMBEDDING_LITELLM_MODEL=openai/nomic-embed-text
-#   EMBEDDING_API_BASE=http://192.168.178.140:11434/v1
-EMBEDDING_LITELLM_MODEL=openai/nomic-embed-text
+# Optional embedding models used only when pgvector semantic memory is enabled.
+# EMBEDDING_API_BASE should expose an OpenAI-compatible /v1 API on the
+# dedicated Ollama embedding node.
+# Primary:
+#   ollama pull Q78KG/gte-Qwen2-1.5B-instruct
+# Fallback:
+#   ollama pull bge-m3
+EMBEDDING_LITELLM_MODEL=openai/Q78KG/gte-Qwen2-1.5B-instruct
+EMBEDDING_FALLBACK_LITELLM_MODEL=openai/bge-m3
 EMBEDDING_API_BASE=http://192.168.178.140:11434/v1
 EMBEDDING_TIMEOUT_SECONDS=30
 
@@ -247,6 +250,11 @@ ALPHARAVIS_CONTEXT_KEEP_LAST_MESSAGES=12
 # Allowed values: true, false
 ALPHARAVIS_ENABLE_HIERARCHICAL_COMPRESSION=true
 
+# If true, automatic compression only happens after the current graph run has
+# produced an answer. This avoids compressing in the middle of a task.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_POST_RUN_COMPRESSION=true
+
 # Approximate token budget for uncompressed archive records inside one chat.
 # Above this, older archive records are summarized into an archive collection.
 ALPHARAVIS_ARCHIVE_TOKEN_LIMIT=50000
@@ -338,14 +346,14 @@ ALPHARAVIS_ARCHITECTURE_DOC_MAX_CHARS=6000
 #   pgvector = use the existing Postgres/pgvector container as a search index
 #
 # MongoDB remains the source of truth for LangGraph checkpoints/store. pgvector
-# stores only search cards: source_key, metadata, preview text, and embedding.
-# The exact long content stays in MongoDB/store/artifacts and is retrieved by
-# source_key when needed.
-ALPHARAVIS_VECTOR_BACKEND=off
+# stores complete retrieval chunks plus a source catalog/Inhaltsverzeichnis
+# built from the original source data. source_key points back to Mongo/store,
+# artifact files, or the federated RAG document source.
+ALPHARAVIS_VECTOR_BACKEND=pgvector
 
 # Legacy boolean alias for enabling pgvector memory.
 # Allowed values: true, false
-ALPHARAVIS_ENABLE_PGVECTOR_MEMORY=false
+ALPHARAVIS_ENABLE_PGVECTOR_MEMORY=true
 
 # Postgres/pgvector connection used by LangGraph. Docker default points to the
 # existing `vectordb` service.
@@ -359,11 +367,34 @@ ALPHARAVIS_PGVECTOR_TABLE=alpharavis_memory_vectors
 ALPHARAVIS_PGVECTOR_EMBEDDING_BASE_URL=http://litellm:4000/v1
 ALPHARAVIS_PGVECTOR_EMBEDDING_API_KEY=sk-local-dev
 ALPHARAVIS_PGVECTOR_EMBEDDING_MODEL=memory-embed
+ALPHARAVIS_PGVECTOR_FALLBACK_EMBEDDING_MODEL=memory-embed-fallback
 ALPHARAVIS_PGVECTOR_EMBEDDING_TIMEOUT_SECONDS=20
 
-# Max characters embedded per indexed record. The original source can be longer
-# in MongoDB/store/artifacts; this is only the semantic search card.
-ALPHARAVIS_PGVECTOR_MAX_CONTENT_CHARS=8000
+# Indexing mode.
+# Allowed values:
+#   background = schedule pgvector indexing after Mongo/store write succeeds
+#   inline     = await pgvector indexing; useful for tests
+ALPHARAVIS_PGVECTOR_INDEX_MODE=background
+
+# Store full retrieval chunks in pgvector, not only tiny previews.
+# Allowed values: true, false
+ALPHARAVIS_PGVECTOR_STORE_FULL_CHUNKS=true
+
+# Store one extra catalog/Inhaltsverzeichnis row per source. It is extracted
+# from the complete original data and lists source type, source key, metadata,
+# headings, code symbols, file paths, database/RAG topics, and chunk map.
+# Allowed values: true, false
+ALPHARAVIS_PGVECTOR_CATALOG_ENABLED=true
+
+# Chunking controls for full source text. Long chats, archives, code, and
+# artifacts are split into overlapping chunks; each chunk gets its own vector.
+ALPHARAVIS_PGVECTOR_CHUNK_MAX_CHARS=6000
+ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_CHARS=800
+ALPHARAVIS_PGVECTOR_PREVIEW_CHARS=900
+
+# Number of completed chat turns used for one session-turn vector window.
+# 2 means Turn 1+2, then Turn 2+3, which preserves pronoun/context links.
+ALPHARAVIS_PGVECTOR_SESSION_WINDOW_TURNS=2
 
 # Create a pgvector HNSW index automatically. If creation fails, exact vector
 # search still works but may be slower on large memory collections.
@@ -381,6 +412,16 @@ ALPHARAVIS_PGVECTOR_RESULT_PREVIEW_CHARS=900
 ALPHARAVIS_PGVECTOR_PREFETCH_ENABLED=true
 ALPHARAVIS_PGVECTOR_PREFETCH_LIMIT=3
 ALPHARAVIS_PGVECTOR_PREFETCH_MAX_CHARS=1800
+
+# Federated document RAG search. When semantic_memory_search runs, AlphaRavis
+# also queries the existing rag_api pgvector index and normalizes those hits as
+# external_document results instead of duplicating the document DB.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_RAG_FEDERATED_SEARCH=true
+ALPHARAVIS_RAG_API_URL=http://rag_api:8000
+ALPHARAVIS_RAG_FEDERATED_TIMEOUT_SECONDS=20
+ALPHARAVIS_RAG_FEDERATED_MAX_FILE_IDS=200
+ALPHARAVIS_RAG_RESULT_PREVIEW_CHARS=1400
 
 
 # =====================================================================
@@ -474,6 +515,21 @@ ALPHARAVIS_SHOW_FAST_PATH_NOTICE=true
 # state from bouncing between execution modes.
 # Allowed values: true, false
 ALPHARAVIS_FAST_PATH_LOCK_AFTER_SWARM=true
+
+# Normal agent path thinking controls for llama.cpp/Qwen-style models.
+# These are sent through chat_template_kwargs where the backend supports them.
+# Fast Path can still disable thinking separately with the setting above.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_THINKING=true
+ALPHARAVIS_PRESERVE_THINKING=true
+
+# Lightweight router-planner. It runs only on complex agent-path tasks and
+# injects a short execution plan before the swarm starts.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_PLANNER_NODE=true
+ALPHARAVIS_PLANNER_MIN_QUERY_CHARS=500
+ALPHARAVIS_PLANNER_MAX_CHARS=1800
+ALPHARAVIS_PLANNER_TIMEOUT_SECONDS=45
 
 # If true, appends a visible Run-Profile message after replies. Normally keep
 # false and inspect run_profile in LangGraph Studio/DeepAgents UI instead.

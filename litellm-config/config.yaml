@@ -22,10 +22,19 @@ model_list:
 
   # Optional embedding route for AlphaRavis pgvector memory.
   # Keep ALPHARAVIS_VECTOR_BACKEND=off until this model exists on the target
-  # backend. Ollama examples: nomic-embed-text, mxbai-embed-large.
+  # backend. Primary target: gte-qwen2-1.5b-instruct on the dedicated Ollama node.
   - model_name: memory-embed
     litellm_params:
       model: os.environ/EMBEDDING_LITELLM_MODEL
+      api_base: os.environ/EMBEDDING_API_BASE
+      api_key: os.environ/LOCAL_LLM_API_KEY
+      timeout: os.environ/EMBEDDING_TIMEOUT_SECONDS
+      max_retries: 0
+
+  # Smaller embedding fallback if the primary Qwen embedding route has trouble.
+  - model_name: memory-embed-fallback
+    litellm_params:
+      model: os.environ/EMBEDDING_FALLBACK_LITELLM_MODEL
       api_base: os.environ/EMBEDDING_API_BASE
       api_key: os.environ/LOCAL_LLM_API_KEY
       timeout: os.environ/EMBEDDING_TIMEOUT_SECONDS

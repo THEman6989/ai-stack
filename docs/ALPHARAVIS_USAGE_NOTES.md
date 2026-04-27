@@ -179,8 +179,8 @@ replace: <safer command>
 
 ## Memory And Compression
 
-Active chat compression happens automatically when the LangGraph thread grows
-above `ALPHARAVIS_ACTIVE_TOKEN_LIMIT`.
+Active chat compression happens automatically after the current LangGraph run
+finishes when the thread grows above `ALPHARAVIS_ACTIVE_TOKEN_LIMIT`.
 
 When compression happens, AlphaRavis can show a visible `Memory-Notice`.
 
@@ -245,22 +245,18 @@ Long logs, reports, or implementation notes should go to artifacts instead.
 
 ## Semantic Vector Memory
 
-Optional pgvector memory is a search index, not a second source of truth.
-MongoDB/LangGraph still own checkpoints, store data, archives, and thread state.
-pgvector stores only compact search cards with a preview, metadata, source key,
-thread id, and embedding.
+pgvector memory is the semantic Inhaltsverzeichnis for AlphaRavis. MongoDB and
+LangGraph still own checkpoints, store data, archives, and thread state, but
+pgvector stores a catalog plus full retrieval chunks generated from the
+complete original source data.
 
 Default:
 
 ```text
-ALPHARAVIS_VECTOR_BACKEND=off
-ALPHARAVIS_ENABLE_PGVECTOR_MEMORY=false
-```
-
-Enable:
-
-```text
 ALPHARAVIS_VECTOR_BACKEND=pgvector
+ALPHARAVIS_ENABLE_PGVECTOR_MEMORY=true
+ALPHARAVIS_PGVECTOR_CATALOG_ENABLED=true
+ALPHARAVIS_PGVECTOR_STORE_FULL_CHUNKS=true
 ```
 
 Requirements:
@@ -269,11 +265,12 @@ Requirements:
 ALPHARAVIS_PGVECTOR_DATABASE_URL=postgresql://postgres:<password>@vectordb:5432/rag_api
 ALPHARAVIS_PGVECTOR_EMBEDDING_BASE_URL=http://litellm:4000/v1
 ALPHARAVIS_PGVECTOR_EMBEDDING_MODEL=memory-embed
+ALPHARAVIS_PGVECTOR_FALLBACK_EMBEDDING_MODEL=memory-embed-fallback
 ```
 
 `memory-embed` is a LiteLLM route. The default example routes to an
-OpenAI-compatible Ollama embedding model such as `nomic-embed-text`. Pull or
-configure that model before enabling vector memory.
+OpenAI-compatible Ollama embedding model such as
+`Q78KG/gte-Qwen2-1.5B-instruct`. The fallback route points to `bge-m3`.
 
 Agents can call:
 
@@ -281,8 +278,9 @@ Agents can call:
 semantic_memory_search
 ```
 
-It searches the current thread plus global memories by default. It searches
-other threads only when `include_other_threads=true` is explicitly requested.
+It searches the current thread plus global memories by default and also queries
+the existing RAG API for external documents. It searches other AlphaRavis
+threads only when `include_other_threads=true` is explicitly requested.
 After enabling pgvector memory, new records are indexed automatically. Old
 MongoDB/store history is not bulk-backfilled by default, to avoid a surprise
 embedding job over many chats.

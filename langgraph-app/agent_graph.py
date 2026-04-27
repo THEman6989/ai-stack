@@ -69,6 +69,8 @@ else:
 class AlphaRavisState(MessagesState):
     active_agent: NotRequired[str]
     active_skill_context: NotRequired[str]
+    planner_context: NotRequired[str]
+    planner_last_key: NotRequired[str]
     memory_kernel_context: NotRequired[str]
     memory_kernel_last_turn_key: NotRequired[str]
     fast_path_route: NotRequired[str]
@@ -111,6 +113,7 @@ ARCHIVE_COLLECTION_INDEX_NS = ("alpharavis", "archive_collection_index")
 DEBUGGING_LESSON_NS = ("alpharavis", "debugging_lessons")
 SKILL_LIBRARY_NS = ("alpharavis", "skill_library")
 SKILL_CONTEXT_MESSAGE_ID = "alpharavis_skill_library_context"
+PLANNER_CONTEXT_MESSAGE_ID = "alpharavis_planner_context"
 MEMORY_KERNEL_CONTEXT_MESSAGE_ID = "alpharavis_memory_kernel_context"
 CURATED_MEMORY_INDEX_NS = ("alpharavis", "curated_memory_index")
 SESSION_TURN_INDEX_NS = ("alpharavis", "session_turn_index")
@@ -248,6 +251,23 @@ def _model(model_name: str | None = None, timeout_seconds: float | None = None) 
         max_retries=int(os.getenv("ALPHARAVIS_LLM_MAX_RETRIES", "0")),
         streaming=_env_bool("ALPHARAVIS_LLM_STREAMING", "true"),
     )
+
+
+def _agent_thinking_bind_kwargs() -> dict[str, Any]:
+    chat_template_kwargs: dict[str, Any] = {}
+    if _env_bool("ALPHARAVIS_ENABLE_THINKING", "true"):
+        chat_template_kwargs["enable_thinking"] = True
+    if _env_bool("ALPHARAVIS_PRESERVE_THINKING", "true"):
+        chat_template_kwargs["preserve_thinking"] = True
+    if not chat_template_kwargs:
+        return {}
+    return {"chat_template_kwargs": chat_template_kwargs}
+
+
+def _agent_model() -> Any:
+    llm = _model()
+    kwargs = _agent_thinking_bind_kwargs()
+    return llm.bind(**kwargs) if kwargs else llm
 
 
 def _workspace_root() -> str:
@@ -899,6 +919,74 @@ async def search_curated_memory(query: str, agent_id: str = "", scope: str = "au
     return "\n\n".join(lines[:limit])
 
 
+def _normalize_rag_document_hit(item: Any) -> str | None:
+    document = item
+    score = None
+    if isinstance(item, (list, tuple)) and item:
+        document = item[0]
+        if len(item) > 1:
+            score = item[1]
+
+    if isinstance(document, dict):
+        page_content = str(document.get("page_content") or document.get("content") or document.get("text") or "")
+        metadata = document.get("metadata") or {}
+    else:
+        page_content = str(getattr(document, "page_content", "") or getattr(document, "content", ""))
+        metadata = getattr(document, "metadata", {}) or {}
+
+    if not page_content.strip():
+        return None
+
+    file_id = metadata.get("file_id") or metadata.get("source") or metadata.get("path") or "unknown"
+    filename = metadata.get("filename") or metadata.get("file_name") or metadata.get("source") or file_id
+    preview_chars = int(os.getenv("ALPHARAVIS_RAG_RESULT_PREVIEW_CHARS", "1400"))
+    chunk = page_content[:preview_chars].rstrip()
+    if len(page_content) > preview_chars:
+        chunk += "\n[RAG chunk preview truncated.]"
+    score_text = f", score {score}" if score is not None else ""
+    return (
+        f"external_document `{file_id}` ({filename}{score_text})\n"
+        f"Metadata: {json.dumps(metadata, ensure_ascii=False)[:1000]}\n"
+        f"Chunk:\n{chunk}"
+    )
+
+
+async def _rag_federated_search(query: str, limit: int) -> tuple[list[str], str]:
+    rag_url = os.getenv("ALPHARAVIS_RAG_API_URL", "http://rag_api:8000").rstrip("/")
+    timeout = float(os.getenv("ALPHARAVIS_RAG_FEDERATED_TIMEOUT_SECONDS", "20"))
+    max_file_ids = int(os.getenv("ALPHARAVIS_RAG_FEDERATED_MAX_FILE_IDS", "200"))
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            ids_response = await client.get(f"{rag_url}/ids")
+            if ids_response.status_code >= 400:
+                return [], f"RAG /ids returned HTTP {ids_response.status_code}: {ids_response.text[:300]}"
+            file_ids = ids_response.json()
+            if not isinstance(file_ids, list) or not file_ids:
+                return [], ""
+            file_ids = [str(file_id) for file_id in file_ids[:max_file_ids]]
+            response = await client.post(
+                f"{rag_url}/query_multiple",
+                json={"query": query, "file_ids": file_ids, "k": limit},
+            )
+            if response.status_code == 404:
+                return [], ""
+            if response.status_code >= 400:
+                return [], f"RAG /query_multiple returned HTTP {response.status_code}: {response.text[:300]}"
+            payload = response.json()
+    except Exception as exc:
+        return [], f"RAG federated search unavailable at {rag_url}: {exc}"
+
+    if not isinstance(payload, list):
+        return [], "RAG /query_multiple returned an unexpected non-list payload."
+
+    hits = []
+    for item in payload:
+        hit = _normalize_rag_document_hit(item)
+        if hit:
+            hits.append(hit)
+    return hits, ""
+
+
 @tool
 async def semantic_memory_search(
     query: str,
@@ -906,43 +994,58 @@ async def semantic_memory_search(
     limit: int = 5,
     include_other_threads: bool = False,
 ):
-    """Semantic vector search over the optional pgvector memory index."""
-
-    if not _vector_memory_available():
-        if PGVECTOR_IMPORT_ERROR:
-            return f"Semantic vector memory is unavailable: {PGVECTOR_IMPORT_ERROR}"
-        return (
-            "Semantic vector memory is disabled. Set "
-            "ALPHARAVIS_VECTOR_BACKEND=pgvector or "
-            "ALPHARAVIS_ENABLE_PGVECTOR_MEMORY=true."
-        )
-    if _pgvector_semantic_search is None:
-        return f"Semantic vector memory module is unavailable: {PGVECTOR_IMPORT_ERROR}"
+    """Semantic retrieval over AlphaRavis pgvector memory and federated document RAG."""
 
     limit = max(1, min(int(limit), int(os.getenv("ALPHARAVIS_PGVECTOR_SEARCH_LIMIT", "5"))))
     if include_other_threads:
         limit = min(limit, int(os.getenv("ALPHARAVIS_CROSS_THREAD_VECTOR_SEARCH_LIMIT", "3")))
 
-    try:
-        results = await _pgvector_semantic_search(
-            query=query,
-            thread_id=_state_thread_id(),
-            source_type=source_type,
-            include_other_threads=include_other_threads,
-            limit=limit,
-        )
-    except Exception as exc:
-        return f"Semantic vector memory search failed cleanly: {exc}"
+    results = []
+    vector_warning = ""
+    if _vector_memory_available() and _pgvector_semantic_search is not None:
+        try:
+            results = await _pgvector_semantic_search(
+                query=query,
+                thread_id=_state_thread_id(),
+                source_type=source_type,
+                include_other_threads=include_other_threads,
+                limit=limit,
+            )
+        except Exception as exc:
+            vector_warning = f"AlphaRavis pgvector search failed cleanly: {exc}"
+    elif PGVECTOR_IMPORT_ERROR:
+        vector_warning = f"AlphaRavis pgvector memory is unavailable: {PGVECTOR_IMPORT_ERROR}"
+    else:
+        vector_warning = "AlphaRavis pgvector memory is disabled."
 
-    if not results:
+    rag_results = []
+    rag_warning = ""
+    if _env_bool("ALPHARAVIS_ENABLE_RAG_FEDERATED_SEARCH", "true") and source_type in {
+        "all",
+        "external_document",
+        "document",
+    }:
+        rag_results, rag_warning = await _rag_federated_search(query, limit=limit)
+
+    if not results and not rag_results:
         scope = "across threads" if include_other_threads else "in this thread plus global memory"
-        return f"No semantic vector memory matched `{query}` {scope}."
+        warnings = "\n".join(f"Warning: {warning}" for warning in [vector_warning, rag_warning] if warning)
+        return f"No semantic memory or document RAG matched `{query}` {scope}.\n{warnings}".strip()
 
     lines = [
-        "Semantic vector memory hits. These are index previews; use the source_key "
-        "with the archive/session/artifact tools if exact source text is needed."
+        "Semantic retrieval hits. AlphaRavis memory hits are full chunks/catalogs "
+        "built from original Mongo/store/artifact data; document hits come from the RAG index."
     ]
-    lines.extend(_format_vector_result(record) for record in results[:limit])
+    if vector_warning:
+        lines.append(f"Warning: {vector_warning}")
+    if rag_warning:
+        lines.append(f"Warning: {rag_warning}")
+    if results:
+        lines.append("AlphaRavis pgvector memory:")
+        lines.extend(_format_vector_result(record) for record in results[:limit])
+    if rag_results:
+        lines.append("External document RAG:")
+        lines.extend(rag_results[:limit])
     return "\n\n".join(lines)
 
 
@@ -1133,7 +1236,7 @@ async def write_alpha_ravis_artifact(
         source_type="artifact",
         source_key=artifact_id,
         title=record["title"],
-        content=record["content_preview"],
+        content=content,
         thread_id=thread_id,
         thread_key=thread_key,
         scope="thread",
@@ -2108,25 +2211,32 @@ async def _maybe_index_vector_memory(
         print(f"WARNING: {message}")
         return message
 
-    try:
-        return await _pgvector_upsert_memory_record(
-            source_type=source_type,
-            source_key=source_key,
-            title=title,
-            content=content,
-            thread_id=thread_id,
-            thread_key=thread_key,
-            scope=scope,
-            metadata=metadata or {},
-        )
-    except Exception as exc:
-        message = f"pgvector indexing failed for {source_type}:{source_key}: {exc}"
-        print(f"WARNING: {message}")
-        return message
+    async def _index() -> str:
+        try:
+            return await _pgvector_upsert_memory_record(
+                source_type=source_type,
+                source_key=source_key,
+                title=title,
+                content=content,
+                thread_id=thread_id,
+                thread_key=thread_key,
+                scope=scope,
+                metadata=metadata or {},
+            )
+        except Exception as exc:
+            message = f"pgvector indexing failed for {source_type}:{source_key}: {exc}"
+            print(f"WARNING: {message}")
+            return message
+
+    if os.getenv("ALPHARAVIS_PGVECTOR_INDEX_MODE", "background").lower().strip() == "background":
+        asyncio.create_task(_index())
+        return "scheduled"
+
+    return await _index()
 
 
 def _format_vector_result(record: dict[str, Any]) -> str:
-    content = str(record.get("content") or "")
+    content = str(record.get("chunk_text") or record.get("content") or "")
     preview_chars = int(os.getenv("ALPHARAVIS_PGVECTOR_RESULT_PREVIEW_CHARS", "900"))
     if len(content) > preview_chars:
         content = content[:preview_chars].rstrip() + "\n[Vector result preview truncated.]"
@@ -2136,10 +2246,15 @@ def _format_vector_result(record: dict[str, Any]) -> str:
     source_key = record.get("source_key", "unknown")
     thread = record.get("thread_key") or record.get("thread_id") or "global"
     title = record.get("title") or source_key
+    chunk_index = record.get("chunk_index", "?")
+    chunk_count = record.get("chunk_count", "?")
+    catalog = " catalog" if record.get("is_catalog") else ""
+    model = record.get("embedding_model") or "unknown"
     return (
-        f"{source} `{source_key}` from `{thread}` (similarity {score})\n"
+        f"{source}{catalog} `{source_key}` chunk {chunk_index}/{chunk_count} "
+        f"from `{thread}` (similarity {score}, model {model})\n"
         f"Title: {title}\n"
-        f"Preview:\n{content}"
+        f"Chunk:\n{content}"
     ).strip()
 
 
@@ -2237,6 +2352,30 @@ def _human_turn_count(messages: list[Any]) -> int:
         if role in {"human", "user"}:
             count += 1
     return count
+
+
+def _recent_turn_window_text(messages: list[Any], window_turns: int) -> str:
+    pairs: list[dict[str, str]] = []
+    current_user = ""
+    for message in messages:
+        if isinstance(message, dict):
+            role = message.get("role") or message.get("type")
+        else:
+            role = getattr(message, "type", getattr(message, "role", None))
+        text = _message_text(message)
+        if role in {"human", "user"}:
+            current_user = text
+        elif role in {"ai", "assistant"} and current_user and str(text).strip():
+            pairs.append({"user": current_user, "assistant": text})
+            current_user = ""
+
+    selected = pairs[-max(1, window_turns):]
+    if not selected:
+        return "\n\n".join(_message_text(message) for message in messages[-4:])
+    lines = []
+    for index, pair in enumerate(selected, start=1):
+        lines.append(f"Window turn {index}/{len(selected)}\n{pair['user']}\n{pair['assistant']}")
+    return "\n\n".join(lines)
 
 
 def _latest_user_query(messages: list[Any]) -> str:
@@ -2348,7 +2487,85 @@ async def route_decision_node(state: AlphaRavisState) -> dict[str, Any]:
 
 
 def route_after_decision(state: AlphaRavisState) -> str:
-    return "fast_path" if state.get("fast_path_route") == "fast_path" else "swarm"
+    return "fast_path" if state.get("fast_path_route") == "fast_path" else "planner"
+
+
+def _planner_needed(state: AlphaRavisState) -> bool:
+    if not _env_bool("ALPHARAVIS_ENABLE_PLANNER_NODE", "true"):
+        return False
+    query = _latest_user_query(list(state.get("messages", []))).lower()
+    if len(query) > int(os.getenv("ALPHARAVIS_PLANNER_MIN_QUERY_CHARS", "500")):
+        return True
+    triggers = [
+        "implement",
+        "phase",
+        "plan",
+        "debug",
+        "docker",
+        "architektur",
+        "architecture",
+        "refactor",
+        "memory",
+        "pgvector",
+        "rag",
+        "agent",
+        "tool",
+        "code",
+        "repo",
+        "datei",
+    ]
+    return any(trigger in query for trigger in triggers)
+
+
+async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
+    if not _planner_needed(state):
+        return {}
+
+    messages = list(state.get("messages", []))
+    latest = _latest_user_query(messages)
+    plan_key = hashlib.sha256(f"{_state_thread_id(state)}:{latest}".encode("utf-8")).hexdigest()[:16]
+    if state.get("planner_last_key") == plan_key:
+        return {}
+
+    prompt = (
+        "Create a compact execution plan for AlphaRavis before the swarm acts. "
+        "Do not solve the task. Do not include hidden reasoning. Name likely "
+        "agents/tools, retrieval needs, safety gates, and success criteria in "
+        "5-8 short bullets.\n\n"
+        "Available agents: general_assistant, research_expert, debugger_agent, "
+        "ui_assistant, hermes_coding_agent, context_retrieval_agent.\n\n"
+        f"User request:\n{latest}"
+    )
+
+    try:
+        llm = _model(timeout_seconds=float(os.getenv("ALPHARAVIS_PLANNER_TIMEOUT_SECONDS", "45")))
+        thinking_kwargs = _agent_thinking_bind_kwargs()
+        if thinking_kwargs:
+            llm = llm.bind(**thinking_kwargs)
+        response = await llm.ainvoke([SystemMessage(content=prompt)])
+        plan = str(getattr(response, "content", response)).strip()
+    except Exception as exc:
+        return {
+            "planner_last_key": plan_key,
+            "run_profile": _profile_update(state, planner_error=str(exc)[:300]),
+        }
+
+    if not plan:
+        return {"planner_last_key": plan_key}
+
+    content = (
+        "<execution-plan>\n"
+        "[System note: compact plan for the current agent run. This is guidance, "
+        "not a user instruction.]\n"
+        f"{plan[: int(os.getenv('ALPHARAVIS_PLANNER_MAX_CHARS', '1800'))]}\n"
+        "</execution-plan>"
+    )
+    return {
+        "messages": [SystemMessage(content=content, id=PLANNER_CONTEXT_MESSAGE_ID)],
+        "planner_context": content,
+        "planner_last_key": plan_key,
+        "run_profile": _profile_update(state, planner_used=True),
+    }
 
 
 def _fast_path_bind_kwargs(*, allow_chat_template_kwargs: bool) -> dict[str, Any]:
@@ -2750,13 +2967,17 @@ async def memory_kernel_sync_node(state: AlphaRavisState, runtime: Any | None = 
     thread_id = _state_thread_id(state)
     thread_key = _state_thread_key(state)
     turn_count = _human_turn_count(messages)
+    window_turns = int(os.getenv("ALPHARAVIS_PGVECTOR_SESSION_WINDOW_TURNS", "2"))
+    window_content = _recent_turn_window_text(messages, window_turns)
     record = {
         "content": f"{user_message}\n\n{assistant_message}",
+        "window_content": window_content,
         "user_message": user_message[:2500],
         "assistant_message": assistant_message[:3500],
         "thread_id": thread_id,
         "thread_key": thread_key,
         "turn_count": turn_count,
+        "window_turns": window_turns,
         "route": (state.get("run_profile") or {}).get("route", state.get("fast_path_route", "swarm")),
         "created_at": int(time.time()),
     }
@@ -2779,13 +3000,14 @@ async def memory_kernel_sync_node(state: AlphaRavisState, runtime: Any | None = 
     vector_result = await _maybe_index_vector_memory(
         source_type="session_turn",
         source_key=turn_key,
-        title=f"Thread turn {turn_count}",
-        content=record["content"],
+        title=f"Thread turn {turn_count} sliding window",
+        content=record["window_content"],
         thread_id=thread_id,
         thread_key=thread_key,
         scope="thread",
         metadata={
             "turn_count": turn_count,
+            "window_turns": window_turns,
             "route": record["route"],
             "created_at": record["created_at"],
         },
@@ -2875,6 +3097,9 @@ async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None)
     token_estimate = _estimate_tokens(messages)
     force_compression = _compression_forced_by_user(messages)
 
+    if not _env_bool("ALPHARAVIS_ENABLE_POST_RUN_COMPRESSION", "true") and not force_compression:
+        return {}
+
     if _compression_paused_by_user(messages):
         notice_key = hashlib.sha256(
             f"compression-paused:{_latest_user_query(messages)}:{token_estimate}".encode("utf-8")
@@ -2929,11 +3154,13 @@ async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None)
     thread_key = _state_thread_key(state)
     hierarchy_notice = ""
     if store is not None:
+        archived_messages_text = "\n\n".join(_message_text(message) for message in old_messages)
         archive_record = {
             "summary": summary,
             "content": (
                 f"Archive summary:\n{summary}\n\n"
-                f"Precompression notes:\n{precompress_notes}"
+                f"Precompression notes:\n{precompress_notes}\n\n"
+                f"Archived original messages:\n{archived_messages_text}"
             ).strip(),
             "token_estimate": _estimate_tokens(old_messages),
             "archived_at": int(time.time()),
@@ -3169,7 +3396,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     _warn_about_mongo_checkpointer()
     _configure_llm_cache()
 
-    llm = _model()
+    llm = _agent_model()
     mcp_tools = mcp_tools or []
 
     transfer_to_research = create_handoff_tool(
@@ -3426,9 +3653,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
 
     builder = StateGraph(AlphaRavisState)
     builder.add_node("run_profile_start", run_profile_start_node)
-    builder.add_node("context_guard_before", context_guard_node)
     builder.add_node("route_decision", route_decision_node)
     builder.add_node("fast_chat", fast_chat_node)
+    builder.add_node("planner", planner_node)
     builder.add_node("memory_kernel_before", memory_kernel_prefetch_node)
     builder.add_node("skill_library", skill_library_node)
     builder.add_node("alpha_ravis_swarm", swarm)
@@ -3437,14 +3664,14 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     builder.add_node("memory_notice", memory_notice_node)
     builder.add_node("run_profile_finish", run_profile_finish_node)
     builder.add_edge(START, "run_profile_start")
-    builder.add_edge("run_profile_start", "context_guard_before")
-    builder.add_edge("context_guard_before", "route_decision")
+    builder.add_edge("run_profile_start", "route_decision")
     builder.add_conditional_edges(
         "route_decision",
         route_after_decision,
-        {"fast_path": "fast_chat", "swarm": "memory_kernel_before"},
+        {"fast_path": "fast_chat", "planner": "planner"},
     )
     builder.add_edge("fast_chat", "context_guard_after")
+    builder.add_edge("planner", "memory_kernel_before")
     builder.add_edge("memory_kernel_before", "skill_library")
     builder.add_edge("skill_library", "alpha_ravis_swarm")
     builder.add_edge("alpha_ravis_swarm", "memory_kernel_after")
