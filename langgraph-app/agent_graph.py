@@ -65,6 +65,22 @@ except Exception as exc:  # pragma: no cover - optional local module/deps
 else:
     PGVECTOR_IMPORT_ERROR = None
 
+try:
+    from model_management import (
+        embedding_maintenance_decision as _model_mgmt_embedding_decision,
+        inspect_runtime as _model_mgmt_inspect_runtime,
+        prepare_comfy_for_pixelle as _model_mgmt_prepare_comfy,
+        request_power_action as _model_mgmt_request_power_action,
+    )
+except Exception as exc:  # pragma: no cover - optional local module/deps
+    _model_mgmt_embedding_decision = None
+    _model_mgmt_inspect_runtime = None
+    _model_mgmt_prepare_comfy = None
+    _model_mgmt_request_power_action = None
+    MODEL_MANAGEMENT_IMPORT_ERROR: Exception | None = exc
+else:
+    MODEL_MANAGEMENT_IMPORT_ERROR = None
+
 
 class AlphaRavisState(MessagesState):
     active_agent: NotRequired[str]
@@ -166,6 +182,7 @@ FAST_PATH_DENY_PATTERNS = [
     "docker",
     "dokument",
     "datei",
+    "embedding",
     "fehl",
     "git",
     "hermes",
@@ -175,7 +192,10 @@ FAST_PATH_DENY_PATTERNS = [
     "log",
     "memory",
     "mcp",
+    "model management",
+    "ollama",
     "pc",
+    "power",
     "pdf",
     "pixelle",
     "python",
@@ -393,11 +413,62 @@ def _format_pixelle_failure(job_id: str, logs: str) -> str:
     )
 
 
+def _model_management_unavailable() -> str | None:
+    if MODEL_MANAGEMENT_IMPORT_ERROR:
+        return f"Model management module unavailable: {MODEL_MANAGEMENT_IMPORT_ERROR}"
+    return None
+
+
+def _json_tool_result(data: Any) -> str:
+    return json.dumps(data, ensure_ascii=False, indent=2, default=str)
+
+
+async def _pixelle_preflight() -> dict[str, Any]:
+    if _model_mgmt_prepare_comfy is None:
+        return {
+            "ready": True,
+            "skipped": True,
+            "message": _model_management_unavailable() or "Model management module not loaded.",
+        }
+
+    try:
+        result = await _model_mgmt_prepare_comfy(REMOTE_PCS)
+    except Exception as exc:
+        return {
+            "ready": not _env_bool("ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE", "false"),
+            "error": str(exc),
+            "message": f"Pixelle ComfyUI preflight failed: {exc}",
+        }
+
+    if result.get("ready"):
+        return result
+
+    result["block_job"] = _env_bool("ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE", "false")
+    return result
+
+
+def _pixelle_preflight_notice(result: dict[str, Any]) -> str:
+    message = str(result.get("message") or "").strip()
+    if not message:
+        return ""
+    if result.get("ready"):
+        return f"Pixelle preflight: {message}"
+    return f"Pixelle preflight warning: {message}"
+
+
 @tool
 async def start_pixelle_remote(prompt: str, config: RunnableConfig):
     """Starts a Pixelle image job and monitors it through a durable LangGraph task."""
 
     current_thread_id = config["configurable"].get("thread_id", "default_thread")
+    preflight = await _pixelle_preflight()
+    preflight_notice = _pixelle_preflight_notice(preflight)
+    if preflight.get("block_job"):
+        return (
+            f"{preflight_notice}\n\n"
+            "Pixelle job was not started because ComfyUI appears offline and "
+            "ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE=true."
+        )
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
@@ -405,35 +476,50 @@ async def start_pixelle_remote(prompt: str, config: RunnableConfig):
             response.raise_for_status()
             job_id = response.json().get("job_id")
         except Exception as exc:
-            return f"Error: Could not reach Pixelle. ({exc})"
+            prefix = f"{preflight_notice}\n\n" if preflight_notice else ""
+            return f"{prefix}Error: Could not reach Pixelle. ({exc})"
 
     if not job_id:
-        return "Error: Pixelle did not return a job_id."
+        prefix = f"{preflight_notice}\n\n" if preflight_notice else ""
+        return f"{prefix}Error: Pixelle did not return a job_id."
 
     result = await monitor_pixelle_job(job_id, current_thread_id)
+    prefix = f"{preflight_notice}\n\n" if preflight_notice else ""
     if result["status"] == "completed":
-        return f"Image ready. Job `{job_id}` completed.\n\n{result['message']}"
+        return f"{prefix}Image ready. Job `{job_id}` completed.\n\n{result['message']}"
 
-    return result["message"]
+    return f"{prefix}{result['message']}"
 
 
 @tool
 async def start_pixelle_async(prompt: str):
     """Start a Pixelle image job and return immediately with a job id."""
 
+    preflight = await _pixelle_preflight()
+    preflight_notice = _pixelle_preflight_notice(preflight)
+    if preflight.get("block_job"):
+        return (
+            f"{preflight_notice}\n\n"
+            "Pixelle job was not started because ComfyUI appears offline and "
+            "ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE=true."
+        )
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             response = await client.post(f"{PIXELLE_URL}/api/run", json={"prompt": prompt})
             response.raise_for_status()
             job_id = response.json().get("job_id")
         except Exception as exc:
-            return f"Error: Could not reach Pixelle. ({exc})"
+            prefix = f"{preflight_notice}\n\n" if preflight_notice else ""
+            return f"{prefix}Error: Could not reach Pixelle. ({exc})"
 
     if not job_id:
-        return "Error: Pixelle did not return a job_id."
+        prefix = f"{preflight_notice}\n\n" if preflight_notice else ""
+        return f"{prefix}Error: Pixelle did not return a job_id."
 
+    prefix = f"{preflight_notice}\n\n" if preflight_notice else ""
     return (
-        f"Pixelle job started. job_id: {job_id}\n"
+        f"{prefix}Pixelle job started. job_id: {job_id}\n"
         "Use check_pixelle_job with this exact job_id to get the current status. "
         "Do not poll automatically unless the user asks."
     )
@@ -457,6 +543,46 @@ async def check_pixelle_job(job_id: str):
     if status == "failed":
         return _format_pixelle_failure(job_id, data.get("logs", "No logs returned."))
     return f"Pixelle job `{job_id}` status: {status}\n\n{data.get('logs', '')}"
+
+
+@tool
+async def inspect_model_management_status():
+    """Inspect big LLM, Ollama, ComfyUI, and model/power-management config."""
+
+    if _model_mgmt_inspect_runtime is None:
+        return _model_management_unavailable() or "Model management module not loaded."
+    return _json_tool_result(await _model_mgmt_inspect_runtime(REMOTE_PCS))
+
+
+@tool
+async def plan_embedding_maintenance(reason: str = "", last_activity_age_seconds: float | None = None):
+    """Plan a safe Ollama embedding-model window without executing power actions."""
+
+    if _model_mgmt_inspect_runtime is None or _model_mgmt_embedding_decision is None:
+        return _model_management_unavailable() or "Model management module not loaded."
+    runtime = await _model_mgmt_inspect_runtime(REMOTE_PCS)
+    decision = _model_mgmt_embedding_decision(runtime, last_activity_age_seconds=last_activity_age_seconds)
+    return _json_tool_result({"reason": reason, "runtime": runtime, "decision": decision})
+
+
+@tool
+async def prepare_comfy_for_pixelle():
+    """Check ComfyUI readiness before Pixelle and optionally request a wake action."""
+
+    if _model_mgmt_prepare_comfy is None:
+        return _model_management_unavailable() or "Model management module not loaded."
+    return _json_tool_result(await _model_mgmt_prepare_comfy(REMOTE_PCS))
+
+
+@tool
+async def request_power_management_action(action: str, target: str, reason: str):
+    """Request a configured model/power-management action through the safe external interface."""
+
+    if _model_mgmt_request_power_action is None:
+        return _model_management_unavailable() or "Model management module not loaded."
+    return _json_tool_result(
+        await _model_mgmt_request_power_action(action, target, reason, remote_pcs=REMOTE_PCS)
+    )
 
 
 @tool
@@ -2642,7 +2768,8 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
         "agents/tools, retrieval needs, safety gates, and success criteria in "
         "5-8 short bullets.\n\n"
         "Available agents: general_assistant, research_expert, debugger_agent, "
-        "ui_assistant, hermes_coding_agent, context_retrieval_agent.\n\n"
+        "ui_assistant, hermes_coding_agent, context_retrieval_agent, "
+        "power_management_agent.\n\n"
         f"User request:\n{latest}"
     )
 
@@ -3763,6 +3890,14 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             f"conversation memory. {handoff_requirement}"
         ),
     )
+    transfer_to_power = create_handoff_tool(
+        agent_name="power_management_agent",
+        description=(
+            "Transfer to the power/model management agent for ComfyUI readiness, "
+            "Pixelle preflight, Ollama embedding windows, big-LLM availability, "
+            f"Wake-on-LAN, or planned shutdown/startup actions. {handoff_requirement}"
+        ),
+    )
 
     research_worker = create_deep_agent(
         model=llm,
@@ -3788,6 +3923,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_debugger,
             transfer_to_hermes,
             transfer_to_context,
+            transfer_to_power,
         ],
         name="research_expert",
         system_prompt=(
@@ -3827,6 +3963,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             start_pixelle_async,
             check_pixelle_job,
             wake_on_lan,
+            inspect_model_management_status,
+            plan_embedding_maintenance,
+            prepare_comfy_for_pixelle,
+            request_power_management_action,
             fast_web_search,
             describe_optional_tool_registry,
             read_alpha_ravis_architecture,
@@ -3854,6 +3994,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_debugger,
             transfer_to_hermes,
             transfer_to_context,
+            transfer_to_power,
         ]
         + mcp_tools,
         name="general_assistant",
@@ -3864,6 +4005,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "SSH command diagnostics so the approval gate stays in force. "
             "For long Pixelle jobs, prefer start_pixelle_async and return the "
             "job_id unless the user explicitly wants to wait. "
+            "For ComfyUI readiness, Ollama embedding windows, or PC power "
+            "lifecycle questions, use the model-management tools or transfer "
+            "to power_management_agent. "
             "Use read_alpha_ravis_architecture only when the user asks what "
             "AlphaRavis is, what it can do, or how the stack works. "
             "Optional MCP registries are lazy-loaded; call "
@@ -3891,12 +4035,12 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
 
     computer_worker = _create_ui_assistant(
         llm,
-        [transfer_to_generalist, transfer_to_research, transfer_to_debugger, transfer_to_hermes, transfer_to_context],
+        [transfer_to_generalist, transfer_to_research, transfer_to_debugger, transfer_to_hermes, transfer_to_context, transfer_to_power],
     )
 
     debugger_worker = _create_debugger_subgraph(
         llm,
-        [transfer_to_research, transfer_to_generalist, transfer_to_hermes, transfer_to_context],
+        [transfer_to_research, transfer_to_generalist, transfer_to_hermes, transfer_to_context, transfer_to_power],
     )
 
     hermes_worker = create_deep_agent(
@@ -3920,6 +4064,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_debugger,
             transfer_to_research,
             transfer_to_context,
+            transfer_to_power,
         ],
         name="hermes_coding_agent",
         system_prompt=(
@@ -3967,6 +4112,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_research,
             transfer_to_debugger,
             transfer_to_hermes,
+            transfer_to_power,
         ],
         name="context_retrieval_agent",
         system_prompt=(
@@ -3991,8 +4137,57 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         + HANDOFF_POLICY_PROMPT,
     )
 
+    power_worker = create_deep_agent(
+        model=llm,
+        tools=[
+            inspect_model_management_status,
+            plan_embedding_maintenance,
+            prepare_comfy_for_pixelle,
+            request_power_management_action,
+            wake_on_lan,
+            build_specialist_report,
+            search_agent_memory,
+            record_agent_memory,
+            search_curated_memory,
+            record_curated_memory,
+            semantic_memory_search,
+            transfer_to_generalist,
+            transfer_to_debugger,
+            transfer_to_hermes,
+            transfer_to_research,
+            transfer_to_context,
+        ],
+        name="power_management_agent",
+        system_prompt=(
+            "You are the Power and Model Management Agent. Your job is to keep "
+            "AlphaRavis aware of local hardware state without taking unsafe "
+            "actions. Inspect big llama.cpp availability, Ollama running models, "
+            "ComfyUI readiness, and the embedding-maintenance window. "
+            "You may use wake_on_lan for configured PCs when the user asks or "
+            "a Pixelle/Comfy job needs it. Shutdowns, service starts/stops, "
+            "Ollama model switching, and embedding-job runs must go through "
+            "request_power_management_action; by default it returns a dry-run "
+            "until the curated external management endpoint is configured. "
+            "Never invent SSH commands for shutdown or model switching. If raw "
+            "logs or shell diagnostics are needed, transfer to debugger_agent. "
+            "Use agent_id=`power_management_agent` for durable hardware/model "
+            "lessons, and record only stable facts such as known health URLs or "
+            "safe wake procedures."
+        )
+        + " "
+        + HANDOFF_POLICY_PROMPT,
+    )
+
     swarm = create_swarm(
-        [research_worker, general_worker, computer_worker, debugger_worker, hermes_worker, context_worker],
+        [
+            research_worker,
+            general_worker,
+            computer_worker,
+            debugger_worker,
+            hermes_worker,
+            context_worker,
+            power_worker,
+        ],
         default_active_agent="general_assistant",
     ).compile(store=store)
 

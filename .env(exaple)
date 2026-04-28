@@ -13,6 +13,7 @@
 #   MUST-HAVE                          -> secrets, database password, model route
 #   CORE DOCKER URLS                   -> internal service URLs, usually unchanged
 #   OPTIONAL REMOTE PC / SSH           -> Wake-on-LAN and SSH debugging
+#   OPTIONAL MODEL / POWER MANAGEMENT  -> custom safe hooks for local hardware
 #   OPTIONAL BRIDGE SETTINGS           -> LibreChat <-> LangGraph behavior
 #   OPTIONAL MEMORY SETTINGS           -> compression, archives, architecture doc
 #   OPTIONAL VECTOR MEMORY             -> pgvector semantic memory sidecar
@@ -196,6 +197,66 @@ SSH_PASS_DEFAULT=yourPasswordHere
 
 
 # =====================================================================
+# OPTIONAL MODEL / POWER MANAGEMENT - CUSTOM LOCAL HARDWARE HOOKS
+# =====================================================================
+
+# Enables AlphaRavis's custom model-management planning layer.
+# This does not execute shutdowns or model switches by itself.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true
+
+# Enables power-management intent handling. Wake-on-LAN remains a normal
+# explicit tool; shutdowns/service changes/model switches still require the
+# external curated action endpoint below.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_POWER_MANAGEMENT=false
+
+# If false, request_power_management_action returns a dry-run plan. Set true
+# only after ALPHARAVIS_MODEL_MGMT_ACTION_URL points to your curated tool
+# service/export and you trust the allowed actions.
+# Allowed values: true, false
+ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=false
+
+# One generic action endpoint for curated OpenWebUI/Hermes/local scripts.
+# AlphaRavis POSTs {"action": "...", "payload": {...}} to this URL.
+# Leave empty until you provide the safe implementation.
+ALPHARAVIS_MODEL_MGMT_ACTION_URL=
+ALPHARAVIS_MODEL_MGMT_API_KEY=
+
+# Hardware identity from REMOTE_PCS.
+ALPHARAVIS_BIG_LLM_PC=main_pc
+ALPHARAVIS_COMFY_PC=comfy_server
+
+# Service probes. BIG_BOSS_API_BASE is used as fallback for big LLM health.
+# For ComfyUI, /system_stats is the default if REMOTE_PCS.comfy_server.ip exists.
+ALPHARAVIS_BIG_LLM_HEALTH_URL=
+ALPHARAVIS_COMFY_HEALTH_URL=
+ALPHARAVIS_MODEL_MGMT_PROBE_TIMEOUT_SECONDS=5
+
+# Pixelle preflight. If true, Pixelle tools first check ComfyUI reachability.
+# If the check fails, default behavior is warn-and-continue; set block=true if
+# you prefer not to submit Pixelle jobs while ComfyUI looks offline.
+# Allowed values: true, false
+ALPHARAVIS_PIXELLE_PREPARE_COMFY=true
+ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE=false
+ALPHARAVIS_COMFY_WAKE_WAIT_SECONDS=0
+
+# Ollama model lifecycle. Your Ollama management node can load either the small
+# chat/crisis model or the embedding model, so embedding windows are planned
+# only after inactivity or while the big llama.cpp server is active.
+# Allowed ALPHARAVIS_EMBEDDING_LOAD_POLICY values:
+#   idle_or_big_llm_active = default, safest for your split setup
+#   idle_only              = wait for inactivity only
+#   big_llm_active_only    = embed only when llama.cpp big-boss is reachable
+ALPHARAVIS_MODEL_IDLE_SECONDS=600
+ALPHARAVIS_EMBEDDING_LOAD_POLICY=idle_or_big_llm_active
+ALPHARAVIS_OLLAMA_BASE_URL=http://192.168.178.140:11434
+ALPHARAVIS_OLLAMA_CHAT_MODEL=gemma4:e2b
+ALPHARAVIS_OLLAMA_EMBED_MODEL=Q78KG/gte-Qwen2-1.5B-instruct
+ALPHARAVIS_OLLAMA_EMBED_FALLBACK_MODEL=bge-m3
+
+
+# =====================================================================
 # OPTIONAL BRIDGE SETTINGS - LIBRECHAT <-> LANGGRAPH
 # =====================================================================
 
@@ -228,6 +289,25 @@ BRIDGE_SHOW_ACTIVITY_EVENTS=false
 #   debug   = also show raw non-message event names
 #   off     = suppress activity chunks even if the boolean is true
 BRIDGE_ACTIVITY_DETAIL=summary
+
+# If true, reasoning/thinking deltas from LangGraph/LLM events are forwarded as
+# a separate OpenAI-style delta field instead of normal visible content.
+# LibreChat support depends on the frontend/provider parser. Keep false if the
+# UI shows reasoning as normal text.
+# Allowed values: true, false
+BRIDGE_STREAM_REASONING_EVENTS=false
+
+# Delta field name used when BRIDGE_STREAM_REASONING_EVENTS=true.
+# Common values:
+#   reasoning_content = many OpenAI-compatible local servers / LiteLLM style
+#   reasoning         = some experimental clients
+BRIDGE_REASONING_DELTA_FIELD=reasoning_content
+
+# Adds POST /v1/responses as a compatibility wrapper around the same LangGraph
+# run path used by /v1/chat/completions. Chat Completions remains the primary
+# LibreChat path.
+# Allowed values: true, false
+BRIDGE_ENABLE_RESPONSES_API=true
 
 # Bridge-side real generation smoke test.
 # Endpoint: GET /health/llm-generation on api-bridge.

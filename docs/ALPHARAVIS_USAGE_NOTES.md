@@ -102,6 +102,47 @@ normal swarm/tool path stays on big-boss
 If the big server is down, complex requests should fail visibly instead of
 silently running on the weaker model.
 
+## Model And Power Management
+
+AlphaRavis has a custom `model_management.py` layer for your split hardware
+setup.
+
+Important idea:
+
+- The Ollama management node is mainly for startup/crisis work.
+- The embedding model should be loaded only during safe windows.
+- A safe window means either the system has been idle long enough or the big
+  llama.cpp server is up, so normal chat does not depend on the small Ollama
+  node.
+
+Default controls:
+
+```text
+ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true
+ALPHARAVIS_ENABLE_POWER_MANAGEMENT=false
+ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=false
+ALPHARAVIS_MODEL_IDLE_SECONDS=600
+ALPHARAVIS_EMBEDDING_LOAD_POLICY=idle_or_big_llm_active
+```
+
+With these defaults, AlphaRavis can inspect and plan, but it will not shut down
+machines, switch Ollama models, or run embedding jobs through an external tool.
+Those actions become real only after you provide:
+
+```text
+ALPHARAVIS_MODEL_MGMT_ACTION_URL=
+ALPHARAVIS_MODEL_MGMT_API_KEY=
+ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=true
+```
+
+The Power Management Agent handles these tasks. Use it for questions like:
+
+```text
+check model management status
+plane ein Embedding-Fenster
+pruefe ob ComfyUI fuer Pixelle bereit ist
+```
+
 ## Hermes Mode
 
 Hermes is available as a separate optional coding/system agent.
@@ -176,6 +217,62 @@ approve
 reject
 replace: <safer command>
 ```
+
+## Pixelle Jobs
+
+For image generation, `start_pixelle_remote` starts a job and waits through a
+durable LangGraph `@task`. This is best when you want AlphaRavis to stay with
+the job until it finishes.
+
+`start_pixelle_async` starts the job and returns a `job_id` immediately. This is
+better for long jobs. Later you can ask:
+
+```text
+check_pixelle_job <job_id>
+```
+
+Before a Pixelle job starts, AlphaRavis can check ComfyUI:
+
+```text
+ALPHARAVIS_PIXELLE_PREPARE_COMFY=true
+ALPHARAVIS_COMFY_HEALTH_URL=http://<comfy-ip>:8188/system_stats
+```
+
+If ComfyUI is offline, AlphaRavis warns. It only blocks the Pixelle job when:
+
+```text
+ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE=true
+```
+
+If Pixelle fails, the returned message includes debugger-ready context and asks
+for Pixelle/LangGraph logs instead of crashing silently.
+
+## Bridge Streaming
+
+LibreChat normally uses:
+
+```text
+POST /v1/chat/completions
+```
+
+The bridge also offers:
+
+```text
+POST /v1/responses
+```
+
+`/v1/responses` is a compatibility wrapper around the same LangGraph run path.
+Chat Completions remains the main LibreChat path.
+
+Reasoning/thinking is stripped from normal visible answer text. If a client can
+handle a separate reasoning delta field, enable:
+
+```text
+BRIDGE_STREAM_REASONING_EVENTS=true
+BRIDGE_REASONING_DELTA_FIELD=reasoning_content
+```
+
+If LibreChat shows that reasoning as normal text, turn it back off.
 
 ## Memory And Compression
 

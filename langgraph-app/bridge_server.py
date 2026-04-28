@@ -25,6 +25,17 @@ BRIDGE_SHOW_ACTIVITY_EVENTS = os.getenv("BRIDGE_SHOW_ACTIVITY_EVENTS", "false").
     "yes",
 }
 BRIDGE_ACTIVITY_DETAIL = os.getenv("BRIDGE_ACTIVITY_DETAIL", "summary").lower()
+BRIDGE_STREAM_REASONING_EVENTS = os.getenv("BRIDGE_STREAM_REASONING_EVENTS", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+BRIDGE_REASONING_DELTA_FIELD = os.getenv("BRIDGE_REASONING_DELTA_FIELD", "reasoning_content")
+BRIDGE_ENABLE_RESPONSES_API = os.getenv("BRIDGE_ENABLE_RESPONSES_API", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 BRIDGE_LLM_HEALTH_URL = os.getenv("BRIDGE_LLM_HEALTH_URL", "http://litellm:4000/v1").rstrip("/")
 BRIDGE_LLM_HEALTH_API_KEY = os.getenv("BRIDGE_LLM_HEALTH_API_KEY", os.getenv("OPENAI_API_KEY", "sk-local-dev"))
 BRIDGE_LLM_HEALTH_MODEL = os.getenv("BRIDGE_LLM_HEALTH_MODEL", "big-boss")
@@ -127,6 +138,41 @@ def _message_content(message: Any) -> str:
                 text_parts.append(str(part))
         return "".join(text_parts)
     return str(content)
+
+
+def _message_reasoning_content(message: Any) -> str:
+    if isinstance(message, dict):
+        candidates = [
+            message.get("reasoning_content"),
+            message.get("reasoning"),
+            (message.get("additional_kwargs") or {}).get("reasoning_content")
+            if isinstance(message.get("additional_kwargs"), dict)
+            else None,
+        ]
+        content = message.get("content", "")
+    else:
+        additional_kwargs = getattr(message, "additional_kwargs", {}) or {}
+        candidates = [
+            getattr(message, "reasoning_content", None),
+            getattr(message, "reasoning", None),
+            additional_kwargs.get("reasoning_content") if isinstance(additional_kwargs, dict) else None,
+        ]
+        content = getattr(message, "content", "")
+
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") in {"thinking", "reasoning"}:
+                if isinstance(part.get("text"), str):
+                    text_parts.append(part["text"])
+                elif isinstance(part.get("content"), str):
+                    text_parts.append(part["content"])
+        return "".join(text_parts)
+    return ""
 
 
 def _message_type(message: Any) -> str:
@@ -252,12 +298,21 @@ def _chat_completion_response(content: str, model: str) -> dict[str, Any]:
     }
 
 
-def _chunk(content: str, model: str, *, role: str | None = None, finish_reason: str | None = None) -> dict[str, Any]:
+def _chunk(
+    content: str,
+    model: str,
+    *,
+    role: str | None = None,
+    finish_reason: str | None = None,
+    reasoning_content: str | None = None,
+) -> dict[str, Any]:
     delta: dict[str, Any] = {}
     if role:
         delta["role"] = role
     if content:
         delta["content"] = content
+    if reasoning_content:
+        delta[BRIDGE_REASONING_DELTA_FIELD] = reasoning_content
 
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
@@ -487,6 +542,34 @@ def _extract_stream_text(part: Any) -> str:
     return ""
 
 
+def _extract_stream_reasoning(part: Any) -> str:
+    if not BRIDGE_STREAM_REASONING_EVENTS:
+        return ""
+
+    data = getattr(part, "data", None)
+    if data is None and isinstance(part, dict):
+        data = part.get("data")
+
+    if isinstance(data, tuple) and data:
+        return _message_reasoning_content(data[0]) if _is_ai_message(data[0]) else ""
+
+    if isinstance(data, list) and data:
+        for message in reversed(data):
+            if _is_ai_message(message):
+                return _message_reasoning_content(message)
+        return ""
+
+    if isinstance(data, dict):
+        if "chunk" in data:
+            return _message_reasoning_content(data["chunk"]) if _is_ai_message(data["chunk"]) else ""
+        if "messages" in data and data["messages"]:
+            for message in reversed(data["messages"]):
+                if _is_ai_message(message):
+                    return _message_reasoning_content(message)
+
+    return ""
+
+
 def _stream_event_name(part: Any) -> str:
     if isinstance(part, dict):
         return str(part.get("event") or "")
@@ -549,6 +632,7 @@ async def _stream_chat_events(
 
     saw_token = False
     emitted = ""
+    emitted_reasoning = ""
     emitted_activity: set[str] = set()
 
     stream_kwargs = {
@@ -567,6 +651,12 @@ async def _stream_chat_events(
                 if activity and activity not in emitted_activity:
                     emitted_activity.add(activity)
                     yield _activity_chunk(activity, model)
+
+                reasoning = _extract_stream_reasoning(part)
+                reasoning_delta = _delta_text(reasoning, emitted_reasoning)
+                if reasoning_delta:
+                    emitted_reasoning += reasoning_delta
+                    yield _stream_data(_chunk("", model, reasoning_content=reasoning_delta))
 
                 text = _extract_stream_text(part)
                 delta = _delta_text(text, emitted)
@@ -636,6 +726,167 @@ async def _run_wait_content(client: Any, thread_id: str, run_payload: dict[str, 
         return _clean_error_message(exc)
     except Exception as exc:
         return _clean_error_message(exc)
+
+
+def _responses_content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                if isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                elif isinstance(item.get("content"), str):
+                    parts.append(item["content"])
+                elif item.get("type") in {"input_image", "image_url"}:
+                    parts.append("[image input]")
+            else:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part)
+    return str(content or "")
+
+
+def _responses_input_to_messages(body: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_input = body.get("input")
+    if isinstance(raw_input, str):
+        return [{"role": "user", "content": raw_input}]
+
+    messages: list[dict[str, Any]] = []
+    if isinstance(raw_input, list):
+        for item in raw_input:
+            if isinstance(item, str):
+                messages.append({"role": "user", "content": item})
+                continue
+            if not isinstance(item, dict):
+                continue
+
+            role = str(item.get("role") or "user")
+            content = item.get("content", item.get("text", ""))
+            if item.get("type") == "message":
+                content = item.get("content", content)
+            messages.append({"role": role, "content": _responses_content_to_text(content)})
+
+    if not messages and isinstance(body.get("messages"), list):
+        return body["messages"]
+    return messages
+
+
+def _response_object(content: str, model: str, response_id: str | None = None) -> dict[str, Any]:
+    response_id = response_id or f"resp_{uuid.uuid4().hex}"
+    message_id = f"msg_{uuid.uuid4().hex}"
+    return {
+        "id": response_id,
+        "object": "response",
+        "created_at": int(time.time()),
+        "status": "completed",
+        "model": model,
+        "output": [
+            {
+                "id": message_id,
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": content, "annotations": []}],
+            }
+        ],
+        "usage": None,
+    }
+
+
+def _responses_event(event: str, payload: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIterator[str]:
+    model = str(body.get("model") or OPENAI_MODEL_NAME)
+    response_id = f"resp_{uuid.uuid4().hex}"
+    item_id = f"msg_{uuid.uuid4().hex}"
+    yield _responses_event(
+        "response.created",
+        {
+            "type": "response.created",
+            "response": {
+                "id": response_id,
+                "object": "response",
+                "created_at": int(time.time()),
+                "status": "in_progress",
+                "model": model,
+                "output": [],
+            },
+        },
+    )
+
+    chat_body = dict(body)
+    chat_body["messages"] = _responses_input_to_messages(body)
+    client = _client()
+    thread_key = _extract_thread_key(chat_body, request)
+    thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
+    run_payload = await _prepare_run_payload(client, thread_id, thread_key, chat_body.get("messages", []))
+
+    if run_payload.get("direct_response"):
+        content = str(run_payload["direct_response"])
+        yield _responses_event(
+            "response.output_text.delta",
+            {
+                "type": "response.output_text.delta",
+                "item_id": item_id,
+                "output_index": 0,
+                "content_index": 0,
+                "delta": content,
+            },
+        )
+        yield _responses_event(
+            "response.completed",
+            {"type": "response.completed", "response": _response_object(content, model, response_id)},
+        )
+        yield "data: [DONE]\n\n"
+        return
+
+    full_content = ""
+    async for raw in _stream_chat_events(client, thread_id, run_payload, model):
+        if raw.strip() == "data: [DONE]":
+            break
+        if not raw.startswith("data: "):
+            continue
+        try:
+            payload = json.loads(raw.removeprefix("data: ").strip())
+        except Exception:
+            continue
+        choice = payload.get("choices", [{}])[0]
+        delta = choice.get("delta", {}) if isinstance(choice, dict) else {}
+        text_delta = str(delta.get("content") or "")
+        reasoning_delta = str(delta.get(BRIDGE_REASONING_DELTA_FIELD) or "")
+        if reasoning_delta:
+            yield _responses_event(
+                "response.reasoning_text.delta",
+                {
+                    "type": "response.reasoning_text.delta",
+                    "item_id": item_id,
+                    "output_index": 0,
+                    "delta": reasoning_delta,
+                },
+            )
+        if text_delta:
+            full_content += text_delta
+            yield _responses_event(
+                "response.output_text.delta",
+                {
+                    "type": "response.output_text.delta",
+                    "item_id": item_id,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": text_delta,
+                },
+            )
+
+    yield _responses_event(
+        "response.completed",
+        {"type": "response.completed", "response": _response_object(full_content, model, response_id)},
+    )
+    yield "data: [DONE]\n\n"
 
 
 @app.get("/health")
@@ -744,6 +995,35 @@ async def models():
         "object": "list",
         "data": [{"id": OPENAI_MODEL_NAME, "object": "model", "created": 0, "owned_by": "alpharavis"}],
     }
+
+
+@app.post("/v1/responses")
+async def responses(request: Request):
+    if not BRIDGE_ENABLE_RESPONSES_API:
+        raise HTTPException(status_code=404, detail="Responses API bridge is disabled.")
+
+    body = await request.json()
+    messages = _responses_input_to_messages(body)
+    if not messages:
+        raise HTTPException(status_code=400, detail="input is required")
+
+    if body.get("stream") is True:
+        return StreamingResponse(_stream_responses(body, request), media_type="text/event-stream")
+
+    model = str(body.get("model") or OPENAI_MODEL_NAME)
+    chat_body = dict(body)
+    chat_body["messages"] = messages
+    client = _client()
+    thread_key = _extract_thread_key(chat_body, request)
+    thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
+    run_payload = await _prepare_run_payload(client, thread_id, thread_key, messages)
+
+    if run_payload.get("direct_response"):
+        content = str(run_payload["direct_response"])
+    else:
+        content = await _run_wait_content(client, thread_id, run_payload)
+
+    return JSONResponse(_response_object(content, model))
 
 
 @app.post("/v1/chat/completions")

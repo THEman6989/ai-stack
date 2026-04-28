@@ -23,7 +23,9 @@ The system is designed to be:
 The current Docker architecture is split into these main roles:
 
 - `langgraph-api`: the brain. Runs the LangGraph graph `alpha_ravis`.
-- `api-bridge`: the mouth. Exposes OpenAI-compatible `/v1/models` and `/v1/chat/completions` for LibreChat.
+- `api-bridge`: the mouth. Exposes OpenAI-compatible `/v1/models`,
+  `/v1/chat/completions`, and a compatibility `/v1/responses` wrapper for
+  LibreChat or other OpenAI-style clients.
 - `litellm`: model gateway. Routes AlphaRavis model calls to configured backends such as llama.cpp or Ollama.
 - `mongodb`: LangGraph checkpointing and long-term store backing.
 - `vectordb`: Postgres with pgvector. It can act as an optional semantic
@@ -144,8 +146,13 @@ Important behavior:
 
 - It exposes `/v1/models`.
 - It exposes `/v1/chat/completions`.
+- It exposes `/v1/responses` as a compatibility wrapper around the same
+  LangGraph run path.
 - It supports non-streaming and OpenAI-compatible SSE streaming.
 - It can stream LangGraph message events.
+- It can optionally forward reasoning/thinking deltas as a separate SSE delta
+  field when `BRIDGE_STREAM_REASONING_EVENTS=true`. Normal visible content
+  still strips reasoning blocks.
 - It can optionally emit short visible status/activity messages.
 - It handles LangGraph human approval interrupts and lets the user reply with:
   - `approve`
@@ -271,6 +278,39 @@ Capabilities:
 - Search debugging lessons.
 - Search active workflow skills.
 - Search other chat archives only when explicitly requested through `include_other_threads=true`.
+
+### Power Management Agent
+
+Handles local hardware and model lifecycle planning.
+
+Capabilities:
+
+- Inspect big llama.cpp reachability.
+- Inspect Ollama running models on the small management node.
+- Inspect ComfyUI readiness before Pixelle work.
+- Plan safe embedding windows for `memory-embed`.
+- Send Wake-on-LAN through the existing configured `REMOTE_PCS` tool.
+- Request shutdown/service/model-switch actions through a curated external
+  action endpoint.
+
+Safety:
+
+- Shutdowns, service starts/stops, Ollama model switches, and embedding-job
+  execution are dry-run by default.
+- Real actions require:
+
+```text
+ALPHARAVIS_MODEL_MGMT_ACTION_URL=<your curated tool endpoint>
+ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=true
+```
+
+- The action endpoint receives a small JSON object:
+
+```json
+{"action": "wake_pc", "payload": {"target": "comfy_server", "reason": "..."}}
+```
+
+This is intentionally separate from prompt-generated SSH commands.
 
 ## Memory Layers
 
@@ -679,6 +719,23 @@ Pixelle image jobs can be started through either:
 Monitoring is implemented as a LangGraph `@task`, so it is visible and resumable
 inside LangGraph execution rather than being a loose FastAPI background task.
 
+Before a Pixelle job starts, AlphaRavis can run a ComfyUI preflight through the
+model-management layer:
+
+```text
+ALPHARAVIS_PIXELLE_PREPARE_COMFY=true
+ALPHARAVIS_COMFY_HEALTH_URL=http://<comfy-ip>:8188/system_stats
+```
+
+If ComfyUI is reachable, Pixelle starts normally. If ComfyUI is offline,
+AlphaRavis can request a wake action, but real power actions stay dry-run until
+the curated action endpoint is configured. By default Pixelle warns and still
+tries the job; set this to block instead:
+
+```text
+ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE=true
+```
+
 If Pixelle MCP tools are unavailable, AlphaRavis should fail cleanly and route
 debuggable context instead of crashing.
 
@@ -720,8 +777,29 @@ slow for the current timeout. That does not automatically mean the bridge is
 broken.
 
 Automatic power actions such as SSH shutdown or Wake-on-LAN are intentionally
-not run by a hidden background watchdog. They stay available through debugger
-tools and the approval gate so destructive recovery remains visible to the user.
+not run by a hidden background watchdog. The Power Management Agent can inspect
+and plan them, and Wake-on-LAN can be called explicitly, but destructive actions
+must go through a curated endpoint or the debugger approval gate.
+
+The embedding model lives on the Ollama management node. Because that node may
+not be able to keep both the chat/crisis model and the embedding model loaded,
+AlphaRavis plans embedding windows instead of blindly loading the model:
+
+```text
+ALPHARAVIS_EMBEDDING_LOAD_POLICY=idle_or_big_llm_active
+ALPHARAVIS_MODEL_IDLE_SECONDS=600
+ALPHARAVIS_OLLAMA_CHAT_MODEL=gemma4:e2b
+ALPHARAVIS_OLLAMA_EMBED_MODEL=Q78KG/gte-Qwen2-1.5B-instruct
+```
+
+The intended flow is:
+
+1. Keep MongoDB/store as source of truth.
+2. Queue pgvector indexing work safely.
+3. When the system is idle or `big-boss` is reachable, switch Ollama into the
+   embedding model window.
+4. Run queued embedding jobs.
+5. Restore the small chat/crisis model if needed.
 
 ## Fast Path And Run Profile
 
