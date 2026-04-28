@@ -181,7 +181,9 @@ The graph is built as:
 START
   -> run_profile_start
   -> route_decision
-  -> fast_chat OR planner
+  -> hard_context_stop OR fast_chat OR crisis_preflight
+  -> crisis_manager when owner crisis recovery is enabled and the big LLM preflight fails
+  -> planner
   -> memory_kernel_before when the agent path is selected
   -> skill_library when the agent path is selected
   -> handoff_context_guard when the agent path is selected
@@ -287,6 +289,7 @@ management is enabled:
 ```text
 ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true
 ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=true
+ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=true
 ```
 
 It is disabled by default so normal single-model stacks continue to use only
@@ -734,6 +737,7 @@ model-management layer:
 ```text
 ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true
 ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=true
+ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=true
 ALPHARAVIS_PIXELLE_PREPARE_COMFY=true
 ALPHARAVIS_COMFY_HEALTH_URL=http://<comfy-ip>:8188/system_stats
 ```
@@ -797,6 +801,7 @@ The custom model-management layer is off by default:
 ```text
 ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=false
 ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=false
+ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=false
 ALPHARAVIS_ENABLE_CRISIS_MANAGER=false
 ```
 
@@ -820,6 +825,20 @@ The intended flow is:
    embedding model window.
 4. Run queued embedding jobs.
 5. Restore the small chat/crisis model if needed.
+
+## Hard Context Cutoff
+
+AlphaRavis has two hard cutoff layers:
+
+```text
+BRIDGE_HARD_INPUT_TOKEN_LIMIT=128000
+ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT=128000
+```
+
+The bridge refuses oversized incoming requests before they reach LangGraph. The
+graph checks the active checkpointed context again before routing to fast path,
+planner, swarm, or crisis manager. Set either value to `0` only when you
+explicitly want to disable that guard.
 
 ## Fast Path And Run Profile
 

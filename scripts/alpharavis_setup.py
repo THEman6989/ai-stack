@@ -38,12 +38,20 @@ IMPORTANT_KEYS = [
 MODEL_MANAGEMENT_KEYS = [
     ("ALPHARAVIS_ENABLE_MODEL_MANAGEMENT", "enable the custom model-management planning layer"),
     ("ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT", "enable power_management_agent and advanced hooks"),
+    ("ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS", "enable owner-only SSH/Wake-on-LAN tools"),
     ("ALPHARAVIS_ENABLE_CRISIS_MANAGER", "future crisis-manager routing switch"),
     ("ALPHARAVIS_CRISIS_MANAGER_MODEL", "small Ollama/LiteLLM crisis-manager model"),
     ("ALPHARAVIS_CRISIS_MAX_ATTEMPTS", "future maximum automatic recovery attempts"),
     ("ALPHARAVIS_CRISIS_TIMEOUT_SECONDS", "future crisis-manager wall-clock timeout"),
     ("ALPHARAVIS_CRISIS_AUTO_ACTIONS", "future auto-approved recovery action names"),
     ("ALPHARAVIS_CRISIS_HITL_ACTIONS", "future human-approval action names"),
+    ("ALPHARAVIS_POWER_MANAGER_MODEL", "small model used by power_management_agent"),
+    ("ALPHARAVIS_POWER_MANAGER_TIMEOUT_SECONDS", "power-management agent timeout"),
+    ("ALPHARAVIS_OWNER_SSH_PASS", "private owner SSH password fallback; do not commit real values"),
+    ("ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT", "hard LangGraph context cutoff"),
+    ("BRIDGE_PREFERRED_API_MODE", "responses or chat_completions"),
+    ("BRIDGE_HARD_INPUT_TOKEN_LIMIT", "hard bridge request cutoff"),
+    ("BRIDGE_HARD_INPUT_HTTP_ERROR", "return HTTP 413 instead of visible message"),
     ("ALPHARAVIS_ENABLE_POWER_MANAGEMENT", "allow power-management intent handling"),
     ("ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS", "allow real external model/power actions"),
     ("ALPHARAVIS_MODEL_MGMT_ACTION_URL", "curated action endpoint URL"),
@@ -162,6 +170,7 @@ def configure_model_management() -> None:
             {
                 "ALPHARAVIS_ENABLE_MODEL_MANAGEMENT": "false",
                 "ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT": "false",
+                "ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS": "false",
                 "ALPHARAVIS_ENABLE_CRISIS_MANAGER": "false",
                 "ALPHARAVIS_ENABLE_POWER_MANAGEMENT": "false",
                 "ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS": "false",
@@ -182,6 +191,7 @@ def configure_model_management() -> None:
         set_many(
             {
                 "ALPHARAVIS_ENABLE_CRISIS_MANAGER": "false",
+                "ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS": "false",
                 "ALPHARAVIS_ENABLE_POWER_MANAGEMENT": "false",
                 "ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS": "false",
                 "ALPHARAVIS_PIXELLE_PREPARE_COMFY": "false",
@@ -193,6 +203,7 @@ def configure_model_management() -> None:
     values = read_env(ENV_PATH)
     prompts = [
         ("ALPHARAVIS_ENABLE_POWER_MANAGEMENT", "Enable power-management intents", False),
+        ("ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS", "Enable owner-only SSH/Wake-on-LAN tools", False),
         ("ALPHARAVIS_PIXELLE_PREPARE_COMFY", "Check ComfyUI before Pixelle jobs", False),
         ("ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE", "Block Pixelle if ComfyUI is offline", False),
         ("ALPHARAVIS_ENABLE_CRISIS_MANAGER", "Enable future crisis-manager routing", False),
@@ -209,6 +220,7 @@ def configure_model_management() -> None:
             "ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS",
             "ALPHARAVIS_PIXELLE_PREPARE_COMFY",
             "ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE",
+            "BRIDGE_HARD_INPUT_HTTP_ERROR",
         }:
             continue
         current = values.get(key, "")
@@ -287,6 +299,7 @@ def print_status() -> None:
     print("\nCustom model management")
     print(f"- Model management: {env.get('ALPHARAVIS_ENABLE_MODEL_MANAGEMENT', 'false')}")
     print(f"- Advanced hooks: {env.get('ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT', 'false')}")
+    print(f"- Owner power tools: {env.get('ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS', 'false')}")
     print(f"- Crisis manager: {env.get('ALPHARAVIS_ENABLE_CRISIS_MANAGER', 'false')}")
     print(f"- Real action endpoint: {'configured' if env.get('ALPHARAVIS_MODEL_MGMT_ACTION_URL') else 'not configured'}")
     print("\nDocker status")

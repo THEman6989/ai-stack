@@ -211,6 +211,11 @@ ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=false
 # Allowed values: true, false
 ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=false
 
+# Enables owner-specific SSH/Wake-on-LAN tools from langgraph-app/owner_power_tools.py.
+# This is intended only for the repository owner/custom local hardware setup.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=false
+
 # Future crisis-manager node switch. Currently documented as planned work; keep
 # false until the safe start/restart/check tools are wired.
 # Allowed values: true, false
@@ -223,6 +228,15 @@ ALPHARAVIS_CRISIS_MAX_ATTEMPTS=1
 ALPHARAVIS_CRISIS_TIMEOUT_SECONDS=120
 ALPHARAVIS_CRISIS_AUTO_ACTIONS=check_llama_server|check_ollama_models|check_comfyui|start_llama_server|restart_llama_server|wake_pc
 ALPHARAVIS_CRISIS_HITL_ACTIONS=shutdown_server|reboot_server|kill_process|delete_files
+
+# Model used by power_management_agent when advanced hooks are enabled. Keep it
+# small and fast; it only decides hardware/model lifecycle actions.
+ALPHARAVIS_POWER_MANAGER_MODEL=openai/edge-gemma
+ALPHARAVIS_POWER_MANAGER_TIMEOUT_SECONDS=90
+
+# Owner-only SSH password fallback for owner_power_tools.py. Prefer setting this
+# in your private .env only. Do not commit a real password.
+ALPHARAVIS_OWNER_SSH_PASS=
 
 # Enables power-management intent handling. Wake-on-LAN remains a normal
 # explicit tool; shutdowns/service changes/model switches still require the
@@ -273,6 +287,10 @@ ALPHARAVIS_OLLAMA_BASE_URL=http://192.168.178.140:11434
 ALPHARAVIS_OLLAMA_CHAT_MODEL=gemma4:e2b
 ALPHARAVIS_OLLAMA_EMBED_MODEL=Q78KG/gte-Qwen2-1.5B-instruct
 ALPHARAVIS_OLLAMA_EMBED_FALLBACK_MODEL=bge-m3
+
+# Hard graph-level cutoff. If the active LangGraph context is above this
+# estimate, AlphaRavis refuses the run before invoking the model.
+ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT=128000
 
 
 # =====================================================================
@@ -327,6 +345,17 @@ BRIDGE_REASONING_DELTA_FIELD=reasoning_content
 # LibreChat path.
 # Allowed values: true, false
 BRIDGE_ENABLE_RESPONSES_API=true
+
+# Preferred external API mode for clients that can choose. Chat Completions stays
+# enabled for LibreChat compatibility; Responses has richer output item events.
+# Allowed values: responses, chat_completions
+BRIDGE_PREFERRED_API_MODE=responses
+
+# Bridge-level hard cutoff before the request is sent to LangGraph. Set 0 to
+# disable. If BRIDGE_HARD_INPUT_HTTP_ERROR=false, the bridge returns a visible
+# assistant message instead of an HTTP 413.
+BRIDGE_HARD_INPUT_TOKEN_LIMIT=128000
+BRIDGE_HARD_INPUT_HTTP_ERROR=false
 
 # Bridge-side real generation smoke test.
 # Endpoint: GET /health/llm-generation on api-bridge.

@@ -36,6 +36,13 @@ BRIDGE_ENABLE_RESPONSES_API = os.getenv("BRIDGE_ENABLE_RESPONSES_API", "true").l
     "true",
     "yes",
 }
+BRIDGE_PREFERRED_API_MODE = os.getenv("BRIDGE_PREFERRED_API_MODE", "responses").lower()
+BRIDGE_HARD_INPUT_TOKEN_LIMIT = int(os.getenv("BRIDGE_HARD_INPUT_TOKEN_LIMIT", "128000"))
+BRIDGE_HARD_INPUT_HTTP_ERROR = os.getenv("BRIDGE_HARD_INPUT_HTTP_ERROR", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 BRIDGE_LLM_HEALTH_URL = os.getenv("BRIDGE_LLM_HEALTH_URL", "http://litellm:4000/v1").rstrip("/")
 BRIDGE_LLM_HEALTH_API_KEY = os.getenv("BRIDGE_LLM_HEALTH_API_KEY", os.getenv("OPENAI_API_KEY", "sk-local-dev"))
 BRIDGE_LLM_HEALTH_MODEL = os.getenv("BRIDGE_LLM_HEALTH_MODEL", "big-boss")
@@ -50,7 +57,7 @@ BRIDGE_ENABLE_LANGGRAPH_TOOL = os.getenv("BRIDGE_ENABLE_LANGGRAPH_TOOL", "false"
 BRIDGE_LANGGRAPH_TOOL_API_KEY = os.getenv("BRIDGE_LANGGRAPH_TOOL_API_KEY", "")
 BRIDGE_LANGGRAPH_TOOL_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_LANGGRAPH_TOOL_TIMEOUT_SECONDS", "120"))
 
-app = FastAPI(title="AlphaRavis OpenAI Bridge")
+app = FastAPI(title="AlphaRavis OpenAI Bridge", openapi_version="3.1.0")
 
 
 def _client():
@@ -113,6 +120,32 @@ def _last_user_content(messages: list[dict[str, Any]]) -> str:
         if message.get("role") == "user":
             return str(message.get("content") or "").strip()
     return ""
+
+
+def _approx_tokens(text: str) -> int:
+    return max(1, len(text) // 4)
+
+
+def _request_token_estimate(messages: list[dict[str, Any]]) -> int:
+    total = 0
+    for message in messages:
+        total += _approx_tokens(str(message.get("role", "")))
+        total += _approx_tokens(_responses_content_to_text(message.get("content", "")))
+    return total
+
+
+def _hard_input_error(messages: list[dict[str, Any]]) -> str:
+    if BRIDGE_HARD_INPUT_TOKEN_LIMIT <= 0:
+        return ""
+    estimate = _request_token_estimate(messages)
+    if estimate <= BRIDGE_HARD_INPUT_TOKEN_LIMIT:
+        return ""
+    return (
+        "Hard context cutoff: Diese Anfrage wird nicht an AlphaRavis gesendet, "
+        f"weil sie ca. {estimate} Tokens umfasst und das Bridge-Limit "
+        f"{BRIDGE_HARD_INPUT_TOKEN_LIMIT} ist. Bitte kuerze die Eingabe oder "
+        "nutze Archiv-/RAG-Suche statt den ganzen Kontext direkt zu senden."
+    )
 
 
 def _message_content(message: Any) -> str:
@@ -690,6 +723,12 @@ async def _stream_chat_events(
 
 async def _stream_chat(body: dict[str, Any], request: Request) -> AsyncIterator[str]:
     model = str(body.get("model") or OPENAI_MODEL_NAME)
+    hard_error = _hard_input_error(body.get("messages", []))
+    if hard_error:
+        for chunk in _openai_stream_response(hard_error, model):
+            yield chunk
+        return
+
     client = _client()
     thread_key = _extract_thread_key(body, request)
     thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
@@ -802,12 +841,34 @@ def _responses_event(event: str, payload: dict[str, Any]) -> str:
 
 async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIterator[str]:
     model = str(body.get("model") or OPENAI_MODEL_NAME)
+    messages = _responses_input_to_messages(body)
+    hard_error = _hard_input_error(messages)
+    if hard_error:
+        response_id = f"resp_{uuid.uuid4().hex}"
+        yield _responses_event("response.created", {"type": "response.created", "sequence_number": 0, "response": _response_object("", model, response_id)})
+        yield _responses_event(
+            "response.output_text.delta",
+            {
+                "type": "response.output_text.delta",
+                "sequence_number": 1,
+                "item_id": f"msg_{uuid.uuid4().hex}",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": hard_error,
+            },
+        )
+        yield _responses_event("response.completed", {"type": "response.completed", "sequence_number": 2, "response": _response_object(hard_error, model, response_id)})
+        yield "data: [DONE]\n\n"
+        return
+
     response_id = f"resp_{uuid.uuid4().hex}"
     item_id = f"msg_{uuid.uuid4().hex}"
+    sequence_number = 0
     yield _responses_event(
         "response.created",
         {
             "type": "response.created",
+            "sequence_number": sequence_number,
             "response": {
                 "id": response_id,
                 "object": "response",
@@ -818,9 +879,26 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
             },
         },
     )
+    sequence_number += 1
+    yield _responses_event(
+        "response.output_item.added",
+        {
+            "type": "response.output_item.added",
+            "sequence_number": sequence_number,
+            "output_index": 0,
+            "item": {
+                "id": item_id,
+                "type": "message",
+                "status": "in_progress",
+                "role": "assistant",
+                "content": [],
+            },
+        },
+    )
+    sequence_number += 1
 
     chat_body = dict(body)
-    chat_body["messages"] = _responses_input_to_messages(body)
+    chat_body["messages"] = messages
     client = _client()
     thread_key = _extract_thread_key(chat_body, request)
     thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
@@ -832,20 +910,45 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
             "response.output_text.delta",
             {
                 "type": "response.output_text.delta",
+                "sequence_number": sequence_number,
                 "item_id": item_id,
                 "output_index": 0,
                 "content_index": 0,
                 "delta": content,
             },
         )
+        sequence_number += 1
+        yield _responses_event(
+            "response.output_text.done",
+            {
+                "type": "response.output_text.done",
+                "sequence_number": sequence_number,
+                "item_id": item_id,
+                "output_index": 0,
+                "content_index": 0,
+                "text": content,
+            },
+        )
+        sequence_number += 1
+        yield _responses_event(
+            "response.output_item.done",
+            {
+                "type": "response.output_item.done",
+                "sequence_number": sequence_number,
+                "output_index": 0,
+                "item": _response_object(content, model, response_id)["output"][0],
+            },
+        )
+        sequence_number += 1
         yield _responses_event(
             "response.completed",
-            {"type": "response.completed", "response": _response_object(content, model, response_id)},
+            {"type": "response.completed", "sequence_number": sequence_number, "response": _response_object(content, model, response_id)},
         )
         yield "data: [DONE]\n\n"
         return
 
     full_content = ""
+    full_reasoning = ""
     async for raw in _stream_chat_events(client, thread_id, run_payload, model):
         if raw.strip() == "data: [DONE]":
             break
@@ -860,38 +963,84 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
         text_delta = str(delta.get("content") or "")
         reasoning_delta = str(delta.get(BRIDGE_REASONING_DELTA_FIELD) or "")
         if reasoning_delta:
+            full_reasoning += reasoning_delta
             yield _responses_event(
                 "response.reasoning_text.delta",
                 {
                     "type": "response.reasoning_text.delta",
+                    "sequence_number": sequence_number,
                     "item_id": item_id,
                     "output_index": 0,
+                    "content_index": 0,
                     "delta": reasoning_delta,
                 },
             )
+            sequence_number += 1
         if text_delta:
             full_content += text_delta
             yield _responses_event(
                 "response.output_text.delta",
                 {
                     "type": "response.output_text.delta",
+                    "sequence_number": sequence_number,
                     "item_id": item_id,
                     "output_index": 0,
                     "content_index": 0,
                     "delta": text_delta,
                 },
             )
+            sequence_number += 1
 
+    if full_reasoning:
+        yield _responses_event(
+            "response.reasoning_text.done",
+            {
+                "type": "response.reasoning_text.done",
+                "sequence_number": sequence_number,
+                "item_id": item_id,
+                "output_index": 0,
+                "content_index": 0,
+                "text": full_reasoning,
+            },
+        )
+        sequence_number += 1
+    yield _responses_event(
+        "response.output_text.done",
+        {
+            "type": "response.output_text.done",
+            "sequence_number": sequence_number,
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "text": full_content,
+        },
+    )
+    sequence_number += 1
+    yield _responses_event(
+        "response.output_item.done",
+        {
+            "type": "response.output_item.done",
+            "sequence_number": sequence_number,
+            "output_index": 0,
+            "item": _response_object(full_content, model, response_id)["output"][0],
+        },
+    )
+    sequence_number += 1
     yield _responses_event(
         "response.completed",
-        {"type": "response.completed", "response": _response_object(full_content, model, response_id)},
+        {"type": "response.completed", "sequence_number": sequence_number, "response": _response_object(full_content, model, response_id)},
     )
     yield "data: [DONE]\n\n"
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "langgraph_api_url": LANGGRAPH_API_URL}
+    return {
+        "status": "ok",
+        "langgraph_api_url": LANGGRAPH_API_URL,
+        "preferred_api_mode": BRIDGE_PREFERRED_API_MODE,
+        "openapi_version": app.openapi_version,
+    }
 
 
 @app.get("/health/llm-generation")
@@ -1006,6 +1155,12 @@ async def responses(request: Request):
     messages = _responses_input_to_messages(body)
     if not messages:
         raise HTTPException(status_code=400, detail="input is required")
+    hard_error = _hard_input_error(messages)
+    if hard_error:
+        if BRIDGE_HARD_INPUT_HTTP_ERROR:
+            raise HTTPException(status_code=413, detail=hard_error)
+        model = str(body.get("model") or OPENAI_MODEL_NAME)
+        return JSONResponse(_response_object(hard_error, model))
 
     if body.get("stream") is True:
         return StreamingResponse(_stream_responses(body, request), media_type="text/event-stream")
@@ -1031,6 +1186,11 @@ async def chat_completions(request: Request):
     body = await request.json()
     if not body.get("messages"):
         raise HTTPException(status_code=400, detail="messages is required")
+    hard_error = _hard_input_error(body.get("messages", []))
+    if hard_error:
+        if BRIDGE_HARD_INPUT_HTTP_ERROR:
+            raise HTTPException(status_code=413, detail=hard_error)
+        return JSONResponse(_chat_completion_response(hard_error, str(body.get("model") or OPENAI_MODEL_NAME)))
 
     if body.get("stream") is True:
         return StreamingResponse(_stream_chat(body, request), media_type="text/event-stream")

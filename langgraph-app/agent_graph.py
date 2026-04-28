@@ -17,7 +17,7 @@ from deepagents import create_deep_agent
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.globals import set_llm_cache
-from langchain_core.messages import AIMessage, BaseMessage, RemoveMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langchain_litellm import ChatLiteLLM
@@ -81,6 +81,34 @@ except Exception as exc:  # pragma: no cover - optional local module/deps
 else:
     MODEL_MANAGEMENT_IMPORT_ERROR = None
 
+try:
+    from owner_power_tools import (
+        owner_check_comfyui_server as _owner_check_comfyui_server,
+        owner_check_llama_server as _owner_check_llama_server,
+        owner_get_llama_logs as _owner_get_llama_logs,
+        owner_get_pixelle_logs as _owner_get_pixelle_logs,
+        owner_restart_llama_server as _owner_restart_llama_server,
+        owner_shutdown_comfyui_server as _owner_shutdown_comfyui_server,
+        owner_shutdown_llama_server as _owner_shutdown_llama_server,
+        owner_start_all_model_services as _owner_start_all_model_services,
+        owner_start_comfyui_server as _owner_start_comfyui_server,
+        owner_start_llama_server as _owner_start_llama_server,
+    )
+except Exception as exc:  # pragma: no cover - owner-only optional module
+    _owner_check_comfyui_server = None
+    _owner_check_llama_server = None
+    _owner_get_llama_logs = None
+    _owner_get_pixelle_logs = None
+    _owner_restart_llama_server = None
+    _owner_shutdown_comfyui_server = None
+    _owner_shutdown_llama_server = None
+    _owner_start_all_model_services = None
+    _owner_start_comfyui_server = None
+    _owner_start_llama_server = None
+    OWNER_POWER_TOOLS_IMPORT_ERROR: Exception | None = exc
+else:
+    OWNER_POWER_TOOLS_IMPORT_ERROR = None
+
 
 class AlphaRavisState(MessagesState):
     active_agent: NotRequired[str]
@@ -96,6 +124,9 @@ class AlphaRavisState(MessagesState):
     fast_path_route: NotRequired[str]
     fast_path_locked: NotRequired[bool]
     fast_path_lock_reason: NotRequired[str]
+    hard_context_error: NotRequired[str]
+    crisis_route: NotRequired[str]
+    crisis_recovery_attempted: NotRequired[bool]
     run_profile: NotRequired[dict[str, Any]]
     thread_id: NotRequired[str]
     thread_key: NotRequired[str]
@@ -251,6 +282,14 @@ def _advanced_model_management_enabled() -> bool:
     return _model_management_enabled() and _env_bool("ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT", "false")
 
 
+def _owner_power_tools_enabled() -> bool:
+    return _advanced_model_management_enabled() and _env_bool("ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS", "false")
+
+
+def _crisis_manager_enabled() -> bool:
+    return _owner_power_tools_enabled() and _env_bool("ALPHARAVIS_ENABLE_CRISIS_MANAGER", "false")
+
+
 def _available_agent_names() -> str:
     agents = [
         "general_assistant",
@@ -262,6 +301,8 @@ def _available_agent_names() -> str:
     ]
     if _advanced_model_management_enabled():
         agents.append("power_management_agent")
+    if _crisis_manager_enabled():
+        agents.append("crisis_manager_agent")
     return ", ".join(agents)
 
 
@@ -608,6 +649,106 @@ async def request_power_management_action(action: str, target: str, reason: str)
     return _json_tool_result(
         await _model_mgmt_request_power_action(action, target, reason, remote_pcs=REMOTE_PCS)
     )
+
+
+def _owner_power_unavailable() -> str | None:
+    if OWNER_POWER_TOOLS_IMPORT_ERROR:
+        return f"Owner power tools unavailable: {OWNER_POWER_TOOLS_IMPORT_ERROR}"
+    if not _owner_power_tools_enabled():
+        return "Owner power tools are disabled. Set ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=true with advanced model management."
+    return None
+
+
+async def _owner_call(func: Any, *args: Any, **kwargs: Any) -> str:
+    unavailable = _owner_power_unavailable()
+    if unavailable:
+        return unavailable
+    if func is None:
+        return "Owner power tool is not loaded."
+    return _json_tool_result(await func(*args, **kwargs))
+
+
+def _owner_destructive_approval(action: str, target: str) -> str | None:
+    approval = _require_command_approval("owner_power", action, target=target)
+    if approval["approved"]:
+        return None
+    return approval["message"]
+
+
+@tool
+async def owner_check_llama_server():
+    """Owner-only read-only check for the llama.cpp big model server."""
+
+    return await _owner_call(_owner_check_llama_server)
+
+
+@tool
+async def owner_start_llama_server(wait_seconds: int = 90):
+    """Owner-only safe action: wake and start the llama.cpp server, then wait for port 8033."""
+
+    return await _owner_call(_owner_start_llama_server, wait_seconds=wait_seconds)
+
+
+@tool
+async def owner_restart_llama_server(wait_seconds: int = 90):
+    """Owner-only safe recovery action: restart the llama.cpp process and wait for readiness."""
+
+    return await _owner_call(_owner_restart_llama_server, wait_seconds=wait_seconds)
+
+
+@tool
+async def owner_get_llama_server_logs(lines: int = 80):
+    """Owner-only read-only action: tail llama server logs over SSH."""
+
+    return await _owner_call(_owner_get_llama_logs, lines=lines)
+
+
+@tool
+async def owner_check_comfyui_server():
+    """Owner-only read-only check for ComfyUI host and API reachability."""
+
+    return await _owner_call(_owner_check_comfyui_server)
+
+
+@tool
+async def owner_start_comfyui_server():
+    """Owner-only safe action: send Wake-on-LAN for the ComfyUI machine."""
+
+    return await _owner_call(_owner_start_comfyui_server)
+
+
+@tool
+async def owner_start_all_model_services(wait_seconds: int = 90):
+    """Owner-only safe action: wake ComfyUI and start the llama.cpp server."""
+
+    return await _owner_call(_owner_start_all_model_services, wait_seconds=wait_seconds)
+
+
+@tool
+async def owner_get_pixelle_logs(lines: int = 80):
+    """Owner-only read-only action: get recent Pixelle Docker logs when available."""
+
+    return await _owner_call(_owner_get_pixelle_logs, lines=lines)
+
+
+@tool
+async def owner_shutdown_llama_server():
+    """Owner-only protected action: shutdown the llama.cpp server host after HITL approval."""
+
+    blocked = _owner_destructive_approval("shutdown_server llama_server", "llama_server")
+    if blocked:
+        return blocked
+    return await _owner_call(_owner_shutdown_llama_server)
+
+
+@tool
+async def owner_shutdown_comfyui_server():
+    """Owner-only protected action: shutdown the ComfyUI host after HITL approval."""
+
+    blocked = _owner_destructive_approval("shutdown_server comfyui_server", "comfyui_server")
+    if blocked:
+        return blocked
+    return await _owner_call(_owner_shutdown_comfyui_server)
 
 
 @tool
@@ -2720,6 +2861,28 @@ async def run_profile_start_node(state: AlphaRavisState) -> dict[str, Any]:
 
 
 async def route_decision_node(state: AlphaRavisState) -> dict[str, Any]:
+    messages = list(state.get("messages", []))
+    token_estimate = _estimate_tokens(messages)
+    hard_limit = int(os.getenv("ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT", "128000"))
+    if hard_limit > 0 and token_estimate > hard_limit:
+        message = (
+            "Hard context cutoff: Diese Anfrage wird nicht ausgefuehrt, weil der "
+            f"aktive Kontext mit ca. {token_estimate} Tokens ueber dem Limit "
+            f"von {hard_limit} liegt. Bitte kuerze die Eingabe oder frage nach "
+            "Archiv-/RAG-Suche statt den ganzen Verlauf direkt zu senden."
+        )
+        return {
+            "fast_path_route": "hard_stop",
+            "hard_context_error": message,
+            "run_profile": _profile_update(
+                state,
+                route="hard_stop",
+                route_reason="hard context limit exceeded",
+                token_estimate=token_estimate,
+                hard_context_limit=hard_limit,
+            ),
+        }
+
     use_fast_path, reason = _fast_path_decision(state)
     route = "fast_path" if use_fast_path else "swarm"
     lock_thread = (
@@ -2747,7 +2910,58 @@ async def route_decision_node(state: AlphaRavisState) -> dict[str, Any]:
 
 
 def route_after_decision(state: AlphaRavisState) -> str:
-    return "fast_path" if state.get("fast_path_route") == "fast_path" else "planner"
+    route = state.get("fast_path_route")
+    if route == "hard_stop":
+        return "hard_stop"
+    return "fast_path" if route == "fast_path" else "crisis_preflight"
+
+
+async def hard_context_stop_node(state: AlphaRavisState) -> dict[str, Any]:
+    return {
+        "messages": [
+            AIMessage(
+                content=state.get("hard_context_error")
+                or "Hard context limit exceeded. Reduce the input or ask to archive/search instead."
+            )
+        ],
+        "run_profile": _profile_update(state, hard_context_stopped=True),
+    }
+
+
+async def crisis_preflight_node(state: AlphaRavisState) -> dict[str, Any]:
+    if not _crisis_manager_enabled() or state.get("crisis_recovery_attempted"):
+        return {"crisis_route": "normal"}
+    if _owner_check_llama_server is None:
+        return {"crisis_route": "normal"}
+
+    try:
+        status = await _owner_check_llama_server()
+    except Exception as exc:
+        return {
+            "crisis_route": "normal",
+            "run_profile": _profile_update(state, crisis_preflight_error=str(exc)[:300]),
+        }
+
+    if status.get("ok"):
+        return {
+            "crisis_route": "normal",
+            "run_profile": _profile_update(state, crisis_preflight="big_llm_ready"),
+        }
+
+    notice = (
+        "Crisis-Notice: Der Hauptserver antwortet gerade nicht. "
+        "Ich pruefe den Owner-Power-Pfad und versuche einen sicheren Start/Restart, "
+        "danach laeuft deine Anfrage wieder ueber big-boss."
+    )
+    return {
+        "crisis_route": "crisis",
+        "messages": [AIMessage(content=notice, id=f"alpharavis_crisis_notice_{int(time.time())}")],
+        "run_profile": _profile_update(state, crisis_preflight="big_llm_unavailable", crisis_status=status),
+    }
+
+
+def route_after_crisis_preflight(state: AlphaRavisState) -> str:
+    return "crisis_manager" if state.get("crisis_route") == "crisis" else "planner"
 
 
 def _planner_needed(state: AlphaRavisState) -> bool:
@@ -3878,6 +4092,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     )
     model_management_enabled = _model_management_enabled()
     advanced_model_management_enabled = _advanced_model_management_enabled()
+    owner_power_tools_enabled = _owner_power_tools_enabled()
+    crisis_manager_enabled = _crisis_manager_enabled()
     model_management_tools = (
         [inspect_model_management_status, plan_embedding_maintenance]
         if model_management_enabled
@@ -3885,6 +4101,25 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     )
     pixelle_management_tools = [prepare_comfy_for_pixelle] if advanced_model_management_enabled else []
     power_management_tools = [request_power_management_action] if advanced_model_management_enabled else []
+    owner_safe_power_tools = (
+        [
+            owner_check_llama_server,
+            owner_start_llama_server,
+            owner_restart_llama_server,
+            owner_get_llama_server_logs,
+            owner_check_comfyui_server,
+            owner_start_comfyui_server,
+            owner_start_all_model_services,
+            owner_get_pixelle_logs,
+        ]
+        if owner_power_tools_enabled
+        else []
+    )
+    owner_protected_power_tools = (
+        [owner_shutdown_llama_server, owner_shutdown_comfyui_server]
+        if owner_power_tools_enabled
+        else []
+    )
     if advanced_model_management_enabled:
         model_management_prompt = (
             "For ComfyUI readiness, Ollama embedding windows, or PC power "
@@ -3901,6 +4136,11 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         model_management_prompt = (
             "Custom model/power management is disabled; use the normal big-boss "
             "route and transfer infrastructure failures to debugger_agent. "
+        )
+    if owner_power_tools_enabled:
+        model_management_prompt += (
+            "Owner-only power tools are available to the power/crisis agents; "
+            "shutdown tools require human approval. "
         )
 
     transfer_to_research = create_handoff_tool(
@@ -3950,6 +4190,16 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             ),
         )
     power_handoff_tools = [transfer_to_power] if transfer_to_power is not None else []
+    transfer_to_crisis = None
+    if crisis_manager_enabled:
+        transfer_to_crisis = create_handoff_tool(
+            agent_name="crisis_manager_agent",
+            description=(
+                "Transfer to the token-light crisis manager only when the big "
+                f"llama.cpp backend is unavailable or stuck. {handoff_requirement}"
+            ),
+        )
+    crisis_handoff_tools = [transfer_to_crisis] if transfer_to_crisis is not None else []
 
     research_worker = create_deep_agent(
         model=llm,
@@ -3976,6 +4226,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_hermes,
             transfer_to_context,
             *power_handoff_tools,
+            *crisis_handoff_tools,
         ],
         name="research_expert",
         system_prompt=(
@@ -4046,6 +4297,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_hermes,
             transfer_to_context,
             *power_handoff_tools,
+            *crisis_handoff_tools,
         ]
         + mcp_tools,
         name="general_assistant",
@@ -4091,12 +4343,20 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_hermes,
             transfer_to_context,
             *power_handoff_tools,
+            *crisis_handoff_tools,
         ],
     )
 
     debugger_worker = _create_debugger_subgraph(
         llm,
-        [transfer_to_research, transfer_to_generalist, transfer_to_hermes, transfer_to_context, *power_handoff_tools],
+        [
+            transfer_to_research,
+            transfer_to_generalist,
+            transfer_to_hermes,
+            transfer_to_context,
+            *power_handoff_tools,
+            *crisis_handoff_tools,
+        ],
     )
 
     hermes_worker = create_deep_agent(
@@ -4121,6 +4381,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_research,
             transfer_to_context,
             *power_handoff_tools,
+            *crisis_handoff_tools,
         ],
         name="hermes_coding_agent",
         system_prompt=(
@@ -4169,6 +4430,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_debugger,
             transfer_to_hermes,
             *power_handoff_tools,
+            *crisis_handoff_tools,
         ],
         name="context_retrieval_agent",
         system_prompt=(
@@ -4202,13 +4464,23 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         context_worker,
     ]
     if advanced_model_management_enabled:
+        power_llm = _model(
+            model_name=os.getenv(
+                "ALPHARAVIS_POWER_MANAGER_MODEL",
+                os.getenv("ALPHARAVIS_CRISIS_MANAGER_MODEL", "openai/edge-gemma"),
+            ),
+            timeout_seconds=float(os.getenv("ALPHARAVIS_POWER_MANAGER_TIMEOUT_SECONDS", "90")),
+            model_kwargs={"chat_template_kwargs": {"enable_thinking": False}},
+        )
         power_worker = create_deep_agent(
-            model=llm,
+            model=power_llm,
             tools=[
                 inspect_model_management_status,
                 plan_embedding_maintenance,
                 prepare_comfy_for_pixelle,
                 request_power_management_action,
+                *owner_safe_power_tools,
+                *owner_protected_power_tools,
                 wake_on_lan,
                 build_specialist_report,
                 search_agent_memory,
@@ -4221,6 +4493,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 transfer_to_hermes,
                 transfer_to_research,
                 transfer_to_context,
+                *crisis_handoff_tools,
             ],
             name="power_management_agent",
             system_prompt=(
@@ -4243,15 +4516,77 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             + HANDOFF_POLICY_PROMPT,
         )
         swarm_workers.append(power_worker)
+    if crisis_manager_enabled:
+        crisis_llm = _model(
+            model_name=os.getenv("ALPHARAVIS_CRISIS_MANAGER_MODEL", "openai/edge-gemma"),
+            timeout_seconds=float(os.getenv("ALPHARAVIS_CRISIS_TIMEOUT_SECONDS", "120")),
+            model_kwargs={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        crisis_worker = create_deep_agent(
+            model=crisis_llm,
+            tools=[
+                *owner_safe_power_tools,
+                build_specialist_report,
+                transfer_to_generalist,
+                transfer_to_debugger,
+                transfer_to_power,
+            ],
+            name="crisis_manager_agent",
+            system_prompt=(
+                "You are AlphaRavis Crisis Manager. Keep context tiny. Use only "
+                "safe owner tools: check status, read logs, wake/start/restart. "
+                "Do not shutdown, reboot, kill processes, or delete files. "
+                "Goal: restore the big llama.cpp backend, then report whether "
+                "it is ready. Return a short status and next step."
+            ),
+        )
+        swarm_workers.append(crisis_worker)
+    else:
+        crisis_worker = None
 
     swarm = create_swarm(
         swarm_workers,
         default_active_agent="general_assistant",
     ).compile(store=store)
 
+    async def run_crisis_manager(state: AlphaRavisState) -> dict[str, Any]:
+        if crisis_worker is None:
+            return {"crisis_route": "normal"}
+
+        latest = _latest_user_query(list(state.get("messages", [])))
+        prompt = (
+            "The big llama.cpp backend failed the preflight. Keep this run short. "
+            "Use safe owner tools to check, wake, start, or restart. Do not use "
+            "shutdown/reboot/kill/delete. Report readiness and one next step.\n\n"
+            f"Original user request:\n{_truncate_text(latest, 1200)}"
+        )
+        try:
+            result = await crisis_worker.ainvoke(
+                {
+                    "messages": [
+                        SystemMessage(content="You are the token-light crisis recovery agent."),
+                        HumanMessage(content=prompt),
+                    ]
+                }
+            )
+            messages = list(result.get("messages", []))
+            final_message = messages[-1] if messages else AIMessage(content="Crisis manager returned no result.")
+        except Exception as exc:
+            final_message = AIMessage(content=f"Crisis manager failed: {exc}")
+
+        return {
+            "messages": [final_message],
+            "crisis_route": "normal",
+            "crisis_recovery_attempted": True,
+            "run_profile": _profile_update(state, crisis_manager_used=True),
+        }
+
     builder = StateGraph(AlphaRavisState)
     builder.add_node("run_profile_start", run_profile_start_node)
     builder.add_node("route_decision", route_decision_node)
+    builder.add_node("hard_context_stop", hard_context_stop_node)
+    builder.add_node("crisis_preflight", crisis_preflight_node)
+    builder.add_node("crisis_manager", run_crisis_manager)
     builder.add_node("fast_chat", fast_chat_node)
     builder.add_node("planner", planner_node)
     builder.add_node("memory_kernel_before", memory_kernel_prefetch_node)
@@ -4267,9 +4602,16 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     builder.add_conditional_edges(
         "route_decision",
         route_after_decision,
-        {"fast_path": "fast_chat", "planner": "planner"},
+        {"fast_path": "fast_chat", "crisis_preflight": "crisis_preflight", "hard_stop": "hard_context_stop"},
     )
+    builder.add_edge("hard_context_stop", END)
     builder.add_edge("fast_chat", "context_guard_after")
+    builder.add_conditional_edges(
+        "crisis_preflight",
+        route_after_crisis_preflight,
+        {"crisis_manager": "crisis_manager", "planner": "planner"},
+    )
+    builder.add_edge("crisis_manager", "planner")
     builder.add_edge("planner", "memory_kernel_before")
     builder.add_edge("memory_kernel_before", "skill_library")
     builder.add_edge("skill_library", "handoff_context_guard")

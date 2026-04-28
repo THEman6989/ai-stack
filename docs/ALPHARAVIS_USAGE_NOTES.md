@@ -120,9 +120,12 @@ Default controls keep this custom layer completely off:
 ```text
 ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=false
 ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=false
+ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=false
 ALPHARAVIS_ENABLE_CRISIS_MANAGER=false
 ALPHARAVIS_ENABLE_POWER_MANAGEMENT=false
 ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=false
+ALPHARAVIS_POWER_MANAGER_MODEL=openai/edge-gemma
+ALPHARAVIS_CRISIS_MANAGER_MODEL=openai/edge-gemma
 ALPHARAVIS_MODEL_IDLE_SECONDS=600
 ALPHARAVIS_EMBEDDING_LOAD_POLICY=idle_or_big_llm_active
 ```
@@ -136,6 +139,7 @@ The advanced hooks become visible only after:
 ```text
 ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true
 ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=true
+ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=true
 ```
 
 Even then, real shutdowns, service changes, Ollama model switching, and
@@ -158,6 +162,10 @@ check model management status
 plane ein Embedding-Fenster
 pruefe ob ComfyUI fuer Pixelle bereit ist
 ```
+
+Owner-specific host/MAC/start-command defaults live in
+`langgraph-app/owner_power_tools.py`. Keep real passwords in your private `.env`
+through `ALPHARAVIS_OWNER_SSH_PASS`, not in git.
 
 ## Hermes Mode
 
@@ -252,6 +260,7 @@ Before a Pixelle job starts, AlphaRavis can check ComfyUI:
 ```text
 ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true
 ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=true
+ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=true
 ALPHARAVIS_PIXELLE_PREPARE_COMFY=true
 ALPHARAVIS_COMFY_HEALTH_URL=http://<comfy-ip>:8188/system_stats
 ```
@@ -280,7 +289,12 @@ POST /v1/responses
 ```
 
 `/v1/responses` is a compatibility wrapper around the same LangGraph run path.
-Chat Completions remains the main LibreChat path.
+Chat Completions remains available for LibreChat compatibility. Clients that
+support richer Responses output items should prefer:
+
+```text
+BRIDGE_PREFERRED_API_MODE=responses
+```
 
 Reasoning/thinking is stripped from normal visible answer text. If a client can
 handle a separate reasoning delta field, enable:
@@ -291,6 +305,16 @@ BRIDGE_REASONING_DELTA_FIELD=reasoning_content
 ```
 
 If LibreChat shows that reasoning as normal text, turn it back off.
+
+Hard request cutoffs:
+
+```text
+ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT=128000
+BRIDGE_HARD_INPUT_TOKEN_LIMIT=128000
+```
+
+The bridge checks before sending a request to LangGraph. The graph checks again
+before invoking any model.
 
 ## Memory And Compression
 

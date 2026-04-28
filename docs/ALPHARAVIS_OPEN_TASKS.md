@@ -5,7 +5,7 @@ not fully wired yet.
 
 ## Custom Model / Power Management
 
-Status: prepared, default off.
+Status: prepared, default off. Owner tool file exists.
 
 Implemented:
 
@@ -18,6 +18,11 @@ Implemented:
 ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true
 ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=true
 ```
+- Owner-only tools from `langgraph-app/owner_power_tools.py` are available when:
+
+```text
+ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=true
+```
 
 Still needed:
 
@@ -29,18 +34,12 @@ ALPHARAVIS_MODEL_MGMT_API_KEY=
 ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=true
 ```
 
-- Populate safe real actions:
-  - `check_llama_server`
+- Populate remaining safe real actions:
   - `check_ollama_models`
-  - `check_comfyui`
-  - `start_llama_server`
-  - `restart_llama_server`
-  - `wake_pc`
   - `load_embedding_model`
   - `unload_ollama_model`
   - `run_embedding_jobs`
-- Populate HITL/destructive actions:
-  - `shutdown_server`
+- Populate remaining HITL/destructive actions:
   - `reboot_server`
   - `kill_process`
   - `delete_files`
@@ -50,7 +49,7 @@ ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=true
 
 ## Crisis Manager
 
-Status: documented, not implemented as an active retry node yet.
+Status: minimal preflight/recovery agent implemented, default off.
 
 Desired behavior:
 
@@ -59,12 +58,16 @@ Desired behavior:
 ```text
 ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true
 ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=true
+ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=true
 ALPHARAVIS_ENABLE_CRISIS_MANAGER=true
 ALPHARAVIS_CRISIS_MANAGER_MODEL=openai/edge-gemma
+ALPHARAVIS_POWER_MANAGER_MODEL=openai/edge-gemma
 ```
 
 - Trigger on main-model failures such as timeout, 502, connection errors, or
   LiteLLM backend generation health failure.
+- Current implementation does a preflight check before the normal planner path.
+  Full mid-run timeout recovery still needs deeper LangGraph/bridge retry work.
 - Use the small Ollama model only as a crisis moderator, not for normal complex
   work.
 - Automatically run non-destructive checks and safe starts:
@@ -96,12 +99,12 @@ ALPHARAVIS_CRISIS_TIMEOUT_SECONDS=120
 
 ## Embedding Queue And pgvector
 
-Status: pgvector retrieval chunks are implemented; model lifecycle runner is
-not fully populated.
+Status: pgvector retrieval chunks and best-effort background indexing are
+implemented; a durable maintenance queue is not fully populated.
 
 Still needed:
 
-- A real embedding job queue runner behind `run_embedding_jobs`.
+- A real durable embedding job queue runner behind `run_embedding_jobs`.
 - Manual backfill tools:
   - index this thread
   - index last N artifacts
@@ -109,6 +112,15 @@ Still needed:
 - Queue visibility in status output.
 - Optional idle scheduler that starts only after no active LangGraph/Pixelle/MCP
   work is running.
+
+Clarification:
+
+- Today, `ALPHARAVIS_PGVECTOR_INDEX_MODE=background` schedules async indexing
+  with `asyncio.create_task` after the Mongo/store write. That is useful, but it
+  is not a durable queue that survives process restarts.
+- "Model lifecycle runner" means the missing owner-specific code that unloads
+  the Ollama chat model, loads the embedding model, drains queued embedding
+  jobs, and restores the chat model.
 
 ## Pixelle / ComfyUI Power Flow
 

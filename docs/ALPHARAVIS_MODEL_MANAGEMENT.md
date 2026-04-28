@@ -22,6 +22,7 @@ By default, this whole custom layer is off:
 ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=false
 ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=false
 ALPHARAVIS_ENABLE_CRISIS_MANAGER=false
+ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=false
 ```
 
 The standard stack uses `big-boss` through LiteLLM and does not create the
@@ -117,6 +118,48 @@ These are intentionally left as interfaces until the safe tools are curated:
 - ComfyUI health URL for the real image backend.
 - Crisis-manager routing node and retry-original-request logic.
 
+## Owner Power Tools
+
+Owner-specific tools live in:
+
+```text
+langgraph-app/owner_power_tools.py
+```
+
+They are enabled only when all of these are true:
+
+```text
+ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true
+ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=true
+ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=true
+```
+
+The file contains editable host/IP/MAC/start-command defaults derived from the
+exported OpenWebUI tools. Real passwords are intentionally not committed; use:
+
+```text
+ALPHARAVIS_OWNER_SSH_PASS=<private password>
+```
+
+The helper uses `sshpass -e` so the password is supplied through the process
+environment instead of a visible command-line argument. On Linux, install
+`sshpass` on the host/container that runs these owner tools, or replace the
+implementation with SSH keys in `owner_power_tools.py`.
+
+Safe owner actions include:
+
+- check llama server
+- start/restart llama server
+- read llama logs
+- check/wake ComfyUI
+- start all model services
+- read Pixelle logs when Docker is reachable
+
+Protected owner actions use the LangGraph human approval interrupt:
+
+- shutdown llama server
+- shutdown ComfyUI server
+
 Future crisis-manager guard rails are already represented as ENV placeholders:
 
 ```text
@@ -125,6 +168,13 @@ ALPHARAVIS_CRISIS_MAX_ATTEMPTS=1
 ALPHARAVIS_CRISIS_TIMEOUT_SECONDS=120
 ALPHARAVIS_CRISIS_AUTO_ACTIONS=check_llama_server|check_ollama_models|check_comfyui|start_llama_server|restart_llama_server|wake_pc
 ALPHARAVIS_CRISIS_HITL_ACTIONS=shutdown_server|reboot_server|kill_process|delete_files
+```
+
+The power-management agent also uses a small model by default:
+
+```text
+ALPHARAVIS_POWER_MANAGER_MODEL=openai/edge-gemma
+ALPHARAVIS_POWER_MANAGER_TIMEOUT_SECONDS=90
 ```
 
 The agent should not invent SSH commands for these actions. It should either
