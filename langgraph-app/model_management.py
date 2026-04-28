@@ -91,7 +91,7 @@ def load_config(remote_pcs: dict[str, Any] | None = None) -> ModelManagementConf
     remote_pcs = remote_pcs or {}
     comfy_pc = os.getenv("ALPHARAVIS_COMFY_PC", "comfy_server")
     return ModelManagementConfig(
-        enabled=env_bool("ALPHARAVIS_ENABLE_MODEL_MANAGEMENT", "true"),
+        enabled=env_bool("ALPHARAVIS_ENABLE_MODEL_MANAGEMENT", "false"),
         power_enabled=env_bool("ALPHARAVIS_ENABLE_POWER_MANAGEMENT", "false"),
         allow_actions=env_bool("ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS", "false"),
         embedding_policy=os.getenv("ALPHARAVIS_EMBEDDING_LOAD_POLICY", "idle_or_big_llm_active").strip().lower(),
@@ -325,7 +325,14 @@ async def request_power_action(
 async def prepare_comfy_for_pixelle(remote_pcs: dict[str, Any] | None = None) -> dict[str, Any]:
     remote_pcs = remote_pcs or {}
     config = load_config(remote_pcs)
-    if not env_bool("ALPHARAVIS_PIXELLE_PREPARE_COMFY", "true"):
+    if not config.enabled:
+        return {
+            "ready": True,
+            "skipped": True,
+            "message": "Custom model management disabled; Pixelle preflight did not run.",
+        }
+
+    if not env_bool("ALPHARAVIS_PIXELLE_PREPARE_COMFY", "false"):
         return {"ready": True, "skipped": True, "message": "Pixelle ComfyUI preflight disabled."}
 
     if not config.comfy_probe_url:

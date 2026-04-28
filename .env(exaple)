@@ -201,9 +201,28 @@ SSH_PASS_DEFAULT=yourPasswordHere
 # =====================================================================
 
 # Enables AlphaRavis's custom model-management planning layer.
-# This does not execute shutdowns or model switches by itself.
+# Default is false because this is a very custom local hardware setup.
 # Allowed values: true, false
-ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true
+ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=false
+
+# Enables the advanced custom model-management integration inside the graph:
+# power_management_agent, Pixelle ComfyUI preflight, and future crisis manager
+# routing. Requires ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=false
+
+# Future crisis-manager node switch. Currently documented as planned work; keep
+# false until the safe start/restart/check tools are wired.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_CRISIS_MANAGER=false
+
+# Future crisis-manager model and guard rails. The small Ollama model should be
+# used only as a moderator/recovery dispatcher, not for normal complex work.
+ALPHARAVIS_CRISIS_MANAGER_MODEL=openai/edge-gemma
+ALPHARAVIS_CRISIS_MAX_ATTEMPTS=1
+ALPHARAVIS_CRISIS_TIMEOUT_SECONDS=120
+ALPHARAVIS_CRISIS_AUTO_ACTIONS=check_llama_server|check_ollama_models|check_comfyui|start_llama_server|restart_llama_server|wake_pc
+ALPHARAVIS_CRISIS_HITL_ACTIONS=shutdown_server|reboot_server|kill_process|delete_files
 
 # Enables power-management intent handling. Wake-on-LAN remains a normal
 # explicit tool; shutdowns/service changes/model switches still require the
@@ -237,7 +256,7 @@ ALPHARAVIS_MODEL_MGMT_PROBE_TIMEOUT_SECONDS=5
 # If the check fails, default behavior is warn-and-continue; set block=true if
 # you prefer not to submit Pixelle jobs while ComfyUI looks offline.
 # Allowed values: true, false
-ALPHARAVIS_PIXELLE_PREPARE_COMFY=true
+ALPHARAVIS_PIXELLE_PREPARE_COMFY=false
 ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE=false
 ALPHARAVIS_COMFY_WAKE_WAIT_SECONDS=0
 

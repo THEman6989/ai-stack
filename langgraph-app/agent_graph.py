@@ -243,6 +243,28 @@ def _env_bool(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).lower() in {"1", "true", "yes"}
 
 
+def _model_management_enabled() -> bool:
+    return _env_bool("ALPHARAVIS_ENABLE_MODEL_MANAGEMENT", "false")
+
+
+def _advanced_model_management_enabled() -> bool:
+    return _model_management_enabled() and _env_bool("ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT", "false")
+
+
+def _available_agent_names() -> str:
+    agents = [
+        "general_assistant",
+        "research_expert",
+        "debugger_agent",
+        "ui_assistant",
+        "hermes_coding_agent",
+        "context_retrieval_agent",
+    ]
+    if _advanced_model_management_enabled():
+        agents.append("power_management_agent")
+    return ", ".join(agents)
+
+
 _PERSISTENT_CONTEXT_THREAT_PATTERNS = [
     (r"ignore\s+(previous|all|above|prior)\s+instructions", "prompt_injection"),
     (r"system\s+prompt\s+override", "system_override"),
@@ -424,6 +446,9 @@ def _json_tool_result(data: Any) -> str:
 
 
 async def _pixelle_preflight() -> dict[str, Any]:
+    if not _advanced_model_management_enabled() or not _env_bool("ALPHARAVIS_PIXELLE_PREPARE_COMFY", "false"):
+        return {"ready": True, "skipped": True, "message": ""}
+
     if _model_mgmt_prepare_comfy is None:
         return {
             "ready": True,
@@ -2767,9 +2792,7 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
         "Do not solve the task. Do not include hidden reasoning. Name likely "
         "agents/tools, retrieval needs, safety gates, and success criteria in "
         "5-8 short bullets.\n\n"
-        "Available agents: general_assistant, research_expert, debugger_agent, "
-        "ui_assistant, hermes_coding_agent, context_retrieval_agent, "
-        "power_management_agent.\n\n"
+        f"Available agents: {_available_agent_names()}.\n\n"
         f"User request:\n{latest}"
     )
 
@@ -3853,6 +3876,32 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         "verification status, risks, open tasks, and the exact instruction for "
         "the next agent. Keep long logs in artifacts and reference their keys."
     )
+    model_management_enabled = _model_management_enabled()
+    advanced_model_management_enabled = _advanced_model_management_enabled()
+    model_management_tools = (
+        [inspect_model_management_status, plan_embedding_maintenance]
+        if model_management_enabled
+        else []
+    )
+    pixelle_management_tools = [prepare_comfy_for_pixelle] if advanced_model_management_enabled else []
+    power_management_tools = [request_power_management_action] if advanced_model_management_enabled else []
+    if advanced_model_management_enabled:
+        model_management_prompt = (
+            "For ComfyUI readiness, Ollama embedding windows, or PC power "
+            "lifecycle questions, use the model-management tools or transfer "
+            "to power_management_agent. "
+        )
+    elif model_management_enabled:
+        model_management_prompt = (
+            "Custom model-management status and embedding-window planning tools "
+            "are available, but power actions and the power_management_agent are "
+            "disabled. "
+        )
+    else:
+        model_management_prompt = (
+            "Custom model/power management is disabled; use the normal big-boss "
+            "route and transfer infrastructure failures to debugger_agent. "
+        )
 
     transfer_to_research = create_handoff_tool(
         agent_name="research_expert",
@@ -3890,14 +3939,17 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             f"conversation memory. {handoff_requirement}"
         ),
     )
-    transfer_to_power = create_handoff_tool(
-        agent_name="power_management_agent",
-        description=(
-            "Transfer to the power/model management agent for ComfyUI readiness, "
-            "Pixelle preflight, Ollama embedding windows, big-LLM availability, "
-            f"Wake-on-LAN, or planned shutdown/startup actions. {handoff_requirement}"
-        ),
-    )
+    transfer_to_power = None
+    if advanced_model_management_enabled:
+        transfer_to_power = create_handoff_tool(
+            agent_name="power_management_agent",
+            description=(
+                "Transfer to the power/model management agent for ComfyUI readiness, "
+                "Pixelle preflight, Ollama embedding windows, big-LLM availability, "
+                f"Wake-on-LAN, or planned shutdown/startup actions. {handoff_requirement}"
+            ),
+        )
+    power_handoff_tools = [transfer_to_power] if transfer_to_power is not None else []
 
     research_worker = create_deep_agent(
         model=llm,
@@ -3923,7 +3975,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_debugger,
             transfer_to_hermes,
             transfer_to_context,
-            transfer_to_power,
+            *power_handoff_tools,
         ],
         name="research_expert",
         system_prompt=(
@@ -3963,10 +4015,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             start_pixelle_async,
             check_pixelle_job,
             wake_on_lan,
-            inspect_model_management_status,
-            plan_embedding_maintenance,
-            prepare_comfy_for_pixelle,
-            request_power_management_action,
+            *model_management_tools,
+            *pixelle_management_tools,
+            *power_management_tools,
             fast_web_search,
             describe_optional_tool_registry,
             read_alpha_ravis_architecture,
@@ -3994,7 +4045,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_debugger,
             transfer_to_hermes,
             transfer_to_context,
-            transfer_to_power,
+            *power_handoff_tools,
         ]
         + mcp_tools,
         name="general_assistant",
@@ -4005,9 +4056,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "SSH command diagnostics so the approval gate stays in force. "
             "For long Pixelle jobs, prefer start_pixelle_async and return the "
             "job_id unless the user explicitly wants to wait. "
-            "For ComfyUI readiness, Ollama embedding windows, or PC power "
-            "lifecycle questions, use the model-management tools or transfer "
-            "to power_management_agent. "
+            f"{model_management_prompt}"
             "Use read_alpha_ravis_architecture only when the user asks what "
             "AlphaRavis is, what it can do, or how the stack works. "
             "Optional MCP registries are lazy-loaded; call "
@@ -4035,12 +4084,19 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
 
     computer_worker = _create_ui_assistant(
         llm,
-        [transfer_to_generalist, transfer_to_research, transfer_to_debugger, transfer_to_hermes, transfer_to_context, transfer_to_power],
+        [
+            transfer_to_generalist,
+            transfer_to_research,
+            transfer_to_debugger,
+            transfer_to_hermes,
+            transfer_to_context,
+            *power_handoff_tools,
+        ],
     )
 
     debugger_worker = _create_debugger_subgraph(
         llm,
-        [transfer_to_research, transfer_to_generalist, transfer_to_hermes, transfer_to_context, transfer_to_power],
+        [transfer_to_research, transfer_to_generalist, transfer_to_hermes, transfer_to_context, *power_handoff_tools],
     )
 
     hermes_worker = create_deep_agent(
@@ -4064,7 +4120,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_debugger,
             transfer_to_research,
             transfer_to_context,
-            transfer_to_power,
+            *power_handoff_tools,
         ],
         name="hermes_coding_agent",
         system_prompt=(
@@ -4112,7 +4168,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_research,
             transfer_to_debugger,
             transfer_to_hermes,
-            transfer_to_power,
+            *power_handoff_tools,
         ],
         name="context_retrieval_agent",
         system_prompt=(
@@ -4137,57 +4193,59 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         + HANDOFF_POLICY_PROMPT,
     )
 
-    power_worker = create_deep_agent(
-        model=llm,
-        tools=[
-            inspect_model_management_status,
-            plan_embedding_maintenance,
-            prepare_comfy_for_pixelle,
-            request_power_management_action,
-            wake_on_lan,
-            build_specialist_report,
-            search_agent_memory,
-            record_agent_memory,
-            search_curated_memory,
-            record_curated_memory,
-            semantic_memory_search,
-            transfer_to_generalist,
-            transfer_to_debugger,
-            transfer_to_hermes,
-            transfer_to_research,
-            transfer_to_context,
-        ],
-        name="power_management_agent",
-        system_prompt=(
-            "You are the Power and Model Management Agent. Your job is to keep "
-            "AlphaRavis aware of local hardware state without taking unsafe "
-            "actions. Inspect big llama.cpp availability, Ollama running models, "
-            "ComfyUI readiness, and the embedding-maintenance window. "
-            "You may use wake_on_lan for configured PCs when the user asks or "
-            "a Pixelle/Comfy job needs it. Shutdowns, service starts/stops, "
-            "Ollama model switching, and embedding-job runs must go through "
-            "request_power_management_action; by default it returns a dry-run "
-            "until the curated external management endpoint is configured. "
-            "Never invent SSH commands for shutdown or model switching. If raw "
-            "logs or shell diagnostics are needed, transfer to debugger_agent. "
-            "Use agent_id=`power_management_agent` for durable hardware/model "
-            "lessons, and record only stable facts such as known health URLs or "
-            "safe wake procedures."
+    swarm_workers = [
+        research_worker,
+        general_worker,
+        computer_worker,
+        debugger_worker,
+        hermes_worker,
+        context_worker,
+    ]
+    if advanced_model_management_enabled:
+        power_worker = create_deep_agent(
+            model=llm,
+            tools=[
+                inspect_model_management_status,
+                plan_embedding_maintenance,
+                prepare_comfy_for_pixelle,
+                request_power_management_action,
+                wake_on_lan,
+                build_specialist_report,
+                search_agent_memory,
+                record_agent_memory,
+                search_curated_memory,
+                record_curated_memory,
+                semantic_memory_search,
+                transfer_to_generalist,
+                transfer_to_debugger,
+                transfer_to_hermes,
+                transfer_to_research,
+                transfer_to_context,
+            ],
+            name="power_management_agent",
+            system_prompt=(
+                "You are the Power and Model Management Agent. Your job is to keep "
+                "AlphaRavis aware of local hardware state without taking unsafe "
+                "actions. Inspect big llama.cpp availability, Ollama running models, "
+                "ComfyUI readiness, and the embedding-maintenance window. "
+                "You may use wake_on_lan for configured PCs when the user asks or "
+                "a Pixelle/Comfy job needs it. Shutdowns, service starts/stops, "
+                "Ollama model switching, and embedding-job runs must go through "
+                "request_power_management_action; by default it returns a dry-run "
+                "until the curated external management endpoint is configured. "
+                "Never invent SSH commands for shutdown or model switching. If raw "
+                "logs or shell diagnostics are needed, transfer to debugger_agent. "
+                "Use agent_id=`power_management_agent` for durable hardware/model "
+                "lessons, and record only stable facts such as known health URLs or "
+                "safe wake procedures."
+            )
+            + " "
+            + HANDOFF_POLICY_PROMPT,
         )
-        + " "
-        + HANDOFF_POLICY_PROMPT,
-    )
+        swarm_workers.append(power_worker)
 
     swarm = create_swarm(
-        [
-            research_worker,
-            general_worker,
-            computer_worker,
-            debugger_worker,
-            hermes_worker,
-            context_worker,
-            power_worker,
-        ],
+        swarm_workers,
         default_active_agent="general_assistant",
     ).compile(store=store)
 

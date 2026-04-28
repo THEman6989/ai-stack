@@ -281,7 +281,16 @@ Capabilities:
 
 ### Power Management Agent
 
-Handles local hardware and model lifecycle planning.
+Handles local hardware and model lifecycle planning when advanced custom model
+management is enabled:
+
+```text
+ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true
+ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=true
+```
+
+It is disabled by default so normal single-model stacks continue to use only
+the standard `big-boss` route.
 
 Capabilities:
 
@@ -723,6 +732,8 @@ Before a Pixelle job starts, AlphaRavis can run a ComfyUI preflight through the
 model-management layer:
 
 ```text
+ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true
+ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=true
 ALPHARAVIS_PIXELLE_PREPARE_COMFY=true
 ALPHARAVIS_COMFY_HEALTH_URL=http://<comfy-ip>:8188/system_stats
 ```
@@ -781,9 +792,18 @@ not run by a hidden background watchdog. The Power Management Agent can inspect
 and plan them, and Wake-on-LAN can be called explicitly, but destructive actions
 must go through a curated endpoint or the debugger approval gate.
 
-The embedding model lives on the Ollama management node. Because that node may
-not be able to keep both the chat/crisis model and the embedding model loaded,
-AlphaRavis plans embedding windows instead of blindly loading the model:
+The custom model-management layer is off by default:
+
+```text
+ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=false
+ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=false
+ALPHARAVIS_ENABLE_CRISIS_MANAGER=false
+```
+
+When enabled for the custom local setup, the embedding model lives on the Ollama
+management node. Because that node may not be able to keep both the chat/crisis
+model and the embedding model loaded, AlphaRavis plans embedding windows instead
+of blindly loading the model:
 
 ```text
 ALPHARAVIS_EMBEDDING_LOAD_POLICY=idle_or_big_llm_active

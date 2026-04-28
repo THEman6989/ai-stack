@@ -35,6 +35,31 @@ IMPORTANT_KEYS = [
 ]
 
 
+MODEL_MANAGEMENT_KEYS = [
+    ("ALPHARAVIS_ENABLE_MODEL_MANAGEMENT", "enable the custom model-management planning layer"),
+    ("ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT", "enable power_management_agent and advanced hooks"),
+    ("ALPHARAVIS_ENABLE_CRISIS_MANAGER", "future crisis-manager routing switch"),
+    ("ALPHARAVIS_CRISIS_MANAGER_MODEL", "small Ollama/LiteLLM crisis-manager model"),
+    ("ALPHARAVIS_CRISIS_MAX_ATTEMPTS", "future maximum automatic recovery attempts"),
+    ("ALPHARAVIS_CRISIS_TIMEOUT_SECONDS", "future crisis-manager wall-clock timeout"),
+    ("ALPHARAVIS_CRISIS_AUTO_ACTIONS", "future auto-approved recovery action names"),
+    ("ALPHARAVIS_CRISIS_HITL_ACTIONS", "future human-approval action names"),
+    ("ALPHARAVIS_ENABLE_POWER_MANAGEMENT", "allow power-management intent handling"),
+    ("ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS", "allow real external model/power actions"),
+    ("ALPHARAVIS_MODEL_MGMT_ACTION_URL", "curated action endpoint URL"),
+    ("ALPHARAVIS_MODEL_MGMT_API_KEY", "curated action endpoint bearer token"),
+    ("ALPHARAVIS_PIXELLE_PREPARE_COMFY", "check ComfyUI before Pixelle jobs"),
+    ("ALPHARAVIS_COMFY_HEALTH_URL", "ComfyUI health URL"),
+    ("ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE", "block Pixelle when ComfyUI is offline"),
+    ("ALPHARAVIS_MODEL_IDLE_SECONDS", "idle seconds before embedding maintenance is allowed"),
+    ("ALPHARAVIS_EMBEDDING_LOAD_POLICY", "idle_only, big_llm_active_only, or idle_or_big_llm_active"),
+    ("ALPHARAVIS_OLLAMA_BASE_URL", "Ollama management-node base URL"),
+    ("ALPHARAVIS_OLLAMA_CHAT_MODEL", "small Ollama chat/crisis model"),
+    ("ALPHARAVIS_OLLAMA_EMBED_MODEL", "Ollama embedding model"),
+    ("ALPHARAVIS_OLLAMA_EMBED_FALLBACK_MODEL", "fallback embedding model"),
+]
+
+
 SERVICE_URLS = [
     ("LibreChat", "http://localhost:3080"),
     ("LangGraph API", "http://localhost:2024"),
@@ -117,6 +142,82 @@ def configure() -> None:
     print(".env updated")
 
 
+def set_many(values: dict[str, str]) -> None:
+    for key, value in values.items():
+        update_env_value(key, value)
+
+
+def configure_model_management() -> None:
+    ensure_env()
+    values = read_env(ENV_PATH)
+    print("Custom model/power management is off by default.")
+    print("Press Enter to keep the shown value.")
+
+    enable = ask_yes_no(
+        "Enable custom model-management planning",
+        default=values.get("ALPHARAVIS_ENABLE_MODEL_MANAGEMENT", "false").lower() in {"1", "true", "yes"},
+    )
+    if not enable:
+        set_many(
+            {
+                "ALPHARAVIS_ENABLE_MODEL_MANAGEMENT": "false",
+                "ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT": "false",
+                "ALPHARAVIS_ENABLE_CRISIS_MANAGER": "false",
+                "ALPHARAVIS_ENABLE_POWER_MANAGEMENT": "false",
+                "ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS": "false",
+                "ALPHARAVIS_PIXELLE_PREPARE_COMFY": "false",
+            }
+        )
+        print("Custom model/power management disabled in .env")
+        return
+
+    update_env_value("ALPHARAVIS_ENABLE_MODEL_MANAGEMENT", "true")
+    advanced = ask_yes_no(
+        "Enable advanced hooks (power_management_agent, Pixelle preflight, future crisis manager)",
+        default=values.get("ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT", "false").lower() in {"1", "true", "yes"},
+    )
+    update_env_value("ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT", "true" if advanced else "false")
+
+    if not advanced:
+        set_many(
+            {
+                "ALPHARAVIS_ENABLE_CRISIS_MANAGER": "false",
+                "ALPHARAVIS_ENABLE_POWER_MANAGEMENT": "false",
+                "ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS": "false",
+                "ALPHARAVIS_PIXELLE_PREPARE_COMFY": "false",
+            }
+        )
+        print("Basic model-management planning enabled; advanced hooks disabled.")
+        return
+
+    values = read_env(ENV_PATH)
+    prompts = [
+        ("ALPHARAVIS_ENABLE_POWER_MANAGEMENT", "Enable power-management intents", False),
+        ("ALPHARAVIS_PIXELLE_PREPARE_COMFY", "Check ComfyUI before Pixelle jobs", False),
+        ("ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE", "Block Pixelle if ComfyUI is offline", False),
+        ("ALPHARAVIS_ENABLE_CRISIS_MANAGER", "Enable future crisis-manager routing", False),
+        ("ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS", "Allow real external model/power actions", False),
+    ]
+    for key, prompt, default in prompts:
+        current = values.get(key, "true" if default else "false").lower() in {"1", "true", "yes"}
+        update_env_value(key, "true" if ask_yes_no(prompt, default=current) else "false")
+
+    values = read_env(ENV_PATH)
+    print("Press Enter to keep text values.")
+    for key, description in MODEL_MANAGEMENT_KEYS:
+        if key.startswith("ALPHARAVIS_ENABLE_") or key in {
+            "ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS",
+            "ALPHARAVIS_PIXELLE_PREPARE_COMFY",
+            "ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE",
+        }:
+            continue
+        current = values.get(key, "")
+        answer = input(f"{key} [{current}] - {description}: ").strip()
+        if answer:
+            update_env_value(key, answer)
+    print("Model-management .env settings updated")
+
+
 def ask_yes_no(prompt: str, default: bool = True) -> bool:
     suffix = "Y/n" if default else "y/N"
     answer = input(f"{prompt} [{suffix}]: ").strip().lower()
@@ -129,6 +230,8 @@ def install() -> None:
     ensure_env()
     if ask_yes_no("Edit important .env values now", default=False):
         configure()
+    if ask_yes_no("Configure custom model/power management now", default=False):
+        configure_model_management()
     if ask_yes_no("Initialize/update submodules now", default=True):
         run(["git", "submodule", "update", "--init", "--recursive"])
     print_status()
@@ -142,6 +245,8 @@ def update() -> None:
         run(["git", "submodule", "update", "--init", "--recursive", "--remote"])
     if ask_yes_no("Edit important .env values after update", default=False):
         configure()
+    if ask_yes_no("Configure custom model/power management after update", default=False):
+        configure_model_management()
     print_status()
 
 
@@ -179,6 +284,11 @@ def print_status() -> None:
     print("- LangGraph Agent: custom endpoint -> api-bridge:8123/v1")
     print("- Hermes Agent: custom endpoint -> hermes-agent:8642/v1")
     print("- OpenAI: only appears if LIBRECHAT_OPENAI_API_KEY/REVERSE_PROXY are set")
+    print("\nCustom model management")
+    print(f"- Model management: {env.get('ALPHARAVIS_ENABLE_MODEL_MANAGEMENT', 'false')}")
+    print(f"- Advanced hooks: {env.get('ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT', 'false')}")
+    print(f"- Crisis manager: {env.get('ALPHARAVIS_ENABLE_CRISIS_MANAGER', 'false')}")
+    print(f"- Real action endpoint: {'configured' if env.get('ALPHARAVIS_MODEL_MGMT_ACTION_URL') else 'not configured'}")
     print("\nDocker status")
     docker_ps()
 
@@ -221,12 +331,25 @@ def hermes_smoke() -> None:
 
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="AlphaRavis setup helper")
-    parser.add_argument("command", choices=["install", "configure", "update", "status", "bridge-smoke", "hermes-smoke"])
+    parser.add_argument(
+        "command",
+        choices=[
+            "install",
+            "configure",
+            "model-management",
+            "update",
+            "status",
+            "bridge-smoke",
+            "hermes-smoke",
+        ],
+    )
     args = parser.parse_args(argv)
     if args.command == "install":
         install()
     elif args.command == "configure":
         configure()
+    elif args.command == "model-management":
+        configure_model_management()
     elif args.command == "update":
         update()
     elif args.command == "status":

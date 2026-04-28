@@ -115,19 +115,31 @@ Important idea:
   llama.cpp server is up, so normal chat does not depend on the small Ollama
   node.
 
-Default controls:
+Default controls keep this custom layer completely off:
 
 ```text
-ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true
+ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=false
+ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=false
+ALPHARAVIS_ENABLE_CRISIS_MANAGER=false
 ALPHARAVIS_ENABLE_POWER_MANAGEMENT=false
 ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=false
 ALPHARAVIS_MODEL_IDLE_SECONDS=600
 ALPHARAVIS_EMBEDDING_LOAD_POLICY=idle_or_big_llm_active
 ```
 
-With these defaults, AlphaRavis can inspect and plan, but it will not shut down
-machines, switch Ollama models, or run embedding jobs through an external tool.
-Those actions become real only after you provide:
+With these defaults, AlphaRavis uses the normal `big-boss` route and does not
+create the Power Management Agent. Enable the layer only on the custom hardware
+setup that needs it.
+
+The advanced hooks become visible only after:
+
+```text
+ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true
+ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=true
+```
+
+Even then, real shutdowns, service changes, Ollama model switching, and
+embedding-job runs stay disabled until you provide:
 
 ```text
 ALPHARAVIS_MODEL_MGMT_ACTION_URL=
@@ -135,7 +147,11 @@ ALPHARAVIS_MODEL_MGMT_API_KEY=
 ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=true
 ```
 
-The Power Management Agent handles these tasks. Use it for questions like:
+`make model-management` can write these ENV switches interactively. The result
+is still plain `.env`, so you can copy that `.env` to another machine and skip
+the Make step later.
+
+When enabled, the Power Management Agent handles questions like:
 
 ```text
 check model management status
@@ -234,6 +250,8 @@ check_pixelle_job <job_id>
 Before a Pixelle job starts, AlphaRavis can check ComfyUI:
 
 ```text
+ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true
+ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=true
 ALPHARAVIS_PIXELLE_PREPARE_COMFY=true
 ALPHARAVIS_COMFY_HEALTH_URL=http://<comfy-ip>:8188/system_stats
 ```

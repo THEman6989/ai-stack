@@ -1,13 +1,16 @@
 PYTHON ?= python
 COMPOSE ?= docker compose
 
-.PHONY: install configure update status up down logs submodules build bridge-smoke hermes-smoke
+.PHONY: install configure model-management update status up down logs submodules build bridge-smoke hermes-smoke
 
 install:
 	$(PYTHON) scripts/alpharavis_setup.py install
 
 configure:
 	$(PYTHON) scripts/alpharavis_setup.py configure
+
+model-management:
+	$(PYTHON) scripts/alpharavis_setup.py model-management
 
 update:
 	$(PYTHON) scripts/alpharavis_setup.py update

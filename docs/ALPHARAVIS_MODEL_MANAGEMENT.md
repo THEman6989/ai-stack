@@ -16,7 +16,19 @@ same time, AlphaRavis treats embedding work as a scheduled maintenance window.
 
 ## Default Safe Behavior
 
-By default, AlphaRavis can inspect and plan:
+By default, this whole custom layer is off:
+
+```text
+ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=false
+ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=false
+ALPHARAVIS_ENABLE_CRISIS_MANAGER=false
+```
+
+The standard stack uses `big-boss` through LiteLLM and does not create the
+Power Management Agent. This keeps the repo usable for normal single-model
+setups.
+
+When `ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true`, AlphaRavis can inspect and plan:
 
 ```text
 inspect_model_management_status
@@ -25,7 +37,16 @@ prepare_comfy_for_pixelle
 request_power_management_action
 ```
 
-But real power/model actions are disabled:
+Advanced hooks are separate:
+
+```text
+ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=true
+```
+
+That enables the `power_management_agent`, Pixelle ComfyUI preflight hooks, and
+the future crisis-manager routing surface.
+
+Real power/model actions are still disabled by default:
 
 ```text
 ALPHARAVIS_ENABLE_POWER_MANAGEMENT=false
@@ -65,9 +86,12 @@ The planned sequence is:
 Pixelle is the image job API. ComfyUI is the backend that may live on a machine
 that is not always awake.
 
-Before Pixelle starts, AlphaRavis can check:
+Before Pixelle starts, AlphaRavis can check ComfyUI when advanced model
+management and Pixelle preflight are both enabled:
 
 ```text
+ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true
+ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=true
 ALPHARAVIS_PIXELLE_PREPARE_COMFY=true
 ALPHARAVIS_COMFY_HEALTH_URL=http://<comfy-ip>:8188/system_stats
 ```
@@ -91,6 +115,17 @@ These are intentionally left as interfaces until the safe tools are curated:
 - `load_embedding_model` / `unload_ollama_model`: Ollama model lifecycle.
 - `run_embedding_jobs`: process queued pgvector embedding work.
 - ComfyUI health URL for the real image backend.
+- Crisis-manager routing node and retry-original-request logic.
+
+Future crisis-manager guard rails are already represented as ENV placeholders:
+
+```text
+ALPHARAVIS_CRISIS_MANAGER_MODEL=openai/edge-gemma
+ALPHARAVIS_CRISIS_MAX_ATTEMPTS=1
+ALPHARAVIS_CRISIS_TIMEOUT_SECONDS=120
+ALPHARAVIS_CRISIS_AUTO_ACTIONS=check_llama_server|check_ollama_models|check_comfyui|start_llama_server|restart_llama_server|wake_pc
+ALPHARAVIS_CRISIS_HITL_ACTIONS=shutdown_server|reboot_server|kill_process|delete_files
+```
 
 The agent should not invent SSH commands for these actions. It should either
 use the curated endpoint, Wake-on-LAN, or transfer to the debugger where the
