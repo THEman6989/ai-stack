@@ -216,8 +216,8 @@ ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=false
 # Allowed values: true, false
 ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=false
 
-# Future crisis-manager node switch. Currently documented as planned work; keep
-# false until the safe start/restart/check tools are wired.
+# Crisis-manager preflight/recovery switch. Keep false unless owner power tools
+# are enabled and the small fallback model is configured.
 # Allowed values: true, false
 ALPHARAVIS_ENABLE_CRISIS_MANAGER=false
 

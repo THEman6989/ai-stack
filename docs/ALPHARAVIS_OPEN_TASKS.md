@@ -5,7 +5,7 @@ not fully wired yet.
 
 ## Custom Model / Power Management
 
-Status: prepared, default off. Owner tool file exists.
+Status: prepared, default off. Owner tool file exists and safe owner tools are wired.
 
 Implemented:
 
@@ -23,6 +23,18 @@ ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=true
 ```text
 ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=true
 ```
+- Safe owner actions are wired:
+  - check llama server
+  - start/restart llama server
+  - read llama logs
+  - check/wake ComfyUI
+  - start all model services
+  - read Pixelle logs when Docker is reachable
+- Protected owner actions are wired through human approval:
+  - shutdown llama server
+  - shutdown ComfyUI server
+- `power_management_agent` uses `ALPHARAVIS_POWER_MANAGER_MODEL` when advanced
+  model management is enabled.
 
 Still needed:
 
@@ -39,7 +51,7 @@ ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=true
   - `load_embedding_model`
   - `unload_ollama_model`
   - `run_embedding_jobs`
-- Populate remaining HITL/destructive actions:
+- Populate remaining HITL/destructive actions if you really want them:
   - `reboot_server`
   - `kill_process`
   - `delete_files`
@@ -51,7 +63,7 @@ ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=true
 
 Status: minimal preflight/recovery agent implemented, default off.
 
-Desired behavior:
+Implemented:
 
 - Enabled only by:
 
@@ -63,30 +75,31 @@ ALPHARAVIS_ENABLE_CRISIS_MANAGER=true
 ALPHARAVIS_CRISIS_MANAGER_MODEL=openai/edge-gemma
 ALPHARAVIS_POWER_MANAGER_MODEL=openai/edge-gemma
 ```
-
-- Trigger on main-model failures such as timeout, 502, connection errors, or
-  LiteLLM backend generation health failure.
-- Current implementation does a preflight check before the normal planner path.
-  Full mid-run timeout recovery still needs deeper LangGraph/bridge retry work.
 - Use the small Ollama model only as a crisis moderator, not for normal complex
   work.
-- Automatically run non-destructive checks and safe starts:
+- Preflight check runs before the normal planner path.
+- Automatically runs non-destructive checks and safe starts through owner tools:
   - status checks
   - logs/read-only probes
-  - `wake_pc`
   - `start_llama_server`
   - `restart_llama_server`
-- Interrupt for destructive actions:
-  - shutdown
-  - reboot
-  - kill process
-  - delete files
-- Send the user a short status message while recovery is happening.
-- After health checks pass, retry the original user request against `big-boss`.
-- Add hard caps:
+- Sends the user a short `Crisis-Notice` while recovery is happening.
+- After the recovery attempt, routes back to the normal planner path so the
+  original user request can continue.
+- Destructive shutdown tools are not given to the crisis agent.
+
+Still needed:
+
+- Trigger crisis recovery on mid-run main-model failures such as timeout, 502,
+  connection errors, or LiteLLM backend generation health failure.
+- Add a post-recovery readiness gate before continuing to the planner.
+- Add full hard caps from the ENV placeholders:
   - max recovery attempts
   - max wall-clock time
   - no recursive crisis loops
+- Add read-only Ollama/LiteLLM checks:
+  - `check_ollama_models`
+  - LiteLLM generation smoke status
 
 ENV placeholders already exist:
 
@@ -126,6 +139,15 @@ Clarification:
 
 Status: preflight hook exists, default off.
 
+Implemented:
+
+- Pixelle can run with durable `@task` monitoring or async job id polling.
+- ComfyUI preflight can warn or block before Pixelle starts.
+- The generic model-management preflight can request `wake_pc` through the
+  curated action endpoint when that endpoint is configured.
+- Owner power tools include a direct ComfyUI wake helper for manual/power-agent
+  use.
+
 Still needed:
 
 - Set a real ComfyUI health URL:
@@ -141,11 +163,22 @@ ALPHARAVIS_COMFY_HEALTH_URL=http://<comfy-ip>:8188/system_stats
 ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE=false
 ```
 
-- Wire wake/start actions so ComfyUI can be woken before submitting image jobs.
+- Decide whether Pixelle preflight should call the owner ComfyUI wake helper
+  directly or stay routed through the curated action endpoint.
 
 ## Bridge
 
-Status: Chat Completions is primary; Responses API wrapper exists.
+Status: Chat Completions remains compatible; Responses API wrapper and
+Responses-style streaming events exist.
+
+Implemented:
+
+- `/v1/chat/completions`
+- `/v1/responses`
+- OpenAPI schema version `3.1.0`
+- `response.output_item.*`, `response.output_text.*`, and optional
+  `response.reasoning_text.*` stream events
+- bridge-level hard request cutoff before LangGraph is called
 
 Still needed:
 

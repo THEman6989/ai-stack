@@ -564,6 +564,7 @@ Already available:
 - optional Hermes direct endpoint for LibreChat and Hermes coding sub-agent for AlphaRavis
 - fast-path hidden-thinking disable for llama.cpp/Qwen-style models
 - visible fast-path notices and thread lockout after agent path
+- graph-level and bridge-level hard context cutoffs
 - agent-specific and global memory tools
 - MemoryKernel with curated always-memory, turn indexing, and compression hints
 - session-history search over indexed turns
@@ -575,9 +576,23 @@ Already available:
 - visible memory notices
 - command approval gate
 - LLM generation health endpoint
+- owner-only power tools for llama.cpp and ComfyUI, default off
+- protected owner shutdown tools behind human approval
+- token-light crisis preflight/recovery agent, default off
+- OpenAPI 3.1 bridge schema and richer Responses streaming event names
+- `make model-management` / `make owner-model-management` for custom hardware setup
 
-Planned next:
+Still open / planned next:
 
-- backend watchdog as a safe debugger tool
+- mid-run backend watchdog and crisis recovery for timeouts/502s after a graph
+  run already started
+- post-crisis readiness gate before continuing to the normal planner
+- durable embedding queue runner and manual backfill tools
+- real Ollama model lifecycle runner for load/unload embedding windows
+- Pixelle preflight decision: direct owner ComfyUI wake helper or curated action
+  endpoint only
 - agent time/tool/handoff budget guard
 - richer activity stream in LibreChat
+- test whether LibreChat shows `reasoning_content` in a separate reasoning
+  panel before enabling reasoning streaming by default
+- optional parallel agent execution with dependency groups
