@@ -361,6 +361,24 @@ async def run_embedding_lifecycle(
     embedding_loaded = any(_model_name_matches(name, config.ollama_embedding_model) for name in running_models)
 
     actions: list[dict[str, Any]] = []
+    if (
+        chat_model_loaded
+        and not embedding_loaded
+        and not env_bool("ALPHARAVIS_EMBEDDING_UNLOAD_CHAT_MODEL", "false")
+        and env_bool("ALPHARAVIS_EMBEDDING_SKIP_IF_CHAT_MODEL_LOADED", "true")
+    ):
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": reason,
+            "decision": decision,
+            "message": (
+                "Ollama chat/crisis model is loaded; embedding queue is paused. "
+                "Set ALPHARAVIS_EMBEDDING_UNLOAD_CHAT_MODEL=true to let the lifecycle runner unload it."
+            ),
+            "running_models": running_models,
+        }
+
     should_unload_chat = (
         chat_model_loaded
         and not embedding_loaded

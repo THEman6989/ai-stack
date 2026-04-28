@@ -71,8 +71,6 @@ OPENAI_API_KEY=sk-local-dev
 #   responses        = direct no-tool LangGraph calls use /v1/responses
 #   chat_completions = direct no-tool LangGraph calls use /v1/chat/completions
 #
-# DeepAgents tool workers still keep ChatLiteLLM's tool-binding fallback unless
-# a future LangChain/LiteLLM Responses tool model is proven stable.
 ALPHARAVIS_LLM_API_MODE=responses
 ALPHARAVIS_RESPONSES_API_BASE=http://litellm:4000/v1
 ALPHARAVIS_RESPONSES_API_KEY=sk-local-dev
@@ -83,6 +81,21 @@ ALPHARAVIS_RESPONSES_INCLUDE_CHAT_TEMPLATE_KWARGS=true
 ALPHARAVIS_RESPONSES_STRIP_OPENAI_PREFIX=true
 ALPHARAVIS_RESPONSES_TRUNCATION=disabled
 ALPHARAVIS_RESPONSES_PARALLEL_TOOL_CALLS=true
+ALPHARAVIS_RESPONSES_PARSE_TOOL_CALLS=true
+ALPHARAVIS_RESPONSES_REASONING_FORMAT=
+
+# DeepAgents tool workers can use LangChain ChatOpenAI with the Responses API.
+# Allowed values:
+#   responses        = bind tools through /v1/responses when langchain-openai supports it
+#   chat_completions = old ChatLiteLLM tool-binding path
+# ALPHARAVIS_DEEPAGENTS_REQUIRE_RESPONSES=true makes startup fail instead of falling back.
+ALPHARAVIS_DEEPAGENTS_API_MODE=responses
+ALPHARAVIS_DEEPAGENTS_RESPONSES_API_BASE=http://litellm:4000/v1
+ALPHARAVIS_DEEPAGENTS_RESPONSES_API_KEY=sk-local-dev
+ALPHARAVIS_DEEPAGENTS_RESPONSES_MODEL=big-boss
+ALPHARAVIS_DEEPAGENTS_RESPONSES_OUTPUT_VERSION=responses/v1
+ALPHARAVIS_DEEPAGENTS_REQUIRE_RESPONSES=false
+ALPHARAVIS_DEEPAGENTS_USE_PREVIOUS_RESPONSE_ID=false
 
 # Dummy API key passed to local OpenAI-compatible llama.cpp/Ollama endpoints.
 # These local servers usually ignore it, but LiteLLM's OpenAI adapter expects one.
@@ -558,8 +571,25 @@ ALPHARAVIS_EMBEDDING_JOB_MAX_BATCH=25
 ALPHARAVIS_EMBEDDING_JOB_MAX_ATTEMPTS=3
 ALPHARAVIS_EMBEDDING_KEEP_ALIVE=30m
 ALPHARAVIS_EMBEDDING_UNLOAD_CHAT_MODEL=false
+ALPHARAVIS_EMBEDDING_SKIP_IF_CHAT_MODEL_LOADED=true
 ALPHARAVIS_EMBEDDING_RESTORE_CHAT_MODEL=true
 ALPHARAVIS_OLLAMA_CHAT_KEEP_ALIVE=30m
+ALPHARAVIS_ENABLE_EMBEDDING_SCHEDULER=false
+ALPHARAVIS_EMBEDDING_SCHEDULER_INTERVAL_SECONDS=120
+ALPHARAVIS_EMBEDDING_SCHEDULER_INITIAL_DELAY_SECONDS=30
+ALPHARAVIS_EMBEDDING_SCHEDULER_LAST_ACTIVITY_AGE_SECONDS=999999
+
+# Optional bounded backfill daemon. It never runs by default and requires a query
+# so startup cannot accidentally index every old chat/artifact.
+ALPHARAVIS_ENABLE_VECTOR_BACKFILL_DAEMON=false
+ALPHARAVIS_VECTOR_BACKFILL_QUERY=
+ALPHARAVIS_VECTOR_BACKFILL_SOURCE_TYPES=session_turn,artifact,archive,archive_collection,curated_memory,debugging_lesson,skill
+ALPHARAVIS_VECTOR_BACKFILL_LIMIT_PER_SOURCE=10
+ALPHARAVIS_VECTOR_BACKFILL_MAX_LIMIT=50
+ALPHARAVIS_VECTOR_BACKFILL_INCLUDE_OTHER_THREADS=false
+ALPHARAVIS_VECTOR_BACKFILL_INTERVAL_SECONDS=1800
+ALPHARAVIS_VECTOR_BACKFILL_INITIAL_DELAY_SECONDS=60
+ALPHARAVIS_VECTOR_BACKFILL_ARTIFACT_MAX_CHARS=250000
 
 # Store full retrieval chunks in pgvector, not only tiny previews.
 # Allowed values: true, false

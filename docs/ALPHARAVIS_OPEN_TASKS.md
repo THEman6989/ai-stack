@@ -112,9 +112,9 @@ ALPHARAVIS_CRISIS_TIMEOUT_SECONDS=120
 
 ## Embedding Queue And pgvector
 
-Status: pgvector retrieval chunks, catalog rows, durable queueing, and a manual
-model-lifecycle queue runner are implemented. Automatic scheduling and manual
-backfill tools are still open.
+Status: pgvector retrieval chunks, catalog rows, durable queueing, a manual
+model-lifecycle queue runner, optional scheduler, and bounded Store-index
+backfill queueing are implemented.
 
 Implemented:
 
@@ -125,24 +125,27 @@ Implemented:
   allowed and drains queued pgvector jobs.
 - The runner may work while big-boss is active, so the small Ollama node can be
   used for embeddings without taking over complex chat.
+- `ALPHARAVIS_ENABLE_EMBEDDING_SCHEDULER=true` drains the queue periodically.
+- `queue_vector_memory_backfill` queues bounded old Store records by query.
+- `ALPHARAVIS_ENABLE_VECTOR_BACKFILL_DAEMON=true` can repeat that bounded
+  backfill search, but only when `ALPHARAVIS_VECTOR_BACKFILL_QUERY` is set.
 
 Still needed:
 
-- Manual backfill tools:
-  - index this thread
-  - index last N artifacts
-  - index selected document/source keys
-- Optional idle scheduler that starts only after no active LangGraph/Pixelle/MCP
-  work is running.
+- More precise convenience backfill commands:
+  - index this exact thread without a search query
+  - index last N artifacts by timestamp
+  - index selected document/source keys from the external RAG backend
+- Active-job awareness for Pixelle/MCP jobs beyond the current big-LLM/Ollama
+  model probes.
 
 Clarification:
 
 - `ALPHARAVIS_PGVECTOR_INDEX_MODE=background` still exists for best-effort
   async indexing, but the default example now uses `queue`.
 - The model lifecycle runner can load the embedding model and drain jobs. It
-  does not unload the small chat/crisis model by default; set
-  `ALPHARAVIS_EMBEDDING_UNLOAD_CHAT_MODEL=true` only if your Ollama node cannot
-  keep both models loaded.
+  does not unload the small chat/crisis model by default. If that model is
+  already loaded, the runner skips unless `ALPHARAVIS_EMBEDDING_UNLOAD_CHAT_MODEL=true`.
 
 ## Pixelle / ComfyUI Power Flow
 
@@ -177,8 +180,9 @@ ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE=false
 
 ## Bridge
 
-Status: Chat Completions remains compatible; Responses API wrapper and
-Responses-style streaming events exist.
+Status: Chat Completions remains compatible; Responses API wrapper,
+Responses-style streaming events, direct Responses calls, and DeepAgents
+Responses model binding exist.
 
 Implemented:
 
@@ -193,16 +197,19 @@ Implemented:
 ```text
 ALPHARAVIS_LLM_API_MODE=responses
 ```
+- DeepAgents workers can bind tools through Responses with:
+
+```text
+ALPHARAVIS_DEEPAGENTS_API_MODE=responses
+```
 
 Still needed:
 
 - Test whether LibreChat preserves `reasoning_content` as a separate reasoning
   panel or shows it as normal text.
 - Keep `BRIDGE_STREAM_REASONING_EVENTS=false` until verified.
-- Decide if `/v1/responses` should become a first-class external endpoint or
-  stay a compatibility wrapper.
-- Verify full Responses-native tool-agent binding before replacing ChatLiteLLM
-  for DeepAgents workers.
+- Live smoke-test DeepAgents tool calls against the actual llama.cpp Responses
+  backend and keep ChatLiteLLM fallback enabled until that passes repeatedly.
 
 ## Parallel Agent Work
 

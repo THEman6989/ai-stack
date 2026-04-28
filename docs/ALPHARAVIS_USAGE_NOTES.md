@@ -111,10 +111,21 @@ ALPHARAVIS_RESPONSES_MODEL=big-boss
 ```
 
 This applies to direct calls such as planner, fast path, and summarizers. The
-DeepAgents tool workers keep the ChatLiteLLM tool-binding fallback for now, so
-tool calling stays stable while the stack moves toward Responses-native calls.
-Set `ALPHARAVIS_RESPONSES_REQUIRE_NATIVE=true` only when you want these direct
-calls to fail instead of falling back to Chat Completions.
+DeepAgents tool workers can also use LangChain's `ChatOpenAI` Responses mode:
+
+```text
+ALPHARAVIS_DEEPAGENTS_API_MODE=responses
+ALPHARAVIS_DEEPAGENTS_RESPONSES_API_BASE=http://litellm:4000/v1
+ALPHARAVIS_DEEPAGENTS_RESPONSES_MODEL=big-boss
+ALPHARAVIS_DEEPAGENTS_RESPONSES_OUTPUT_VERSION=responses/v1
+```
+
+Set `ALPHARAVIS_DEEPAGENTS_API_MODE=chat_completions` to return only DeepAgents
+tool workers to the older ChatLiteLLM path. Set
+`ALPHARAVIS_DEEPAGENTS_REQUIRE_RESPONSES=true` only when you want startup to
+fail instead of falling back. Set `ALPHARAVIS_RESPONSES_REQUIRE_NATIVE=true`
+only when you want direct no-tool calls to fail instead of falling back to Chat
+Completions.
 
 ## Model And Power Management
 
@@ -486,6 +497,39 @@ The Power Management Agent can drain that queue with `run_embedding_memory_jobs`
 It is allowed when the big llama.cpp server is active or the system has been
 idle long enough, depending on `ALPHARAVIS_EMBEDDING_LOAD_POLICY`.
 
+To let LangGraph drain the queue automatically:
+
+```text
+ALPHARAVIS_ENABLE_EMBEDDING_SCHEDULER=true
+ALPHARAVIS_EMBEDDING_SCHEDULER_INTERVAL_SECONDS=120
+```
+
+The lifecycle runner pauses if the small Ollama chat/crisis model is already
+loaded and `ALPHARAVIS_EMBEDDING_UNLOAD_CHAT_MODEL=false`. This avoids stealing
+the management node from crisis work. If you want the runner to unload the small
+chat model for embedding windows, set:
+
+```text
+ALPHARAVIS_EMBEDDING_UNLOAD_CHAT_MODEL=true
+```
+
+Manual bounded backfill is available through:
+
+```text
+queue vector memory backfill
+```
+
+The optional daemon is default off and requires a query:
+
+```text
+ALPHARAVIS_ENABLE_VECTOR_BACKFILL_DAEMON=true
+ALPHARAVIS_VECTOR_BACKFILL_QUERY=project-name-or-topic
+ALPHARAVIS_VECTOR_BACKFILL_LIMIT_PER_SOURCE=10
+```
+
+That daemon searches existing Store indexes and queues matching records. It is
+not an automatic full-history backfill.
+
 ## Session Search And Artifacts
 
 AlphaRavis now keeps an indexed per-turn history, similar in spirit to Hermes
@@ -621,8 +665,11 @@ Already available:
 - token-light crisis preflight/recovery agent, default off
 - OpenAPI 3.1 bridge schema and richer Responses streaming event names
 - Responses-native direct LangGraph calls for planner/fast-path/summarizers
+- Responses-native DeepAgents model binding through LangChain `ChatOpenAI`,
+  feature-flagged with ChatLiteLLM fallback
 - `make model-management` / `make owner-model-management` for custom hardware setup
-- durable pgvector embedding queue and manual queue runner
+- durable pgvector embedding queue, scheduler, manual queue runner, and bounded
+  backfill queueing
 - Pixelle owner wake guard for ComfyUI, default off through model management
 
 Still open / planned next:
@@ -630,10 +677,8 @@ Still open / planned next:
 - mid-run backend watchdog and crisis recovery for timeouts/502s after a graph
   run already started
 - post-crisis readiness gate before continuing to the normal planner
-- manual backfill tools for older threads/artifacts/documents
-- automatic idle scheduler for embedding queue draining
-- full Responses-native tool-agent model once LangChain/LiteLLM tool binding is
-  verified for your local llama.cpp Responses path
+- live smoke test against your llama.cpp Responses endpoint for full DeepAgents
+  tool calls
 - agent time/tool/handoff budget guard
 - richer activity stream in LibreChat
 - test whether LibreChat shows `reasoning_content` in a separate reasoning

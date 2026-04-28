@@ -23,7 +23,7 @@ langchain-mcp-adapters
 langchain>=0.2.0
 langchain-community>=0.2.0
 langchain-core>=0.2.0
-langchain-openai
+langchain-openai>=0.3.29
 # --- VISUALISIERUNG & DEBUGGING (Awesome LangGraph) ---
 langgraphics
 # agent-tackle-box

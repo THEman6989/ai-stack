@@ -31,6 +31,14 @@ from langmem import create_manage_memory_tool, create_search_memory_tool
 from typing_extensions import NotRequired
 
 try:
+    from langchain_openai import ChatOpenAI
+except Exception as exc:  # pragma: no cover - optional dependency in older local envs
+    ChatOpenAI = None  # type: ignore[assignment]
+    CHAT_OPENAI_IMPORT_ERROR: Exception | None = exc
+else:
+    CHAT_OPENAI_IMPORT_ERROR = None
+
+try:
     from langgraph.config import get_config, get_store
 except Exception:  # pragma: no cover - older local LangGraph imports
     get_config = None
@@ -396,9 +404,114 @@ def _agent_thinking_bind_kwargs() -> dict[str, Any]:
     return {"chat_template_kwargs": chat_template_kwargs}
 
 
+def _deepagents_responses_enabled() -> bool:
+    mode = os.getenv("ALPHARAVIS_DEEPAGENTS_API_MODE", os.getenv("ALPHARAVIS_LLM_API_MODE", "chat_completions"))
+    return mode.strip().lower() in {"responses", "response", "native_responses"}
+
+
+def _deepagents_responses_extra_body(model_kwargs: dict[str, Any] | None) -> dict[str, Any]:
+    extra_body: dict[str, Any] = {}
+    model_kwargs = dict(model_kwargs or {})
+    chat_template_kwargs = model_kwargs.get("chat_template_kwargs")
+    if isinstance(chat_template_kwargs, dict):
+        extra_body["chat_template_kwargs"] = chat_template_kwargs
+
+    reasoning_format = os.getenv("ALPHARAVIS_RESPONSES_REASONING_FORMAT", "").strip()
+    if reasoning_format:
+        extra_body["reasoning_format"] = reasoning_format
+
+    for env_name, target_name in {
+        "ALPHARAVIS_RESPONSES_PARSE_TOOL_CALLS": "parse_tool_calls",
+        "ALPHARAVIS_RESPONSES_PARALLEL_TOOL_CALLS": "parallel_tool_calls",
+    }.items():
+        raw = os.getenv(env_name, "").strip()
+        if raw:
+            extra_body[target_name] = raw.lower() in {"1", "true", "yes", "on"}
+
+    return extra_body
+
+
+def _deepagents_responses_model(
+    *,
+    model_name: str | None = None,
+    timeout_seconds: float | None = None,
+    model_kwargs: dict[str, Any] | None = None,
+) -> Any | None:
+    if not _deepagents_responses_enabled():
+        return None
+    if ChatOpenAI is None:
+        message = f"ChatOpenAI unavailable for DeepAgents Responses mode: {CHAT_OPENAI_IMPORT_ERROR}"
+        if _env_bool("ALPHARAVIS_DEEPAGENTS_REQUIRE_RESPONSES", "false"):
+            raise RuntimeError(message)
+        print(f"WARNING: {message}")
+        return None
+
+    kwargs: dict[str, Any] = {
+        "model": (
+            model_name.removeprefix("openai/")
+            if model_name
+            else (
+                os.getenv("ALPHARAVIS_DEEPAGENTS_RESPONSES_MODEL", os.getenv("ALPHARAVIS_RESPONSES_MODEL", "")).strip()
+                or os.getenv("ALPHARAVIS_MODEL", "openai/big-boss").removeprefix("openai/")
+            )
+        ),
+        "base_url": os.getenv(
+            "ALPHARAVIS_DEEPAGENTS_RESPONSES_API_BASE",
+            os.getenv("ALPHARAVIS_RESPONSES_API_BASE", os.getenv("OPENAI_API_BASE", "http://litellm:4000/v1")),
+        ).rstrip("/"),
+        "api_key": os.getenv("ALPHARAVIS_DEEPAGENTS_RESPONSES_API_KEY", os.getenv("ALPHARAVIS_RESPONSES_API_KEY", os.getenv("OPENAI_API_KEY", "sk-local-dev"))),
+        "timeout": timeout_seconds or float(os.getenv("ALPHARAVIS_LLM_TIMEOUT_SECONDS", "120")),
+        "max_retries": int(os.getenv("ALPHARAVIS_LLM_MAX_RETRIES", "0")),
+        "streaming": _env_bool("ALPHARAVIS_LLM_STREAMING", "true"),
+        "use_responses_api": True,
+        "store": _env_bool("ALPHARAVIS_RESPONSES_STORE", "false"),
+        "output_version": os.getenv("ALPHARAVIS_DEEPAGENTS_RESPONSES_OUTPUT_VERSION", "responses/v1"),
+        "extra_body": _deepagents_responses_extra_body(model_kwargs),
+    }
+    if _env_bool("ALPHARAVIS_DEEPAGENTS_USE_PREVIOUS_RESPONSE_ID", "false"):
+        kwargs["use_previous_response_id"] = True
+
+    try:
+        return ChatOpenAI(**kwargs)
+    except TypeError as exc:
+        # Older langchain-openai builds may not know output_version yet.
+        if "output_version" in kwargs:
+            kwargs.pop("output_version", None)
+            try:
+                return ChatOpenAI(**kwargs)
+            except Exception as inner_exc:
+                exc = inner_exc
+        if _env_bool("ALPHARAVIS_DEEPAGENTS_REQUIRE_RESPONSES", "false"):
+            raise
+        print(f"WARNING: DeepAgents Responses model initialization failed, falling back to ChatLiteLLM: {exc}")
+        return None
+    except Exception as exc:
+        if _env_bool("ALPHARAVIS_DEEPAGENTS_REQUIRE_RESPONSES", "false"):
+            raise
+        print(f"WARNING: DeepAgents Responses model initialization failed, falling back to ChatLiteLLM: {exc}")
+        return None
+
+
 def _agent_model() -> Any:
     kwargs = _agent_thinking_bind_kwargs()
     return _model(model_kwargs=kwargs)
+
+
+def _deep_agent_model(
+    *,
+    model_name: str | None = None,
+    timeout_seconds: float | None = None,
+    model_kwargs: dict[str, Any] | None = None,
+) -> Any:
+    kwargs = model_kwargs if model_kwargs is not None else _agent_thinking_bind_kwargs()
+    responses_model = _deepagents_responses_model(
+        model_name=model_name,
+        timeout_seconds=timeout_seconds,
+        model_kwargs=kwargs,
+    )
+    if responses_model is not None:
+        return responses_model
+    return _model(model_name=model_name, timeout_seconds=timeout_seconds, model_kwargs=kwargs)
 
 
 def _responses_direct_calls_enabled() -> bool:
@@ -2876,6 +2989,161 @@ def _thread_artifact_ns(thread_id: str) -> tuple[str, ...]:
     return ("alpharavis", "threads", thread_id, "artifacts")
 
 
+def _split_csv_env(value: str, default: list[str]) -> list[str]:
+    parts = [part.strip() for part in value.split(",") if part.strip()]
+    return parts or list(default)
+
+
+def _backfill_namespaces(source_type: str, include_other_threads: bool) -> list[tuple[tuple[str, ...], str]]:
+    thread_id = _state_thread_id()
+    if source_type == "session_turn":
+        return [(SESSION_TURN_INDEX_NS, "session_turn")] if include_other_threads else [(_thread_session_turn_ns(thread_id), "session_turn")]
+    if source_type == "artifact":
+        return [(ARTIFACT_INDEX_NS, "artifact")] if include_other_threads else [(_thread_artifact_ns(thread_id), "artifact")]
+    if source_type == "archive":
+        return [(ARCHIVE_INDEX_NS, "archive")] if include_other_threads else [(_thread_archive_ns(thread_id), "archive")]
+    if source_type == "archive_collection":
+        return (
+            [(ARCHIVE_COLLECTION_INDEX_NS, "archive_collection")]
+            if include_other_threads
+            else [(_thread_archive_collection_ns(thread_id), "archive_collection")]
+        )
+    if source_type == "curated_memory":
+        return [(CURATED_MEMORY_INDEX_NS, "curated_memory")]
+    if source_type == "debugging_lesson":
+        return [(DEBUGGING_LESSON_NS, "debugging_lesson")]
+    if source_type == "skill":
+        return [(SKILL_LIBRARY_NS, "skill")]
+    return []
+
+
+def _backfill_content_from_value(source_type: str, value: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
+    title = str(value.get("title") or value.get("name") or value.get("memory_type") or source_type)[:200]
+    metadata = dict(value)
+
+    if source_type == "session_turn":
+        content = str(value.get("window_content") or "").strip() or "\n\n".join(
+            part for part in [str(value.get("user_message") or ""), str(value.get("assistant_message") or "")] if part
+        )
+        return title or f"Session turn {value.get('turn_count', '')}", content, metadata
+
+    if source_type == "artifact":
+        content = ""
+        path = str(value.get("path") or "")
+        if path:
+            try:
+                resolved = Path(path).expanduser().resolve()
+                if resolved.exists() and resolved.is_file():
+                    max_chars = int(os.getenv("ALPHARAVIS_VECTOR_BACKFILL_ARTIFACT_MAX_CHARS", "250000"))
+                    content = resolved.read_text(encoding="utf-8", errors="replace")[:max_chars]
+            except Exception as exc:
+                metadata["backfill_read_error"] = str(exc)
+        if not content:
+            content = str(value.get("content") or value.get("content_preview") or "")
+        return title, content, metadata
+
+    if source_type in {"archive", "archive_collection"}:
+        return title, str(value.get("content") or value.get("summary") or value.get("archive_summary") or ""), metadata
+
+    if source_type == "curated_memory":
+        content = f"{value.get('memory', '')}\n\nEvidence: {value.get('evidence', '')}".strip()
+        return title or "Curated memory", content, metadata
+
+    if source_type == "debugging_lesson":
+        content = (
+            f"Problem: {value.get('problem', '')}\nRoot cause: {value.get('root_cause', '')}\n"
+            f"Fix: {value.get('fix', '')}\nSignals: {value.get('signals', '')}\nOutcome: {value.get('outcome', '')}"
+        )
+        return title or f"Debugging lesson: {str(value.get('problem', ''))[:120]}", content, metadata
+
+    if source_type == "skill":
+        content = (
+            f"Trigger: {value.get('trigger', '')}\nSteps: {value.get('steps', '')}\n"
+            f"Success signals: {value.get('success_signals', '')}\nSafety: {value.get('safety_notes', '')}"
+        )
+        return title or f"Skill: {value.get('name', '')}", content, metadata
+
+    return title, str(value.get("content") or value.get("text") or value), metadata
+
+
+async def _queue_vector_backfill_from_store(
+    store: Any,
+    *,
+    query: str,
+    source_types: list[str],
+    limit_per_source: int,
+    include_other_threads: bool,
+) -> dict[str, Any]:
+    if not _vector_memory_available():
+        return {"ok": False, "message": "pgvector memory is disabled"}
+    if not query.strip():
+        return {
+            "ok": False,
+            "skipped": True,
+            "message": "Backfill requires a query to avoid accidental full-history indexing.",
+        }
+
+    queued: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for source_type in source_types:
+        source_type = source_type.strip().lower()
+        for namespace, normalized_type in _backfill_namespaces(source_type, include_other_threads):
+            try:
+                results = await _maybe_search(store, namespace, query=query, limit=limit_per_source)
+            except Exception as exc:
+                warnings.append(f"{normalized_type}:{namespace} search failed: {exc}")
+                continue
+            for item in results or []:
+                key = _store_item_key(item)
+                value = _store_item_value(item)
+                if not isinstance(value, dict):
+                    continue
+                title, content, metadata = _backfill_content_from_value(normalized_type, value)
+                if not content.strip():
+                    warnings.append(f"{normalized_type}:{key} skipped because content is empty")
+                    continue
+                thread_id = str(value.get("thread_id") or "")
+                result = await _maybe_index_vector_memory(
+                    source_type=normalized_type,
+                    source_key=key,
+                    title=title,
+                    content=content,
+                    thread_id=thread_id,
+                    thread_key=str(value.get("thread_key") or ("global" if not thread_id else thread_id)),
+                    scope=str(value.get("scope") or ("global" if not thread_id else "thread")),
+                    metadata={**metadata, "backfill_query": query, "backfill_source_namespace": "/".join(namespace)},
+                )
+                queued.append({"source_type": normalized_type, "source_key": key, "vector_result": result})
+
+    return {"ok": True, "query": query, "queued": queued, "warnings": warnings[:20]}
+
+
+@tool
+async def queue_vector_memory_backfill(
+    query: str,
+    source_types: str = "session_turn,artifact,archive,archive_collection,curated_memory,debugging_lesson,skill",
+    limit_per_source: int = 10,
+    include_other_threads: bool = False,
+):
+    """Queue a bounded pgvector backfill from existing AlphaRavis store indexes."""
+
+    if get_store is None:
+        return "LangGraph store access is unavailable in this runtime."
+    try:
+        store = get_store()
+    except Exception as exc:
+        return f"No LangGraph store is attached to this run: {exc}"
+
+    result = await _queue_vector_backfill_from_store(
+        store,
+        query=query,
+        source_types=_split_csv_env(source_types, []),
+        limit_per_source=max(1, min(int(limit_per_source), int(os.getenv("ALPHARAVIS_VECTOR_BACKFILL_MAX_LIMIT", "50")))),
+        include_other_threads=include_other_threads,
+    )
+    return _json_tool_result(result)
+
+
 def _curated_memory_ns(scope: str) -> tuple[str, ...]:
     return ("alpharavis", "curated_memory", scope)
 
@@ -4131,7 +4399,7 @@ async def run_profile_finish_node(state: AlphaRavisState) -> dict[str, Any]:
     }
 
 
-def _create_ui_assistant(llm: ChatLiteLLM, handoff_tools: list[Any]):
+def _create_ui_assistant(llm: Any, handoff_tools: list[Any]):
     if create_cua is not None:
         try:
             computer_worker = create_cua(
@@ -4161,7 +4429,7 @@ def _create_ui_assistant(llm: ChatLiteLLM, handoff_tools: list[Any]):
     )
 
 
-def _create_debugger_subgraph(llm: ChatLiteLLM, handoff_tools: list[Any]):
+def _create_debugger_subgraph(llm: Any, handoff_tools: list[Any]):
     debugger_worker = create_deep_agent(
         model=llm,
         tools=[
@@ -4248,7 +4516,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     _warn_about_mongo_checkpointer()
     _configure_llm_cache()
 
-    llm = _agent_model()
+    llm = _deep_agent_model()
     mcp_tools = mcp_tools or []
     handoff_requirement = (
         "Before calling this transfer tool, create a handoff packet with "
@@ -4261,7 +4529,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     owner_power_tools_enabled = _owner_power_tools_enabled()
     crisis_manager_enabled = _crisis_manager_enabled()
     model_management_tools = (
-        [inspect_model_management_status, plan_embedding_maintenance, run_embedding_memory_jobs]
+        [inspect_model_management_status, plan_embedding_maintenance, run_embedding_memory_jobs, queue_vector_memory_backfill]
         if model_management_enabled
         else []
     )
@@ -4630,7 +4898,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         context_worker,
     ]
     if advanced_model_management_enabled:
-        power_llm = _model(
+        power_llm = _deep_agent_model(
             model_name=os.getenv(
                 "ALPHARAVIS_POWER_MANAGER_MODEL",
                 os.getenv("ALPHARAVIS_CRISIS_MANAGER_MODEL", "openai/edge-gemma"),
@@ -4644,6 +4912,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 inspect_model_management_status,
                 plan_embedding_maintenance,
                 run_embedding_memory_jobs,
+                queue_vector_memory_backfill,
                 prepare_comfy_for_pixelle,
                 request_power_management_action,
                 *owner_safe_power_tools,
@@ -4684,7 +4953,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         )
         swarm_workers.append(power_worker)
     if crisis_manager_enabled:
-        crisis_llm = _model(
+        crisis_llm = _deep_agent_model(
             model_name=os.getenv("ALPHARAVIS_CRISIS_MANAGER_MODEL", "openai/edge-gemma"),
             timeout_seconds=float(os.getenv("ALPHARAVIS_CRISIS_TIMEOUT_SECONDS", "120")),
             model_kwargs={"chat_template_kwargs": {"enable_thinking": False}},
@@ -4828,6 +5097,80 @@ def _open_mongodb_store(stack: contextlib.AsyncExitStack):
         return None
 
 
+async def _embedding_scheduler_loop() -> None:
+    if _model_mgmt_run_embedding_lifecycle is None:
+        print(f"WARNING: Embedding scheduler unavailable: {MODEL_MANAGEMENT_IMPORT_ERROR}")
+        return
+
+    interval = max(10, int(os.getenv("ALPHARAVIS_EMBEDDING_SCHEDULER_INTERVAL_SECONDS", "120")))
+    initial_delay = max(0, int(os.getenv("ALPHARAVIS_EMBEDDING_SCHEDULER_INITIAL_DELAY_SECONDS", "30")))
+    job_limit = max(1, int(os.getenv("ALPHARAVIS_EMBEDDING_JOB_BATCH_SIZE", "10")))
+    last_activity_age = float(os.getenv("ALPHARAVIS_EMBEDDING_SCHEDULER_LAST_ACTIVITY_AGE_SECONDS", "999999"))
+    if initial_delay:
+        await asyncio.sleep(initial_delay)
+
+    while True:
+        try:
+            result = await _model_mgmt_run_embedding_lifecycle(
+                reason="scheduled embedding queue maintenance",
+                remote_pcs=REMOTE_PCS,
+                job_limit=job_limit,
+                last_activity_age_seconds=last_activity_age,
+            )
+            if not result.get("ok") and not result.get("skipped"):
+                print(f"WARNING: Embedding scheduler run failed: {result}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"WARNING: Embedding scheduler error: {exc}")
+        await asyncio.sleep(interval)
+
+
+async def _vector_backfill_daemon_loop(store: Any) -> None:
+    query = os.getenv("ALPHARAVIS_VECTOR_BACKFILL_QUERY", "").strip()
+    if not query:
+        print("WARNING: Vector backfill daemon enabled but ALPHARAVIS_VECTOR_BACKFILL_QUERY is empty; daemon is idle.")
+        return
+
+    source_types = _split_csv_env(
+        os.getenv(
+            "ALPHARAVIS_VECTOR_BACKFILL_SOURCE_TYPES",
+            "session_turn,artifact,archive,archive_collection,curated_memory,debugging_lesson,skill",
+        ),
+        [],
+    )
+    limit_per_source = max(1, int(os.getenv("ALPHARAVIS_VECTOR_BACKFILL_LIMIT_PER_SOURCE", "10")))
+    include_other_threads = _env_bool("ALPHARAVIS_VECTOR_BACKFILL_INCLUDE_OTHER_THREADS", "false")
+    interval = max(60, int(os.getenv("ALPHARAVIS_VECTOR_BACKFILL_INTERVAL_SECONDS", "1800")))
+    initial_delay = max(0, int(os.getenv("ALPHARAVIS_VECTOR_BACKFILL_INITIAL_DELAY_SECONDS", "60")))
+    if initial_delay:
+        await asyncio.sleep(initial_delay)
+
+    while True:
+        try:
+            result = await _queue_vector_backfill_from_store(
+                store,
+                query=query,
+                source_types=source_types,
+                limit_per_source=limit_per_source,
+                include_other_threads=include_other_threads,
+            )
+            if result.get("warnings"):
+                print(f"WARNING: Vector backfill warnings: {result['warnings']}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"WARNING: Vector backfill daemon error: {exc}")
+        await asyncio.sleep(interval)
+
+
+async def _cancel_background_tasks(tasks: list[asyncio.Task[Any]]) -> None:
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 @contextlib.asynccontextmanager
 async def make_graph(runtime: ServerRuntime | None = None):
     """LangGraph CLI entrypoint for the AlphaRavis brain."""
@@ -4841,7 +5184,16 @@ async def make_graph(runtime: ServerRuntime | None = None):
         if store is None:
             store = _open_mongodb_store(stack)
 
-        yield _build_graph(mcp_tools=mcp_tools, store=store)
+        background_tasks: list[asyncio.Task[Any]] = []
+        if _env_bool("ALPHARAVIS_ENABLE_EMBEDDING_SCHEDULER", "false"):
+            background_tasks.append(asyncio.create_task(_embedding_scheduler_loop(), name="alpharavis_embedding_scheduler"))
+        if store is not None and _env_bool("ALPHARAVIS_ENABLE_VECTOR_BACKFILL_DAEMON", "false"):
+            background_tasks.append(asyncio.create_task(_vector_backfill_daemon_loop(store), name="alpharavis_vector_backfill_daemon"))
+
+        try:
+            yield _build_graph(mcp_tools=mcp_tools, store=store)
+        finally:
+            await _cancel_background_tasks(background_tasks)
 
 
 __all__ = ["make_graph", "monitor_pixelle_job", "start_pixelle_remote"]

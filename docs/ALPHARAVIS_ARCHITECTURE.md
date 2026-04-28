@@ -203,8 +203,21 @@ AlphaRavis currently uses a swarm-style multi-agent setup.
 Direct no-tool model calls inside the graph can use
 `ALPHARAVIS_LLM_API_MODE=responses`. That path calls the OpenAI-compatible
 `/v1/responses` endpoint on LiteLLM or llama.cpp for planner, fast path, and
-summary calls. Tool-heavy DeepAgents workers still use ChatLiteLLM tool binding
-as a stable fallback until Responses-native tool binding is verified end to end.
+summary calls.
+
+Tool-heavy DeepAgents workers can use Responses-native tool binding through
+LangChain `ChatOpenAI`:
+
+```text
+ALPHARAVIS_DEEPAGENTS_API_MODE=responses
+ALPHARAVIS_DEEPAGENTS_RESPONSES_API_BASE=http://litellm:4000/v1
+ALPHARAVIS_DEEPAGENTS_RESPONSES_OUTPUT_VERSION=responses/v1
+```
+
+This keeps DeepAgents on its native `create_agent(...)` path while swapping the
+model object underneath it. If a local provider has a Responses/tool-call bug,
+set `ALPHARAVIS_DEEPAGENTS_API_MODE=chat_completions` or leave
+`ALPHARAVIS_DEEPAGENTS_REQUIRE_RESPONSES=false` to fall back to ChatLiteLLM.
 
 Every specialist prompt includes a local specialist-planning rule. The global
 planner creates the compact task contract once before the swarm; each specialist
@@ -836,6 +849,16 @@ The intended flow is:
    embedding model window.
 4. Run queued embedding jobs.
 5. Restore the small chat/crisis model if needed.
+
+The optional scheduler performs step 4 repeatedly when enabled:
+
+```text
+ALPHARAVIS_ENABLE_EMBEDDING_SCHEDULER=true
+```
+
+The optional vector backfill daemon is deliberately bounded. It only searches
+existing Store indexes for `ALPHARAVIS_VECTOR_BACKFILL_QUERY` and queues matching
+records. It is not a startup-time full-history import.
 
 ## Hard Context Cutoff
 
