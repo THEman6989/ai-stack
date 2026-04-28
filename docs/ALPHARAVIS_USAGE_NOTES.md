@@ -102,6 +102,20 @@ normal swarm/tool path stays on big-boss
 If the big server is down, complex requests should fail visibly instead of
 silently running on the weaker model.
 
+Direct no-tool LangGraph model calls can use the Responses API:
+
+```text
+ALPHARAVIS_LLM_API_MODE=responses
+ALPHARAVIS_RESPONSES_API_BASE=http://litellm:4000/v1
+ALPHARAVIS_RESPONSES_MODEL=big-boss
+```
+
+This applies to direct calls such as planner, fast path, and summarizers. The
+DeepAgents tool workers keep the ChatLiteLLM tool-binding fallback for now, so
+tool calling stays stable while the stack moves toward Responses-native calls.
+Set `ALPHARAVIS_RESPONSES_REQUIRE_NATIVE=true` only when you want these direct
+calls to fail instead of falling back to Chat Completions.
+
 ## Model And Power Management
 
 AlphaRavis has a custom `model_management.py` layer for your split hardware
@@ -160,6 +174,7 @@ When enabled, the Power Management Agent handles questions like:
 ```text
 check model management status
 plane ein Embedding-Fenster
+run embedding memory jobs
 pruefe ob ComfyUI fuer Pixelle bereit ist
 ```
 
@@ -271,6 +286,15 @@ If ComfyUI is offline, AlphaRavis warns. It only blocks the Pixelle job when:
 ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE=true
 ```
 
+For the owner hardware setup, Pixelle preflight can also use the direct
+owner-tool Wake-on-LAN path:
+
+```text
+ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=true
+ALPHARAVIS_PIXELLE_OWNER_WAKE_COMFY=true
+ALPHARAVIS_PIXELLE_OWNER_WAKE_WAIT_SECONDS=30
+```
+
 If Pixelle fails, the returned message includes debugger-ready context and asks
 for Pixelle/LangGraph logs instead of crashing silently.
 
@@ -295,6 +319,10 @@ support richer Responses output items should prefer:
 ```text
 BRIDGE_PREFERRED_API_MODE=responses
 ```
+
+LibreChat custom endpoints may still call `/v1/chat/completions` depending on
+LibreChat provider support. AlphaRavis exposes `/v1/responses` and uses OpenAPI
+`3.1.0`; clients that support the newer Responses endpoint can call it directly.
 
 Reasoning/thinking is stripped from normal visible answer text. If a client can
 handle a separate reasoning delta field, enable:
@@ -446,6 +474,18 @@ After enabling pgvector memory, new records are indexed automatically. Old
 MongoDB/store history is not bulk-backfilled by default, to avoid a surprise
 embedding job over many chats.
 
+New records go into a durable embedding queue by default:
+
+```text
+ALPHARAVIS_PGVECTOR_INDEX_MODE=queue
+ALPHARAVIS_PGVECTOR_QUEUE_TABLE=alpharavis_embedding_jobs
+ALPHARAVIS_EMBEDDING_JOB_BATCH_SIZE=10
+```
+
+The Power Management Agent can drain that queue with `run_embedding_memory_jobs`.
+It is allowed when the big llama.cpp server is active or the system has been
+idle long enough, depending on `ALPHARAVIS_EMBEDDING_LOAD_POLICY`.
+
 ## Session Search And Artifacts
 
 AlphaRavis now keeps an indexed per-turn history, similar in spirit to Hermes
@@ -580,17 +620,20 @@ Already available:
 - protected owner shutdown tools behind human approval
 - token-light crisis preflight/recovery agent, default off
 - OpenAPI 3.1 bridge schema and richer Responses streaming event names
+- Responses-native direct LangGraph calls for planner/fast-path/summarizers
 - `make model-management` / `make owner-model-management` for custom hardware setup
+- durable pgvector embedding queue and manual queue runner
+- Pixelle owner wake guard for ComfyUI, default off through model management
 
 Still open / planned next:
 
 - mid-run backend watchdog and crisis recovery for timeouts/502s after a graph
   run already started
 - post-crisis readiness gate before continuing to the normal planner
-- durable embedding queue runner and manual backfill tools
-- real Ollama model lifecycle runner for load/unload embedding windows
-- Pixelle preflight decision: direct owner ComfyUI wake helper or curated action
-  endpoint only
+- manual backfill tools for older threads/artifacts/documents
+- automatic idle scheduler for embedding queue draining
+- full Responses-native tool-agent model once LangChain/LiteLLM tool binding is
+  verified for your local llama.cpp Responses path
 - agent time/tool/handoff budget guard
 - richer activity stream in LibreChat
 - test whether LibreChat shows `reasoning_content` in a separate reasoning

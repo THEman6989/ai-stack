@@ -8,6 +8,16 @@ from typing import Any
 
 import httpx
 
+try:
+    from vector_memory import queue_stats as _vector_queue_stats
+    from vector_memory import run_embedding_jobs as _vector_run_embedding_jobs
+except Exception as exc:  # pragma: no cover - optional local module/deps
+    _vector_queue_stats = None
+    _vector_run_embedding_jobs = None
+    VECTOR_QUEUE_IMPORT_ERROR: Exception | None = exc
+else:
+    VECTOR_QUEUE_IMPORT_ERROR = None
+
 
 TRUTHY = {"1", "true", "yes", "on"}
 
@@ -156,13 +166,24 @@ async def _ollama_running_models(config: ModelManagementConfig) -> dict[str, Any
     return probe
 
 
+async def _embedding_queue_status() -> dict[str, Any]:
+    if _vector_queue_stats is None:
+        return {"ok": False, "message": f"vector queue unavailable: {VECTOR_QUEUE_IMPORT_ERROR}"}
+    try:
+        stats = await _vector_queue_stats()
+        return {"ok": True, **stats}
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
+
+
 async def inspect_runtime(remote_pcs: dict[str, Any] | None = None) -> dict[str, Any]:
     remote_pcs = remote_pcs or {}
     config = load_config(remote_pcs)
     big_task = probe_http(config.big_llm_probe_url, timeout_seconds=config.probe_timeout_seconds)
     comfy_task = probe_http(config.comfy_probe_url, timeout_seconds=config.probe_timeout_seconds)
     ollama_task = _ollama_running_models(config)
-    big_llm, comfy, ollama = await asyncio.gather(big_task, comfy_task, ollama_task)
+    queue_task = _embedding_queue_status()
+    big_llm, comfy, ollama, embedding_queue = await asyncio.gather(big_task, comfy_task, ollama_task, queue_task)
     public_config = asdict(config)
     if public_config.get("action_api_key"):
         public_config["action_api_key"] = "***"
@@ -176,6 +197,7 @@ async def inspect_runtime(remote_pcs: dict[str, Any] | None = None) -> dict[str,
             "big_llm": big_llm,
             "comfyui": comfy,
             "ollama": ollama,
+            "embedding_queue": embedding_queue,
         },
     }
 
@@ -288,6 +310,109 @@ async def call_management_action(
         }
     except Exception as exc:
         return {"ok": False, "dry_run": False, "error": str(exc), **safe_payload}
+
+
+async def _ollama_generate_control(
+    config: ModelManagementConfig,
+    *,
+    model: str,
+    keep_alive: str,
+    prompt: str = "",
+) -> dict[str, Any]:
+    payload = {"model": model, "prompt": prompt, "stream": False, "keep_alive": keep_alive}
+    started = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=max(config.probe_timeout_seconds, 30)) as client:
+            response = await client.post(f"{config.ollama_base_url}/api/generate", json=payload)
+        return {
+            "ok": response.status_code < 400,
+            "model": model,
+            "keep_alive": keep_alive,
+            "status_code": response.status_code,
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "response": response.text[:500],
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "model": model,
+            "keep_alive": keep_alive,
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "error": str(exc),
+        }
+
+
+async def run_embedding_lifecycle(
+    reason: str = "",
+    *,
+    remote_pcs: dict[str, Any] | None = None,
+    job_limit: int | None = None,
+    last_activity_age_seconds: float | None = None,
+) -> dict[str, Any]:
+    runtime = await inspect_runtime(remote_pcs or {})
+    decision = embedding_maintenance_decision(runtime, last_activity_age_seconds=last_activity_age_seconds)
+    if not decision.get("allowed"):
+        return {"ok": False, "skipped": True, "reason": reason, "runtime": runtime, "decision": decision}
+
+    config = load_config(remote_pcs or {})
+    services = runtime.get("services", {})
+    running_models = services.get("ollama", {}).get("running_models", []) or []
+    chat_model_loaded = any(_model_name_matches(name, config.ollama_chat_model) for name in running_models)
+    embedding_loaded = any(_model_name_matches(name, config.ollama_embedding_model) for name in running_models)
+
+    actions: list[dict[str, Any]] = []
+    should_unload_chat = (
+        chat_model_loaded
+        and not embedding_loaded
+        and env_bool("ALPHARAVIS_EMBEDDING_UNLOAD_CHAT_MODEL", "false")
+    )
+    if should_unload_chat:
+        actions.append(
+            {
+                "action": "unload_chat_model",
+                "result": await _ollama_generate_control(config, model=config.ollama_chat_model, keep_alive="0"),
+            }
+        )
+
+    if not embedding_loaded:
+        actions.append(
+            {
+                "action": "load_embedding_model",
+                "result": await _ollama_generate_control(
+                    config,
+                    model=config.ollama_embedding_model,
+                    keep_alive=os.getenv("ALPHARAVIS_EMBEDDING_KEEP_ALIVE", "30m"),
+                ),
+            }
+        )
+
+    if _vector_run_embedding_jobs is None:
+        queue_result = {"ok": False, "message": f"vector queue unavailable: {VECTOR_QUEUE_IMPORT_ERROR}"}
+    else:
+        queue_result = await _vector_run_embedding_jobs(
+            limit=job_limit or int(os.getenv("ALPHARAVIS_EMBEDDING_JOB_BATCH_SIZE", "10"))
+        )
+
+    restore_chat = should_unload_chat and env_bool("ALPHARAVIS_EMBEDDING_RESTORE_CHAT_MODEL", "true")
+    if restore_chat:
+        actions.append(
+            {
+                "action": "restore_chat_model",
+                "result": await _ollama_generate_control(
+                    config,
+                    model=config.ollama_chat_model,
+                    keep_alive=os.getenv("ALPHARAVIS_OLLAMA_CHAT_KEEP_ALIVE", "30m"),
+                ),
+            }
+        )
+
+    return {
+        "ok": bool(queue_result.get("ok")),
+        "reason": reason,
+        "decision": decision,
+        "actions": actions,
+        "queue_result": queue_result,
+    }
 
 
 async def request_power_action(

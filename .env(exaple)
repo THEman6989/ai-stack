@@ -66,6 +66,24 @@ OPENAI_API_BASE=http://litellm:4000/v1
 # For the local stack, this normally equals LITELLM_MASTER_KEY.
 OPENAI_API_KEY=sk-local-dev
 
+# Internal LangGraph model-call API mode.
+# Allowed values:
+#   responses        = direct no-tool LangGraph calls use /v1/responses
+#   chat_completions = direct no-tool LangGraph calls use /v1/chat/completions
+#
+# DeepAgents tool workers still keep ChatLiteLLM's tool-binding fallback unless
+# a future LangChain/LiteLLM Responses tool model is proven stable.
+ALPHARAVIS_LLM_API_MODE=responses
+ALPHARAVIS_RESPONSES_API_BASE=http://litellm:4000/v1
+ALPHARAVIS_RESPONSES_API_KEY=sk-local-dev
+ALPHARAVIS_RESPONSES_MODEL=big-boss
+ALPHARAVIS_RESPONSES_REQUIRE_NATIVE=false
+ALPHARAVIS_RESPONSES_STORE=false
+ALPHARAVIS_RESPONSES_INCLUDE_CHAT_TEMPLATE_KWARGS=true
+ALPHARAVIS_RESPONSES_STRIP_OPENAI_PREFIX=true
+ALPHARAVIS_RESPONSES_TRUNCATION=disabled
+ALPHARAVIS_RESPONSES_PARALLEL_TOOL_CALLS=true
+
 # Dummy API key passed to local OpenAI-compatible llama.cpp/Ollama endpoints.
 # These local servers usually ignore it, but LiteLLM's OpenAI adapter expects one.
 LOCAL_LLM_API_KEY=sk-local-dev
@@ -273,6 +291,8 @@ ALPHARAVIS_MODEL_MGMT_PROBE_TIMEOUT_SECONDS=5
 ALPHARAVIS_PIXELLE_PREPARE_COMFY=false
 ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE=false
 ALPHARAVIS_COMFY_WAKE_WAIT_SECONDS=0
+ALPHARAVIS_PIXELLE_OWNER_WAKE_COMFY=true
+ALPHARAVIS_PIXELLE_OWNER_WAKE_WAIT_SECONDS=30
 
 # Ollama model lifecycle. Your Ollama management node can load either the small
 # chat/crisis model or the embedding model, so embedding windows are planned
@@ -530,7 +550,16 @@ ALPHARAVIS_PGVECTOR_EMBEDDING_TIMEOUT_SECONDS=20
 # Allowed values:
 #   background = schedule pgvector indexing after Mongo/store write succeeds
 #   inline     = await pgvector indexing; useful for tests
-ALPHARAVIS_PGVECTOR_INDEX_MODE=background
+#   queue      = durable pgvector embedding queue; runner drains it later
+ALPHARAVIS_PGVECTOR_INDEX_MODE=queue
+ALPHARAVIS_PGVECTOR_QUEUE_TABLE=alpharavis_embedding_jobs
+ALPHARAVIS_EMBEDDING_JOB_BATCH_SIZE=10
+ALPHARAVIS_EMBEDDING_JOB_MAX_BATCH=25
+ALPHARAVIS_EMBEDDING_JOB_MAX_ATTEMPTS=3
+ALPHARAVIS_EMBEDDING_KEEP_ALIVE=30m
+ALPHARAVIS_EMBEDDING_UNLOAD_CHAT_MODEL=false
+ALPHARAVIS_EMBEDDING_RESTORE_CHAT_MODEL=true
+ALPHARAVIS_OLLAMA_CHAT_KEEP_ALIVE=30m
 
 # Store full retrieval chunks in pgvector, not only tiny previews.
 # Allowed values: true, false

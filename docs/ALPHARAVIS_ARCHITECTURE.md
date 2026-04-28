@@ -148,6 +148,7 @@ Important behavior:
 - It exposes `/v1/chat/completions`.
 - It exposes `/v1/responses` as a compatibility wrapper around the same
   LangGraph run path.
+- It publishes an OpenAPI `3.1.0` schema.
 - It supports non-streaming and OpenAI-compatible SSE streaming.
 - It can stream LangGraph message events.
 - It can optionally forward reasoning/thinking deltas as a separate SSE delta
@@ -198,6 +199,16 @@ START
 ## Agents
 
 AlphaRavis currently uses a swarm-style multi-agent setup.
+
+Direct no-tool model calls inside the graph can use
+`ALPHARAVIS_LLM_API_MODE=responses`. That path calls the OpenAI-compatible
+`/v1/responses` endpoint on LiteLLM or llama.cpp for planner, fast path, and
+summary calls. Tool-heavy DeepAgents workers still use ChatLiteLLM tool binding
+as a stable fallback until Responses-native tool binding is verified end to end.
+
+Every specialist prompt includes a local specialist-planning rule. The global
+planner creates the compact task contract once before the swarm; each specialist
+then adapts that contract into its own role-specific plan before doing work.
 
 ### General Assistant
 

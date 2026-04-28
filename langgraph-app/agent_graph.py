@@ -52,13 +52,19 @@ except Exception:  # pragma: no cover - older local CLI imports
 try:
     from vector_memory import (
         VectorMemoryError,
+        enqueue_memory_record as _pgvector_enqueue_memory_record,
         is_enabled as _pgvector_memory_enabled,
+        queue_stats as _pgvector_queue_stats,
+        run_embedding_jobs as _pgvector_run_embedding_jobs,
         semantic_search as _pgvector_semantic_search,
         upsert_memory_record as _pgvector_upsert_memory_record,
     )
 except Exception as exc:  # pragma: no cover - optional local module/deps
     VectorMemoryError = RuntimeError  # type: ignore[misc,assignment]
+    _pgvector_enqueue_memory_record = None
     _pgvector_memory_enabled = None
+    _pgvector_queue_stats = None
+    _pgvector_run_embedding_jobs = None
     _pgvector_semantic_search = None
     _pgvector_upsert_memory_record = None
     PGVECTOR_IMPORT_ERROR: Exception | None = exc
@@ -71,12 +77,14 @@ try:
         inspect_runtime as _model_mgmt_inspect_runtime,
         prepare_comfy_for_pixelle as _model_mgmt_prepare_comfy,
         request_power_action as _model_mgmt_request_power_action,
+        run_embedding_lifecycle as _model_mgmt_run_embedding_lifecycle,
     )
 except Exception as exc:  # pragma: no cover - optional local module/deps
     _model_mgmt_embedding_decision = None
     _model_mgmt_inspect_runtime = None
     _model_mgmt_prepare_comfy = None
     _model_mgmt_request_power_action = None
+    _model_mgmt_run_embedding_lifecycle = None
     MODEL_MANAGEMENT_IMPORT_ERROR: Exception | None = exc
 else:
     MODEL_MANAGEMENT_IMPORT_ERROR = None
@@ -108,6 +116,19 @@ except Exception as exc:  # pragma: no cover - owner-only optional module
     OWNER_POWER_TOOLS_IMPORT_ERROR: Exception | None = exc
 else:
     OWNER_POWER_TOOLS_IMPORT_ERROR = None
+
+try:
+    from responses_client import invoke_responses as _invoke_responses
+    from responses_client import responses_enabled as _responses_enabled
+except Exception as exc:  # pragma: no cover - optional local module/deps
+    _invoke_responses = None
+    RESPONSES_CLIENT_IMPORT_ERROR: Exception | None = exc
+
+    def _responses_enabled() -> bool:
+        return False
+
+else:
+    RESPONSES_CLIENT_IMPORT_ERROR = None
 
 
 class AlphaRavisState(MessagesState):
@@ -199,6 +220,15 @@ HANDOFF_POLICY_PROMPT = (
     "verification status, risks, and the exact next-agent instruction. Do not "
     "put long logs in the packet; store them as artifacts and cite the artifact key."
 )
+SPECIALIST_LOCAL_PLAN_PROMPT = (
+    "Specialist planning policy: when you receive an execution plan or current "
+    "task brief, first adapt it into your own short specialist plan before "
+    "doing substantive work. Keep this internal plan concise: objective, needed "
+    "tools/retrieval, safety gates, success criteria, and handoff target if one "
+    "is likely. Do not replace the planner's task contract; refine only the "
+    "part your specialist role owns."
+)
+AGENT_POLICY_PROMPT = SPECIALIST_LOCAL_PLAN_PROMPT + " " + HANDOFF_POLICY_PROMPT
 FAST_PATH_DENY_PATTERNS = [
     "agent",
     "alpha ravis",
@@ -371,6 +401,70 @@ def _agent_model() -> Any:
     return _model(model_kwargs=kwargs)
 
 
+def _responses_direct_calls_enabled() -> bool:
+    return bool(_responses_enabled() and _invoke_responses is not None)
+
+
+async def _ainvoke_direct_model(
+    messages: list[Any],
+    *,
+    model_name: str | None = None,
+    timeout_seconds: float | None = None,
+    model_kwargs: dict[str, Any] | None = None,
+    purpose: str = "direct",
+) -> AIMessage:
+    if _responses_direct_calls_enabled():
+        try:
+            result = await _invoke_responses(
+                messages,
+                model_name=model_name,
+                timeout_seconds=timeout_seconds,
+                model_kwargs=model_kwargs,
+                purpose=purpose,
+            )
+            return AIMessage(
+                content=result.content,
+                additional_kwargs={
+                    "reasoning_content": result.reasoning,
+                    "responses_api": True,
+                    "responses_model": result.model,
+                    "responses_elapsed_seconds": result.elapsed_seconds,
+                },
+            )
+        except Exception as exc:
+            if _env_bool("ALPHARAVIS_RESPONSES_REQUIRE_NATIVE", "false"):
+                raise
+            print(f"WARNING: Responses API direct call failed for {purpose}, falling back to ChatLiteLLM: {exc}")
+    elif RESPONSES_CLIENT_IMPORT_ERROR and os.getenv("ALPHARAVIS_LLM_API_MODE", "").lower() in {"responses", "response"}:
+        print(f"WARNING: Responses client unavailable: {RESPONSES_CLIENT_IMPORT_ERROR}")
+
+    llm = _model(model_name=model_name, timeout_seconds=timeout_seconds)
+    if model_kwargs:
+        llm = llm.bind(**model_kwargs)
+    return await llm.ainvoke(messages)
+
+
+async def _ainvoke_direct_text(
+    messages: list[Any],
+    *,
+    model_name: str | None = None,
+    timeout_seconds: float | None = None,
+    model_kwargs: dict[str, Any] | None = None,
+    purpose: str = "direct",
+) -> str:
+    response = await _ainvoke_direct_model(
+        messages,
+        model_name=model_name,
+        timeout_seconds=timeout_seconds,
+        model_kwargs=model_kwargs,
+        purpose=purpose,
+    )
+    content = getattr(response, "content", response)
+    if isinstance(content, list):
+        return " ".join(str(block) for block in content)
+    return str(content)
+
+
 def _workspace_root() -> str:
     configured = os.getenv("ALPHARAVIS_WORKSPACE_DIR")
     if configured:
@@ -509,6 +603,24 @@ async def _pixelle_preflight() -> dict[str, Any]:
     if result.get("ready"):
         return result
 
+    if (
+        _owner_power_tools_enabled()
+        and _env_bool("ALPHARAVIS_PIXELLE_OWNER_WAKE_COMFY", "true")
+        and _owner_start_comfyui_server is not None
+    ):
+        try:
+            wake_result = await _owner_start_comfyui_server()
+            result["owner_wake_result"] = wake_result
+            wait_seconds = max(0, int(os.getenv("ALPHARAVIS_PIXELLE_OWNER_WAKE_WAIT_SECONDS", "30")))
+            if wait_seconds:
+                await asyncio.sleep(wait_seconds)
+                retry = await _model_mgmt_prepare_comfy(REMOTE_PCS) if _model_mgmt_prepare_comfy is not None else {}
+                result["owner_retry_probe"] = retry
+                if retry.get("ready"):
+                    return retry | {"owner_wake_result": wake_result}
+        except Exception as exc:
+            result["owner_wake_error"] = str(exc)
+
     result["block_job"] = _env_bool("ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE", "false")
     return result
 
@@ -629,6 +741,22 @@ async def plan_embedding_maintenance(reason: str = "", last_activity_age_seconds
     runtime = await _model_mgmt_inspect_runtime(REMOTE_PCS)
     decision = _model_mgmt_embedding_decision(runtime, last_activity_age_seconds=last_activity_age_seconds)
     return _json_tool_result({"reason": reason, "runtime": runtime, "decision": decision})
+
+
+@tool
+async def run_embedding_memory_jobs(reason: str = "", job_limit: int = 10, last_activity_age_seconds: float | None = None):
+    """Run queued pgvector embedding jobs during an allowed Ollama embedding window."""
+
+    if _model_mgmt_run_embedding_lifecycle is None:
+        return _model_management_unavailable() or "Model management module not loaded."
+    return _json_tool_result(
+        await _model_mgmt_run_embedding_lifecycle(
+            reason=reason,
+            remote_pcs=REMOTE_PCS,
+            job_limit=job_limit,
+            last_activity_age_seconds=last_activity_age_seconds,
+        )
+    )
 
 
 @tool
@@ -2612,6 +2740,29 @@ async def _maybe_index_vector_memory(
         print(f"WARNING: {message}")
         return message
 
+    index_mode = os.getenv("ALPHARAVIS_PGVECTOR_INDEX_MODE", "queue").lower().strip()
+    if index_mode in {"queue", "queued", "durable_queue"}:
+        if _pgvector_enqueue_memory_record is None:
+            message = f"pgvector queue module unavailable: {PGVECTOR_IMPORT_ERROR}"
+            print(f"WARNING: {message}")
+            return message
+        try:
+            job_id = await _pgvector_enqueue_memory_record(
+                source_type=source_type,
+                source_key=source_key,
+                title=title,
+                content=content,
+                thread_id=thread_id,
+                thread_key=thread_key,
+                scope=scope,
+                metadata=metadata or {},
+            )
+            return f"queued:{job_id}" if job_id else "queue disabled"
+        except Exception as exc:
+            message = f"pgvector queueing failed for {source_type}:{source_key}: {exc}"
+            print(f"WARNING: {message}")
+            return message
+
     async def _index() -> str:
         try:
             return await _pgvector_upsert_memory_record(
@@ -2629,7 +2780,7 @@ async def _maybe_index_vector_memory(
             print(f"WARNING: {message}")
             return message
 
-    if os.getenv("ALPHARAVIS_PGVECTOR_INDEX_MODE", "background").lower().strip() == "background":
+    if index_mode == "background":
         asyncio.create_task(_index())
         return "scheduled"
 
@@ -3011,12 +3162,15 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
     )
 
     try:
-        llm = _model(timeout_seconds=float(os.getenv("ALPHARAVIS_PLANNER_TIMEOUT_SECONDS", "45")))
         thinking_kwargs = _agent_thinking_bind_kwargs()
-        if thinking_kwargs:
-            llm = llm.bind(**thinking_kwargs)
-        response = await llm.ainvoke([SystemMessage(content=prompt)])
-        plan = str(getattr(response, "content", response)).strip()
+        plan = (
+            await _ainvoke_direct_text(
+                [SystemMessage(content=prompt)],
+                timeout_seconds=float(os.getenv("ALPHARAVIS_PLANNER_TIMEOUT_SECONDS", "45")),
+                model_kwargs=thinking_kwargs,
+                purpose="planner",
+            )
+        ).strip()
     except Exception as exc:
         return {
             "planner_last_key": plan_key,
@@ -3080,11 +3234,13 @@ async def fast_chat_node(state: AlphaRavisState) -> dict[str, Any]:
     fallback_error = ""
 
     try:
-        primary_llm = _model(
+        response = await _ainvoke_direct_model(
+            [prompt, *messages],
             model_name=primary_model,
             timeout_seconds=float(os.getenv("ALPHARAVIS_FAST_PATH_PRIMARY_TIMEOUT_SECONDS", "20")),
-        ).bind(**_fast_path_bind_kwargs(allow_chat_template_kwargs=True))
-        response = await primary_llm.ainvoke([prompt, *messages])
+            model_kwargs=_fast_path_bind_kwargs(allow_chat_template_kwargs=True),
+            purpose="fast_path_primary",
+        )
     except Exception as exc:
         fallback_error = str(exc)
         fallback_model = os.getenv("ALPHARAVIS_FAST_PATH_FALLBACK_MODEL", "openai/edge-gemma")
@@ -3092,11 +3248,13 @@ async def fast_chat_node(state: AlphaRavisState) -> dict[str, Any]:
             raise
         fallback_used = True
         used_model = fallback_model
-        fallback_llm = _model(
+        response = await _ainvoke_direct_model(
+            [prompt, *messages],
             model_name=fallback_model,
             timeout_seconds=float(os.getenv("ALPHARAVIS_FAST_PATH_FALLBACK_TIMEOUT_SECONDS", "45")),
-        ).bind(**_fast_path_bind_kwargs(allow_chat_template_kwargs=False))
-        response = await fallback_llm.ainvoke([prompt, *messages])
+            model_kwargs=_fast_path_bind_kwargs(allow_chat_template_kwargs=False),
+            purpose="fast_path_fallback",
+        )
 
     response_content = getattr(response, "content", "")
     if isinstance(response_content, list):
@@ -3163,8 +3321,12 @@ async def _summarize_messages(
         f"History to archive:\n{history}"
         f"{precompress}"
     )
-    response = await llm.ainvoke([SystemMessage(content=prompt)])
-    return str(response.content)
+    return await _ainvoke_direct_text(
+        [SystemMessage(content=prompt)],
+        timeout_seconds=float(os.getenv("ALPHARAVIS_SUMMARY_TIMEOUT_SECONDS", "60")),
+        model_kwargs=_agent_thinking_bind_kwargs(),
+        purpose="active_context_summary",
+    )
 
 
 def _message_stable_key(message: Any) -> str:
@@ -3377,8 +3539,12 @@ async def _summarize_archive_records(
         f"Previous archive summary:\n{previous}\n\n"
         f"Archives to compress:\n{archive_text}"
     )
-    response = await llm.ainvoke([SystemMessage(content=prompt)])
-    return str(response.content)
+    return await _ainvoke_direct_text(
+        [SystemMessage(content=prompt)],
+        timeout_seconds=float(os.getenv("ALPHARAVIS_ARCHIVE_SUMMARY_TIMEOUT_SECONDS", "60")),
+        model_kwargs=_agent_thinking_bind_kwargs(),
+        purpose="archive_summary",
+    )
 
 
 async def _maybe_compact_archives(
@@ -3991,7 +4157,7 @@ def _create_ui_assistant(llm: ChatLiteLLM, handoff_tools: list[Any]):
             "and transfer to another agent when the task is not UI-specific."
         )
         + " "
-        + HANDOFF_POLICY_PROMPT,
+        + AGENT_POLICY_PROMPT,
     )
 
 
@@ -4053,7 +4219,7 @@ def _create_debugger_subgraph(llm: ChatLiteLLM, handoff_tools: list[Any]):
             "put long logs or reports into artifacts."
         )
         + " "
-        + HANDOFF_POLICY_PROMPT,
+        + AGENT_POLICY_PROMPT,
     )
 
     async def run_debugger(state: DebuggerState) -> dict[str, Any]:
@@ -4095,7 +4261,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     owner_power_tools_enabled = _owner_power_tools_enabled()
     crisis_manager_enabled = _crisis_manager_enabled()
     model_management_tools = (
-        [inspect_model_management_status, plan_embedding_maintenance]
+        [inspect_model_management_status, plan_embedding_maintenance, run_embedding_memory_jobs]
         if model_management_enabled
         else []
     )
@@ -4256,7 +4422,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "project work to hermes_coding_agent when Hermes is the better fit."
         )
         + " "
-        + HANDOFF_POLICY_PROMPT,
+        + AGENT_POLICY_PROMPT,
     )
 
     general_worker = create_deep_agent(
@@ -4331,7 +4497,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "a supervisor."
         )
         + " "
-        + HANDOFF_POLICY_PROMPT,
+        + AGENT_POLICY_PROMPT,
     )
 
     computer_worker = _create_ui_assistant(
@@ -4402,7 +4568,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "Hermes outputs before summarizing them."
         )
         + " "
-        + HANDOFF_POLICY_PROMPT,
+        + AGENT_POLICY_PROMPT,
     )
 
     context_worker = create_deep_agent(
@@ -4452,7 +4618,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "unrelated tasks yourself; transfer back."
         )
         + " "
-        + HANDOFF_POLICY_PROMPT,
+        + AGENT_POLICY_PROMPT,
     )
 
     swarm_workers = [
@@ -4477,6 +4643,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             tools=[
                 inspect_model_management_status,
                 plan_embedding_maintenance,
+                run_embedding_memory_jobs,
                 prepare_comfy_for_pixelle,
                 request_power_management_action,
                 *owner_safe_power_tools,
@@ -4513,7 +4680,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 "safe wake procedures."
             )
             + " "
-            + HANDOFF_POLICY_PROMPT,
+            + AGENT_POLICY_PROMPT,
         )
         swarm_workers.append(power_worker)
     if crisis_manager_enabled:

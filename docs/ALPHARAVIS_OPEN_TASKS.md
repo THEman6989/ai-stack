@@ -112,28 +112,37 @@ ALPHARAVIS_CRISIS_TIMEOUT_SECONDS=120
 
 ## Embedding Queue And pgvector
 
-Status: pgvector retrieval chunks and best-effort background indexing are
-implemented; a durable maintenance queue is not fully populated.
+Status: pgvector retrieval chunks, catalog rows, durable queueing, and a manual
+model-lifecycle queue runner are implemented. Automatic scheduling and manual
+backfill tools are still open.
+
+Implemented:
+
+- `ALPHARAVIS_PGVECTOR_INDEX_MODE=queue` stores new indexing work in Postgres.
+- `alpharavis_embedding_jobs` keeps pending/failed/running/done queue state.
+- `inspect_model_management_status` shows queue status.
+- `run_embedding_memory_jobs` loads the configured Ollama embedding model when
+  allowed and drains queued pgvector jobs.
+- The runner may work while big-boss is active, so the small Ollama node can be
+  used for embeddings without taking over complex chat.
 
 Still needed:
 
-- A real durable embedding job queue runner behind `run_embedding_jobs`.
 - Manual backfill tools:
   - index this thread
   - index last N artifacts
   - index selected document/source keys
-- Queue visibility in status output.
 - Optional idle scheduler that starts only after no active LangGraph/Pixelle/MCP
   work is running.
 
 Clarification:
 
-- Today, `ALPHARAVIS_PGVECTOR_INDEX_MODE=background` schedules async indexing
-  with `asyncio.create_task` after the Mongo/store write. That is useful, but it
-  is not a durable queue that survives process restarts.
-- "Model lifecycle runner" means the missing owner-specific code that unloads
-  the Ollama chat model, loads the embedding model, drains queued embedding
-  jobs, and restores the chat model.
+- `ALPHARAVIS_PGVECTOR_INDEX_MODE=background` still exists for best-effort
+  async indexing, but the default example now uses `queue`.
+- The model lifecycle runner can load the embedding model and drain jobs. It
+  does not unload the small chat/crisis model by default; set
+  `ALPHARAVIS_EMBEDDING_UNLOAD_CHAT_MODEL=true` only if your Ollama node cannot
+  keep both models loaded.
 
 ## Pixelle / ComfyUI Power Flow
 
@@ -179,6 +188,11 @@ Implemented:
 - `response.output_item.*`, `response.output_text.*`, and optional
   `response.reasoning_text.*` stream events
 - bridge-level hard request cutoff before LangGraph is called
+- direct no-tool LangGraph calls can use `/v1/responses` with:
+
+```text
+ALPHARAVIS_LLM_API_MODE=responses
+```
 
 Still needed:
 
@@ -187,6 +201,8 @@ Still needed:
 - Keep `BRIDGE_STREAM_REASONING_EVENTS=false` until verified.
 - Decide if `/v1/responses` should become a first-class external endpoint or
   stay a compatibility wrapper.
+- Verify full Responses-native tool-agent binding before replacing ChatLiteLLM
+  for DeepAgents workers.
 
 ## Parallel Agent Work
 

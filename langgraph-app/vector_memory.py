@@ -60,10 +60,22 @@ def _table_name() -> str:
     return table_name or "alpharavis_memory_vectors"
 
 
+def _queue_table_name() -> str:
+    table_name = os.getenv("ALPHARAVIS_PGVECTOR_QUEUE_TABLE", "alpharavis_embedding_jobs")
+    table_name = re.sub(r"[^a-zA-Z0-9_]+", "_", table_name).strip("_")
+    return table_name or "alpharavis_embedding_jobs"
+
+
 def _table_identifier():
     if sql is None:
         raise VectorMemoryError("psycopg.sql is unavailable.")
     return sql.Identifier(_table_name())
+
+
+def _queue_table_identifier():
+    if sql is None:
+        raise VectorMemoryError("psycopg.sql is unavailable.")
+    return sql.Identifier(_queue_table_name())
 
 
 def _chunk_max_chars() -> int:
@@ -444,6 +456,118 @@ def _delete_source_sync(
         conn.commit()
 
 
+def _ensure_queue_schema_sync() -> None:
+    _require_psycopg()
+    table_name = _queue_table_name()
+    table = sql.Identifier(table_name)
+    with psycopg.connect(_database_url(), autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS {table} (
+                        id TEXT PRIMARY KEY,
+                        namespace TEXT NOT NULL,
+                        scope TEXT NOT NULL,
+                        thread_id TEXT,
+                        source_type TEXT NOT NULL,
+                        source_key TEXT NOT NULL,
+                        title TEXT,
+                        payload JSONB NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        last_error TEXT NOT NULL DEFAULT '',
+                        available_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )
+                    """
+                ).format(table=table)
+            )
+            cur.execute(
+                sql.SQL(
+                    "CREATE INDEX IF NOT EXISTS {index} ON {table} (status, available_at, created_at)"
+                ).format(index=sql.Identifier(f"{table_name}_status_idx"), table=table)
+            )
+
+
+def _enqueue_memory_record_sync(payload: dict[str, Any]) -> str:
+    _require_psycopg()
+    _ensure_queue_schema_sync()
+    table = _queue_table_identifier()
+    job_id = _record_id(
+        str(payload.get("source_type") or "memory"),
+        str(payload.get("source_key") or ""),
+        str(payload.get("thread_id") or ""),
+        str(payload.get("scope") or "thread"),
+        0,
+    )
+    with psycopg.connect(_database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    INSERT INTO {table} (
+                        id, namespace, scope, thread_id, source_type, source_key,
+                        title, payload, status, attempts, last_error, available_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', 0, '', now())
+                    ON CONFLICT (id) DO UPDATE SET
+                        namespace = EXCLUDED.namespace,
+                        scope = EXCLUDED.scope,
+                        thread_id = EXCLUDED.thread_id,
+                        source_type = EXCLUDED.source_type,
+                        source_key = EXCLUDED.source_key,
+                        title = EXCLUDED.title,
+                        payload = EXCLUDED.payload,
+                        status = CASE WHEN {table}.status = 'running' THEN {table}.status ELSE 'pending' END,
+                        last_error = '',
+                        updated_at = now()
+                    """
+                ).format(table=table),
+                (
+                    job_id,
+                    str(payload.get("namespace") or "alpharavis"),
+                    str(payload.get("scope") or "thread"),
+                    str(payload.get("thread_id") or ""),
+                    str(payload.get("source_type") or "memory"),
+                    str(payload.get("source_key") or ""),
+                    str(payload.get("title") or "")[:500],
+                    Jsonb(payload),
+                ),
+            )
+        conn.commit()
+    return job_id
+
+
+async def enqueue_memory_record(
+    *,
+    source_type: str,
+    source_key: str,
+    title: str,
+    content: str,
+    thread_id: str = "",
+    thread_key: str = "",
+    scope: str = "thread",
+    namespace: str = "alpharavis",
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    if not is_enabled():
+        return ""
+    payload = {
+        "source_type": source_type,
+        "source_key": source_key,
+        "title": title,
+        "content": content,
+        "thread_id": thread_id,
+        "thread_key": thread_key,
+        "scope": scope,
+        "namespace": namespace,
+        "metadata": metadata or {},
+    }
+    return await asyncio.to_thread(_enqueue_memory_record_sync, payload)
+
+
 def _insert_chunk_sync(
     *,
     record_id: str,
@@ -635,6 +759,124 @@ async def upsert_memory_record(
             embedding=embedding.vector,
         )
     return f"{source_type}:{source_key}:{chunk_count}"
+
+
+def _claim_embedding_jobs_sync(limit: int, max_attempts: int) -> list[dict[str, Any]]:
+    _require_psycopg()
+    _ensure_queue_schema_sync()
+    table = _queue_table_identifier()
+    with psycopg.connect(_database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    WITH claimed AS (
+                        SELECT id
+                        FROM {table}
+                        WHERE status IN ('pending', 'failed')
+                          AND attempts < %s
+                          AND available_at <= now()
+                        ORDER BY created_at
+                        LIMIT %s
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE {table}
+                    SET status = 'running',
+                        attempts = attempts + 1,
+                        updated_at = now()
+                    WHERE id IN (SELECT id FROM claimed)
+                    RETURNING id, payload, attempts
+                    """
+                ).format(table=table),
+                (max_attempts, limit),
+            )
+            rows = cur.fetchall()
+        conn.commit()
+    return [{"id": row[0], "payload": row[1], "attempts": row[2]} for row in rows]
+
+
+def _finish_embedding_job_sync(job_id: str, *, ok: bool, error: str = "") -> None:
+    _require_psycopg()
+    table = _queue_table_identifier()
+    status = "done" if ok else "failed"
+    with psycopg.connect(_database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    UPDATE {table}
+                    SET status = %s,
+                        last_error = %s,
+                        available_at = CASE WHEN %s THEN now() ELSE now() + interval '5 minutes' END,
+                        updated_at = now()
+                    WHERE id = %s
+                    """
+                ).format(table=table),
+                (status, error[:2000], ok, job_id),
+            )
+        conn.commit()
+
+
+def _queue_stats_sync() -> dict[str, Any]:
+    _require_psycopg()
+    _ensure_queue_schema_sync()
+    table = _queue_table_identifier()
+    with psycopg.connect(_database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("SELECT status, COUNT(*) FROM {table} GROUP BY status ORDER BY status").format(table=table)
+            )
+            counts = {str(status): int(count) for status, count in cur.fetchall()}
+            cur.execute(
+                sql.SQL(
+                    """
+                    SELECT id, source_type, source_key, title, status, attempts, last_error, updated_at
+                    FROM {table}
+                    WHERE status IN ('pending', 'failed', 'running')
+                    ORDER BY updated_at DESC
+                    LIMIT 5
+                    """
+                ).format(table=table)
+            )
+            columns = [desc[0] for desc in cur.description]
+            rows = [dict(zip(columns, row)) for row in cur.fetchall()]
+    for row in rows:
+        if hasattr(row.get("updated_at"), "isoformat"):
+            row["updated_at"] = row["updated_at"].isoformat()
+    return {"table": _queue_table_name(), "counts": counts, "recent_active": rows}
+
+
+async def queue_stats() -> dict[str, Any]:
+    if not is_enabled():
+        return {"enabled": False}
+    return await asyncio.to_thread(_queue_stats_sync)
+
+
+async def run_embedding_jobs(limit: int = 10) -> dict[str, Any]:
+    if not is_enabled():
+        return {"ok": False, "message": "pgvector memory is disabled"}
+
+    limit = max(1, min(int(limit), int(os.getenv("ALPHARAVIS_EMBEDDING_JOB_MAX_BATCH", "25"))))
+    max_attempts = max(1, int(os.getenv("ALPHARAVIS_EMBEDDING_JOB_MAX_ATTEMPTS", "3")))
+    jobs = await asyncio.to_thread(_claim_embedding_jobs_sync, limit, max_attempts)
+    results = []
+    for job in jobs:
+        payload = dict(job.get("payload") or {})
+        job_id = str(job["id"])
+        try:
+            result = await upsert_memory_record(**payload)
+            await asyncio.to_thread(_finish_embedding_job_sync, job_id, ok=True)
+            results.append({"id": job_id, "ok": True, "result": result})
+        except Exception as exc:
+            await asyncio.to_thread(_finish_embedding_job_sync, job_id, ok=False, error=str(exc))
+            results.append({"id": job_id, "ok": False, "error": str(exc)[:500]})
+
+    return {
+        "ok": all(item["ok"] for item in results) if results else True,
+        "processed": len(results),
+        "results": results,
+        "stats": await queue_stats(),
+    }
 
 
 def _search_sync(
