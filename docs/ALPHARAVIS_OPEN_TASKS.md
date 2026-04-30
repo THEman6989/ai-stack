@@ -307,3 +307,386 @@ Still needed:
 - Use the DeepAgents and Hermes skill cards as templates when adding new agents.
 - Extract more stable reusable skills from completed workflows.
 - Keep promotion manual through the existing skill-library review flow.
+
+## Hermes Deep-Code Followups
+
+Status: reference analysis done against the local Hermes Agent checkout at
+`C:\experi\ai\hermes-agent`. These are adoption candidates only; Hermes should
+remain a reference and optional external agent, not a runtime dependency for
+AlphaRavis.
+
+Already adopted or partly adopted:
+
+- `agent/context_compressor.py`, `agent/model_metadata.py`, and `agent/redact.py`
+  inspired AlphaRavis's active compression hardening:
+  - JSON-safe tool-call argument truncation
+  - tool-output pruning and duplicate-output backreferences for summary prompts
+  - anti-thrashing via `compression_stats`
+  - failure cooldown
+  - image/tool-argument-aware token estimation
+  - percentage-based context-length triggers with local model context discovery
+- `agent/context_engine.py` inspired the lightweight AlphaRavis
+  `compression_stats` state. A full plugin-style context engine is not needed
+  yet because AlphaRavis compression also writes archives and pgvector records.
+- Hermes skill ideas are represented by reviewed repo skill cards under
+  `ai-skills/`, plus the Store-backed skill-library candidate flow.
+
+High priority:
+
+1. Context reference preprocessor.
+
+   Reference:
+
+   ```text
+   C:\experi\ai\hermes-agent\agent\context_references.py
+   parse_context_references
+   preprocess_context_references
+   _expand_file_reference
+   _expand_folder_reference
+   _expand_git_reference
+   _fetch_url_content
+   _resolve_path
+   ```
+
+   AlphaRavis target:
+
+   ```text
+   langgraph-app/bridge_server.py
+   langgraph-app/agent_graph.py
+   ```
+
+   Needed behavior:
+
+   - Support explicit `@file`, `@folder`, `@diff`, `@staged`, `@git`, and `@url`
+     references before planning.
+   - Resolve paths relative to the repo/workspace and keep an `allowed_root`
+     guard so references cannot silently escape the intended workspace.
+   - Use context budget thresholds similar to Hermes:
+     - soft warning around 25 percent of context
+     - hard refusal around 50 percent of context
+   - Attach files/folders/diffs as explicit context blocks rather than letting
+     LibreChat full-history sync or prompt text dump arbitrary data.
+   - Record reference warnings in `run_profile`.
+
+2. Streaming internal-context scrubber.
+
+   Reference:
+
+   ```text
+   C:\experi\ai\hermes-agent\agent\memory_manager.py
+   sanitize_context
+   StreamingContextScrubber
+   build_memory_context_block
+   ```
+
+   AlphaRavis target:
+
+   ```text
+   langgraph-app/bridge_server.py
+   langgraph-app/agent_graph.py
+   ```
+
+   Needed behavior:
+
+   - Keep `<memory-context>...</memory-context>` and similar internal context
+     blocks from leaking into LibreChat visible output.
+   - Handle SSE chunk boundaries. A simple one-shot regex is not enough because
+     opening and closing tags may arrive in different deltas.
+   - Keep memory/context visible in Deep Agent/LangGraph debugging where useful,
+     but scrub it from normal assistant text unless explicitly requested.
+
+3. API error classification router.
+
+   Reference:
+
+   ```text
+   C:\experi\ai\hermes-agent\agent\error_classifier.py
+   FailoverReason
+   ClassifiedError
+   classify_api_error
+   _classify_by_status
+   _classify_by_error_code
+   _classify_by_message
+   ```
+
+   AlphaRavis target:
+
+   ```text
+   langgraph-app/responses_client.py
+   langgraph-app/bridge_server.py
+   langgraph-app/agent_graph.py
+   ```
+
+   Needed behavior:
+
+   - Classify `context_overflow` as compression/hard-cutoff work, not a generic
+     backend crash.
+   - Classify timeout, 502, overloaded, and connection failures as crisis-manager
+     candidates when advanced model management is enabled.
+   - Classify rate limits and temporary server errors as retry/backoff.
+   - Classify format errors as Responses/Chat fallback or unsupported-parameter
+     stripping.
+   - Store the classified reason in `run_profile` and bridge status events.
+
+4. Central file read/write safety.
+
+   Reference:
+
+   ```text
+   C:\experi\ai\hermes-agent\agent\file_safety.py
+   is_write_denied
+   get_read_block_error
+   get_safe_write_root
+   ```
+
+   AlphaRavis target:
+
+   ```text
+   langgraph-app/file_safety.py
+   langgraph-app/owner_power_tools.py
+   future file/coding tools
+   ```
+
+   Needed behavior:
+
+   - Block writes to sensitive paths such as `.ssh`, `.aws`, `.kube`, `.docker`,
+     `.env`, shell profiles, credential files, and system directories.
+   - Add optional `ALPHARAVIS_WRITE_SAFE_ROOT`.
+   - Block reads of internal cache/vector/secret files when those could become
+     prompt-injection or credential leaks.
+   - Make future Hermes/deep coding delegation obey the same safety policy.
+
+Medium priority:
+
+5. Disk skill index and manifest cache.
+
+   Reference:
+
+   ```text
+   C:\experi\ai\hermes-agent\agent\prompt_builder.py
+   _build_skills_manifest
+   _load_skills_snapshot
+   _write_skills_snapshot
+   _parse_skill_file
+   _skill_should_show
+   build_skills_system_prompt
+
+   C:\experi\ai\hermes-agent\agent\skill_commands.py
+   _build_skill_message
+   scan_skill_commands
+   reload_skills
+   build_skill_invocation_message
+   ```
+
+   AlphaRavis target:
+
+   ```text
+   ai-skills/
+   langgraph-app/agent_graph.py
+   docs/ALPHARAVIS_USAGE_NOTES.md
+   ```
+
+   Needed behavior:
+
+   - Add a manifest cache for repo skills so full `SKILL.md` scans do not run
+     every time.
+   - Respect skill metadata such as required tools/toolsets, platform guards, and
+     fallback-only behavior.
+   - Include supporting folders (`references`, `templates`, `scripts`, `assets`)
+     in the loaded skill message, with paths resolved relative to the skill
+     directory.
+   - Add a reload/status command or tool that reports added/removed/unchanged
+     skills without auto-promoting Store skill candidates.
+
+6. True lazy toolset resolver.
+
+   Reference:
+
+   ```text
+   C:\experi\ai\hermes-agent\toolsets.py
+   TOOLSETS
+   get_toolset
+   resolve_toolset
+   resolve_multiple_toolsets
+   get_all_toolsets
+   validate_toolset
+   ```
+
+   AlphaRavis target:
+
+   ```text
+   langgraph-app/agent_graph.py
+   OPTIONAL_TOOL_REGISTRY
+   describe_optional_tool_registry
+   ```
+
+   Needed behavior:
+
+   - Replace the current manifest-only approximation with composable toolsets
+     such as `coding/read`, `coding/write`, `coding/execute`, `media/video`,
+     `rag/memory`, `system/power`.
+   - Keep category descriptions visible to the model, but bind concrete tools
+     only after the planner or agent selects the category.
+   - Cache MCP tool schemas per category.
+   - Record selected and loaded toolsets in `run_profile`.
+   - Prevent recursive/cyclic toolset includes.
+
+7. Usage, cost, and rate-limit telemetry.
+
+   Reference:
+
+   ```text
+   C:\experi\ai\hermes-agent\agent\usage_pricing.py
+   CanonicalUsage
+   normalize_usage
+   estimate_usage_cost
+
+   C:\experi\ai\hermes-agent\agent\rate_limit_tracker.py
+   parse_rate_limit_headers
+   format_rate_limit_display
+   format_rate_limit_compact
+   ```
+
+   AlphaRavis target:
+
+   ```text
+   langgraph-app/responses_client.py
+   langgraph-app/bridge_server.py
+   langgraph-app/agent_graph.py
+   run_profile
+   ```
+
+   Needed behavior:
+
+   - Normalize usage across LiteLLM, llama.cpp, and future hosted providers.
+   - Track input, output, reasoning, cache-read, and cache-write tokens.
+   - Mark local llama.cpp/Ollama costs as local/included instead of fake money.
+   - Parse `x-ratelimit-*` headers when present and show compact status in
+     bridge/debug output.
+   - Use real usage values for compression decisions whenever available.
+
+8. Prompt assembly and context-file cache hygiene.
+
+   Reference:
+
+   ```text
+   C:\experi\ai\hermes-agent\agent\prompt_builder.py
+   build_environment_hints
+   build_context_files_prompt
+   _truncate_content
+
+   C:\experi\ai\hermes-agent\agent\prompt_caching.py
+   ```
+
+   AlphaRavis target:
+
+   ```text
+   langgraph-app/agent_graph.py
+   docs/ALPHARAVIS_ARCHITECTURE.md
+   ```
+
+   Needed behavior:
+
+   - Separate stable system prompt material from ephemeral task, memory, skill,
+     and handoff context.
+   - Add WSL/Windows path hints when the workspace path indicates a mixed
+     Windows/Linux environment.
+   - Truncate context files by preserving useful head/tail regions and scan
+     hints, not just naive first-N characters.
+   - Keep stable prompt-cache candidates stable so future provider-side prompt
+     caching can work better.
+
+Lower priority / future:
+
+9. Offline trajectory/archive compression evaluator.
+
+   Reference:
+
+   ```text
+   C:\experi\ai\hermes-agent\trajectory_compressor.py
+   ```
+
+   AlphaRavis target:
+
+   ```text
+   archive collections
+   vector backfill tools
+   maintenance scripts
+   ```
+
+   Needed behavior:
+
+   - Batch-evaluate old thread/archive compression quality.
+   - Track success/failure metrics for collection summaries.
+   - Use it for maintenance/backfill, not the live chat path.
+
+10. Shell hooks and approval allowlists.
+
+    Reference:
+
+    ```text
+    C:\experi\ai\hermes-agent\agent\shell_hooks.py
+    ```
+
+    AlphaRavis target:
+
+    ```text
+    langgraph-app/owner_power_tools.py
+    future terminal/file tools
+    ```
+
+    Needed behavior:
+
+    - Optional pre/post hooks around shell/system actions.
+    - Strict allowlist and audit trail.
+    - No automatic destructive hook execution without HITL.
+
+11. Provider adapter hardening.
+
+    Reference:
+
+    ```text
+    C:\experi\ai\hermes-agent\agent\auxiliary_client.py
+    C:\experi\ai\hermes-agent\agent\codex_responses_adapter.py
+    C:\experi\ai\hermes-agent\agent\anthropic_adapter.py
+    C:\experi\ai\hermes-agent\agent\gemini_native_adapter.py
+    ```
+
+    AlphaRavis target:
+
+    ```text
+    langgraph-app/responses_client.py
+    langgraph-app/bridge_server.py
+    ```
+
+    Needed behavior:
+
+    - Strip unsupported parameters and retry where safe.
+    - Map model-specific max-output-token and temperature behavior.
+    - Keep Chat Completions fallback for providers with broken Responses tools.
+    - Add direct non-OpenAI providers only if LiteLLM is not enough.
+
+12. Thread title and insight helpers.
+
+    Reference:
+
+    ```text
+    C:\experi\ai\hermes-agent\agent\title_generator.py
+    C:\experi\ai\hermes-agent\agent\insights.py
+    ```
+
+    AlphaRavis target:
+
+    ```text
+    archive titles
+    archive collections
+    LibreChat/bridge metadata
+    curated memory review
+    ```
+
+    Needed behavior:
+
+    - Generate short stable titles for archive records and archive collections.
+    - Extract candidate user/system insights for review without auto-promoting
+      them into always-memory.
+    - Keep this separate from raw archives and pgvector source-of-truth rules.
