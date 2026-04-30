@@ -178,6 +178,36 @@ The bridge also owns first-pass context hygiene:
   sensitive credential/config paths. Warnings and injected-token estimates are
   copied into `run_profile` as `bridge_context_references`.
 
+## File Safety
+
+AlphaRavis keeps file access policy in one local helper:
+
+```text
+langgraph-app/file_safety.py
+```
+
+This module is inspired by Hermes file safety but is not a Hermes runtime
+dependency. It is used by:
+
+- bridge context references (`@file`, `@folder`)
+- architecture and reviewed repo-skill readers
+- disk-backed AlphaRavis artifact reads/writes
+- media gallery downloads
+
+The guard blocks sensitive credential/config paths, internal caches, shell
+profiles, and OS/system paths before direct reads, lists, writes, or future
+delete helpers run. Examples include `.env`, `.ssh`, `.aws`, `.kube`, `.docker`,
+`.git`, `.cache`, and common shell profile files.
+
+Optional owner-wide write confinement:
+
+```text
+ALPHARAVIS_WRITE_SAFE_ROOT=
+```
+
+When this is set, AlphaRavis write/delete helpers must stay under that root in
+addition to their tool-specific roots such as the artifact root or media root.
+
 ## Agent Graph
 
 The main graph lives in `langgraph-app/agent_graph.py`.

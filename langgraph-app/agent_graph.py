@@ -162,6 +162,22 @@ except Exception as exc:  # pragma: no cover - optional local helper
 else:
     ERROR_CLASSIFIER_IMPORT_ERROR = None
 
+try:
+    from file_safety import (
+        FileSafetyError,
+        ensure_list_allowed as _ensure_list_allowed,
+        ensure_read_allowed as _ensure_read_allowed,
+        ensure_write_allowed as _ensure_write_allowed,
+    )
+except Exception as exc:  # pragma: no cover - optional local helper
+    FileSafetyError = ValueError  # type: ignore[misc,assignment]
+    _ensure_list_allowed = None
+    _ensure_read_allowed = None
+    _ensure_write_allowed = None
+    FILE_SAFETY_IMPORT_ERROR: Exception | None = exc
+else:
+    FILE_SAFETY_IMPORT_ERROR = None
+
 from context_compressor import (
     CompressionResult,
     build_archive_policy_message,
@@ -743,6 +759,42 @@ def _workspace_root() -> str:
     if Path("/workspace").exists():
         return "/workspace"
     return str(Path(__file__).resolve().parents[1])
+
+
+def _file_safety_unavailable() -> str:
+    if FILE_SAFETY_IMPORT_ERROR:
+        return f"File safety module unavailable: {FILE_SAFETY_IMPORT_ERROR}"
+    return "File safety module unavailable."
+
+
+def _check_read_path(path: Path, *, allowed_root: Path) -> str:
+    if _ensure_read_allowed is None:
+        return _file_safety_unavailable()
+    try:
+        _ensure_read_allowed(path, allowed_root=allowed_root)
+    except Exception as exc:
+        return str(exc)
+    return ""
+
+
+def _check_list_path(path: Path, *, allowed_root: Path) -> str:
+    if _ensure_list_allowed is None:
+        return _file_safety_unavailable()
+    try:
+        _ensure_list_allowed(path, allowed_root=allowed_root)
+    except Exception as exc:
+        return str(exc)
+    return ""
+
+
+def _check_write_path(path: Path, *, allowed_root: Path) -> str:
+    if _ensure_write_allowed is None:
+        return _file_safety_unavailable()
+    try:
+        _ensure_write_allowed(path, allowed_root=allowed_root)
+    except Exception as exc:
+        return str(exc)
+    return ""
 
 
 def _configure_llm_cache() -> None:
@@ -1680,6 +1732,9 @@ def read_alpha_ravis_architecture(query: str = "", max_chars: int = 6000):
         workspace = Path(_workspace_root()).resolve()
         if workspace not in [resolved, *resolved.parents]:
             return f"Architecture document path is outside the workspace: {resolved}"
+        safety_error = _check_read_path(resolved, allowed_root=workspace)
+        if safety_error:
+            return f"Architecture document read refused: {safety_error}"
         content = resolved.read_text(encoding="utf-8")
     except Exception as exc:
         return f"Could not read AlphaRavis architecture document: {exc}"
@@ -1731,6 +1786,9 @@ def _list_repo_ai_skill_metadata() -> list[dict[str, str]] | str:
         resolved = skills_dir.resolve()
         if workspace not in [resolved, *resolved.parents]:
             return f"AI skills path is outside the workspace: {resolved}"
+        safety_error = _check_list_path(resolved, allowed_root=workspace)
+        if safety_error:
+            return f"AI skills listing refused: {safety_error}"
         if not resolved.exists():
             return []
     except Exception as exc:
@@ -1739,6 +1797,9 @@ def _list_repo_ai_skill_metadata() -> list[dict[str, str]] | str:
     skills = []
     for skill_md in sorted(resolved.glob("*/SKILL.md")):
         try:
+            safety_error = _check_read_path(skill_md.resolve(), allowed_root=workspace)
+            if safety_error:
+                continue
             text = skill_md.read_text(encoding="utf-8")
         except Exception:
             continue
@@ -1807,6 +1868,9 @@ def read_repo_ai_skill(skill_name: str, reference_name: str = "", max_chars: int
             return f"Skill path is outside the workspace: {resolved}"
         if allowed_root not in [resolved, *resolved.parents]:
             return f"Skill path is outside the requested skill directory: {resolved}"
+        safety_error = _check_read_path(resolved, allowed_root=allowed_root)
+        if safety_error:
+            return f"Skill read refused: {safety_error}"
         content = resolved.read_text(encoding="utf-8")
     except Exception as exc:
         return f"Could not read repo AI skill `{normalized}`: {exc}"
@@ -2185,6 +2249,9 @@ def _resolve_artifact_path(thread_id: str, filename: str) -> Path | str:
     target = (root / _safe_artifact_segment(thread_id, "global") / filename).resolve()
     if root not in [target, *target.parents]:
         return f"Artifact path escaped artifact root: {target}"
+    safety_error = _check_write_path(target, allowed_root=root)
+    if safety_error:
+        return f"Artifact write refused: {safety_error}"
     return target
 
 
@@ -2312,6 +2379,9 @@ async def read_alpha_ravis_artifact(artifact_id_or_query: str, max_chars: int = 
         root = _artifact_root().resolve()
         if root not in [resolved, *resolved.parents]:
             return f"Artifact path is outside artifact root: {resolved}"
+        safety_error = _check_read_path(resolved, allowed_root=root)
+        if safety_error:
+            return f"Artifact read refused: {safety_error}"
         content = resolved.read_text(encoding="utf-8")
     except Exception as exc:
         return f"Could not read artifact `{record.get('artifact_id', query)}`: {exc}"
@@ -2418,7 +2488,10 @@ async def call_hermes_agent(task: str, context: str = "", max_output_chars: int 
         "Return a concise structured result with: summary, actions taken or "
         "recommended, files/commands involved, risks, and next step. If a task "
         "would require destructive commands, ask the parent AlphaRavis agent to "
-        "handle approval instead of executing blindly."
+        "handle approval instead of executing blindly. Respect AlphaRavis file "
+        "safety: do not read/write credential paths, internal caches, shell "
+        "profiles, or OS/system paths; keep writes inside approved workspace or "
+        "artifact roots."
     )
     user_content = task.strip()
     if context.strip():

@@ -437,6 +437,29 @@ BRIDGE_HARD_INPUT_TOKEN_LIMIT=128000
 The bridge checks before sending a request to LangGraph. The graph checks again
 before invoking any model.
 
+## File Safety
+
+AlphaRavis uses one shared local guard for direct file reads/lists/writes:
+
+```text
+langgraph-app/file_safety.py
+```
+
+It blocks sensitive credential/config paths and internal caches before tool
+execution, including `.env`, `.ssh`, `.aws`, `.kube`, `.docker`, shell profiles,
+`.git`, `.cache`, and OS/system paths for writes/deletes.
+
+Optional write-root enforcement:
+
+```text
+ALPHARAVIS_WRITE_SAFE_ROOT=
+```
+
+Leave it empty for the normal Docker layout. Set it to `/workspace` or another
+owner-approved directory if you want all AlphaRavis write/delete helpers to be
+confined under one root. The artifact and media tools still also enforce their
+own artifact/media roots.
+
 ## Memory And Compression
 
 Active chat compression happens automatically after the current LangGraph run
@@ -642,6 +665,10 @@ Default artifact root:
 
 Use artifacts when a result is too large for chat but should still be
 recoverable later.
+
+Artifact reads and writes go through the central file-safety guard, then through
+the artifact-root check. This means an artifact cannot escape its root, and a
+misconfigured artifact path cannot be used to read or write secrets.
 
 ## Agent-Specific Memories
 

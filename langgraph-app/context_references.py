@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from file_safety import ensure_list_allowed, ensure_read_allowed, is_path_allowed
+
 
 _QUOTED_REFERENCE_VALUE = r'(?:`[^`\n]+`|"[^"\n]+"|\'[^\'\n]+\')'
 REFERENCE_PATTERN = re.compile(
@@ -22,29 +24,6 @@ REFERENCE_PATTERN = re.compile(
 TRAILING_PUNCTUATION = ",.;!?"
 DEFAULT_MAX_URL_CHARS = 12000
 DEFAULT_FOLDER_LIMIT = 200
-
-SENSITIVE_EXACT_NAMES = {
-    ".env",
-    ".env.local",
-    ".env.production",
-    ".netrc",
-    ".pgpass",
-    ".npmrc",
-    ".pypirc",
-    "id_rsa",
-    "id_ed25519",
-    "authorized_keys",
-}
-SENSITIVE_PATH_PARTS = {
-    ".ssh",
-    ".aws",
-    ".gnupg",
-    ".kube",
-    ".docker",
-    ".azure",
-    ".config/gh",
-}
-
 
 @dataclass(frozen=True)
 class ContextReference:
@@ -283,7 +262,7 @@ def _expand_file_reference(
     allowed_root: Path,
 ) -> tuple[str | None, str | None]:
     path = _resolve_path(cwd, ref.target, allowed_root=allowed_root)
-    _ensure_reference_path_allowed(path)
+    _ensure_reference_path_allowed(path, allowed_root=allowed_root, operation="read")
     if not path.exists():
         return f"{ref.raw}: file not found", None
     if not path.is_file():
@@ -311,7 +290,7 @@ def _expand_folder_reference(
     folder_limit: int,
 ) -> tuple[str | None, str | None]:
     path = _resolve_path(cwd, ref.target, allowed_root=allowed_root)
-    _ensure_reference_path_allowed(path)
+    _ensure_reference_path_allowed(path, allowed_root=allowed_root, operation="list")
     if not path.exists():
         return f"{ref.raw}: folder not found", None
     if not path.is_dir():
@@ -388,13 +367,11 @@ def _resolve_path(cwd: Path, target: str, *, allowed_root: Path) -> Path:
     return resolved
 
 
-def _ensure_reference_path_allowed(path: Path) -> None:
-    normalized_parts = {part.lower() for part in path.parts}
-    if path.name.lower() in SENSITIVE_EXACT_NAMES:
-        raise ValueError("path is a sensitive credential/config file and cannot be attached")
-    for sensitive_part in SENSITIVE_PATH_PARTS:
-        if sensitive_part.lower() in normalized_parts:
-            raise ValueError("path is inside a sensitive credential/config directory and cannot be attached")
+def _ensure_reference_path_allowed(path: Path, *, allowed_root: Path, operation: str) -> None:
+    if operation == "list":
+        ensure_list_allowed(path, allowed_root=allowed_root)
+    else:
+        ensure_read_allowed(path, allowed_root=allowed_root)
 
 
 def _strip_trailing_punctuation(value: str) -> str:
@@ -506,6 +483,8 @@ def _iter_visible_entries(path: Path, allowed_root: Path, *, limit: int) -> list
             full = allowed_root / rel
             if not full.exists():
                 continue
+            if not is_path_allowed(full, operation="read", allowed_root=allowed_root):
+                continue
             for parent in full.parents:
                 if parent == allowed_root or parent == path:
                     continue
@@ -519,8 +498,18 @@ def _iter_visible_entries(path: Path, allowed_root: Path, *, limit: int) -> list
 
     output: list[Path] = []
     for root, dirs, files in os.walk(path):
-        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d != "__pycache__")
-        files = sorted(f for f in files if not f.startswith("."))
+        dirs[:] = sorted(
+            d
+            for d in dirs
+            if not d.startswith(".")
+            and d != "__pycache__"
+            and is_path_allowed(Path(root) / d, operation="list", allowed_root=allowed_root)
+        )
+        files = sorted(
+            f
+            for f in files
+            if not f.startswith(".") and is_path_allowed(Path(root) / f, operation="read", allowed_root=allowed_root)
+        )
         root_path = Path(root)
         for dirname in dirs:
             output.append(root_path / dirname)

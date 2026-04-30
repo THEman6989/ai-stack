@@ -15,6 +15,8 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from file_safety import ensure_write_allowed
+
 try:
     from pymongo import MongoClient
 except Exception as exc:  # pragma: no cover - optional at import time
@@ -33,6 +35,7 @@ DOWNLOAD_ENABLED = os.getenv("ALPHARAVIS_MEDIA_DOWNLOAD_ENABLED", "true").lower(
 MAX_DOWNLOAD_BYTES = int(os.getenv("ALPHARAVIS_MEDIA_MAX_DOWNLOAD_BYTES", str(2 * 1024 * 1024 * 1024)))
 
 app = FastAPI(title="AlphaRavis Media Gallery", openapi_version="3.1.0")
+ensure_write_allowed(MEDIA_ROOT, allowed_root=MEDIA_ROOT)
 MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
 app.mount("/media", StaticFiles(directory=str(MEDIA_ROOT)), name="media")
 
@@ -91,6 +94,7 @@ def _extension_from_url(url: str, media_type: str) -> str:
 
 async def _download_asset(source_url: str, target: Path) -> dict[str, Any]:
     size = 0
+    ensure_write_allowed(target, allowed_root=MEDIA_ROOT)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".{target.name}.tmp")
     async with httpx.AsyncClient(timeout=float(os.getenv("ALPHARAVIS_MEDIA_DOWNLOAD_TIMEOUT_SECONDS", "120"))) as client:

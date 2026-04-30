@@ -446,6 +446,32 @@ Acceptance:
 
 ### Chunk 3: Central File Safety
 
+Status: implemented as shared AlphaRavis-local file safety guard.
+
+Implemented files:
+
+```text
+langgraph-app/file_safety.py
+langgraph-app/context_references.py
+langgraph-app/agent_graph.py
+langgraph-app/media_server.py
+tests/test_file_safety.py
+```
+
+AlphaRavis-specific integration:
+
+- `file_safety.py` centralizes read/list/write/delete checks for sensitive
+  credential/config paths, internal caches, shell profiles, and OS/system paths.
+- `BRIDGE_ENABLE_CONTEXT_REFERENCES` file/folder reads now call the central
+  read/list guard instead of carrying separate safety rules.
+- `read_alpha_ravis_architecture`, `read_repo_ai_skill`,
+  `write_alpha_ravis_artifact`, and `read_alpha_ravis_artifact` now pass through
+  the same guard.
+- Media gallery downloads verify the target path before writing under
+  `ALPHARAVIS_MEDIA_ROOT`.
+- `ALPHARAVIS_WRITE_SAFE_ROOT` can optionally force AlphaRavis write/delete
+  helpers under a single owner-approved root.
+
 Goal:
 
 - Future coding/file/power tools share one safety policy.

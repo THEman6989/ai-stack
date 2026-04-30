@@ -459,6 +459,14 @@ BRIDGE_CONTEXT_REFERENCE_HARD_RATIO=0.50
 BRIDGE_CONTEXT_REFERENCE_MAX_URL_CHARS=12000
 BRIDGE_CONTEXT_REFERENCE_FOLDER_LIMIT=200
 
+# Central file safety.
+# Empty = no global write root limit, but sensitive files/directories are still
+# blocked by file_safety.py (.env, .ssh, .aws, .kube, .docker, shell profiles,
+# internal caches, and OS/system paths for writes/deletes).
+# Set this to force all AlphaRavis write/delete helpers under one root, e.g.:
+#   ALPHARAVIS_WRITE_SAFE_ROOT=/workspace
+ALPHARAVIS_WRITE_SAFE_ROOT=
+
 # Bridge-level hard cutoff before the request is sent to LangGraph. Set 0 to
 # disable. If BRIDGE_HARD_INPUT_HTTP_ERROR=false, the bridge returns a visible
 # assistant message instead of an HTTP 413.
