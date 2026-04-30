@@ -347,11 +347,17 @@ ALPHARAVIS_OLLAMA_EMBED_FALLBACK_MODEL=bge-m3
 # estimate, AlphaRavis refuses the run before invoking the model.
 ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT=128000
 
-# Optional model/context-length hints used by the compressor's budget estimator.
-# The estimator prefers real usage metadata from model responses when present,
-# then falls back to model-aware rough estimates. You can override a single
+# Optional model/context-length hints used by the compressor's budget estimator
+# and percentage-based context guards. The estimator prefers real usage metadata
+# from model responses when present, and the guard can discover max context from
+# OpenAI-compatible /models or llama.cpp /v1/props. You can override a single
 # model with ALPHARAVIS_CONTEXT_LENGTH_<SANITIZED_MODEL_NAME>, for example:
 #   ALPHARAVIS_CONTEXT_LENGTH_BIG_BOSS=128000
+ALPHARAVIS_AUTO_DISCOVER_CONTEXT_LENGTH=true
+ALPHARAVIS_CONTEXT_DISCOVERY_API_BASE=
+ALPHARAVIS_CONTEXT_DISCOVERY_API_KEY=
+ALPHARAVIS_CONTEXT_DISCOVERY_MODEL=
+ALPHARAVIS_CONTEXT_DISCOVERY_TIMEOUT_SECONDS=2
 ALPHARAVIS_DEFAULT_CONTEXT_LENGTH=128000
 ALPHARAVIS_MODEL_CONTEXT_LENGTH=128000
 
@@ -472,15 +478,22 @@ LIBRECHAT_OPENAI_REVERSE_PROXY=
 #   hermes_style = one shared compressor for handoff guard and post-run guard
 ALPHARAVIS_COMPRESSION_ENGINE=hermes_style
 
-# Approximate active message-window token limit for the post-run safety net.
-# If the current LangGraph thread goes above this after a run, the middle of
-# the active context is summarized and archived. Head/policy/task/planner/
-# memory/skill context and a recent tail are protected.
-ALPHARAVIS_ACTIVE_TOKEN_LIMIT=30000
+# Percentage-based context limits. When enabled, AlphaRavis discovers the active
+# model's context size and computes limits as percentages, Hermes-style.
+# If discovery fails, ALPHARAVIS_MODEL_CONTEXT_LENGTH / DEFAULT_CONTEXT_LENGTH
+# are used. Set false to use the fixed token values below.
+ALPHARAVIS_ENABLE_PERCENT_CONTEXT_LIMITS=true
+ALPHARAVIS_COMPRESSION_TRIGGER_RATIO=0.50
+ALPHARAVIS_ACTIVE_CONTEXT_TRIGGER_RATIO=0.50
+ALPHARAVIS_HANDOFF_CONTEXT_TRIGGER_RATIO=0.50
+ALPHARAVIS_HARD_CONTEXT_RATIO=0.95
+ALPHARAVIS_MIN_COMPRESSION_TOKEN_LIMIT=4096
+ALPHARAVIS_MIN_HARD_CONTEXT_TOKEN_LIMIT=8192
 
-# Approximate token budget before the pre-swarm handoff guard compresses an
-# oversized active context. This prevents specialists from receiving a giant
-# prompt while preserving the current task brief and latest handoff packet.
+# Fixed fallback token limits used when percent context limits are disabled.
+# With ALPHARAVIS_ENABLE_PERCENT_CONTEXT_LIMITS=true these remain only fallback
+# documentation for older deployments.
+ALPHARAVIS_ACTIVE_TOKEN_LIMIT=30000
 ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT=12000
 
 # Controls the shared Hermes-style compressor. It protects the first messages

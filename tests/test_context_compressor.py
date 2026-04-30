@@ -20,6 +20,7 @@ from context_compressor import (  # noqa: E402
     select_head_middle_tail,
     should_compress,
 )
+from model_metadata import context_limit_from_ratio, get_model_context_length  # noqa: E402
 
 
 def test_estimate_tokens_counts_images_and_tool_args() -> None:
@@ -107,6 +108,32 @@ def test_anti_thrashing_blocks_auto_and_force_ignores_it() -> None:
     assert forced.should_run
 
 
+def test_percent_context_limit_helper_and_env_override() -> None:
+    old_values = {
+        key: os.environ.get(key)
+        for key in (
+            "ALPHARAVIS_AUTO_DISCOVER_CONTEXT_LENGTH",
+            "ALPHARAVIS_MODEL_CONTEXT_LENGTH",
+            "ALPHARAVIS_DEFAULT_CONTEXT_LENGTH",
+            "ALPHARAVIS_CONTEXT_LENGTH_BIG_BOSS",
+        )
+    }
+    try:
+        os.environ["ALPHARAVIS_AUTO_DISCOVER_CONTEXT_LENGTH"] = "false"
+        os.environ["ALPHARAVIS_MODEL_CONTEXT_LENGTH"] = "0"
+        os.environ["ALPHARAVIS_DEFAULT_CONTEXT_LENGTH"] = "0"
+        os.environ["ALPHARAVIS_CONTEXT_LENGTH_BIG_BOSS"] = "64000"
+
+        assert get_model_context_length("big-boss") == 64000
+        assert context_limit_from_ratio(64000, 0.50, minimum=4096) == 32000
+    finally:
+        for key, value in old_values.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def test_summary_failure_returns_visible_fallback_and_archive_content() -> None:
     async def failing_summary(_prompt: str, _max_tokens: int) -> str:
         raise RuntimeError("summary backend down")
@@ -187,6 +214,7 @@ def _run_all() -> None:
         test_informative_tool_result_summary,
         test_head_middle_tail_keeps_handoff_packet_protected,
         test_anti_thrashing_blocks_auto_and_force_ignores_it,
+        test_percent_context_limit_helper_and_env_override,
         test_summary_failure_returns_visible_fallback_and_archive_content,
         test_iterative_prompt_keeps_previous_summary,
         test_reference_only_summary_message,

@@ -104,6 +104,16 @@ else:
     MODEL_MANAGEMENT_IMPORT_ERROR = None
 
 try:
+    from model_metadata import context_limit_from_ratio as _context_limit_from_ratio
+    from model_metadata import get_model_context_length as _get_model_context_length
+except Exception as exc:  # pragma: no cover - optional local helper
+    _context_limit_from_ratio = None
+    _get_model_context_length = None
+    MODEL_METADATA_IMPORT_ERROR: Exception | None = exc
+else:
+    MODEL_METADATA_IMPORT_ERROR = None
+
+try:
     from owner_power_tools import (
         owner_check_comfyui_server as _owner_check_comfyui_server,
         owner_check_llama_server as _owner_check_llama_server,
@@ -405,6 +415,16 @@ if not COMFY_IP:
 
 def _env_bool(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).lower() in {"1", "true", "yes"}
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
 def _model_management_enabled() -> bool:
@@ -3235,6 +3255,100 @@ def _estimate_tokens(messages: list[Any]) -> int:
     return _compressor_estimate_tokens(messages)
 
 
+def _context_discovery_model() -> str:
+    return (
+        os.getenv("ALPHARAVIS_CONTEXT_DISCOVERY_MODEL")
+        or os.getenv("ALPHARAVIS_RESPONSES_MODEL")
+        or os.getenv("ALPHARAVIS_MODEL")
+        or "big-boss"
+    )
+
+
+def _context_discovery_base_url() -> str:
+    return (
+        os.getenv("ALPHARAVIS_CONTEXT_DISCOVERY_API_BASE")
+        or os.getenv("BIG_BOSS_API_BASE")
+        or os.getenv("ALPHARAVIS_RESPONSES_API_BASE")
+        or os.getenv("OPENAI_API_BASE")
+        or ""
+    ).rstrip("/")
+
+
+def _context_discovery_api_key() -> str:
+    return (
+        os.getenv("ALPHARAVIS_CONTEXT_DISCOVERY_API_KEY")
+        or os.getenv("LOCAL_LLM_API_KEY")
+        or os.getenv("ALPHARAVIS_RESPONSES_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or ""
+    )
+
+
+def _detected_context_length() -> int:
+    fallback = int(os.getenv("ALPHARAVIS_MODEL_CONTEXT_LENGTH", os.getenv("ALPHARAVIS_DEFAULT_CONTEXT_LENGTH", "128000")))
+    if _get_model_context_length is None:
+        return max(4096, fallback)
+    try:
+        return _get_model_context_length(
+            _context_discovery_model(),
+            provider=os.getenv("ALPHARAVIS_CONTEXT_DISCOVERY_PROVIDER", ""),
+            default=fallback,
+            base_url=_context_discovery_base_url(),
+            api_key=_context_discovery_api_key(),
+        )
+    except Exception as exc:
+        print(f"WARNING: context length discovery failed, using fallback {fallback}: {exc}")
+        return max(4096, fallback)
+
+
+def _ratio_token_limit(
+    *,
+    ratio_env: str,
+    fixed_env: str,
+    fixed_default: str,
+    default_ratio: float,
+) -> int:
+    fixed_limit = int(os.getenv(fixed_env, fixed_default))
+    if not _env_bool("ALPHARAVIS_ENABLE_PERCENT_CONTEXT_LIMITS", "true"):
+        return fixed_limit
+    context_length = _detected_context_length()
+    ratio = _env_float(ratio_env, _env_float("ALPHARAVIS_COMPRESSION_TRIGGER_RATIO", default_ratio))
+    minimum = int(os.getenv("ALPHARAVIS_MIN_COMPRESSION_TOKEN_LIMIT", "4096"))
+    if _context_limit_from_ratio is not None:
+        return _context_limit_from_ratio(context_length, ratio, minimum=minimum)
+    return max(minimum, int(context_length * ratio))
+
+
+def _active_context_token_limit() -> int:
+    return _ratio_token_limit(
+        ratio_env="ALPHARAVIS_ACTIVE_CONTEXT_TRIGGER_RATIO",
+        fixed_env="ALPHARAVIS_ACTIVE_TOKEN_LIMIT",
+        fixed_default="30000",
+        default_ratio=0.50,
+    )
+
+
+def _handoff_context_token_limit() -> int:
+    return _ratio_token_limit(
+        ratio_env="ALPHARAVIS_HANDOFF_CONTEXT_TRIGGER_RATIO",
+        fixed_env="ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT",
+        fixed_default="12000",
+        default_ratio=0.50,
+    )
+
+
+def _hard_context_token_limit() -> int:
+    fixed_limit = int(os.getenv("ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT", "128000"))
+    if fixed_limit == 0 or not _env_bool("ALPHARAVIS_ENABLE_PERCENT_CONTEXT_LIMITS", "true"):
+        return fixed_limit
+    context_length = _detected_context_length()
+    ratio = _env_float("ALPHARAVIS_HARD_CONTEXT_RATIO", 0.95)
+    minimum = int(os.getenv("ALPHARAVIS_MIN_HARD_CONTEXT_TOKEN_LIMIT", "8192"))
+    if _context_limit_from_ratio is not None:
+        return _context_limit_from_ratio(context_length, ratio, minimum=minimum)
+    return max(minimum, int(context_length * ratio))
+
+
 def _message_id(message: Any) -> str:
     if isinstance(message, dict):
         return str(message.get("id") or "")
@@ -3839,7 +3953,7 @@ async def run_profile_start_node(state: AlphaRavisState) -> dict[str, Any]:
 async def route_decision_node(state: AlphaRavisState) -> dict[str, Any]:
     messages = list(state.get("messages", []))
     token_estimate = _estimate_tokens(messages)
-    hard_limit = int(os.getenv("ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT", "128000"))
+    hard_limit = _hard_context_token_limit()
     if hard_limit > 0 and token_estimate > hard_limit:
         message = (
             "Hard context cutoff: Diese Anfrage wird nicht ausgefuehrt, weil der "
@@ -4461,7 +4575,7 @@ async def handoff_context_guard_node(state: AlphaRavisState, runtime: Any | None
         updates["handoff_packet"] = latest_packet
         updates["handoff_packet_key"] = packet_key
 
-    token_limit = int(os.getenv("ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT", "12000"))
+    token_limit = _handoff_context_token_limit()
     token_estimate = _estimate_tokens(_drop_previous_compaction_messages([*messages, *inject_messages]))
     if token_estimate <= token_limit:
         if inject_messages:
@@ -4991,7 +5105,7 @@ async def skill_library_node(state: AlphaRavisState, runtime: Any | None = None)
 
 async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
     messages = list(state.get("messages", []))
-    token_limit = int(os.getenv("ALPHARAVIS_ACTIVE_TOKEN_LIMIT", "30000"))
+    token_limit = _active_context_token_limit()
     token_estimate = _estimate_tokens(_drop_previous_compaction_messages(messages))
     force_compression = _compression_forced_by_user(messages)
 

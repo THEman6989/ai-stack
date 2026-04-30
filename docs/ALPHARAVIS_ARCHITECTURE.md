@@ -557,12 +557,48 @@ Default:
 
 ```text
 ALPHARAVIS_COMPRESSION_ENGINE=hermes_style
-ALPHARAVIS_ACTIVE_TOKEN_LIMIT=30000
+ALPHARAVIS_ENABLE_PERCENT_CONTEXT_LIMITS=true
+ALPHARAVIS_COMPRESSION_TRIGGER_RATIO=0.50
+ALPHARAVIS_ACTIVE_CONTEXT_TRIGGER_RATIO=0.50
+ALPHARAVIS_HANDOFF_CONTEXT_TRIGGER_RATIO=0.50
+ALPHARAVIS_HARD_CONTEXT_RATIO=0.95
 ALPHARAVIS_ENABLE_POST_RUN_COMPRESSION=true
 ALPHARAVIS_COMPRESSION_PROTECT_FIRST_MESSAGES=3
 ALPHARAVIS_COMPRESSION_PROTECT_LAST_MESSAGES=16
 ALPHARAVIS_COMPRESSION_TAIL_TOKEN_RATIO=0.20
 ```
+
+With percentage limits enabled, AlphaRavis resolves the model context length
+first and then computes the actual guard thresholds:
+
+```text
+compression_trigger = context_length * ALPHARAVIS_*_TRIGGER_RATIO
+hard_cutoff         = context_length * ALPHARAVIS_HARD_CONTEXT_RATIO
+```
+
+For a 128k llama.cpp context and the default 50 percent trigger, handoff and
+post-run compression start around 64k estimated tokens, while the hard stop
+starts around 121k. If the endpoint cannot report context length, the fallback
+values `ALPHARAVIS_MODEL_CONTEXT_LENGTH` and `ALPHARAVIS_DEFAULT_CONTEXT_LENGTH`
+are used. Set `ALPHARAVIS_ENABLE_PERCENT_CONTEXT_LIMITS=false` to return to the
+fixed legacy limits `ALPHARAVIS_ACTIVE_TOKEN_LIMIT` and
+`ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT`.
+
+Context-length discovery follows the Hermes idea but stays local to
+AlphaRavis:
+
+```text
+ALPHARAVIS_AUTO_DISCOVER_CONTEXT_LENGTH=true
+ALPHARAVIS_CONTEXT_DISCOVERY_API_BASE=
+ALPHARAVIS_CONTEXT_DISCOVERY_API_KEY=
+ALPHARAVIS_CONTEXT_DISCOVERY_MODEL=
+ALPHARAVIS_CONTEXT_DISCOVERY_TIMEOUT_SECONDS=2
+```
+
+If `ALPHARAVIS_CONTEXT_DISCOVERY_API_BASE` is empty, AlphaRavis prefers the
+direct `BIG_BOSS_API_BASE`, then Responses/OpenAI base URLs. It queries
+OpenAI-compatible `/models` metadata and, for llama.cpp, `/v1/props` or `/props`
+to read the actually allocated `n_ctx`.
 
 What happens:
 
@@ -597,6 +633,7 @@ retrieval. The ported mechanisms are local helpers:
 
 - image-aware and tool-argument-aware token estimation, with real API usage
   values preferred when model metadata contains them
+- percentage-based trigger thresholds calibrated from discovered context length
 - JSON-safe tool-call-argument truncation
 - tool-output deduplication for the summary prompt only
 - tool-specific summaries for terminal, file, search, browser/web, and generic
@@ -982,12 +1019,15 @@ AlphaRavis has two hard cutoff layers:
 ```text
 BRIDGE_HARD_INPUT_TOKEN_LIMIT=128000
 ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT=128000
+ALPHARAVIS_HARD_CONTEXT_RATIO=0.95
 ```
 
 The bridge refuses oversized incoming requests before they reach LangGraph. The
 graph checks the active checkpointed context again before routing to fast path,
-planner, swarm, or crisis manager. Set either value to `0` only when you
-explicitly want to disable that guard.
+planner, swarm, or crisis manager. When percentage limits are enabled, the graph
+hard cutoff is computed from discovered context length and
+`ALPHARAVIS_HARD_CONTEXT_RATIO`; `ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT=0`
+still disables the graph hard stop explicitly.
 
 ## Fast Path And Run Profile
 
