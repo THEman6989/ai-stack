@@ -5,12 +5,16 @@ import json
 import os
 import time
 import uuid
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from langgraph_sdk import get_client
+
+from context_references import preprocess_context_references
+from internal_context import StreamingInternalContextScrubber, sanitize_internal_context
 
 
 LANGGRAPH_API_URL = os.getenv("LANGGRAPH_API_URL", "http://langgraph-api:2024")
@@ -73,6 +77,37 @@ BRIDGE_ENABLE_LANGGRAPH_TOOL = os.getenv("BRIDGE_ENABLE_LANGGRAPH_TOOL", "false"
 }
 BRIDGE_LANGGRAPH_TOOL_API_KEY = os.getenv("BRIDGE_LANGGRAPH_TOOL_API_KEY", "")
 BRIDGE_LANGGRAPH_TOOL_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_LANGGRAPH_TOOL_TIMEOUT_SECONDS", "120"))
+BRIDGE_SCRUB_INTERNAL_CONTEXT = os.getenv("BRIDGE_SCRUB_INTERNAL_CONTEXT", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+BRIDGE_ENABLE_CONTEXT_REFERENCES = os.getenv("BRIDGE_ENABLE_CONTEXT_REFERENCES", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+BRIDGE_CONTEXT_REFERENCES_FETCH_URLS = os.getenv("BRIDGE_CONTEXT_REFERENCES_FETCH_URLS", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+BRIDGE_CONTEXT_REFERENCE_CONTEXT_LENGTH = int(
+    os.getenv("BRIDGE_CONTEXT_REFERENCE_CONTEXT_LENGTH", str(BRIDGE_HARD_INPUT_TOKEN_LIMIT or 128000))
+)
+BRIDGE_CONTEXT_REFERENCE_SOFT_RATIO = float(os.getenv("BRIDGE_CONTEXT_REFERENCE_SOFT_RATIO", "0.25"))
+BRIDGE_CONTEXT_REFERENCE_HARD_RATIO = float(os.getenv("BRIDGE_CONTEXT_REFERENCE_HARD_RATIO", "0.50"))
+BRIDGE_CONTEXT_REFERENCE_MAX_URL_CHARS = int(os.getenv("BRIDGE_CONTEXT_REFERENCE_MAX_URL_CHARS", "12000"))
+BRIDGE_CONTEXT_REFERENCE_FOLDER_LIMIT = int(os.getenv("BRIDGE_CONTEXT_REFERENCE_FOLDER_LIMIT", "200"))
+BRIDGE_WORKSPACE_ROOT = Path(
+    os.getenv("BRIDGE_CONTEXT_REFERENCE_WORKSPACE_ROOT") or Path(__file__).resolve().parents[1]
+).expanduser().resolve()
+BRIDGE_CONTEXT_REFERENCE_CWD = Path(
+    os.getenv("BRIDGE_CONTEXT_REFERENCE_CWD") or BRIDGE_WORKSPACE_ROOT
+).expanduser().resolve()
 
 app = FastAPI(title="AlphaRavis OpenAI Bridge", openapi_version="3.1.0")
 
@@ -362,7 +397,45 @@ def _messages_after_last_human(messages: list[dict[str, Any]], last_human_conten
     return [latest] if latest else []
 
 
-def _build_input_payload(
+async def _apply_context_references_to_messages(
+    messages: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not BRIDGE_ENABLE_CONTEXT_REFERENCES:
+        return messages, []
+
+    output: list[dict[str, Any]] = []
+    profiles: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role") or "")
+        content = message.get("content")
+        if role not in {"human", "user"} or not isinstance(content, str) or "@" not in content:
+            output.append(message)
+            continue
+
+        result = await preprocess_context_references(
+            content,
+            cwd=BRIDGE_CONTEXT_REFERENCE_CWD,
+            allowed_root=BRIDGE_WORKSPACE_ROOT,
+            context_length=BRIDGE_CONTEXT_REFERENCE_CONTEXT_LENGTH,
+            soft_ratio=BRIDGE_CONTEXT_REFERENCE_SOFT_RATIO,
+            hard_ratio=BRIDGE_CONTEXT_REFERENCE_HARD_RATIO,
+            max_url_chars=BRIDGE_CONTEXT_REFERENCE_MAX_URL_CHARS,
+            folder_limit=BRIDGE_CONTEXT_REFERENCE_FOLDER_LIMIT,
+            fetch_urls=BRIDGE_CONTEXT_REFERENCES_FETCH_URLS,
+        )
+        if result.references:
+            profiles.append(result.profile())
+        if result.expanded:
+            updated = dict(message)
+            updated["content"] = result.message
+            output.append(updated)
+        else:
+            output.append(message)
+
+    return output, profiles
+
+
+async def _build_input_payload(
     raw_messages: list[dict[str, Any]],
     state: Any,
     *,
@@ -378,14 +451,19 @@ def _build_input_payload(
         if not selected and normalized:
             selected = [normalized[-1]]
 
-    return {
+    selected, reference_profiles = await _apply_context_references_to_messages(selected)
+
+    payload = {
         "messages": selected,
         "thread_id": thread_id,
         "thread_key": thread_key,
+        "bridge_context_references": reference_profiles,
     }
+    return payload
 
 
 def _chat_completion_response(content: str, model: str) -> dict[str, Any]:
+    content = _visible_content(content)
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
@@ -435,6 +513,7 @@ def _activity_chunk(text: str, model: str) -> str:
 
 
 def _openai_stream_response(content: str, model: str) -> list[str]:
+    content = _visible_content(content)
     return [
         _stream_data(_chunk("", model, role="assistant")),
         _stream_data(_chunk(content, model)),
@@ -611,7 +690,7 @@ async def _prepare_run_payload(
             return {"direct_response": _approval_prompt(interrupt_value)}
         return {"command": {"resume": resume}}
 
-    input_payload = _build_input_payload(
+    input_payload = await _build_input_payload(
         messages,
         state,
         thread_id=thread_id,
@@ -737,6 +816,8 @@ async def _stream_chat_events(
     emitted = ""
     emitted_reasoning = ""
     emitted_activity: set[str] = set()
+    content_scrubber = StreamingInternalContextScrubber() if BRIDGE_SCRUB_INTERNAL_CONTEXT else None
+    reasoning_scrubber = StreamingInternalContextScrubber() if BRIDGE_SCRUB_INTERNAL_CONTEXT else None
 
     stream_kwargs = {
         "stream_mode": ["messages", "updates"] if BRIDGE_SHOW_ACTIVITY_EVENTS else "messages",
@@ -759,14 +840,20 @@ async def _stream_chat_events(
                 reasoning_delta = _delta_text(reasoning, emitted_reasoning)
                 if reasoning_delta:
                     emitted_reasoning += reasoning_delta
-                    yield _stream_data(_chunk("", model, reasoning_content=reasoning_delta))
+                    visible_reasoning_delta = (
+                        reasoning_scrubber.feed(reasoning_delta) if reasoning_scrubber else reasoning_delta
+                    )
+                    if visible_reasoning_delta:
+                        yield _stream_data(_chunk("", model, reasoning_content=visible_reasoning_delta))
 
                 text = _extract_stream_text(part)
                 delta = _delta_text(text, emitted)
                 if delta:
-                    saw_token = True
                     emitted += delta
-                    yield _stream_data(_chunk(delta, model))
+                    visible_delta = content_scrubber.feed(delta) if content_scrubber else delta
+                    if visible_delta:
+                        saw_token = True
+                        yield _stream_data(_chunk(visible_delta, model))
     except TimeoutError as exc:
         yield _stream_data(_chunk(_clean_error_message(exc), model))
         yield _stream_data(_chunk("", model, finish_reason="stop"))
@@ -785,7 +872,18 @@ async def _stream_chat_events(
         except Exception as exc:
             content = _clean_error_message(exc)
         if content:
-            yield _stream_data(_chunk(content, model))
+            visible = _visible_content(content)
+            if visible:
+                yield _stream_data(_chunk(visible, model))
+
+    if reasoning_scrubber:
+        reasoning_tail = reasoning_scrubber.flush()
+        if reasoning_tail:
+            yield _stream_data(_chunk("", model, reasoning_content=reasoning_tail))
+    if content_scrubber:
+        content_tail = content_scrubber.flush()
+        if content_tail:
+            yield _stream_data(_chunk(content_tail, model))
 
     yield _stream_data(_chunk("", model, finish_reason="stop"))
     yield "data: [DONE]\n\n"
@@ -858,6 +956,12 @@ def _responses_content_to_text(content: Any) -> str:
     return str(content or "")
 
 
+def _visible_content(content: str) -> str:
+    if not BRIDGE_SCRUB_INTERNAL_CONTEXT:
+        return content
+    return sanitize_internal_context(content)
+
+
 def _responses_input_to_messages(body: dict[str, Any]) -> list[dict[str, Any]]:
     raw_input = body.get("input")
     if isinstance(raw_input, str):
@@ -884,6 +988,7 @@ def _responses_input_to_messages(body: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _response_object(content: str, model: str, response_id: str | None = None) -> dict[str, Any]:
+    content = _visible_content(content)
     response_id = response_id or f"resp_{uuid.uuid4().hex}"
     message_id = f"msg_{uuid.uuid4().hex}"
     return {
@@ -1200,7 +1305,7 @@ async def langgraph_tool_run(request: Request):
 
     return JSONResponse(
         {
-            "result": content,
+            "result": _visible_content(content),
             "thread_id": thread_id,
             "thread_key": f"hermes-tool:{thread_key}",
             "next_action": "Return this result to the user. Do not recursively call Hermes or LangGraph.",

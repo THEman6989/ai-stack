@@ -166,6 +166,18 @@ messages into LangGraph instead of re-sending the whole LibreChat history every
 turn. This keeps LangGraph compression useful and avoids old messages being
 reintroduced forever.
 
+The bridge also owns first-pass context hygiene:
+
+- `BRIDGE_SCRUB_INTERNAL_CONTEXT=true` removes internal blocks such as
+  `<memory-context>...</memory-context>` from visible OpenAI/LibreChat output,
+  including streamed chunks where the tag can be split across deltas.
+- `BRIDGE_ENABLE_CONTEXT_REFERENCES=true` lets explicit user references such as
+  `@file:...`, `@folder:...`, `@diff`, `@staged`, `@git:3`, and `@url:...` be
+  expanded into bounded context blocks before LangGraph planning.
+- Context references resolve under the AI-stack repo root by default and refuse
+  sensitive credential/config paths. Warnings and injected-token estimates are
+  copied into `run_profile` as `bridge_context_references`.
+
 ## Agent Graph
 
 The main graph lives in `langgraph-app/agent_graph.py`.

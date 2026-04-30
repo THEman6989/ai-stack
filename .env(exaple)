@@ -429,6 +429,36 @@ BRIDGE_PREFERRED_API_MODE=responses
 BRIDGE_ALLOW_RAW_MEDIA_CONTEXT=false
 BRIDGE_MEDIA_CONTEXT_MODE=metadata
 
+# Bridge-side internal context hygiene.
+# BRIDGE_SCRUB_INTERNAL_CONTEXT=true strips internal blocks such as
+# <memory-context>...</memory-context> from visible LibreChat/OpenAI output,
+# including streamed chunks where the tag can be split across deltas.
+# Allowed values: true, false
+BRIDGE_SCRUB_INTERNAL_CONTEXT=true
+
+# Explicit @ context references in user messages.
+# When enabled, the bridge can expand bounded references before LangGraph sees
+# the message:
+#   @file:path/to/file.py:10-40
+#   @folder:path/to/folder
+#   @diff
+#   @staged
+#   @git:3
+#   @url:https://example.com/page
+#
+# Files are resolved inside BRIDGE_CONTEXT_REFERENCE_WORKSPACE_ROOT. Sensitive
+# config/credential paths such as .env, .ssh, .aws, .kube, .docker are refused.
+# URL fetching is explicit-user-message only and can be disabled separately.
+BRIDGE_ENABLE_CONTEXT_REFERENCES=true
+BRIDGE_CONTEXT_REFERENCES_FETCH_URLS=true
+BRIDGE_CONTEXT_REFERENCE_WORKSPACE_ROOT=
+BRIDGE_CONTEXT_REFERENCE_CWD=
+BRIDGE_CONTEXT_REFERENCE_CONTEXT_LENGTH=128000
+BRIDGE_CONTEXT_REFERENCE_SOFT_RATIO=0.25
+BRIDGE_CONTEXT_REFERENCE_HARD_RATIO=0.50
+BRIDGE_CONTEXT_REFERENCE_MAX_URL_CHARS=12000
+BRIDGE_CONTEXT_REFERENCE_FOLDER_LIMIT=200
+
 # Bridge-level hard cutoff before the request is sent to LangGraph. Set 0 to
 # disable. If BRIDGE_HARD_INPUT_HTTP_ERROR=false, the bridge returns a visible
 # assistant message instead of an HTTP 413.

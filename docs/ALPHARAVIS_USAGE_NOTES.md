@@ -345,6 +345,52 @@ BRIDGE_REASONING_DELTA_FIELD=reasoning_content
 
 If LibreChat shows that reasoning as normal text, turn it back off.
 
+## Bridge Context Hygiene
+
+The bridge strips internal AlphaRavis context blocks from visible output by
+default:
+
+```text
+BRIDGE_SCRUB_INTERNAL_CONTEXT=true
+```
+
+This protects LibreChat streaming output even when an internal tag such as
+`<memory-context>` is split across multiple SSE deltas. The internal context can
+still exist inside LangGraph state and Studio debugging; it is just not emitted
+as normal assistant text.
+
+Explicit user references can be expanded before the message reaches LangGraph:
+
+```text
+BRIDGE_ENABLE_CONTEXT_REFERENCES=true
+BRIDGE_CONTEXT_REFERENCES_FETCH_URLS=true
+```
+
+Supported forms:
+
+```text
+@file:langgraph-app/agent_graph.py:10-40
+@folder:docs
+@diff
+@staged
+@git:3
+@url:https://example.com/page
+```
+
+Files are resolved under `BRIDGE_CONTEXT_REFERENCE_WORKSPACE_ROOT` or the
+AI-stack repo root by default. Sensitive credential/config paths such as `.env`,
+`.ssh`, `.aws`, `.kube`, and `.docker` are refused. Large references are bounded
+by:
+
+```text
+BRIDGE_CONTEXT_REFERENCE_SOFT_RATIO=0.25
+BRIDGE_CONTEXT_REFERENCE_HARD_RATIO=0.50
+BRIDGE_CONTEXT_REFERENCE_CONTEXT_LENGTH=128000
+```
+
+Reference warnings and injected-token estimates are recorded in the LangGraph
+`run_profile`.
+
 Hard request cutoffs:
 
 ```text

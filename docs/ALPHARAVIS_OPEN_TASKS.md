@@ -338,6 +338,31 @@ chunks so every step stays testable and can be disabled independently.
 
 ### Chunk 1: Context Hygiene First
 
+Status: implemented.
+
+Implemented files:
+
+```text
+langgraph-app/internal_context.py
+langgraph-app/context_references.py
+langgraph-app/bridge_server.py
+langgraph-app/agent_graph.py
+tests/test_context_hygiene.py
+```
+
+AlphaRavis-specific integration:
+
+- The scrubber is attached at the bridge output layer, so LibreChat receives
+  clean visible text while LangGraph Studio can still inspect internal state.
+- Context references are resolved relative to the AI-stack repo root by default,
+  not relative to an arbitrary process directory.
+- Reference metadata is passed into LangGraph state as
+  `bridge_context_references` and copied into `run_profile`.
+- Sensitive paths such as `.env`, `.ssh`, `.aws`, `.kube`, and `.docker` are
+  refused before file content is attached.
+- URL reference fetching is controlled independently by
+  `BRIDGE_CONTEXT_REFERENCES_FETCH_URLS`.
+
 Goal:
 
 - Prevent accidental context leaks into LibreChat.
@@ -604,6 +629,10 @@ High priority:
 
 1. Context reference preprocessor.
 
+   Status: implemented in Chunk 1. Future refinement can add richer URL
+   extraction or browser/VPN-backed fetching, but the safe bridge-side
+   preprocessor is wired.
+
    Reference:
 
    ```text
@@ -638,6 +667,9 @@ High priority:
    - Record reference warnings in `run_profile`.
 
 2. Streaming internal-context scrubber.
+
+   Status: implemented in Chunk 1 for bridge visible output and Responses
+   wrapper streams.
 
    Reference:
 

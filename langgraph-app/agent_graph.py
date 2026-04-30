@@ -181,6 +181,7 @@ class AlphaRavisState(MessagesState):
     hard_context_error: NotRequired[str]
     crisis_route: NotRequired[str]
     crisis_recovery_attempted: NotRequired[bool]
+    bridge_context_references: NotRequired[list[dict[str, Any]]]
     run_profile: NotRequired[dict[str, Any]]
     thread_id: NotRequired[str]
     thread_key: NotRequired[str]
@@ -3940,12 +3941,15 @@ def _fast_path_decision(state: AlphaRavisState) -> tuple[bool, str]:
 
 async def run_profile_start_node(state: AlphaRavisState) -> dict[str, Any]:
     messages = list(state.get("messages", []))
+    bridge_refs = [item for item in list(state.get("bridge_context_references") or []) if isinstance(item, dict)]
     return {
         "run_profile": {
             "started_at": time.time(),
             "latest_user_chars": len(_latest_user_query(messages)),
             "message_count": len(messages),
             "token_estimate": _estimate_tokens(messages),
+            "bridge_context_references": bridge_refs[:8],
+            "bridge_context_reference_count": sum(int(item.get("reference_count", 0)) for item in bridge_refs),
         }
     }
 
