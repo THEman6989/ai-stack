@@ -570,10 +570,13 @@ What happens:
    planner context, MemoryKernel context, skill hint, and latest handoff packet.
 2. It protects a recent tail by message count and token budget.
 3. The middle is summarized. Tool outputs are pruned into informative previews
-   before the summary call, and secrets are redacted.
+   before the summary call, repeated old tool outputs are deduplicated by hash,
+   tool-call JSON arguments are shortened without breaking JSON, and secrets are
+   redacted.
 4. Previous summaries are updated iteratively instead of starting from zero.
-5. A thread-specific raw archive record is stored with the removed original
-   messages.
+5. A thread-specific raw archive record is stored with the removed messages.
+   The archive keeps the original structure and useful content, but credential
+   values are redacted so secrets are not leaked into summaries or logs.
 6. The raw archive record is queued/indexed in pgvector when vector memory is
    enabled.
 7. The active LangGraph message list is replaced by:
@@ -586,6 +589,55 @@ What happens:
 The compaction summary is reference-only. It explicitly tells the next agent
 that previous turns are already handled and that it should answer only the latest
 user request.
+
+The current compressor borrows mature single-agent ideas from Hermes but does
+not import Hermes at runtime. AlphaRavis keeps its own LangGraph-state design,
+raw archives, archive collections, MemoryKernel, skill context, and pgvector
+retrieval. The ported mechanisms are local helpers:
+
+- image-aware and tool-argument-aware token estimation, with real API usage
+  values preferred when model metadata contains them
+- JSON-safe tool-call-argument truncation
+- tool-output deduplication for the summary prompt only
+- tool-specific summaries for terminal, file, search, browser/web, and generic
+  tools
+- anti-thrashing based on `compression_stats.last_compression_savings_pct` and
+  `compression_stats.ineffective_compression_count`
+- summary failure cooldown with a visible fail-safe reference summary instead
+  of silent context loss
+- iterative summary updates that keep still-valid facts, remove obsolete points,
+  and move completed work into `Progress Done`
+
+Relevant additional settings:
+
+```text
+ALPHARAVIS_COMPRESSION_TOOL_ARGS_MAX_CHARS=1500
+ALPHARAVIS_COMPRESSION_TOOL_ARGS_HEAD_CHARS=1000
+ALPHARAVIS_COMPRESSION_TOOL_ARGS_TAIL_CHARS=300
+ALPHARAVIS_COMPRESSION_DEDUP_MIN_CHARS=200
+ALPHARAVIS_COMPRESSION_IMAGE_TOKEN_ESTIMATE=1600
+ALPHARAVIS_COMPRESSION_ANTI_THRASHING_ENABLED=true
+ALPHARAVIS_COMPRESSION_MIN_SAVINGS_RATIO=0.10
+ALPHARAVIS_COMPRESSION_FAILURE_COOLDOWN_SECONDS=600
+ALPHARAVIS_DEFAULT_CONTEXT_LENGTH=128000
+ALPHARAVIS_MODEL_CONTEXT_LENGTH=128000
+```
+
+`compression_stats` is stored in LangGraph state and currently contains:
+
+```text
+last_compression_savings_pct
+ineffective_compression_count
+summary_failure_cooldown_until
+last_summary_error
+last_summary_failed_at
+last_summary_fallback_used
+```
+
+This is the small AlphaRavis equivalent of Hermes' ContextEngine status. A full
+pluggable ContextEngine abstraction was not copied because LangGraph already
+uses explicit nodes (`handoff_context_guard` and `context_guard_after`), and a
+larger plugin layer would add complexity without improving the current graph.
 
 The active context does not receive all archive collections. It receives only a
 small policy note:
@@ -600,8 +652,8 @@ relying on old details.
 Before the swarm starts, AlphaRavis can run the same active compressor with the
 smaller `ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT`. If the active message window is
 already too large, the guard compresses the middle into a handoff summary,
-archives the exact original messages, and keeps the important coordination
-material active:
+archives the removed messages as redacted raw archive records, and keeps the
+important coordination material active:
 
 - current task brief
 - planner execution plan

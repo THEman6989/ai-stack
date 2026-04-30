@@ -150,6 +150,7 @@ from context_compressor import (
     build_summary_message_content,
     compress_messages,
     estimate_tokens_rough as _compressor_estimate_tokens,
+    redacted_message_to_json,
 )
 
 
@@ -178,6 +179,7 @@ class AlphaRavisState(MessagesState):
     archived_context_keys: NotRequired[list[str]]
     archive_collection_keys: NotRequired[list[str]]
     compressed_archive_keys: NotRequired[list[str]]
+    compression_stats: NotRequired[dict[str, Any]]
     memory_notice: NotRequired[str]
     memory_notice_key: NotRequired[str]
     memory_notice_seen_key: NotRequired[str]
@@ -3230,8 +3232,7 @@ def _message_to_json(message: Any) -> dict[str, Any]:
 
 
 def _estimate_tokens(messages: list[Any]) -> int:
-    text = "\n".join(_message_text(message) for message in messages)
-    return max(1, len(text) // 4)
+    return _compressor_estimate_tokens(messages)
 
 
 def _message_id(message: Any) -> str:
@@ -4299,7 +4300,8 @@ async def _store_compression_archive(
         "archive_kind": "active_context_compression",
         "compression_mode": mode,
         "message_count": len(result.middle),
-        "messages": [_message_to_json(message) for message in result.middle],
+        "messages": [redacted_message_to_json(message) for message in result.middle],
+        "messages_redacted": True,
         "thread_id": thread_id,
         "thread_key": thread_key,
         "covered_turn_range": {
@@ -4314,6 +4316,9 @@ async def _store_compression_archive(
             "source_type": "archive",
             "source_key": archive_key,
             "created_at": archived_at,
+            "summary_failed": result.summary_failed,
+            "summary_error": result.summary_error[:500],
+            "compression_stats": result.compression_stats,
         },
     }
     await _maybe_put(store, _thread_archive_ns(thread_id), archive_key, archive_record)
@@ -4380,6 +4385,7 @@ async def _run_hermes_style_compression(
         protected_message_ids=_compression_protected_message_ids(),
         summarize_fn=_compression_summary_from_prompt,
         force=force,
+        compression_stats=dict(state.get("compression_stats") or {}),
     )
     if result.skipped:
         return result, "", {}
@@ -4402,6 +4408,7 @@ async def _run_hermes_style_compression(
         "current_task_brief": current_task_brief,
         "handoff_packet": latest_packet,
         "handoff_packet_key": hashlib.sha256(latest_packet.encode("utf-8")).hexdigest()[:16] if latest_packet else "",
+        "compression_stats": result.compression_stats,
     }
     if mode == "handoff":
         updates["handoff_context_summary"] = result.summary
@@ -4484,6 +4491,18 @@ async def handoff_context_guard_node(state: AlphaRavisState, runtime: Any | None
     if result.skipped:
         if inject_messages:
             updates["messages"] = inject_messages
+        if result.reason in {"anti_thrashing", "summary_failure_cooldown"}:
+            notice = (
+                "Handoff Context Guard hat automatische Kompression pausiert "
+                f"({result.reason}). Der aktive Kontext bleibt unveraendert; "
+                "manuelle Kompression kann weiterhin erzwungen werden."
+            )
+            return {
+                **updates,
+                "memory_notice": notice,
+                "memory_notice_key": hashlib.sha256(notice.encode("utf-8")).hexdigest()[:16],
+                "run_profile": _profile_update(state, handoff_context_guard_skipped=result.reason),
+            }
         return updates
 
     hierarchy_notice = str(compression_updates.pop("archive_compression_notice", "") or "")
@@ -4493,6 +4512,11 @@ async def handoff_context_guard_node(state: AlphaRavisState, runtime: Any | None
         f"{token_limit} lagen. Task-Brief, Planner/Memory/Skill-Hints, "
         f"letztes Handoff-Paket und Tail bleiben aktiv; Rohdaten liegen im Archiv `{archive_key}`."
     )
+    if result.summary_failed:
+        notice += (
+            " Hinweis: Das Summary-Modell ist fehlgeschlagen; AlphaRavis hat einen "
+            "fail-safe Reference-Only-Fallback gespeichert und die Raw Archives trotzdem angelegt."
+        )
     if hierarchy_notice:
         notice += f" {hierarchy_notice}"
     return {
@@ -5010,11 +5034,28 @@ async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None)
         }
 
     if result.skipped:
+        if result.reason in {"anti_thrashing", "summary_failure_cooldown"}:
+            notice_key = hashlib.sha256(
+                f"compression-skipped:{result.reason}:{_latest_user_query(messages)}:{len(messages)}".encode("utf-8")
+            ).hexdigest()[:16]
+            return {
+                "compression_stats": result.compression_stats,
+                "memory_notice": (
+                    "Automatische Kompression wurde pausiert "
+                    f"({result.reason}). Das verhindert endloses Re-Komprimieren, "
+                    "wenn die letzten Kompressionen kaum Kontext gespart haben oder "
+                    "das Summary-Modell gerade im Cooldown ist. Mit `komprimiere jetzt` "
+                    "kannst du sie manuell erzwingen."
+                ),
+                "memory_notice_key": notice_key,
+                "run_profile": _profile_update(state, post_run_compression_skipped=result.reason),
+            }
         if force_compression:
             notice_key = hashlib.sha256(
                 f"compression-skipped:{result.reason}:{_latest_user_query(messages)}:{len(messages)}".encode("utf-8")
             ).hexdigest()[:16]
             return {
+                "compression_stats": result.compression_stats,
                 "memory_notice": (
                     "Manuelle Kompression wurde angefragt, aber der gemeinsame "
                     f"Hermes-style Compressor hat nichts Sinnvolles zum Archivieren gefunden ({result.reason})."
@@ -5036,6 +5077,11 @@ async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None)
         memory_notice += " Es war kein LangGraph Store verfuegbar, daher existiert nur die Summary im Thread."
     if hierarchy_notice:
         memory_notice += f" {hierarchy_notice}"
+    if result.summary_failed:
+        memory_notice += (
+            " Hinweis: Das Summary-Modell ist fehlgeschlagen; AlphaRavis hat einen "
+            "sichtbaren fail-safe Fallback geschrieben und die Raw Archives trotzdem gespeichert."
+        )
 
     return {
         **compression_updates,

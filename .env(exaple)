@@ -347,6 +347,14 @@ ALPHARAVIS_OLLAMA_EMBED_FALLBACK_MODEL=bge-m3
 # estimate, AlphaRavis refuses the run before invoking the model.
 ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT=128000
 
+# Optional model/context-length hints used by the compressor's budget estimator.
+# The estimator prefers real usage metadata from model responses when present,
+# then falls back to model-aware rough estimates. You can override a single
+# model with ALPHARAVIS_CONTEXT_LENGTH_<SANITIZED_MODEL_NAME>, for example:
+#   ALPHARAVIS_CONTEXT_LENGTH_BIG_BOSS=128000
+ALPHARAVIS_DEFAULT_CONTEXT_LENGTH=128000
+ALPHARAVIS_MODEL_CONTEXT_LENGTH=128000
+
 
 # =====================================================================
 # OPTIONAL BRIDGE SETTINGS - LIBRECHAT <-> LANGGRAPH
@@ -489,8 +497,33 @@ ALPHARAVIS_SUMMARY_TIMEOUT_SECONDS=60
 ALPHARAVIS_COMPRESSION_TOOL_OUTPUT_MAX_CHARS=6000
 ALPHARAVIS_COMPRESSION_TOOL_OUTPUT_HEAD_CHARS=4000
 ALPHARAVIS_COMPRESSION_TOOL_OUTPUT_TAIL_CHARS=1500
+
+# JSON-safe tool-call argument truncation. Long string values inside JSON
+# arguments are shortened recursively and then serialized back to valid JSON.
+ALPHARAVIS_COMPRESSION_TOOL_ARGS_MAX_CHARS=1500
+ALPHARAVIS_COMPRESSION_TOOL_ARGS_HEAD_CHARS=1000
+ALPHARAVIS_COMPRESSION_TOOL_ARGS_TAIL_CHARS=300
+
+# Repeated old tool outputs are deduplicated for the summary prompt only. Raw
+# archive records still keep redacted original messages.
+ALPHARAVIS_COMPRESSION_DEDUP_MIN_CHARS=200
+
+# Multimodal budget estimate for one image/input_image block when no real model
+# usage metadata is available.
+ALPHARAVIS_COMPRESSION_IMAGE_TOKEN_ESTIMATE=1600
+
+# Secret redaction protects summaries, archive text, and archived message JSON.
 ALPHARAVIS_COMPRESSION_REDACT_SECRETS=true
-ALPHARAVIS_COMPRESSION_ANTI_THRASHING=true
+
+# Anti-thrashing: if two automatic compressions in a row save less than the
+# minimum ratio, automatic compression pauses. Manual/forced compression still
+# works. Stats live in LangGraph state as compression_stats.
+ALPHARAVIS_COMPRESSION_ANTI_THRASHING_ENABLED=true
+ALPHARAVIS_COMPRESSION_MIN_SAVINGS_RATIO=0.10
+
+# If the summary model fails, AlphaRavis writes a visible fail-safe summary,
+# stores archives when possible, and avoids repeatedly retrying until cooldown.
+ALPHARAVIS_COMPRESSION_FAILURE_COOLDOWN_SECONDS=600
 
 # Enables second-tier compression for old archive blocks.
 # Allowed values: true, false
