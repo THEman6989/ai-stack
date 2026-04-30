@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 
+from error_classifier import AlphaRavisAPIError, classify_api_error
+
 
 @dataclass(frozen=True)
 class ResponsesResult:
@@ -207,11 +209,27 @@ async def invoke_responses(
 
     timeout = timeout_seconds or float(os.getenv("ALPHARAVIS_LLM_TIMEOUT_SECONDS", "120"))
     started = time.perf_counter()
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(f"{_responses_base_url()}/responses", headers=headers, json=payload)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(f"{_responses_base_url()}/responses", headers=headers, json=payload)
+    except Exception as exc:
+        raise AlphaRavisAPIError(
+            classify_api_error(exc, provider="responses", model=str(payload["model"])),
+            original=exc,
+        ) from exc
     if response.status_code >= 400:
-        raise RuntimeError(f"Responses API HTTP {response.status_code}: {response.text[:800]}")
-    data = response.json()
+        exc = RuntimeError(f"Responses API HTTP {response.status_code}: {response.text[:800]}")
+        raise AlphaRavisAPIError(
+            classify_api_error(exc, provider="responses", model=str(payload["model"])),
+            original=exc,
+        ) from exc
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise AlphaRavisAPIError(
+            classify_api_error(exc, provider="responses", model=str(payload["model"])),
+            original=exc,
+        ) from exc
     content = _extract_output_text(data)
     return ResponsesResult(
         content=content,

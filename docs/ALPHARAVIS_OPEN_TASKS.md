@@ -395,6 +395,31 @@ Acceptance:
 
 ### Chunk 2: Error Router And Recovery Decisions
 
+Status: implemented as compact AlphaRavis-local classifier.
+
+Implemented files:
+
+```text
+langgraph-app/error_classifier.py
+langgraph-app/responses_client.py
+langgraph-app/bridge_server.py
+langgraph-app/agent_graph.py
+tests/test_error_classifier.py
+```
+
+AlphaRavis-specific integration:
+
+- Responses direct calls now raise `AlphaRavisAPIError` with a structured
+  classification instead of plain `RuntimeError` for HTTP/transport failures.
+- The bridge formats visible errors by class, for example `context_overflow`,
+  `timeout`, `server_error`, `overloaded`, `rate_limit`, and `format_error`.
+- When activity events are enabled, the bridge can emit a short classified
+  error status event before the visible error message.
+- Planner, fast-path fallback, crisis preflight, and crisis-manager failures
+  record classification metadata in `run_profile`.
+- The classifier is intentionally compact; it does not import Hermes or bring in
+  cloud-provider billing/credential rotation behavior.
+
 Goal:
 
 - Stop treating every backend issue as the same failure.
@@ -697,6 +722,8 @@ High priority:
      but scrub it from normal assistant text unless explicitly requested.
 
 3. API error classification router.
+
+   Status: implemented in Chunk 2 as `langgraph-app/error_classifier.py`.
 
    Reference:
 

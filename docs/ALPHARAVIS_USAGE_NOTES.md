@@ -345,6 +345,42 @@ BRIDGE_REASONING_DELTA_FIELD=reasoning_content
 
 If LibreChat shows that reasoning as normal text, turn it back off.
 
+## Error Classification
+
+AlphaRavis classifies backend/API failures before showing them to LibreChat or
+recording them in `run_profile`:
+
+```text
+ALPHARAVIS_ENABLE_ERROR_CLASSIFIER=true
+BRIDGE_SHOW_ERROR_CLASSIFICATION=true
+```
+
+The classifier labels failures as:
+
+```text
+context_overflow
+payload_too_large
+timeout
+server_error
+overloaded
+rate_limit
+format_error
+auth
+model_not_found
+unknown
+```
+
+It does not execute dangerous recovery actions by itself. It only tells the
+bridge and graph which recovery path is appropriate: compress active context,
+retry/back off, strip unsupported parameters or fall back, surface an auth/model
+configuration error, or hand the situation to the Crisis Manager when advanced
+model management is enabled.
+
+Planner errors, fast-path primary-model fallback, crisis preflight failures, and
+crisis-manager failures store this classification metadata in `run_profile`.
+When bridge activity events are enabled, LibreChat can also receive a short
+status line such as `Fehler klassifiziert: timeout; Aktion: crisis_recovery.`
+
 ## Bridge Context Hygiene
 
 The bridge strips internal AlphaRavis context blocks from visible output by

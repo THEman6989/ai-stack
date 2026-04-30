@@ -154,6 +154,14 @@ except Exception as exc:  # pragma: no cover - optional local module/deps
 else:
     RESPONSES_CLIENT_IMPORT_ERROR = None
 
+try:
+    from error_classifier import classify_api_error as _classify_api_error
+except Exception as exc:  # pragma: no cover - optional local helper
+    _classify_api_error = None
+    ERROR_CLASSIFIER_IMPORT_ERROR: Exception | None = exc
+else:
+    ERROR_CLASSIFIER_IMPORT_ERROR = None
+
 from context_compressor import (
     CompressionResult,
     build_archive_policy_message,
@@ -460,6 +468,28 @@ def _available_agent_names() -> str:
     return ", ".join(agents)
 
 
+def _classified_error_profile(
+    exc: Exception,
+    *,
+    provider: str = "langgraph",
+    model: str = "",
+    approx_tokens: int = 0,
+    context_length: int = 0,
+    num_messages: int = 0,
+) -> dict[str, Any]:
+    if _classify_api_error is None:
+        return {"reason": "unclassified", "message": str(exc)[:500]}
+    classified = _classify_api_error(
+        exc,
+        provider=provider,
+        model=model,
+        approx_tokens=approx_tokens,
+        context_length=context_length,
+        num_messages=num_messages,
+    )
+    return classified.to_profile()
+
+
 _PERSISTENT_CONTEXT_THREAT_PATTERNS = [
     (r"ignore\s+(previous|all|above|prior)\s+instructions", "prompt_injection"),
     (r"system\s+prompt\s+override", "system_override"),
@@ -663,7 +693,19 @@ async def _ainvoke_direct_model(
         except Exception as exc:
             if _env_bool("ALPHARAVIS_RESPONSES_REQUIRE_NATIVE", "false"):
                 raise
-            print(f"WARNING: Responses API direct call failed for {purpose}, falling back to ChatLiteLLM: {exc}")
+            classified = _classified_error_profile(
+                exc,
+                provider="responses",
+                model=model_name or os.getenv("ALPHARAVIS_RESPONSES_MODEL", ""),
+                approx_tokens=_estimate_tokens(messages),
+                context_length=_hard_context_token_limit(),
+                num_messages=len(messages),
+            )
+            print(
+                "WARNING: Responses API direct call failed for "
+                f"{purpose} ({classified.get('reason')}/{classified.get('action')}), "
+                f"falling back to ChatLiteLLM: {exc}"
+            )
     elif RESPONSES_CLIENT_IMPORT_ERROR and os.getenv("ALPHARAVIS_LLM_API_MODE", "").lower() in {"responses", "response"}:
         print(f"WARNING: Responses client unavailable: {RESPONSES_CLIENT_IMPORT_ERROR}")
 
@@ -4033,7 +4075,15 @@ async def crisis_preflight_node(state: AlphaRavisState) -> dict[str, Any]:
     except Exception as exc:
         return {
             "crisis_route": "normal",
-            "run_profile": _profile_update(state, crisis_preflight_error=str(exc)[:300]),
+            "run_profile": _profile_update(
+                state,
+                crisis_preflight_error=str(exc)[:300],
+                crisis_preflight_error_classification=_classified_error_profile(
+                    exc,
+                    provider="crisis_preflight",
+                    model=os.getenv("ALPHARAVIS_MODEL", "openai/big-boss"),
+                ),
+            ),
         }
 
     if status.get("ok"):
@@ -4161,9 +4211,21 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
             )
         ).strip()
     except Exception as exc:
+        classified = _classified_error_profile(
+            exc,
+            provider="planner",
+            model=os.getenv("ALPHARAVIS_RESPONSES_MODEL", os.getenv("ALPHARAVIS_MODEL", "")),
+            approx_tokens=_estimate_tokens([SystemMessage(content=prompt)]),
+            context_length=_hard_context_token_limit(),
+            num_messages=1,
+        )
         return {
             "planner_last_key": plan_key,
-            "run_profile": _profile_update(state, planner_error=str(exc)[:300]),
+            "run_profile": _profile_update(
+                state,
+                planner_error=str(exc)[:300],
+                planner_error_classification=classified,
+            ),
         }
 
     if not plan:
@@ -4225,6 +4287,7 @@ async def fast_chat_node(state: AlphaRavisState) -> dict[str, Any]:
     used_model = primary_model
     fallback_used = False
     fallback_error = ""
+    fallback_error_classification: dict[str, Any] = {}
 
     try:
         response = await _ainvoke_direct_model(
@@ -4236,6 +4299,14 @@ async def fast_chat_node(state: AlphaRavisState) -> dict[str, Any]:
         )
     except Exception as exc:
         fallback_error = str(exc)
+        fallback_error_classification = _classified_error_profile(
+            exc,
+            provider="fast_path_primary",
+            model=primary_model,
+            approx_tokens=_estimate_tokens([prompt, *messages]),
+            context_length=_hard_context_token_limit(),
+            num_messages=len(messages) + 1,
+        )
         fallback_model = os.getenv("ALPHARAVIS_FAST_PATH_FALLBACK_MODEL", "openai/edge-gemma")
         if not _env_bool("ALPHARAVIS_FAST_PATH_ENABLE_FALLBACK", "true") or not fallback_model:
             raise
@@ -4285,6 +4356,7 @@ async def fast_chat_node(state: AlphaRavisState) -> dict[str, Any]:
     }
     if fallback_error:
         profile_updates["fast_path_primary_error"] = fallback_error[:300]
+        profile_updates["fast_path_primary_error_classification"] = fallback_error_classification
 
     return {
         "messages": [response],
@@ -5902,12 +5974,23 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             final_message = messages[-1] if messages else AIMessage(content="Crisis manager returned no result.")
         except Exception as exc:
             final_message = AIMessage(content=f"Crisis manager failed: {exc}")
+            crisis_error_classification = _classified_error_profile(
+                exc,
+                provider="crisis_manager",
+                model=os.getenv("ALPHARAVIS_CRISIS_MANAGER_MODEL", "openai/edge-gemma"),
+            )
+        else:
+            crisis_error_classification = {}
 
         return {
             "messages": [final_message],
             "crisis_route": "normal",
             "crisis_recovery_attempted": True,
-            "run_profile": _profile_update(state, crisis_manager_used=True),
+            "run_profile": _profile_update(
+                state,
+                crisis_manager_used=True,
+                **({"crisis_manager_error_classification": crisis_error_classification} if crisis_error_classification else {}),
+            ),
         }
 
     builder = StateGraph(AlphaRavisState)

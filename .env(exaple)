@@ -475,6 +475,15 @@ BRIDGE_LLM_HEALTH_FALLBACK_MODEL=edge-gemma
 BRIDGE_LLM_HEALTH_TIMEOUT_SECONDS=10
 BRIDGE_LLM_HEALTH_PROMPT=Antworte nur mit OK.
 
+# Error classification / recovery hints.
+# The classifier does not execute recovery by itself. It labels backend failures
+# so the bridge, run_profile, and future crisis-manager routing can distinguish:
+# context_overflow, timeout, server_error, overloaded, rate_limit, format_error,
+# auth, model_not_found, payload_too_large.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_ERROR_CLASSIFIER=true
+BRIDGE_SHOW_ERROR_CLASSIFICATION=true
+
 # Optional Hermes -> LangGraph tool endpoint exposed by api-bridge.
 # Endpoint: POST /tools/langgraph/run
 # It is disabled by default and also requires explicit_user_request=true in the

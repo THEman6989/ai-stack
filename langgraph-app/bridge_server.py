@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from langgraph_sdk import get_client
 
 from context_references import preprocess_context_references
+from error_classifier import classify_api_error, format_user_error
 from internal_context import StreamingInternalContextScrubber, sanitize_internal_context
 
 
@@ -77,6 +78,12 @@ BRIDGE_ENABLE_LANGGRAPH_TOOL = os.getenv("BRIDGE_ENABLE_LANGGRAPH_TOOL", "false"
 }
 BRIDGE_LANGGRAPH_TOOL_API_KEY = os.getenv("BRIDGE_LANGGRAPH_TOOL_API_KEY", "")
 BRIDGE_LANGGRAPH_TOOL_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_LANGGRAPH_TOOL_TIMEOUT_SECONDS", "120"))
+BRIDGE_SHOW_ERROR_CLASSIFICATION = os.getenv("BRIDGE_SHOW_ERROR_CLASSIFICATION", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 BRIDGE_SCRUB_INTERNAL_CONTEXT = os.getenv("BRIDGE_SCRUB_INTERNAL_CONTEXT", "true").lower() in {
     "1",
     "true",
@@ -523,19 +530,12 @@ def _openai_stream_response(content: str, model: str) -> list[str]:
 
 
 def _clean_error_message(exc: Exception) -> str:
-    if isinstance(exc, TimeoutError):
-        return (
-            "AlphaRavis ist erreichbar, aber der LangGraph-Run hat das Bridge-Timeout erreicht. "
-            "Sehr wahrscheinlich antwortet das konfigurierte LLM-Backend gerade nicht."
-        )
+    return format_user_error(exc, component="AlphaRavis Bridge")
 
-    text = str(exc).strip() or exc.__class__.__name__
-    if "Cannot connect to host" in text or "APIConnectionError" in text:
-        return (
-            "AlphaRavis ist erreichbar, aber das konfigurierte LLM-Backend ist gerade nicht erreichbar. "
-            "Pruefe LiteLLM und den in `litellm-config/config.yaml` eingetragenen Modellserver."
-        )
-    return f"AlphaRavis konnte den LangGraph-Run nicht abschliessen: {text}"
+
+def _error_activity_text(exc: Exception) -> str:
+    classified = classify_api_error(exc, provider="bridge", model=OPENAI_MODEL_NAME)
+    return f"Fehler klassifiziert: {classified.reason.value}; Aktion: {classified.action}."
 
 
 def _require_langgraph_tool_access(request: Request) -> None:
@@ -855,11 +855,15 @@ async def _stream_chat_events(
                         saw_token = True
                         yield _stream_data(_chunk(visible_delta, model))
     except TimeoutError as exc:
+        if BRIDGE_SHOW_ERROR_CLASSIFICATION and BRIDGE_SHOW_ACTIVITY_EVENTS and BRIDGE_ACTIVITY_DETAIL != "off":
+            yield _activity_chunk(_error_activity_text(exc), model)
         yield _stream_data(_chunk(_clean_error_message(exc), model))
         yield _stream_data(_chunk("", model, finish_reason="stop"))
         yield "data: [DONE]\n\n"
         return
     except Exception as exc:
+        if BRIDGE_SHOW_ERROR_CLASSIFICATION and BRIDGE_SHOW_ACTIVITY_EVENTS and BRIDGE_ACTIVITY_DETAIL != "off":
+            yield _activity_chunk(_error_activity_text(exc), model)
         yield _stream_data(_chunk(_clean_error_message(exc), model))
         yield _stream_data(_chunk("", model, finish_reason="stop"))
         yield "data: [DONE]\n\n"
