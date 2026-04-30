@@ -144,6 +144,14 @@ except Exception as exc:  # pragma: no cover - optional local module/deps
 else:
     RESPONSES_CLIENT_IMPORT_ERROR = None
 
+from context_compressor import (
+    CompressionResult,
+    build_archive_policy_message,
+    build_summary_message_content,
+    compress_messages,
+    estimate_tokens_rough as _compressor_estimate_tokens,
+)
+
 
 class AlphaRavisState(MessagesState):
     active_agent: NotRequired[str]
@@ -206,6 +214,8 @@ CURRENT_TASK_BRIEF_MESSAGE_ID = "alpharavis_current_task_brief"
 HANDOFF_CONTEXT_MESSAGE_ID = "alpharavis_handoff_context_summary"
 HANDOFF_PACKET_MESSAGE_ID = "alpharavis_handoff_packet"
 MEMORY_KERNEL_CONTEXT_MESSAGE_ID = "alpharavis_memory_kernel_context"
+CONTEXT_COMPACTION_MESSAGE_ID = "alpharavis_context_compaction_summary"
+ARCHIVE_POLICY_MESSAGE_ID = "alpharavis_archived_context_policy"
 CURATED_MEMORY_INDEX_NS = ("alpharavis", "curated_memory_index")
 SESSION_TURN_INDEX_NS = ("alpharavis", "session_turn_index")
 ARTIFACT_INDEX_NS = ("alpharavis", "artifact_index")
@@ -236,6 +246,15 @@ HANDOFF_POLICY_PROMPT = (
     "verification status, risks, and the exact next-agent instruction. Do not "
     "put long logs in the packet; store them as artifacts and cite the artifact key."
 )
+ARCHIVE_RETRIEVAL_POLICY_PROMPT = (
+    "Archived context policy: archived context is not automatically loaded into "
+    "the active prompt. If the user asks about earlier work, old debugging, "
+    "previous decisions, 'damals', 'vorhin', 'letztes Mal', or if a summary says "
+    "details are archived, use semantic_memory_search first. Archive collections "
+    "are tables of contents; inspect child_archive_keys and load only relevant "
+    "raw archives before relying on exact old details. Cross-thread retrieval "
+    "requires an explicit user request."
+)
 SPECIALIST_LOCAL_PLAN_PROMPT = (
     "Specialist planning policy: when you receive an execution plan or current "
     "task brief, first adapt it into your own short specialist plan before "
@@ -244,7 +263,7 @@ SPECIALIST_LOCAL_PLAN_PROMPT = (
     "is likely. Do not replace the planner's task contract; refine only the "
     "part your specialist role owns."
 )
-AGENT_POLICY_PROMPT = SPECIALIST_LOCAL_PLAN_PROMPT + " " + HANDOFF_POLICY_PROMPT
+AGENT_POLICY_PROMPT = SPECIALIST_LOCAL_PLAN_PROMPT + " " + HANDOFF_POLICY_PROMPT + " " + ARCHIVE_RETRIEVAL_POLICY_PROMPT
 FAST_PATH_DENY_PATTERNS = [
     "agent",
     "alpha ravis",
@@ -348,7 +367,16 @@ TOOL_REGISTRY_CATEGORIES = [
     {
         "category": "rag/memory",
         "description": "Search or record thread/global memories, archives, artifacts, skills, and pgvector chunks.",
-        "tools": ["semantic_memory_search", "search_agent_memory", "record_agent_memory", "search_curated_memory", "record_curated_memory"],
+        "tools": [
+            "semantic_memory_search",
+            "search_archived_context",
+            "read_archive_record",
+            "read_archive_collection",
+            "search_agent_memory",
+            "record_agent_memory",
+            "search_curated_memory",
+            "record_curated_memory",
+        ],
     },
     {
         "category": "system/docker",
@@ -1830,7 +1858,7 @@ async def search_curated_memory(query: str, agent_id: str = "", scope: str = "au
     return "\n\n".join(lines[:limit])
 
 
-def _normalize_rag_document_hit(item: Any) -> str | None:
+def _normalize_rag_document_hit(item: Any) -> dict[str, Any] | None:
     document = item
     score = None
     if isinstance(item, (list, tuple)) and item:
@@ -1854,15 +1882,18 @@ def _normalize_rag_document_hit(item: Any) -> str | None:
     chunk = page_content[:preview_chars].rstrip()
     if len(page_content) > preview_chars:
         chunk += "\n[RAG chunk preview truncated.]"
-    score_text = f", score {score}" if score is not None else ""
-    return (
-        f"external_document `{file_id}` ({filename}{score_text})\n"
-        f"Metadata: {json.dumps(metadata, ensure_ascii=False)[:1000]}\n"
-        f"Chunk:\n{chunk}"
-    )
+    return {
+        "source_type": "external_document",
+        "source_key": str(file_id),
+        "title": str(filename),
+        "score": score,
+        "preview_text": chunk,
+        "chunk_text": chunk,
+        "metadata": metadata,
+    }
 
 
-async def _rag_federated_search(query: str, limit: int) -> tuple[list[str], str]:
+async def _rag_federated_search(query: str, limit: int) -> tuple[list[dict[str, Any]], str]:
     rag_url = os.getenv("ALPHARAVIS_RAG_API_URL", "http://rag_api:8000").rstrip("/")
     timeout = float(os.getenv("ALPHARAVIS_RAG_FEDERATED_TIMEOUT_SECONDS", "20"))
     max_file_ids = int(os.getenv("ALPHARAVIS_RAG_FEDERATED_MAX_FILE_IDS", "200"))
@@ -1940,24 +1971,35 @@ async def semantic_memory_search(
 
     if not results and not rag_results:
         scope = "across threads" if include_other_threads else "in this thread plus global memory"
-        warnings = "\n".join(f"Warning: {warning}" for warning in [vector_warning, rag_warning] if warning)
-        return f"No semantic memory or document RAG matched `{query}` {scope}.\n{warnings}".strip()
+        return _json_tool_result(
+            {
+                "query": query,
+                "scope": scope,
+                "results": [],
+                "warnings": [warning for warning in [vector_warning, rag_warning] if warning],
+                "retrieval_policy": (
+                    "No matching semantic memory found. Do not invent archived details; ask for clarification "
+                    "or continue from active context."
+                ),
+            }
+        )
 
-    lines = [
-        "Semantic retrieval hits. AlphaRavis memory hits are full chunks/catalogs "
-        "built from original Mongo/store/artifact data; document hits come from the RAG index."
-    ]
-    if vector_warning:
-        lines.append(f"Warning: {vector_warning}")
-    if rag_warning:
-        lines.append(f"Warning: {rag_warning}")
-    if results:
-        lines.append("AlphaRavis pgvector memory:")
-        lines.extend(_format_vector_result(record) for record in results[:limit])
-    if rag_results:
-        lines.append("External document RAG:")
-        lines.extend(rag_results[:limit])
-    return "\n\n".join(lines)
+    memory_hits = [_vector_result_to_tool_hit(record) for record in results[:limit]]
+    document_hits = rag_results[:limit]
+    return _json_tool_result(
+        {
+            "query": query,
+            "include_other_threads": include_other_threads,
+            "source_type_filter": source_type,
+            "retrieval_policy": (
+                "AlphaRavis pgvector hits are searchable chunks/catalogs built from original Mongo/store/artifact data. "
+                "If source_type=archive_collection, inspect child_archive_keys and call read_archive_record for only the relevant raw archives. "
+                "external_document hits come from federated RAG and should be treated as document chunks with source_key pointing to the document/file."
+            ),
+            "results": [*memory_hits, *document_hits],
+            "warnings": [warning for warning in [vector_warning, rag_warning] if warning],
+        }
+    )
 
 
 @tool
@@ -2395,24 +2437,122 @@ async def search_archived_context(query: str, limit: int = 5, include_other_thre
 
     if not records:
         if include_other_threads:
-            return "No archived context matched that query across threads."
-        return "No archived context matched that query in the current chat thread."
+            return _json_tool_result({"query": query, "results": [], "scope": "cross_thread"})
+        return _json_tool_result({"query": query, "results": [], "scope": "current_thread"})
 
-    lines = []
+    structured = []
     for label, item in records[:limit]:
         key = _store_item_key(item)
         value = _store_item_value(item)
         if isinstance(value, dict):
             summary = value.get("summary") or value.get("content") or str(value)
-            token_estimate = value.get("token_estimate", "unknown")
-            source_thread = value.get("thread_key") or value.get("thread_id") or "unknown"
-            lines.append(
-                f"{label} `{key}` from `{source_thread}` ({token_estimate} tokens est.):\n{summary}"
+            metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+            child_archive_keys = value.get("child_archive_keys") or metadata.get("child_archive_keys") or []
+            structured.append(
+                {
+                    "label": label,
+                    "source_type": "archive_collection" if "collection" in label.lower() else "archive",
+                    "source_key": key,
+                    "title": value.get("title") or key,
+                    "thread_id": value.get("thread_id") or "",
+                    "thread_key": value.get("thread_key") or value.get("thread_id") or "",
+                    "token_estimate": value.get("token_estimate", "unknown"),
+                    "preview_text": str(summary)[: int(os.getenv("ALPHARAVIS_ARCHIVE_RESULT_PREVIEW_CHARS", "2000"))],
+                    "metadata": {**metadata, "child_archive_keys": child_archive_keys},
+                    "child_archive_keys": child_archive_keys,
+                }
             )
         else:
-            lines.append(f"{label} `{key}`:\n{value}")
+            structured.append({"label": label, "source_key": key, "preview_text": str(value)})
 
-    return "\n\n".join(lines)
+    return _json_tool_result(
+        {
+            "query": query,
+            "include_other_threads": include_other_threads,
+            "results": structured,
+            "retrieval_policy": (
+                "Archive collections are tables of contents. If a result has child_archive_keys, "
+                "load only the relevant raw archives with read_archive_record before relying on exact old details."
+            ),
+        }
+    )
+
+
+@tool
+async def read_archive_record(archive_key: str, thread_id: str = ""):
+    """Load one raw archive record by key. Defaults to the current chat thread."""
+
+    if get_store is None:
+        return "LangGraph store access is unavailable in this runtime."
+    try:
+        store = get_store()
+    except Exception as exc:
+        return f"No LangGraph store is attached to this run: {exc}"
+
+    archive_key = archive_key.strip()
+    if not archive_key:
+        return "archive_key is required."
+    thread_id = thread_id.strip() or _state_thread_id()
+    item = await _maybe_get(store, _thread_archive_ns(thread_id), archive_key)
+    value = _store_item_value(item)
+    if value is None:
+        index_item = await _maybe_get(store, ARCHIVE_INDEX_NS, archive_key)
+        value = _store_item_value(index_item)
+    if not isinstance(value, dict):
+        return _json_tool_result({"archive_key": archive_key, "thread_id": thread_id, "found": False})
+    return _json_tool_result(
+        {
+            "archive_key": archive_key,
+            "thread_id": value.get("thread_id") or thread_id,
+            "thread_key": value.get("thread_key") or value.get("thread_id") or thread_id,
+            "title": value.get("title") or archive_key,
+            "created_at": value.get("archived_at") or value.get("created_at"),
+            "summary": value.get("summary") or "",
+            "content": value.get("content") or "",
+            "messages": value.get("messages") or [],
+            "metadata": value.get("metadata") or {},
+        }
+    )
+
+
+@tool
+async def read_archive_collection(collection_key: str, thread_id: str = ""):
+    """Load one archive collection table of contents by key."""
+
+    if get_store is None:
+        return "LangGraph store access is unavailable in this runtime."
+    try:
+        store = get_store()
+    except Exception as exc:
+        return f"No LangGraph store is attached to this run: {exc}"
+
+    collection_key = collection_key.strip()
+    if not collection_key:
+        return "collection_key is required."
+    thread_id = thread_id.strip() or _state_thread_id()
+    item = await _maybe_get(store, _thread_archive_collection_ns(thread_id), collection_key)
+    value = _store_item_value(item)
+    if value is None:
+        index_item = await _maybe_get(store, ARCHIVE_COLLECTION_INDEX_NS, collection_key)
+        value = _store_item_value(index_item)
+    if not isinstance(value, dict):
+        return _json_tool_result({"collection_key": collection_key, "thread_id": thread_id, "found": False})
+    metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+    child_archive_keys = value.get("child_archive_keys") or metadata.get("child_archive_keys") or []
+    return _json_tool_result(
+        {
+            "collection_key": collection_key,
+            "thread_id": value.get("thread_id") or thread_id,
+            "thread_key": value.get("thread_key") or value.get("thread_id") or thread_id,
+            "title": value.get("title") or collection_key,
+            "created_at": value.get("compressed_at") or value.get("created_at"),
+            "summary": value.get("summary") or "",
+            "content": value.get("content") or value.get("summary") or "",
+            "child_archive_keys": child_archive_keys,
+            "metadata": {**metadata, "child_archive_keys": child_archive_keys},
+            "retrieval_policy": "Read only the relevant child raw archives with read_archive_record; do not load every child blindly.",
+        }
+    )
 
 
 @tool
@@ -3310,6 +3450,35 @@ def _format_vector_result(record: dict[str, Any]) -> str:
     ).strip()
 
 
+def _vector_result_to_tool_hit(record: dict[str, Any]) -> dict[str, Any]:
+    metadata = record.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {"raw_metadata": metadata}
+    preview = str(record.get("preview_text") or record.get("chunk_text") or record.get("content") or "")
+    preview_chars = int(os.getenv("ALPHARAVIS_PGVECTOR_RESULT_PREVIEW_CHARS", "900"))
+    if len(preview) > preview_chars:
+        preview = preview[:preview_chars].rstrip() + "\n[Vector result preview truncated.]"
+    similarity = record.get("similarity")
+    child_archive_keys = metadata.get("child_archive_keys") or record.get("child_archive_keys") or []
+    return {
+        "source_type": record.get("source_type", "memory"),
+        "source_key": record.get("source_key", "unknown"),
+        "title": record.get("title") or record.get("source_key") or "untitled",
+        "score": similarity,
+        "similarity": similarity,
+        "preview_text": preview,
+        "chunk_text": str(record.get("chunk_text") or record.get("content") or ""),
+        "thread_id": record.get("thread_id") or "",
+        "thread_key": record.get("thread_key") or record.get("thread_id") or "",
+        "chunk_index": record.get("chunk_index"),
+        "chunk_count": record.get("chunk_count"),
+        "is_catalog": bool(record.get("is_catalog")),
+        "embedding_model": record.get("embedding_model") or "",
+        "metadata": metadata,
+        "child_archive_keys": child_archive_keys,
+    }
+
+
 def _format_skill_record(key: str, value: dict[str, Any]) -> str:
     return "\n".join(
         [
@@ -4004,41 +4173,267 @@ async def fast_chat_node(state: AlphaRavisState) -> dict[str, Any]:
     }
 
 
-async def _summarize_messages(
-    llm: ChatLiteLLM,
-    messages: list[Any],
-    existing_summary: str | None,
-    precompress_context: str = "",
-) -> str:
-    history = "\n".join(_message_text(message) for message in messages)
-    previous = existing_summary or "No previous summary."
-    precompress = (
-        f"\n\nMemory-kernel notes to preserve:\n{precompress_context.strip()}"
-        if precompress_context.strip()
-        else ""
-    )
-    prompt = (
-        "Summarize this conversation history for future retrieval. Preserve "
-        "user preferences, unresolved tasks, exact technical facts, file paths, "
-        "commands, error messages, decisions, and pending approvals. Keep it "
-        "compact but specific.\n\n"
-        f"Previous summary:\n{previous}\n\n"
-        f"History to archive:\n{history}"
-        f"{precompress}"
-    )
-    return await _ainvoke_direct_text(
-        [SystemMessage(content=prompt)],
-        timeout_seconds=float(os.getenv("ALPHARAVIS_SUMMARY_TIMEOUT_SECONDS", "60")),
-        model_kwargs=_agent_thinking_bind_kwargs(),
-        purpose="active_context_summary",
-    )
-
-
 def _message_stable_key(message: Any) -> str:
     message_id = _message_id(message)
     if message_id:
         return f"id:{message_id}"
     return "hash:" + hashlib.sha256(_message_text(message).encode("utf-8")).hexdigest()[:24]
+
+
+def _compression_protected_message_ids() -> set[str]:
+    return {
+        CURRENT_TASK_BRIEF_MESSAGE_ID,
+        PLANNER_CONTEXT_MESSAGE_ID,
+        MEMORY_KERNEL_CONTEXT_MESSAGE_ID,
+        SKILL_CONTEXT_MESSAGE_ID,
+        HANDOFF_PACKET_MESSAGE_ID,
+    }
+
+
+def _drop_previous_compaction_messages(messages: list[Any]) -> list[Any]:
+    drop_ids = {
+        HANDOFF_CONTEXT_MESSAGE_ID,
+        CONTEXT_COMPACTION_MESSAGE_ID,
+        ARCHIVE_POLICY_MESSAGE_ID,
+    }
+    cleaned: list[Any] = []
+    for message in messages:
+        message_id = _message_id(message)
+        content = _message_content_text(message).strip()
+        if message_id in drop_ids:
+            continue
+        if content.startswith("<context-compaction-summary>"):
+            continue
+        if content.startswith("<handoff-context-summary>"):
+            continue
+        if content.startswith("Archived context policy:"):
+            continue
+        cleaned.append(message)
+    return cleaned
+
+
+def _join_existing_summaries(*summaries: Any) -> str:
+    parts = []
+    seen = set()
+    for summary in summaries:
+        text = str(summary or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        parts.append(text)
+    return "\n\n".join(parts)
+
+
+def _archive_record_title(mode: str, archive_key: str, summary: str) -> str:
+    for line in str(summary or "").splitlines():
+        cleaned = line.strip(" #-:\t")
+        if cleaned and cleaned.lower() not in {"active task", "goal"}:
+            return f"Archive: {cleaned[:120]}"
+    return f"Archive: {mode} {archive_key}"
+
+
+async def _compression_summary_from_prompt(prompt: str, max_tokens: int) -> str:
+    kwargs = _agent_thinking_bind_kwargs()
+    kwargs.update({"max_tokens": max_tokens, "temperature": 0})
+    return await _ainvoke_direct_text(
+        [SystemMessage(content=prompt)],
+        timeout_seconds=float(os.getenv("ALPHARAVIS_SUMMARY_TIMEOUT_SECONDS", "60")),
+        model_kwargs=kwargs,
+        purpose="context_compression",
+    )
+
+
+def _compression_summary_message(mode: str, result: CompressionResult, archive_key: str) -> SystemMessage:
+    message_id = HANDOFF_CONTEXT_MESSAGE_ID if mode == "handoff" else CONTEXT_COMPACTION_MESSAGE_ID
+    return SystemMessage(
+        content=build_summary_message_content(
+            mode=mode,
+            summary=result.summary,
+            archive_key=archive_key,
+            token_estimate_before=result.token_estimate_before,
+            token_estimate_after=result.token_estimate_after,
+        ),
+        id=message_id,
+    )
+
+
+def _archive_policy_message() -> SystemMessage:
+    return SystemMessage(content=build_archive_policy_message(), id=ARCHIVE_POLICY_MESSAGE_ID)
+
+
+def _dedupe_active_messages(messages: list[Any]) -> list[Any]:
+    deduped: list[Any] = []
+    seen: set[str] = set()
+    for message in messages:
+        key = _message_stable_key(message)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(message)
+    return deduped
+
+
+async def _store_compression_archive(
+    *,
+    store: Any | None,
+    result: CompressionResult,
+    mode: str,
+    thread_id: str,
+    thread_key: str,
+) -> tuple[str, dict[str, Any] | None]:
+    archive_key = hashlib.sha256(
+        f"{mode}:{time.time()}:{result.summary}:{len(result.middle)}".encode("utf-8")
+    ).hexdigest()[:24]
+    if store is None:
+        return archive_key, None
+
+    archived_at = int(time.time())
+    title = _archive_record_title(mode, archive_key, result.summary)
+    archive_record = {
+        "archive_key": archive_key,
+        "title": title,
+        "summary": result.summary,
+        "content": result.archive_content,
+        "token_estimate": _compressor_estimate_tokens(result.middle),
+        "archived_at": archived_at,
+        "archive_kind": "active_context_compression",
+        "compression_mode": mode,
+        "message_count": len(result.middle),
+        "messages": [_message_to_json(message) for message in result.middle],
+        "thread_id": thread_id,
+        "thread_key": thread_key,
+        "covered_turn_range": {
+            "middle_indexes": result.archive_metadata.get("middle_indexes", []),
+            "head_indexes": result.archive_metadata.get("head_indexes", []),
+            "tail_indexes": result.archive_metadata.get("tail_indexes", []),
+        },
+        "summary_key": f"{mode}:{archive_key}",
+        "metadata": {
+            **result.archive_metadata,
+            "archive_key": archive_key,
+            "source_type": "archive",
+            "source_key": archive_key,
+            "created_at": archived_at,
+        },
+    }
+    await _maybe_put(store, _thread_archive_ns(thread_id), archive_key, archive_record)
+    await _maybe_put(
+        store,
+        ARCHIVE_INDEX_NS,
+        archive_key,
+        {key: value for key, value in archive_record.items() if key != "messages"},
+    )
+    await _maybe_index_vector_memory(
+        source_type="archive",
+        source_key=archive_key,
+        title=title,
+        content=archive_record["content"],
+        thread_id=thread_id,
+        thread_key=thread_key,
+        scope="thread",
+        metadata=archive_record["metadata"],
+    )
+    return archive_key, archive_record
+
+
+async def _run_hermes_style_compression(
+    *,
+    state: AlphaRavisState,
+    runtime: Any | None,
+    mode: str,
+    token_limit: int,
+    force: bool = False,
+    inject_messages: list[Any] | None = None,
+) -> tuple[CompressionResult, str, dict[str, Any]]:
+    thread_id = _state_thread_id(state)
+    thread_key = _state_thread_key(state)
+    current_task_brief = _current_task_brief_from_state(state)
+    latest_packet = _latest_handoff_packet(list(state.get("messages", []))) or str(state.get("handoff_packet") or "")
+    raw_input_messages = [*list(state.get("messages", [])), *(inject_messages or [])]
+    existing_ids = {_message_id(message) for message in raw_input_messages}
+    if current_task_brief and CURRENT_TASK_BRIEF_MESSAGE_ID not in existing_ids:
+        raw_input_messages.append(SystemMessage(content=current_task_brief, id=CURRENT_TASK_BRIEF_MESSAGE_ID))
+    if latest_packet and HANDOFF_PACKET_MESSAGE_ID not in existing_ids:
+        raw_input_messages.append(
+            SystemMessage(content=f"<handoff-packet>\n{latest_packet}\n</handoff-packet>", id=HANDOFF_PACKET_MESSAGE_ID)
+        )
+    raw_messages = _drop_previous_compaction_messages(raw_input_messages)
+    previous_summary = _join_existing_summaries(
+        state.get("context_summary"),
+        state.get("handoff_context_summary"),
+    )
+    compression_memory_context = _join_existing_summaries(
+        state.get("memory_kernel_context"),
+        _memory_kernel_precompression_notes(raw_messages),
+    )
+    result = await compress_messages(
+        raw_messages,
+        mode=mode,
+        thread_id=thread_id,
+        thread_key=thread_key,
+        token_limit=token_limit,
+        previous_summary=previous_summary,
+        current_task_brief=current_task_brief,
+        latest_handoff_packet=latest_packet,
+        memory_kernel_context=compression_memory_context,
+        skill_context=str(state.get("active_skill_context") or ""),
+        protected_message_ids=_compression_protected_message_ids(),
+        summarize_fn=_compression_summary_from_prompt,
+        force=force,
+    )
+    if result.skipped:
+        return result, "", {}
+
+    store = getattr(runtime, "store", None) if runtime else None
+    archive_key, archive_record = await _store_compression_archive(
+        store=store,
+        result=result,
+        mode=mode,
+        thread_id=thread_id,
+        thread_key=thread_key,
+    )
+    summary_message = _compression_summary_message(mode, result, archive_key)
+    rebuilt_messages = [
+        RemoveMessage(id=REMOVE_ALL_MESSAGES),
+        *_dedupe_active_messages([*result.head, summary_message, _archive_policy_message(), *result.tail]),
+    ]
+    updates: dict[str, Any] = {
+        "messages": rebuilt_messages,
+        "current_task_brief": current_task_brief,
+        "handoff_packet": latest_packet,
+        "handoff_packet_key": hashlib.sha256(latest_packet.encode("utf-8")).hexdigest()[:16] if latest_packet else "",
+    }
+    if mode == "handoff":
+        updates["handoff_context_summary"] = result.summary
+    else:
+        updates["context_summary"] = result.summary
+
+    if archive_record is not None:
+        archived_keys = list(state.get("archived_context_keys", []))
+        archive_collection_keys = list(state.get("archive_collection_keys", []))
+        compressed_archive_keys = list(state.get("compressed_archive_keys", []))
+        archive_summary = state.get("archive_summary")
+        archived_keys.append(archive_key)
+        compact_update = await _maybe_compact_archives(
+            store,
+            thread_id,
+            thread_key,
+            archived_keys,
+            compressed_archive_keys,
+            archive_collection_keys,
+            archive_summary,
+        )
+        updates.update(
+            {
+                "archive_summary": compact_update.get("archive_summary", archive_summary),
+                "archived_context_keys": archived_keys,
+                "archive_collection_keys": compact_update.get("archive_collection_keys", archive_collection_keys),
+                "compressed_archive_keys": compact_update.get("compressed_archive_keys", compressed_archive_keys),
+            }
+        )
+        if compact_update.get("archive_compression_notice"):
+            updates["archive_compression_notice"] = compact_update["archive_compression_notice"]
+    return result, archive_key, updates
 
 
 async def handoff_context_guard_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
@@ -4059,48 +4454,20 @@ async def handoff_context_guard_node(state: AlphaRavisState, runtime: Any | None
         updates["handoff_packet"] = latest_packet
         updates["handoff_packet_key"] = packet_key
 
-    token_limit = int(os.getenv("ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT", "8500"))
-    token_estimate = _estimate_tokens([*messages, *inject_messages])
+    token_limit = int(os.getenv("ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT", "12000"))
+    token_estimate = _estimate_tokens(_drop_previous_compaction_messages([*messages, *inject_messages]))
     if token_estimate <= token_limit:
         if inject_messages:
             updates["messages"] = inject_messages
         return updates
 
-    keep_last = int(os.getenv("ALPHARAVIS_HANDOFF_CONTEXT_KEEP_LAST_MESSAGES", "16"))
-    keep_last = max(4, keep_last)
-    recent_messages = messages[-keep_last:]
-    protected_messages = _protected_context_messages([*messages, *inject_messages])
-    protected_keys = {_message_stable_key(message) for message in protected_messages}
-    recent_keys = {_message_stable_key(message) for message in recent_messages}
-    old_messages = [
-        message
-        for message in messages
-        if _message_stable_key(message) not in protected_keys and _message_stable_key(message) not in recent_keys
-    ]
-
-    if not old_messages:
-        if inject_messages:
-            updates["messages"] = inject_messages
-        return updates
-
-    precompress_context = "\n\n".join(
-        part
-        for part in [
-            f"Current task brief to preserve verbatim:\n{current_task_brief}" if current_task_brief else "",
-            f"Latest handoff packet to preserve verbatim:\n{latest_packet}" if latest_packet else "",
-            "This is a handoff-context budget summary before the swarm runs. "
-            "Preserve completed work, open tasks, verification status, tool/file facts, "
-            "pending approvals, exact errors, and which agent should continue.",
-        ]
-        if part
-    )
-
     try:
-        summary = await _summarize_messages(
-            _model(timeout_seconds=float(os.getenv("ALPHARAVIS_HANDOFF_SUMMARY_TIMEOUT_SECONDS", "45"))),
-            old_messages,
-            state.get("handoff_context_summary") or state.get("context_summary"),
-            precompress_context,
+        result, archive_key, compression_updates = await _run_hermes_style_compression(
+            state=state,
+            runtime=runtime,
+            mode="handoff",
+            token_limit=token_limit,
+            inject_messages=inject_messages,
         )
     except Exception as exc:
         warning = (
@@ -4114,104 +4481,30 @@ async def handoff_context_guard_node(state: AlphaRavisState, runtime: Any | None
             "run_profile": _profile_update(state, handoff_context_guard_error=str(exc)[:300]),
         }
 
-    summary = _truncate_text(summary, int(os.getenv("ALPHARAVIS_HANDOFF_SUMMARY_MAX_CHARS", "2600")))
-    thread_id = _state_thread_id(state)
-    thread_key = _state_thread_key(state)
-    archive_key = hashlib.sha256(
-        f"handoff:{time.time()}:{summary}:{len(old_messages)}".encode("utf-8")
-    ).hexdigest()[:24]
+    if result.skipped:
+        if inject_messages:
+            updates["messages"] = inject_messages
+        return updates
 
-    store = getattr(runtime, "store", None) if runtime else None
-    if store is not None:
-        archived_messages_text = "\n\n".join(_message_text(message) for message in old_messages)
-        archive_record = {
-            "summary": summary,
-            "content": (
-                f"Handoff context budget summary:\n{summary}\n\n"
-                f"Current task brief:\n{current_task_brief}\n\n"
-                f"Latest handoff packet:\n{latest_packet}\n\n"
-                f"Archived original messages:\n{archived_messages_text}"
-            ).strip(),
-            "token_estimate": _estimate_tokens(old_messages),
-            "archived_at": int(time.time()),
-            "archive_kind": "handoff_context_budget",
-            "messages": [_message_to_json(message) for message in old_messages],
-            "thread_id": thread_id,
-            "thread_key": thread_key,
-        }
-        await _maybe_put(store, _thread_archive_ns(thread_id), archive_key, archive_record)
-        await _maybe_put(
-            store,
-            ARCHIVE_INDEX_NS,
-            archive_key,
-            {key: value for key, value in archive_record.items() if key != "messages"},
-        )
-        await _maybe_index_vector_memory(
-            source_type="handoff_context_archive",
-            source_key=archive_key,
-            title=f"Handoff context archive {archive_key}",
-            content=archive_record["content"],
-            thread_id=thread_id,
-            thread_key=thread_key,
-            scope="thread",
-            metadata={
-                "token_estimate": archive_record["token_estimate"],
-                "archived_at": archive_record["archived_at"],
-                "archive_kind": "handoff_context_budget",
-            },
-        )
-
-    rebuilt_messages: list[Any] = [RemoveMessage(id=REMOVE_ALL_MESSAGES)]
-    seen: set[str] = set()
-    if current_task_brief:
-        rebuilt_messages.append(SystemMessage(content=current_task_brief, id=CURRENT_TASK_BRIEF_MESSAGE_ID))
-        seen.add(f"id:{CURRENT_TASK_BRIEF_MESSAGE_ID}")
-    rebuilt_messages.append(
-        SystemMessage(
-            content=(
-                "<handoff-context-summary>\n"
-                "The earlier beginning of this run was compressed before agent "
-                "handoff because the active context exceeded "
-                f"{token_limit} tokens. Exact source is archived"
-                f"{f' as `{archive_key}`' if store is not None else ''}.\n\n"
-                f"{summary}\n"
-                "</handoff-context-summary>"
-            ),
-            id=HANDOFF_CONTEXT_MESSAGE_ID,
-        )
-    )
-    seen.add(f"id:{HANDOFF_CONTEXT_MESSAGE_ID}")
-    if latest_packet:
-        rebuilt_messages.append(
-            SystemMessage(
-                content=f"<handoff-packet>\n{latest_packet}\n</handoff-packet>",
-                id=HANDOFF_PACKET_MESSAGE_ID,
-            )
-        )
-        seen.add(f"id:{HANDOFF_PACKET_MESSAGE_ID}")
-
-    for message in [*protected_messages, *recent_messages]:
-        key = _message_stable_key(message)
-        if key in seen:
-            continue
-        seen.add(key)
-        rebuilt_messages.append(message)
-
+    hierarchy_notice = str(compression_updates.pop("archive_compression_notice", "") or "")
     notice = (
-        f"Handoff Context Guard: Der Anfang dieses Runs wurde vor dem Swarm "
+        f"Handoff Context Guard: Der mittlere Kontext dieses Runs wurde vor dem Swarm "
         f"komprimiert, weil ca. {token_estimate} Tokens ueber dem Limit "
-        f"{token_limit} lagen. Task-Brief und letztes Handoff-Paket bleiben aktiv."
+        f"{token_limit} lagen. Task-Brief, Planner/Memory/Skill-Hints, "
+        f"letztes Handoff-Paket und Tail bleiben aktiv; Rohdaten liegen im Archiv `{archive_key}`."
     )
+    if hierarchy_notice:
+        notice += f" {hierarchy_notice}"
     return {
         **updates,
-        "messages": rebuilt_messages,
-        "handoff_context_summary": summary,
+        **compression_updates,
         "memory_notice": notice,
         "memory_notice_key": archive_key,
         "run_profile": _profile_update(
             state,
             handoff_context_guard_used=True,
-            handoff_context_tokens=token_estimate,
+            handoff_context_tokens=result.token_estimate_before,
+            handoff_context_tokens_after=result.token_estimate_after,
             handoff_context_archive_key=archive_key,
         ),
     }
@@ -4228,19 +4521,36 @@ async def _summarize_archive_records(
             "\n".join(
                 [
                     f"Archive key: {key}",
+                    f"Title: {value.get('title', '')}",
+                    f"Mode: {value.get('compression_mode', value.get('archive_kind', 'unknown'))}",
                     f"Token estimate: {value.get('token_estimate', 'unknown')}",
                     f"Summary: {value.get('summary', '')}",
+                    f"Content preview: {str(value.get('content', ''))[:3000]}",
                 ]
             )
             for key, value in records
         ]
     )
+    child_keys = [key for key, _ in records]
     prompt = (
-        "Create a higher-level memory summary from these conversation archives. "
-        "Preserve durable facts, user preferences, recurring tasks, unresolved "
-        "decisions, reusable workflow patterns, file paths, commands, errors, "
-        "and references to archive keys when exact raw history may be needed. "
-        "Keep this compact enough to retrieve later.\n\n"
+        "Create an AlphaRavis Archive Collection. This is a thread-scoped table of contents / router, "
+        "not active chat context and not a replacement for raw archive records. Raw archive records remain "
+        "the source of truth. The collection must help an LLM decide which child_archive_keys to load.\n\n"
+        "Return Markdown with this shape:\n"
+        "# Archive Collection: <short topic title>\n\n"
+        f"collection_key: pending\nthread_id: unknown\nthread_key: unknown\n\n"
+        "## Child Archive Keys\n"
+        + "\n".join(f"- {key}" for key in child_keys)
+        + "\n\n"
+        "## Covered Range\n- created_from:\n- created_until:\n- archive_count:\n- approximate_message_count:\n\n"
+        "## Main Topics\n-\n\n"
+        "## Important Files\n-\n\n"
+        "## Commands / Tools\n-\n\n"
+        "## Errors / Signals\n-\n\n"
+        "## Decisions\n-\n\n"
+        "## Open Tasks\n-\n\n"
+        "## Retrieval Keywords\n-\n\n"
+        "Keep child archive key references exact. Preserve file paths, commands, errors, decisions, open tasks, and retrieval keywords.\n\n"
         f"Previous archive summary:\n{previous}\n\n"
         f"Archives to compress:\n{archive_text}"
     )
@@ -4299,14 +4609,37 @@ async def _maybe_compact_archives(
     collection_key = hashlib.sha256(
         f"{time.time()}:{summary}:{','.join(compacted_keys)}".encode("utf-8")
     ).hexdigest()[:24]
+    collection_content = "\n".join(
+        [
+            summary.replace("collection_key: pending", f"collection_key: {collection_key}")
+            .replace("thread_id: unknown", f"thread_id: {thread_id}")
+            .replace("thread_key: unknown", f"thread_key: {thread_key}"),
+            "",
+            "## Raw Archive Source Keys",
+            *[f"- {key}" for key in compacted_keys],
+        ]
+    ).strip()
     collection_record = {
+        "collection_key": collection_key,
+        "title": f"Archive Collection: {collection_key}",
         "summary": summary,
+        "content": collection_content,
         "child_archive_keys": compacted_keys,
+        "archive_count": len(records_to_compact),
         "token_estimate": token_estimate,
         "record_count": len(records_to_compact),
         "compressed_at": int(time.time()),
         "thread_id": thread_id,
         "thread_key": thread_key,
+        "metadata": {
+            "source_type": "archive_collection",
+            "source_key": collection_key,
+            "collection_key": collection_key,
+            "child_archive_keys": compacted_keys,
+            "archive_count": len(records_to_compact),
+            "thread_id": thread_id,
+            "thread_key": thread_key,
+        },
     }
     await _maybe_put(store, _thread_archive_collection_ns(thread_id), collection_key, collection_record)
     await _maybe_put(store, ARCHIVE_COLLECTION_INDEX_NS, collection_key, collection_record)
@@ -4314,12 +4647,14 @@ async def _maybe_compact_archives(
         source_type="archive_collection",
         source_key=collection_key,
         title=f"Hierarchical archive collection {collection_key}",
-        content=summary,
+        content=collection_content,
         thread_id=thread_id,
         thread_key=thread_key,
         scope="thread",
         metadata={
             "child_archive_keys": compacted_keys,
+            "collection_key": collection_key,
+            "source_type": "archive_collection",
             "token_estimate": token_estimate,
             "record_count": len(records_to_compact),
             "compressed_at": collection_record["compressed_at"],
@@ -4632,8 +4967,8 @@ async def skill_library_node(state: AlphaRavisState, runtime: Any | None = None)
 
 async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
     messages = list(state.get("messages", []))
-    token_limit = int(os.getenv("ALPHARAVIS_ACTIVE_TOKEN_LIMIT", "10000"))
-    token_estimate = _estimate_tokens(messages)
+    token_limit = int(os.getenv("ALPHARAVIS_ACTIVE_TOKEN_LIMIT", "30000"))
+    token_estimate = _estimate_tokens(_drop_previous_compaction_messages(messages))
     force_compression = _compression_forced_by_user(messages)
 
     if not _env_bool("ALPHARAVIS_ENABLE_POST_RUN_COMPRESSION", "true") and not force_compression:
@@ -4655,137 +4990,64 @@ async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None)
     if token_estimate <= token_limit and not force_compression:
         return {}
 
-    keep_last = int(os.getenv("ALPHARAVIS_CONTEXT_KEEP_LAST_MESSAGES", "12"))
-    if len(messages) <= keep_last:
+    try:
+        result, archive_key, compression_updates = await _run_hermes_style_compression(
+            state=state,
+            runtime=runtime,
+            mode="post_run",
+            token_limit=token_limit,
+            force=force_compression,
+        )
+    except Exception as exc:
+        warning = (
+            "Post-run context compression failed cleanly. The full context remains active for now. "
+            f"Error: {exc}"
+        )
+        return {
+            "memory_notice": warning,
+            "memory_notice_key": hashlib.sha256(warning.encode("utf-8")).hexdigest()[:16],
+            "run_profile": _profile_update(state, post_run_compression_error=str(exc)[:300]),
+        }
+
+    if result.skipped:
         if force_compression:
             notice_key = hashlib.sha256(
-                f"compression-skipped-small:{_latest_user_query(messages)}:{len(messages)}".encode("utf-8")
+                f"compression-skipped:{result.reason}:{_latest_user_query(messages)}:{len(messages)}".encode("utf-8")
             ).hexdigest()[:16]
             return {
                 "memory_notice": (
-                    "Manuelle Kompression wurde angefragt, aber der aktive Verlauf "
-                    "ist noch zu kurz, um sinnvoll alte Nachrichten zu archivieren."
+                    "Manuelle Kompression wurde angefragt, aber der gemeinsame "
+                    f"Hermes-style Compressor hat nichts Sinnvolles zum Archivieren gefunden ({result.reason})."
                 ),
                 "memory_notice_key": notice_key,
             }
         return {}
 
-    old_messages = messages[:-keep_last]
-    recent_messages = messages[-keep_last:]
-    precompress_notes = _memory_kernel_precompression_notes(old_messages)
-    summary = await _summarize_messages(
-        _model(),
-        old_messages,
-        state.get("context_summary"),
-        precompress_notes,
-    )
-
-    archive_key = hashlib.sha256(
-        f"{time.time()}:{summary}:{len(old_messages)}".encode("utf-8")
-    ).hexdigest()[:24]
-
-    store = getattr(runtime, "store", None) if runtime else None
-    archived_keys = list(state.get("archived_context_keys", []))
-    archive_collection_keys = list(state.get("archive_collection_keys", []))
-    compressed_archive_keys = list(state.get("compressed_archive_keys", []))
-    archive_summary = state.get("archive_summary")
-    thread_id = _state_thread_id(state)
-    thread_key = _state_thread_key(state)
-    hierarchy_notice = ""
-    if store is not None:
-        archived_messages_text = "\n\n".join(_message_text(message) for message in old_messages)
-        archive_record = {
-            "summary": summary,
-            "content": (
-                f"Archive summary:\n{summary}\n\n"
-                f"Precompression notes:\n{precompress_notes}\n\n"
-                f"Archived original messages:\n{archived_messages_text}"
-            ).strip(),
-            "token_estimate": _estimate_tokens(old_messages),
-            "archived_at": int(time.time()),
-            "messages": [_message_to_json(message) for message in old_messages],
-            "thread_id": thread_id,
-            "thread_key": thread_key,
-        }
-        await _maybe_put(store, _thread_archive_ns(thread_id), archive_key, archive_record)
-        await _maybe_put(
-            store,
-            ARCHIVE_INDEX_NS,
-            archive_key,
-            {key: value for key, value in archive_record.items() if key != "messages"},
-        )
-        await _maybe_index_vector_memory(
-            source_type="archive",
-            source_key=archive_key,
-            title=f"Compressed chat archive {archive_key}",
-            content=archive_record["content"],
-            thread_id=thread_id,
-            thread_key=thread_key,
-            scope="thread",
-            metadata={
-                "token_estimate": archive_record["token_estimate"],
-                "archived_at": archive_record["archived_at"],
-            },
-        )
-        archived_keys.append(archive_key)
-        compact_update = await _maybe_compact_archives(
-            store,
-            thread_id,
-            thread_key,
-            archived_keys,
-            compressed_archive_keys,
-            archive_collection_keys,
-            archive_summary,
-        )
-        archive_summary = compact_update.get("archive_summary", archive_summary)
-        archive_collection_keys = compact_update.get("archive_collection_keys", archive_collection_keys)
-        compressed_archive_keys = compact_update.get("compressed_archive_keys", compressed_archive_keys)
-        hierarchy_notice = compact_update.get("archive_compression_notice", "")
-
     prefix = "Manuelle Kompression: " if force_compression else ""
+    hierarchy_notice = str(compression_updates.pop("archive_compression_notice", "") or "")
     memory_notice = (
-        f"{prefix}Ich habe den aktiven Chat-Kontext komprimiert: ca. {_estimate_tokens(old_messages)} "
-        f"alte Tokens wurden als Archiv `{archive_key}` gespeichert, die letzten "
-        f"{len(recent_messages)} Nachrichten bleiben aktiv."
+        f"{prefix}Ich habe den aktiven Chat-Kontext mit dem gemeinsamen Hermes-style Compressor komprimiert: "
+        f"ca. {_compressor_estimate_tokens(result.middle)} Tokens aus dem Mittelteil wurden als Archiv "
+        f"`{archive_key}` gespeichert. Head/Task-Brief, Planner-/Memory-/Skill-Hints, "
+        f"Summary und die neuesten Tail-Nachrichten bleiben aktiv."
     )
-    if store is None:
+    store_missing = getattr(runtime, "store", None) is None if runtime else True
+    if store_missing:
         memory_notice += " Es war kein LangGraph Store verfuegbar, daher existiert nur die Summary im Thread."
     if hierarchy_notice:
         memory_notice += f" {hierarchy_notice}"
 
-    current_task_brief = _current_task_brief_from_state(state)
-    latest_packet = _latest_handoff_packet(messages) or str(state.get("handoff_packet") or "")
-    preserved_prefix_messages: list[Any] = []
-    if current_task_brief:
-        preserved_prefix_messages.append(SystemMessage(content=current_task_brief, id=CURRENT_TASK_BRIEF_MESSAGE_ID))
-    if latest_packet:
-        preserved_prefix_messages.append(
-            SystemMessage(content=f"<handoff-packet>\n{latest_packet}\n</handoff-packet>", id=HANDOFF_PACKET_MESSAGE_ID)
-        )
-
     return {
-        "messages": [
-            RemoveMessage(id=REMOVE_ALL_MESSAGES),
-            *preserved_prefix_messages,
-            SystemMessage(
-                content=(
-                    "Earlier conversation was archived to long-term memory. "
-                    "Use context_retrieval_agent if exact details are needed.\n\n"
-                    f"Summary:\n{summary}"
-                )
-            ),
-            *recent_messages,
-        ],
-        "current_task_brief": current_task_brief,
-        "handoff_packet": latest_packet,
-        "handoff_packet_key": hashlib.sha256(latest_packet.encode("utf-8")).hexdigest()[:16] if latest_packet else "",
-        "context_summary": summary,
-        "archive_summary": archive_summary,
-        "archived_context_keys": archived_keys,
-        "archive_collection_keys": archive_collection_keys,
-        "compressed_archive_keys": compressed_archive_keys,
+        **compression_updates,
         "memory_notice": memory_notice,
         "memory_notice_key": archive_key,
+        "run_profile": _profile_update(
+            state,
+            post_run_compression_used=True,
+            post_run_compression_tokens=result.token_estimate_before,
+            post_run_compression_tokens_after=result.token_estimate_after,
+            post_run_compression_archive_key=archive_key,
+        ),
     }
 
 
@@ -5204,6 +5466,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "your agent memory before recording a new repeated lesson. "
             "Use semantic_memory_search when keyword search misses a likely "
             "older memory, artifact, archive, skill, or session turn. "
+            "If semantic_memory_search returns source_type=archive_collection, "
+            "inspect child_archive_keys and load only relevant raw archives with "
+            "read_archive_record through the context agent; do not guess old details. "
             "Use semantic_media_search when the user asks to find past images or "
             "videos by meaning. "
             "Use approved skill-library entries only as hints. Store new "
@@ -5298,6 +5563,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         model=llm,
         tools=[
             search_archived_context,
+            read_archive_record,
+            read_archive_collection,
             search_session_history,
             semantic_memory_search,
             semantic_media_search,
@@ -5337,7 +5604,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "Use search_session_history for recent indexed turns and artifact "
             "tools when exact disk-backed notes are needed. Use "
             "semantic_memory_search for meaning-based retrieval; by default it "
-            "only searches this thread plus global memories. Use semantic_media_search "
+            "only searches this thread plus global memories. If a hit is "
+            "source_type=archive_collection, inspect child_archive_keys and load "
+            "only the relevant raw archive records with read_archive_record. "
+            "Use semantic_media_search "
             "for media references and timecoded frame hits when vision indexing is enabled. "
             "Use build_specialist_report when returning retrieved facts, source "
             "keys, caveats, and next actions to another agent. Do not answer "

@@ -459,12 +459,38 @@ LIBRECHAT_OPENAI_REVERSE_PROXY=
 # OPTIONAL MEMORY + CONTEXT COMPRESSION
 # =====================================================================
 
-# Approximate active message-window token limit. If the current LangGraph
-# thread goes above this, older messages are summarized and archived.
-ALPHARAVIS_ACTIVE_TOKEN_LIMIT=10000
+# Active compression engine.
+# Allowed values:
+#   hermes_style = one shared compressor for handoff guard and post-run guard
+ALPHARAVIS_COMPRESSION_ENGINE=hermes_style
 
-# Number of most recent messages kept verbatim after chat compression.
-ALPHARAVIS_CONTEXT_KEEP_LAST_MESSAGES=12
+# Approximate active message-window token limit for the post-run safety net.
+# If the current LangGraph thread goes above this after a run, the middle of
+# the active context is summarized and archived. Head/policy/task/planner/
+# memory/skill context and a recent tail are protected.
+ALPHARAVIS_ACTIVE_TOKEN_LIMIT=30000
+
+# Approximate token budget before the pre-swarm handoff guard compresses an
+# oversized active context. This prevents specialists from receiving a giant
+# prompt while preserving the current task brief and latest handoff packet.
+ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT=12000
+
+# Controls the shared Hermes-style compressor. It protects the first messages
+# plus special system messages, keeps a recent tail, compresses only the middle,
+# prunes long tool outputs into informative previews, redacts secrets, and
+# updates the previous summary iteratively.
+ALPHARAVIS_COMPRESSION_PROTECT_FIRST_MESSAGES=3
+ALPHARAVIS_COMPRESSION_PROTECT_LAST_MESSAGES=16
+ALPHARAVIS_COMPRESSION_TAIL_TOKEN_RATIO=0.20
+ALPHARAVIS_COMPRESSION_SUMMARY_RATIO=0.20
+ALPHARAVIS_COMPRESSION_SUMMARY_MIN_TOKENS=1200
+ALPHARAVIS_COMPRESSION_SUMMARY_MAX_TOKENS=6000
+ALPHARAVIS_SUMMARY_TIMEOUT_SECONDS=60
+ALPHARAVIS_COMPRESSION_TOOL_OUTPUT_MAX_CHARS=6000
+ALPHARAVIS_COMPRESSION_TOOL_OUTPUT_HEAD_CHARS=4000
+ALPHARAVIS_COMPRESSION_TOOL_OUTPUT_TAIL_CHARS=1500
+ALPHARAVIS_COMPRESSION_REDACT_SECRETS=true
+ALPHARAVIS_COMPRESSION_ANTI_THRASHING=true
 
 # Enables second-tier compression for old archive blocks.
 # Allowed values: true, false
@@ -504,6 +530,10 @@ ALPHARAVIS_SHOW_MEMORY_NOTICES=true
 # Max archive-search hits returned inside the current chat thread.
 # This keeps retrieval bounded instead of dumping history.
 ALPHARAVIS_ARCHIVE_SEARCH_LIMIT=5
+
+# Max characters returned as preview_text from archive search results before
+# the agent chooses a specific raw archive to load.
+ALPHARAVIS_ARCHIVE_RESULT_PREVIEW_CHARS=2000
 
 # Max archive-search hits when the user explicitly asks to search other chats
 # through include_other_threads=true.
@@ -819,17 +849,16 @@ ALPHARAVIS_PLANNER_MAX_CHARS=1800
 ALPHARAVIS_PLANNER_TIMEOUT_SECONDS=45
 ALPHARAVIS_TASK_BRIEF_MAX_CHARS=2000
 
-# Agent handoff safety. Before the swarm starts, AlphaRavis can shrink an
-# oversized active context into a handoff summary while preserving the current
-# task brief, skill/memory hints, latest handoff packet, and recent messages.
+# Agent handoff safety. Before the swarm starts, AlphaRavis can use the shared
+# Hermes-style compressor to shrink an oversized active context while preserving
+# the current task brief, planner/memory/skill hints, latest handoff packet, and
+# recent tail messages.
 # Agents are instructed to create build_specialist_report handoff packets before
 # transfer_to_* calls.
 # Allowed values: true, false
 ALPHARAVIS_ENABLE_HANDOFF_CONTEXT_GUARD=true
-ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT=8500
-ALPHARAVIS_HANDOFF_CONTEXT_KEEP_LAST_MESSAGES=16
+ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT=12000
 ALPHARAVIS_HANDOFF_PACKET_MAX_CHARS=4000
-ALPHARAVIS_HANDOFF_SUMMARY_MAX_CHARS=2600
 ALPHARAVIS_HANDOFF_SUMMARY_TIMEOUT_SECONDS=45
 
 # If true, appends a visible Run-Profile message after replies. Normally keep

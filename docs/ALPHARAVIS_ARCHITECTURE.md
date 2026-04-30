@@ -301,6 +301,8 @@ Handles archived memory retrieval.
 Capabilities:
 
 - Search archived context from the current chat thread.
+- Load exact raw archive records by `archive_key`.
+- Load archive collection tables of contents by `collection_key`.
 - Search debugging lessons.
 - Search active workflow skills.
 - Search other chat archives only when explicitly requested through `include_other_threads=true`.
@@ -532,58 +534,87 @@ instructions are loaded only when an agent calls `read_repo_ai_skill`.
 
 ## Context Compression
 
-AlphaRavis uses two compression tiers.
+AlphaRavis uses a Hermes-style active compression engine plus a separate archive
+collection tier.
+
+The active engine lives in `langgraph-app/context_compressor.py` and is shared by
+both trigger points:
+
+- `handoff_context_guard`: pre-swarm trigger when a run is already too large.
+- `context_guard_after`: post-run safety net after the current answer is done.
+
+There are not two competing active compression algorithms anymore. Both paths
+protect the same kind of material, compress only the middle, and write the raw
+removed messages into archives.
 
 ### Chat Compression
 
 When the active LangGraph message window exceeds `ALPHARAVIS_ACTIVE_TOKEN_LIMIT`,
-older messages are summarized after the current run has produced its answer.
-Compression no longer runs before the task starts.
+the shared compressor runs after the current graph run has produced its answer.
+It does not compress in the middle of a task.
 
 Default:
 
 ```text
-ALPHARAVIS_ACTIVE_TOKEN_LIMIT=10000
-ALPHARAVIS_CONTEXT_KEEP_LAST_MESSAGES=12
+ALPHARAVIS_COMPRESSION_ENGINE=hermes_style
+ALPHARAVIS_ACTIVE_TOKEN_LIMIT=30000
 ALPHARAVIS_ENABLE_POST_RUN_COMPRESSION=true
+ALPHARAVIS_COMPRESSION_PROTECT_FIRST_MESSAGES=3
+ALPHARAVIS_COMPRESSION_PROTECT_LAST_MESSAGES=16
+ALPHARAVIS_COMPRESSION_TAIL_TOKEN_RATIO=0.20
 ```
 
 What happens:
 
-1. Older messages are summarized.
-2. The current task brief and latest handoff packet are preserved verbatim when
-   available.
-3. Recent messages are kept verbatim.
-4. A thread-specific archive record is stored.
-5. The active LangGraph message list is replaced by:
-   - the current task brief, if present
-   - the latest handoff packet, if present
-   - one summary system message
-   - the recent messages
-6. A visible Memory-Notice can be returned to LibreChat.
+1. The engine protects the head: policy/system context, current task brief,
+   planner context, MemoryKernel context, skill hint, and latest handoff packet.
+2. It protects a recent tail by message count and token budget.
+3. The middle is summarized. Tool outputs are pruned into informative previews
+   before the summary call, and secrets are redacted.
+4. Previous summaries are updated iteratively instead of starting from zero.
+5. A thread-specific raw archive record is stored with the removed original
+   messages.
+6. The raw archive record is queued/indexed in pgvector when vector memory is
+   enabled.
+7. The active LangGraph message list is replaced by:
+   - protected head
+   - one reference-only compaction summary
+   - one tiny archived-context policy note
+   - protected tail
+8. A visible Memory-Notice can be returned to LibreChat.
+
+The compaction summary is reference-only. It explicitly tells the next agent
+that previous turns are already handled and that it should answer only the latest
+user request.
+
+The active context does not receive all archive collections. It receives only a
+small policy note:
+
+```text
+Archived context is available via semantic_memory_search; retrieve before
+relying on old details.
+```
 
 ### Handoff Context Guard
 
-Before the swarm starts, AlphaRavis can run a lighter handoff-context guard. It
-does not wait until the final post-run compression threshold. If the active
-message window is already too large, the guard compresses the beginning of the
-run into a handoff summary, archives the exact original messages, and keeps the
-important coordination material active:
+Before the swarm starts, AlphaRavis can run the same active compressor with the
+smaller `ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT`. If the active message window is
+already too large, the guard compresses the middle into a handoff summary,
+archives the exact original messages, and keeps the important coordination
+material active:
 
 - current task brief
 - planner execution plan
 - MemoryKernel and skill hints
 - latest handoff packet
-- recent messages
+- recent tail messages
 
 Default:
 
 ```text
 ALPHARAVIS_ENABLE_HANDOFF_CONTEXT_GUARD=true
-ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT=8500
-ALPHARAVIS_HANDOFF_CONTEXT_KEEP_LAST_MESSAGES=16
+ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT=12000
 ALPHARAVIS_HANDOFF_PACKET_MAX_CHARS=4000
-ALPHARAVIS_HANDOFF_SUMMARY_MAX_CHARS=2600
 ```
 
 Agents are instructed to call `build_specialist_report` before `transfer_to_*`.
@@ -618,8 +649,34 @@ ALPHARAVIS_ARCHIVE_TOKEN_LIMIT=50000
 ALPHARAVIS_ARCHIVE_KEEP_RECENT_RECORDS=8
 ```
 
-Raw archive records are not deleted. Archive collections are summaries with
-references to child archive keys.
+Raw archive records are not deleted. Archive collections are not normal active
+chat context. They are a thread-scoped Inhaltsverzeichnis / router over older
+raw archive records.
+
+Archive collections contain:
+
+- collection key
+- child archive keys
+- covered range
+- main topics
+- important files
+- commands/tools used
+- errors/signals
+- decisions
+- open tasks
+- retrieval keywords
+
+Both raw archives and archive collections are indexed in pgvector. Retrieval
+works like this:
+
+1. `semantic_memory_search` searches current-thread vector memory by default.
+2. If a hit is `source_type=archive_collection`, the LLM reads
+   `child_archive_keys`.
+3. The LLM calls `read_archive_record` for only the relevant raw archive keys.
+4. The answer is based on the loaded raw archive content.
+
+Cross-thread archive retrieval remains off by default and requires an explicit
+tool call with `include_other_threads=true`.
 
 ### Artifacts
 
@@ -696,13 +753,19 @@ The tool exposed to agents is:
 
 ```text
 semantic_memory_search
+read_archive_record
+read_archive_collection
 ```
 
 By default it searches the current thread plus global memories and federates
-with `rag_api` for external document hits. It searches other AlphaRavis threads
-only when a tool call explicitly sets `include_other_threads=true`. Enabling
-this backend indexes new records from that point onward. Existing MongoDB/store
-history is intentionally not bulk-backfilled automatically.
+with `rag_api` for external document hits. `semantic_memory_search` returns
+structured hits containing `source_type`, `source_key`, `title`, `score`,
+`preview_text`, `metadata`, and `child_archive_keys` when present.
+
+It searches other AlphaRavis threads only when a tool call explicitly sets
+`include_other_threads=true`. Enabling this backend indexes new records from
+that point onward. Existing MongoDB/store history is intentionally not
+bulk-backfilled automatically.
 
 ## Thread Isolation
 
