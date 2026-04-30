@@ -331,6 +331,275 @@ Already adopted or partly adopted:
 - Hermes skill ideas are represented by reviewed repo skill cards under
   `ai-skills/`, plus the Store-backed skill-library candidate flow.
 
+Implementation chunks:
+
+Do not implement the whole Hermes followup list in one pass. Work in these
+chunks so every step stays testable and can be disabled independently.
+
+### Chunk 1: Context Hygiene First
+
+Goal:
+
+- Prevent accidental context leaks into LibreChat.
+- Add explicit context-reference handling without dumping uncontrolled files.
+
+Scope:
+
+- Implement the streaming internal-context scrubber from Hermes
+  `agent/memory_manager.py`.
+- Add tests where `<memory-context>` or archive/internal tags are split across
+  multiple SSE deltas.
+- Implement a minimal AlphaRavis context-reference preprocessor inspired by
+  Hermes `agent/context_references.py`:
+  - `@file`
+  - `@folder`
+  - `@diff`
+  - `@staged`
+  - `@git`
+  - `@url`
+- Add context-budget protection and `allowed_root` path checks.
+- Record warnings/refusals in `run_profile`.
+
+Acceptance:
+
+- LibreChat never receives hidden memory/internal blocks as normal assistant
+  text, even when streaming chunks split the tag boundaries.
+- Explicit references attach bounded context blocks.
+- Oversized references warn or refuse cleanly instead of silently filling the
+  prompt.
+
+### Chunk 2: Error Router And Recovery Decisions
+
+Goal:
+
+- Stop treating every backend issue as the same failure.
+
+Scope:
+
+- Port a compact AlphaRavis-local classifier from Hermes
+  `agent/error_classifier.py`.
+- Wire it into:
+  - `responses_client.py`
+  - bridge non-streaming/streaming errors
+  - graph crisis/preflight metadata
+- Map decisions:
+  - `context_overflow` -> compression/hard-cutoff message
+  - timeout/502/overloaded/connection -> crisis-manager candidate
+  - rate limit/server busy -> retry/backoff or visible status
+  - format/unsupported parameter -> Responses/Chat fallback or parameter strip
+
+Acceptance:
+
+- `run_profile` shows the classified reason.
+- Advanced model-management recovery can use the classification later.
+- Normal users get a useful message instead of a generic backend crash.
+
+### Chunk 3: Central File Safety
+
+Goal:
+
+- Future coding/file/power tools share one safety policy.
+
+Scope:
+
+- Add `langgraph-app/file_safety.py`, inspired by Hermes
+  `agent/file_safety.py`.
+- Protect sensitive paths:
+  - `.ssh`
+  - `.aws`
+  - `.kube`
+  - `.docker`
+  - `.env`
+  - shell profiles
+  - credential files
+  - OS/system paths
+- Add optional:
+
+```text
+ALPHARAVIS_WRITE_SAFE_ROOT=
+```
+
+- Make owner/coding/Hermes delegation tools call this module before destructive
+  file operations.
+
+Acceptance:
+
+- Sensitive writes are blocked before tool execution.
+- Reads that could expose internal caches or secrets return a safe refusal.
+- Destructive actions still require HITL where already configured.
+
+### Chunk 4: Skill Evolution And Self-Crystallizing Workflows
+
+Goal:
+
+- Keep AlphaRavis's safe candidate-review model, while borrowing Hermes's better
+  disk-skill ergonomics.
+
+Current AlphaRavis behavior:
+
+- `record_skill_candidate` stores reusable workflows in Mongo/LangGraph Store as
+  inactive candidates.
+- `activate_skill_candidate` and `deactivate_skill` only work when:
+
+```text
+ALPHARAVIS_ALLOW_SKILL_PROMOTION=true
+```
+
+- Reviewed repo skill cards live under `ai-skills/`.
+- The graph injects only small repo-skill metadata hints; full `SKILL.md` content
+  is loaded only through `read_repo_ai_skill`.
+
+Hermes behavior to learn from:
+
+- Disk skills are first-class `SKILL.md` files.
+- `prompt_builder.py` caches a skill manifest based on `SKILL.md` and
+  `DESCRIPTION.md` mtime/size.
+- `skill_commands.py` can reload skills and return added/removed/unchanged
+  status.
+- Loaded skills include supporting folders such as `references`, `templates`,
+  `scripts`, and `assets`.
+- Hermes encourages saving difficult repeated workflows as skills, but the
+  AlphaRavis version must still keep promotion/manual review.
+
+Scope:
+
+- Add a repo-skill manifest cache for `ai-skills/`.
+- Add a `reload_repo_ai_skills` or status tool that reports changes without
+  changing promotion state.
+- Add an optional exporter from reviewed Store skill candidate to a draft
+  `ai-skills/<slug>/SKILL.md`, default off and review-only.
+- Keep auto-created skills inactive until human review.
+- Add better skill metadata conditions later:
+  - required tool categories
+  - fallback-only skills
+  - platform compatibility
+
+Acceptance:
+
+- AlphaRavis can crystallize workflows into candidates automatically.
+- It does not silently make a candidate active.
+- Reviewed disk skills become faster and more ergonomic to use.
+
+### Chunk 5: True Lazy Toolsets
+
+Goal:
+
+- Move from "the model sees a manifest" to actual bounded tool binding.
+
+Scope:
+
+- Use Hermes `toolsets.py` as the design reference.
+- Define composable AlphaRavis toolsets:
+  - `coding/read`
+  - `coding/write`
+  - `coding/execute`
+  - `media/image`
+  - `media/video`
+  - `rag/documents`
+  - `rag/memory`
+  - `system/docker`
+  - `system/ssh`
+  - `system/power`
+- Keep high-level categories visible.
+- Bind concrete tools only after planner/agent chooses the set.
+- Cache MCP schemas by category.
+
+Acceptance:
+
+- `run_profile` records selected/loaded toolsets.
+- Toolset includes cannot recurse forever.
+- Fast/simple chats still do not pay MCP/tool context cost.
+
+### Chunk 6: Optional Usage, Pricing, And Rate-Limit Telemetry
+
+Goal:
+
+- Capture useful usage/rate-limit metadata without forcing cloud-style pricing
+  into a local setup.
+
+Default:
+
+```text
+ALPHARAVIS_ENABLE_USAGE_TELEMETRY=false
+ALPHARAVIS_ENABLE_COST_ESTIMATION=false
+ALPHARAVIS_SHOW_RATE_LIMITS=false
+```
+
+Reason:
+
+- Your normal setup is local llama.cpp/Ollama, so cost estimation is not needed
+  for daily use.
+- Token/usage telemetry can still be useful for compression triggers and
+  debugging when enabled.
+
+Scope:
+
+- Borrow only the useful parts from Hermes:
+  - `usage_pricing.py` for normalized usage shape
+  - `rate_limit_tracker.py` for `x-ratelimit-*` headers
+- Mark local models as `local/included`, not paid.
+- Add a future Make helper:
+
+```text
+make telemetry
+```
+
+or include it under `make configure`:
+
+```text
+Enable usage telemetry? [y/N]
+Enable cost estimation for hosted APIs? [y/N]
+Show rate-limit headers? [y/N]
+```
+
+Acceptance:
+
+- All telemetry is off by default.
+- Compression can use real API usage when present.
+- Pricing output never appears unless explicitly enabled.
+
+### Chunk 7: Prompt Assembly And Provider Hardening
+
+Goal:
+
+- Make prompt assembly and provider fallback more robust without a huge provider
+  rewrite.
+
+Scope:
+
+- Add WSL/Windows environment hints from Hermes `prompt_builder.py`.
+- Separate stable prompt material from ephemeral task/memory/skill context.
+- Improve head/tail truncation of loaded context files.
+- Borrow selected provider-hardening ideas from Hermes `auxiliary_client.py`:
+  - unsupported parameter retry
+  - model-specific token/temperature quirks
+  - safe Chat fallback when Responses tool-calling is broken
+
+Acceptance:
+
+- No provider adapter becomes a hard dependency.
+- LiteLLM remains the default abstraction.
+- Responses remains preferred where it is stable.
+
+### Chunk 8: Maintenance And Metadata Helpers
+
+Goal:
+
+- Improve long-term quality after the main runtime path is stable.
+
+Scope:
+
+- Offline archive/trajectory compression evaluator from Hermes
+  `trajectory_compressor.py`.
+- Optional shell hooks/approval allowlists from `shell_hooks.py`.
+- Thread/archive title helper from `title_generator.py`.
+- Candidate insight extraction from `insights.py`, review-only.
+
+Acceptance:
+
+- These are maintenance/admin helpers, not mandatory runtime features.
+- Nothing here should affect normal LibreChat use unless enabled.
+
 High priority:
 
 1. Context reference preprocessor.
