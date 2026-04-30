@@ -671,6 +671,14 @@ Already available:
 - durable pgvector embedding queue, scheduler, manual queue runner, and bounded
   backfill queueing
 - Pixelle owner wake guard for ComfyUI, default off through model management
+- safe media handling in the Bridge: URL/file-id/type metadata is passed instead
+  of raw images/videos unless explicitly enabled
+- media-gallery service for Pixelle outputs and uploaded/linked media metadata
+- separate optional media/vision pgvector table to avoid text/vision dimension
+  conflicts
+- lazy tool category registry for coding, media, RAG, and system tool families
+- OpenWebUI optional frontend profile using the AlphaRavis Bridge
+- Hermes healthcheck/fallback before bounded coding-agent calls
 
 Still open / planned next:
 
@@ -684,3 +692,47 @@ Still open / planned next:
 - test whether LibreChat shows `reasoning_content` in a separate reasoning
   panel before enabling reasoning streaming by default
 - optional parallel agent execution with dependency groups
+- full video analysis pipeline: keyframes, timecodes, captions, transcription,
+  and frame-level vision embeddings
+- true internal dynamic tool binding/unbinding per run; current implementation
+  exposes category manifests and keeps concrete LangGraph tools available
+
+## Media And Uploads
+
+By default the Bridge does not forward raw media blocks into LangGraph:
+
+```text
+BRIDGE_ALLOW_RAW_MEDIA_CONTEXT=false
+BRIDGE_MEDIA_CONTEXT_MODE=metadata
+```
+
+That means uploads/links arrive as metadata markers containing fields such as
+type, file id, URL, mime type, or title. This prevents a video or image blob from
+filling the LLM context. Use `register_media_asset` to save a URL/file id in the
+media gallery. Use `semantic_media_search` only after
+`ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true` and a compatible vision embedding
+route exists.
+
+Pixelle output URLs are registered automatically when the job result contains a
+media URL. The gallery runs at:
+
+```text
+http://localhost:8130/gallery
+```
+
+Video analysis remains planned, not automatic. The agent should say this
+clearly and use `plan_media_analysis` when the user asks what would happen.
+
+## OpenWebUI
+
+OpenWebUI is optional:
+
+```text
+docker compose --profile openwebui up -d openwebui
+```
+
+It uses the AlphaRavis Bridge as the OpenAI-compatible provider. In OpenWebUI,
+set Function Calling to `Native` for capable models. Keep web search disabled
+until SearXNG or another search backend is configured. Passthrough is useful for
+Responses/custom endpoints, but it forwards upstream requests with the configured
+OpenWebUI provider key, so keep it owner-only or disable it on shared instances.

@@ -66,6 +66,12 @@ def _queue_table_name() -> str:
     return table_name or "alpharavis_embedding_jobs"
 
 
+def _vision_table_name() -> str:
+    table_name = os.getenv("ALPHARAVIS_VISION_PGVECTOR_TABLE", "alpharavis_media_vectors")
+    table_name = re.sub(r"[^a-zA-Z0-9_]+", "_", table_name).strip("_")
+    return table_name or "alpharavis_media_vectors"
+
+
 def _table_identifier():
     if sql is None:
         raise VectorMemoryError("psycopg.sql is unavailable.")
@@ -76,6 +82,16 @@ def _queue_table_identifier():
     if sql is None:
         raise VectorMemoryError("psycopg.sql is unavailable.")
     return sql.Identifier(_queue_table_name())
+
+
+def _vision_table_identifier():
+    if sql is None:
+        raise VectorMemoryError("psycopg.sql is unavailable.")
+    return sql.Identifier(_vision_table_name())
+
+
+def vision_is_enabled() -> bool:
+    return is_enabled() and _env_bool("ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY", "false")
 
 
 def _chunk_max_chars() -> int:
@@ -95,6 +111,14 @@ def _preview_chars() -> int:
 def _embedding_models() -> list[str]:
     models = [os.getenv("ALPHARAVIS_PGVECTOR_EMBEDDING_MODEL", "memory-embed").strip()]
     fallback = os.getenv("ALPHARAVIS_PGVECTOR_FALLBACK_EMBEDDING_MODEL", "memory-embed-fallback").strip()
+    if fallback and fallback not in models:
+        models.append(fallback)
+    return [model for model in models if model]
+
+
+def _vision_embedding_models() -> list[str]:
+    models = [os.getenv("ALPHARAVIS_VISION_EMBEDDING_MODEL", "vision-embed").strip()]
+    fallback = os.getenv("ALPHARAVIS_VISION_EMBEDDING_FALLBACK_MODEL", "").strip()
     if fallback and fallback not in models:
         models.append(fallback)
     return [model for model in models if model]
@@ -330,6 +354,96 @@ async def _embed_text_with_model(text: str, model: str) -> EmbeddingResult:
     return EmbeddingResult(vector=[float(value) for value in embedding], model=model)
 
 
+def _media_input_payload(*, media_url: str, caption: str, media_type: str) -> Any:
+    media_url = (media_url or "").strip()
+    caption = (caption or "").strip()
+    media_type = (media_type or "image").strip().lower()
+    if media_type == "text" or not media_url:
+        return caption
+    if media_type == "image":
+        parts: list[dict[str, Any]] = [
+            {"type": "input_image", "image_url": media_url},
+        ]
+    elif media_type == "video":
+        parts = [
+            {"type": "input_video", "video_url": media_url},
+        ]
+    else:
+        parts = [
+            {"type": "input_file", "file_url": media_url},
+        ]
+    if caption:
+        parts.insert(0, {"type": "input_text", "text": caption})
+    return parts
+
+
+async def _embed_media_with_model(
+    *,
+    media_url: str,
+    caption: str,
+    media_type: str,
+    model: str,
+) -> EmbeddingResult:
+    base_url = os.getenv(
+        "ALPHARAVIS_VISION_EMBEDDING_BASE_URL",
+        os.getenv("ALPHARAVIS_PGVECTOR_EMBEDDING_BASE_URL", os.getenv("OPENAI_API_BASE", "http://litellm:4000/v1")),
+    ).rstrip("/")
+    api_key = os.getenv(
+        "ALPHARAVIS_VISION_EMBEDDING_API_KEY",
+        os.getenv("ALPHARAVIS_PGVECTOR_EMBEDDING_API_KEY", os.getenv("OPENAI_API_KEY", os.getenv("LITELLM_MASTER_KEY", "sk-local-dev"))),
+    )
+    timeout = float(os.getenv("ALPHARAVIS_VISION_EMBEDDING_TIMEOUT_SECONDS", os.getenv("ALPHARAVIS_PGVECTOR_EMBEDDING_TIMEOUT_SECONDS", "30")))
+    payload = {
+        "model": model,
+        "input": _media_input_payload(media_url=media_url, caption=caption, media_type=media_type),
+    }
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(f"{base_url}/embeddings", headers=headers, json=payload)
+    if response.status_code >= 400:
+        raise VectorMemoryError(f"{model} returned HTTP {response.status_code}: {response.text[:500]}")
+
+    data = response.json()
+    try:
+        embedding = data["data"][0]["embedding"]
+    except Exception as exc:
+        raise VectorMemoryError(f"{model} response did not contain data[0].embedding: {data!r}") from exc
+
+    if not isinstance(embedding, list) or not embedding:
+        raise VectorMemoryError(f"{model} returned an empty or invalid vector.")
+    return EmbeddingResult(vector=[float(value) for value in embedding], model=model)
+
+
+async def embed_media(*, media_url: str = "", caption: str = "", media_type: str = "image") -> EmbeddingResult:
+    caption = (caption or "").strip()
+    media_url = (media_url or "").strip()
+    if not caption and not media_url:
+        raise VectorMemoryError("Cannot embed media without media_url or caption.")
+
+    errors = []
+    for model in _vision_embedding_models():
+        try:
+            return await _embed_media_with_model(
+                media_url=media_url,
+                caption=caption,
+                media_type=media_type,
+                model=model,
+            )
+        except Exception as exc:
+            errors.append(f"{model}: {exc}")
+
+    if _env_bool("ALPHARAVIS_VISION_EMBEDDING_FALLBACK_TEXT", "true") and caption:
+        try:
+            return await embed_text(caption)
+        except Exception as exc:
+            errors.append(f"text fallback: {exc}")
+
+    raise VectorMemoryError("All vision embedding models failed: " + " | ".join(errors))
+
+
 async def embed_text(text: str) -> EmbeddingResult:
     text = (text or "").strip()
     if not text:
@@ -427,6 +541,82 @@ def _ensure_schema_sync(dimensions: int) -> None:
                     )
                 except Exception as exc:
                     print(f"WARNING: pgvector HNSW index unavailable; semantic search will still work: {exc}")
+
+
+def _ensure_vision_schema_sync(dimensions: int) -> None:
+    _require_psycopg()
+    table_name = _vision_table_name()
+    table = sql.Identifier(table_name)
+    hnsw_enabled = _env_bool("ALPHARAVIS_VISION_PGVECTOR_CREATE_HNSW_INDEX", "true")
+
+    with psycopg.connect(_database_url(), autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            cur.execute(
+                sql.SQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS {table} (
+                        id TEXT PRIMARY KEY,
+                        namespace TEXT NOT NULL,
+                        scope TEXT NOT NULL DEFAULT 'thread',
+                        thread_id TEXT,
+                        thread_key TEXT,
+                        source_type TEXT NOT NULL,
+                        source_key TEXT NOT NULL,
+                        file_id TEXT NOT NULL DEFAULT '',
+                        media_type TEXT NOT NULL DEFAULT 'unknown',
+                        media_url TEXT NOT NULL DEFAULT '',
+                        title TEXT NOT NULL DEFAULT '',
+                        caption TEXT NOT NULL DEFAULT '',
+                        frame_index INTEGER NOT NULL DEFAULT 0,
+                        frame_timecode TEXT NOT NULL DEFAULT '',
+                        embedding_model TEXT NOT NULL DEFAULT '',
+                        metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                        embedding vector({dimensions}) NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )
+                    """
+                ).format(table=table, dimensions=sql.Literal(dimensions))
+            )
+            for column, ddl in [
+                ("file_id", "TEXT NOT NULL DEFAULT ''"),
+                ("media_type", "TEXT NOT NULL DEFAULT 'unknown'"),
+                ("media_url", "TEXT NOT NULL DEFAULT ''"),
+                ("title", "TEXT NOT NULL DEFAULT ''"),
+                ("caption", "TEXT NOT NULL DEFAULT ''"),
+                ("frame_index", "INTEGER NOT NULL DEFAULT 0"),
+                ("frame_timecode", "TEXT NOT NULL DEFAULT ''"),
+                ("embedding_model", "TEXT NOT NULL DEFAULT ''"),
+            ]:
+                cur.execute(
+                    sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} " + ddl).format(
+                        table=table,
+                        column=sql.Identifier(column),
+                    )
+                )
+            cur.execute(
+                sql.SQL(
+                    "CREATE INDEX IF NOT EXISTS {index} "
+                    "ON {table} (namespace, scope, thread_id, media_type, source_type, source_key, file_id)"
+                ).format(
+                    index=sql.Identifier(f"{table_name}_scope_idx"),
+                    table=table,
+                )
+            )
+            if hnsw_enabled:
+                try:
+                    cur.execute(
+                        sql.SQL(
+                            "CREATE INDEX IF NOT EXISTS {index} "
+                            "ON {table} USING hnsw (embedding vector_cosine_ops)"
+                        ).format(
+                            index=sql.Identifier(f"{table_name}_embedding_hnsw_idx"),
+                            table=table,
+                        )
+                    )
+                except Exception as exc:
+                    print(f"WARNING: vision pgvector HNSW index unavailable; semantic media search will still work: {exc}")
 
 
 def _delete_source_sync(
@@ -761,6 +951,137 @@ async def upsert_memory_record(
     return f"{source_type}:{source_key}:{chunk_count}"
 
 
+def _insert_vision_sync(
+    *,
+    record_id: str,
+    namespace: str,
+    scope: str,
+    thread_id: str,
+    thread_key: str,
+    source_type: str,
+    source_key: str,
+    file_id: str,
+    media_type: str,
+    media_url: str,
+    title: str,
+    caption: str,
+    frame_index: int,
+    frame_timecode: str,
+    embedding_model: str,
+    metadata: dict[str, Any],
+    embedding: list[float],
+) -> None:
+    table = _vision_table_identifier()
+    vector = _vector_literal(embedding)
+    with psycopg.connect(_database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    INSERT INTO {table} (
+                        id, namespace, scope, thread_id, thread_key, source_type,
+                        source_key, file_id, media_type, media_url, title, caption,
+                        frame_index, frame_timecode, embedding_model, metadata, embedding
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
+                    ON CONFLICT (id) DO UPDATE SET
+                        namespace = EXCLUDED.namespace,
+                        scope = EXCLUDED.scope,
+                        thread_id = EXCLUDED.thread_id,
+                        thread_key = EXCLUDED.thread_key,
+                        source_type = EXCLUDED.source_type,
+                        source_key = EXCLUDED.source_key,
+                        file_id = EXCLUDED.file_id,
+                        media_type = EXCLUDED.media_type,
+                        media_url = EXCLUDED.media_url,
+                        title = EXCLUDED.title,
+                        caption = EXCLUDED.caption,
+                        frame_index = EXCLUDED.frame_index,
+                        frame_timecode = EXCLUDED.frame_timecode,
+                        embedding_model = EXCLUDED.embedding_model,
+                        metadata = EXCLUDED.metadata,
+                        embedding = EXCLUDED.embedding,
+                        updated_at = now()
+                    """
+                ).format(table=table),
+                (
+                    record_id,
+                    namespace,
+                    scope or "thread",
+                    thread_id or "",
+                    thread_key or "",
+                    source_type,
+                    source_key,
+                    file_id or "",
+                    media_type or "unknown",
+                    media_url or "",
+                    title[:500],
+                    caption,
+                    int(frame_index),
+                    frame_timecode or "",
+                    embedding_model,
+                    Jsonb(metadata or {}),
+                    vector,
+                ),
+            )
+        conn.commit()
+
+
+async def upsert_media_record(
+    *,
+    source_type: str,
+    source_key: str,
+    media_type: str,
+    media_url: str = "",
+    file_id: str = "",
+    title: str = "",
+    caption: str = "",
+    thread_id: str = "",
+    thread_key: str = "",
+    scope: str = "thread",
+    namespace: str = "alpharavis",
+    frame_index: int = 0,
+    frame_timecode: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    if not vision_is_enabled():
+        return ""
+
+    source_type = re.sub(r"[^a-zA-Z0-9_-]+", "_", source_type.strip().lower())[:80] or "media"
+    media_type = re.sub(r"[^a-zA-Z0-9_-]+", "_", media_type.strip().lower())[:40] or "unknown"
+    source_key = str(source_key or file_id or media_url or "").strip()
+    if not source_key:
+        raise VectorMemoryError("source_key, file_id, or media_url is required for media vector indexing.")
+
+    title = title or source_key
+    caption = (caption or title or source_key).strip()
+    embedding = await embed_media(media_url=media_url, caption=caption, media_type=media_type)
+    await asyncio.to_thread(_ensure_vision_schema_sync, len(embedding.vector))
+    raw_id = f"{source_type}:{source_key}:{file_id}:{thread_id}:{scope}:{media_type}:{frame_index}:{frame_timecode}"
+    record_id = hashlib.sha256(raw_id.encode("utf-8")).hexdigest()[:32]
+    await asyncio.to_thread(
+        _insert_vision_sync,
+        record_id=record_id,
+        namespace=namespace,
+        scope=scope or "thread",
+        thread_id=thread_id or "",
+        thread_key=thread_key or "",
+        source_type=source_type,
+        source_key=source_key,
+        file_id=file_id or "",
+        media_type=media_type,
+        media_url=media_url or "",
+        title=title,
+        caption=caption,
+        frame_index=int(frame_index),
+        frame_timecode=frame_timecode or "",
+        embedding_model=embedding.model,
+        metadata=metadata or {},
+        embedding=embedding.vector,
+    )
+    return f"{source_type}:{source_key}:{media_type}:{frame_index}"
+
+
 def _claim_embedding_jobs_sync(limit: int, max_attempts: int) -> list[dict[str, Any]]:
     _require_psycopg()
     _ensure_queue_schema_sync()
@@ -934,6 +1255,62 @@ def _search_sync(
     return records
 
 
+def _search_vision_sync(
+    *,
+    query_embedding: list[float],
+    namespace: str,
+    thread_id: str,
+    media_type: str,
+    include_other_threads: bool,
+    limit: int,
+) -> list[dict[str, Any]]:
+    _require_psycopg()
+    table = _vision_table_identifier()
+    vector = _vector_literal(query_embedding)
+    where = ["namespace = %s"]
+    params: list[Any] = [namespace]
+
+    if not include_other_threads:
+        where.append("(thread_id = %s OR thread_id = '' OR thread_id IS NULL)")
+        params.append(thread_id or "")
+
+    if media_type and media_type != "all":
+        where.append("media_type = %s")
+        params.append(media_type)
+
+    params = [vector, *params, vector, limit]
+    query = sql.SQL(
+        """
+        SELECT
+            id, scope, thread_id, thread_key, source_type, source_key, file_id,
+            media_type, media_url, title, caption, frame_index, frame_timecode,
+            embedding_model, metadata, created_at, updated_at,
+            1 - (embedding <=> %s::vector) AS similarity
+        FROM {table}
+        WHERE {where_clause}
+        ORDER BY embedding <=> %s::vector
+        LIMIT %s
+        """
+    ).format(table=table, where_clause=sql.SQL(" AND ").join(sql.SQL(item) for item in where))
+
+    with psycopg.connect(_database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            columns = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
+
+    records = []
+    for row in rows:
+        record = dict(zip(columns, row))
+        if hasattr(record.get("created_at"), "isoformat"):
+            record["created_at"] = record["created_at"].isoformat()
+        if hasattr(record.get("updated_at"), "isoformat"):
+            record["updated_at"] = record["updated_at"].isoformat()
+        record["source"] = "alpharavis_media_pgvector"
+        records.append(record)
+    return records
+
+
 async def semantic_search(
     *,
     query: str,
@@ -960,4 +1337,36 @@ async def semantic_search(
         source_type=source_type,
         include_other_threads=include_other_threads,
         limit=max(1, min(int(limit), int(os.getenv("ALPHARAVIS_PGVECTOR_SEARCH_LIMIT", "5")))),
+    )
+
+
+async def semantic_media_search(
+    *,
+    query: str,
+    thread_id: str = "",
+    media_type: str = "all",
+    include_other_threads: bool = False,
+    limit: int = 5,
+    namespace: str = "alpharavis",
+) -> list[dict[str, Any]]:
+    if not vision_is_enabled():
+        return []
+
+    query = (query or "").strip()
+    if not query:
+        raise VectorMemoryError("query is required for semantic media vector search.")
+
+    media_type = re.sub(r"[^a-zA-Z0-9_-]+", "_", media_type.strip().lower())[:40] or "all"
+    if _env_bool("ALPHARAVIS_VISION_QUERY_USES_VISION_MODEL", "true"):
+        query_embedding = await embed_media(media_url="", caption=query, media_type="text")
+    else:
+        query_embedding = await embed_text(query)
+    return await asyncio.to_thread(
+        _search_vision_sync,
+        query_embedding=query_embedding.vector,
+        namespace=namespace,
+        thread_id=thread_id,
+        media_type=media_type,
+        include_other_threads=include_other_threads,
+        limit=max(1, min(int(limit), int(os.getenv("ALPHARAVIS_VISION_PGVECTOR_SEARCH_LIMIT", "5")))),
     )

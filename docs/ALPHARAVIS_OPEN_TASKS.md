@@ -139,6 +139,78 @@ Still needed:
 - Active-job awareness for Pixelle/MCP jobs beyond the current big-LLM/Ollama
   model probes.
 
+## Media / Vision Memory
+
+Status: safe media metadata handling, media-gallery service, and a separate
+vision pgvector table are implemented. Full image/video understanding is still
+provider/pipeline work.
+
+Implemented:
+
+- Bridge strips raw media blocks from chat context by default and preserves
+  metadata markers.
+- `media-gallery` can register/download image, video, audio, or document URLs
+  and exposes `/gallery`.
+- Pixelle job results are scanned for media URLs and registered when present.
+- `register_media_asset`, `semantic_media_search`, and `plan_media_analysis`
+  tools exist.
+- Vision/media embeddings use `alpharavis_media_vectors`, separate from the text
+  table, so vector dimensions do not collide.
+
+Still needed:
+
+- Connect a real vision embedding endpoint and enable:
+
+```text
+ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true
+```
+
+- Build video analysis:
+  - stable URL/file mapping from LibreChat/Mongo attachments
+  - keyframe extraction
+  - scene/timecode grouping
+  - optional audio transcription
+  - frame captions
+  - frame-level vision embeddings
+- Build image analysis:
+  - captioning
+  - OCR
+  - explicit user-triggered vision analysis
+- Add exact mapping from LibreChat upload ids to gallery assets if LibreChat
+  stores the file only inside its Mongo/filesystem layer.
+
+## OpenWebUI
+
+Status: optional Compose profile exists and points to the AlphaRavis Bridge.
+
+Still needed:
+
+- Start and verify:
+
+```text
+docker compose --profile openwebui up -d openwebui
+make openwebui-smoke
+```
+
+- In OpenWebUI UI, set capable AlphaRavis models to Native function calling.
+- Configure SearXNG or another web-search backend before enabling web search.
+- Decide whether passthrough should stay enabled in your deployment:
+
+```text
+OPENWEBUI_ENABLE_OPENAI_API_PASSTHROUGH=true
+```
+
+## Lazy Tool Loading
+
+Status: category registry exists and agents can inspect it with
+`describe_optional_tool_registry(category=...)`.
+
+Still needed:
+
+- True per-run dynamic internal tool binding/unbinding.
+- Cache concrete MCP tool schemas by category and only expose loaded subsets.
+- Store loaded tool-set metadata in `run_profile`.
+
 Clarification:
 
 - `ALPHARAVIS_PGVECTOR_INDEX_MODE=background` still exists for best-effort

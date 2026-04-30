@@ -64,8 +64,11 @@ try:
         is_enabled as _pgvector_memory_enabled,
         queue_stats as _pgvector_queue_stats,
         run_embedding_jobs as _pgvector_run_embedding_jobs,
+        semantic_media_search as _pgvector_semantic_media_search,
         semantic_search as _pgvector_semantic_search,
+        upsert_media_record as _pgvector_upsert_media_record,
         upsert_memory_record as _pgvector_upsert_memory_record,
+        vision_is_enabled as _pgvector_vision_enabled,
     )
 except Exception as exc:  # pragma: no cover - optional local module/deps
     VectorMemoryError = RuntimeError  # type: ignore[misc,assignment]
@@ -73,8 +76,11 @@ except Exception as exc:  # pragma: no cover - optional local module/deps
     _pgvector_memory_enabled = None
     _pgvector_queue_stats = None
     _pgvector_run_embedding_jobs = None
+    _pgvector_semantic_media_search = None
     _pgvector_semantic_search = None
+    _pgvector_upsert_media_record = None
     _pgvector_upsert_memory_record = None
+    _pgvector_vision_enabled = None
     PGVECTOR_IMPORT_ERROR: Exception | None = exc
 else:
     PGVECTOR_IMPORT_ERROR = None
@@ -187,6 +193,8 @@ PIXELLE_URL = os.getenv("PIXELLE_URL", "http://pixelle:9004")
 HERMES_API_BASE = os.getenv("HERMES_API_BASE", "http://hermes-agent:8642/v1").rstrip("/")
 HERMES_API_KEY = os.getenv("HERMES_API_KEY", "")
 HERMES_MODEL = os.getenv("HERMES_MODEL", "hermes-agent")
+MEDIA_GALLERY_URL = os.getenv("ALPHARAVIS_MEDIA_GALLERY_URL", "http://media-gallery:8130").rstrip("/")
+OPENWEBUI_URL = os.getenv("OPENWEBUI_URL", "http://openwebui:8080").rstrip("/")
 COMFY_IP = REMOTE_PCS.get("comfy_server", {}).get("ip")
 ARCHIVE_INDEX_NS = ("alpharavis", "archive_index")
 ARCHIVE_COLLECTION_INDEX_NS = ("alpharavis", "archive_collection_index")
@@ -300,6 +308,63 @@ OPTIONAL_TOOL_MANIFEST = [
             "Native Pixelle image jobs still work through start_pixelle_remote without loading it."
         ),
     }
+]
+TOOL_REGISTRY_CATEGORIES = [
+    {
+        "category": "coding/read",
+        "description": "Read repositories, artifacts, architecture notes, memories, and files before planning changes.",
+        "tools": ["read_alpha_ravis_artifact", "list_alpha_ravis_artifacts", "read_repo_ai_skill", "search_session_history"],
+    },
+    {
+        "category": "coding/write",
+        "description": "Write AlphaRavis artifacts or delegate repo/code tasks to Hermes when enabled and healthy.",
+        "tools": ["write_alpha_ravis_artifact", "check_hermes_agent", "call_hermes_agent"],
+    },
+    {
+        "category": "coding/execute",
+        "description": "Run bounded diagnostics or terminal-oriented work through approved execution/debugging paths.",
+        "tools": ["execute_local_command", "check_external_service", "call_hermes_agent"],
+    },
+    {
+        "category": "media/image",
+        "description": "Generate, register, catalog, and search images. Raw images stay out of context unless explicitly analyzed.",
+        "tools": ["start_pixelle_remote", "start_pixelle_async", "check_pixelle_job", "register_media_asset", "semantic_media_search"],
+    },
+    {
+        "category": "media/video",
+        "description": "Register and catalog videos by URL/file id; frame extraction/captioning is a planned pipeline.",
+        "tools": ["register_media_asset", "semantic_media_search", "plan_media_analysis"],
+    },
+    {
+        "category": "media/audio",
+        "description": "Audio is tracked as media metadata; transcription pipeline is future work.",
+        "tools": ["register_media_asset", "plan_media_analysis"],
+    },
+    {
+        "category": "rag/documents",
+        "description": "Search existing document RAG without duplicating documents into AlphaRavis memory.",
+        "tools": ["ask_documents", "semantic_memory_search"],
+    },
+    {
+        "category": "rag/memory",
+        "description": "Search or record thread/global memories, archives, artifacts, skills, and pgvector chunks.",
+        "tools": ["semantic_memory_search", "search_agent_memory", "record_agent_memory", "search_curated_memory", "record_curated_memory"],
+    },
+    {
+        "category": "system/docker",
+        "description": "Inspect Docker/service status through safe diagnostics before assuming an external dependency works.",
+        "tools": ["check_external_service", "execute_local_command"],
+    },
+    {
+        "category": "system/ssh",
+        "description": "SSH and log inspection paths are owner-gated and require configured power/owner tools.",
+        "tools": ["inspect_model_management_status", "owner_get_pixelle_logs", "owner_get_llama_logs"],
+    },
+    {
+        "category": "system/power",
+        "description": "Power actions are owner-gated; destructive shutdown/reboot actions require approval gates.",
+        "tools": ["inspect_model_management_status", "request_power_action"],
+    },
 ]
 MCP_SERVER_INFOS: list[dict[str, Any]] = []
 MCP_LOAD_WARNINGS: list[str] = []
@@ -747,6 +812,153 @@ def _pixelle_preflight_notice(result: dict[str, Any]) -> str:
     return f"Pixelle preflight warning: {message}"
 
 
+MEDIA_URL_RE = re.compile(r"https?://[^\s)>\]\"']+", re.IGNORECASE)
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif"}
+VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"}
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac"}
+DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".md", ".csv", ".json", ".yaml", ".yml"}
+
+
+def _extract_media_urls(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return list(dict.fromkeys(match.rstrip(".,;") for match in MEDIA_URL_RE.findall(value)))
+    try:
+        return _extract_media_urls(json.dumps(value, ensure_ascii=False))
+    except Exception:
+        return []
+
+
+def _media_type_from_value(value: str, fallback: str = "unknown") -> str:
+    cleaned = (value or "").split("?", 1)[0].split("#", 1)[0].lower()
+    suffix = Path(cleaned).suffix
+    if suffix in IMAGE_EXTENSIONS:
+        return "image"
+    if suffix in VIDEO_EXTENSIONS:
+        return "video"
+    if suffix in AUDIO_EXTENSIONS:
+        return "audio"
+    if suffix in DOCUMENT_EXTENSIONS:
+        return "document"
+    return fallback if fallback in {"image", "video", "audio", "document", "unknown"} else "unknown"
+
+
+async def _register_media_asset(
+    *,
+    source_url: str = "",
+    file_id: str = "",
+    source_key: str = "",
+    media_type: str = "unknown",
+    role: str = "output",
+    title: str = "",
+    caption: str = "",
+    prompt: str = "",
+    group_id: str = "",
+    thread_id: str = "",
+    thread_key: str = "",
+    download: bool = True,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not _env_bool("ALPHARAVIS_ENABLE_MEDIA_GALLERY", "true"):
+        return {"ok": False, "disabled": True, "message": "media gallery disabled"}
+    if not source_url and not file_id:
+        return {"ok": False, "message": "source_url or file_id required"}
+
+    detected_type = media_type if media_type != "unknown" else _media_type_from_value(source_url or file_id)
+    payload = {
+        "source_url": source_url,
+        "file_id": file_id,
+        "source_key": source_key or file_id or source_url,
+        "thread_id": thread_id or _state_thread_id(),
+        "thread_key": thread_key or _state_thread_id(),
+        "group_id": group_id or thread_key or thread_id or _state_thread_id(),
+        "role": role,
+        "media_type": detected_type,
+        "title": title or source_key or file_id or source_url,
+        "caption": caption,
+        "prompt": prompt,
+        "download": bool(download),
+        "metadata": metadata or {},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=float(os.getenv("ALPHARAVIS_MEDIA_GALLERY_TIMEOUT_SECONDS", "45"))) as client:
+            response = await client.post(f"{MEDIA_GALLERY_URL}/assets/register", json=payload)
+        if response.status_code >= 400:
+            return {"ok": False, "status_code": response.status_code, "error": response.text[:500], "payload": payload}
+        record = response.json()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "payload": payload}
+
+    if _pgvector_upsert_media_record is not None and _pgvector_vision_enabled is not None:
+        try:
+            if _pgvector_vision_enabled():
+                vector_url = str(record.get("public_url") or source_url or "")
+                await _pgvector_upsert_media_record(
+                    source_type="media_asset",
+                    source_key=str(record.get("source_key") or record.get("asset_id") or source_key or source_url),
+                    file_id=str(record.get("file_id") or file_id or record.get("asset_id") or ""),
+                    media_type=detected_type,
+                    media_url=vector_url,
+                    title=str(record.get("title") or title or source_key or ""),
+                    caption=caption or prompt or str(record.get("title") or ""),
+                    thread_id=str(record.get("thread_id") or thread_id or _state_thread_id()),
+                    thread_key=str(record.get("thread_key") or thread_key or _state_thread_id()),
+                    metadata={**(metadata or {}), "media_gallery_record": record},
+                )
+                record["vision_indexed"] = True
+        except Exception as exc:
+            record["vision_index_warning"] = str(exc)
+
+    return {"ok": True, "record": record}
+
+
+def _media_registration_summary(results: list[dict[str, Any]]) -> str:
+    ok_results = [item for item in results if item.get("ok")]
+    if not ok_results:
+        return ""
+    lines = ["\n\nMedia gallery:"]
+    for item in ok_results[:5]:
+        record = item.get("record") or {}
+        public_url = record.get("public_url") or record.get("source_url") or ""
+        lines.append(
+            f"- {record.get('media_type', 'media')} `{record.get('asset_id', record.get('source_key', 'asset'))}`: {public_url}"
+        )
+    if len(ok_results) > 5:
+        lines.append(f"- ... {len(ok_results) - 5} more asset(s) registered.")
+    lines.append(f"Gallery: {MEDIA_GALLERY_URL}/gallery")
+    return "\n".join(lines)
+
+
+async def _register_pixelle_media_from_result(
+    *,
+    job_id: str,
+    result: Any,
+    prompt: str = "",
+    thread_id: str = "",
+) -> str:
+    urls = _extract_media_urls(result)
+    if not urls:
+        return ""
+    records = []
+    for index, url in enumerate(urls[: int(os.getenv("ALPHARAVIS_PIXELLE_MEDIA_REGISTER_LIMIT", "8"))]):
+        media_type = _media_type_from_value(url, "image")
+        records.append(
+            await _register_media_asset(
+                source_url=url,
+                source_key=f"pixelle:{job_id}:{index}",
+                media_type=media_type,
+                role="output",
+                title=f"Pixelle {media_type} {job_id}",
+                caption=prompt,
+                prompt=prompt,
+                group_id=f"pixelle-{job_id}",
+                thread_id=thread_id or _state_thread_id(),
+                thread_key=thread_id or _state_thread_id(),
+                metadata={"job_id": job_id, "provider": "pixelle", "raw_result_preview": str(result)[:2000]},
+            )
+        )
+    return _media_registration_summary(records)
+
+
 @tool
 async def start_pixelle_remote(prompt: str, config: RunnableConfig):
     """Starts a Pixelle image job and monitors it through a durable LangGraph task."""
@@ -777,7 +989,13 @@ async def start_pixelle_remote(prompt: str, config: RunnableConfig):
     result = await monitor_pixelle_job(job_id, current_thread_id)
     prefix = f"{preflight_notice}\n\n" if preflight_notice else ""
     if result["status"] == "completed":
-        return f"{prefix}Image ready. Job `{job_id}` completed.\n\n{result['message']}"
+        media_notice = await _register_pixelle_media_from_result(
+            job_id=job_id,
+            result=result.get("message", ""),
+            prompt=prompt,
+            thread_id=current_thread_id,
+        )
+        return f"{prefix}Image ready. Job `{job_id}` completed.\n\n{result['message']}{media_notice}"
 
     return f"{prefix}{result['message']}"
 
@@ -830,10 +1048,139 @@ async def check_pixelle_job(job_id: str):
 
     status = data.get("status", "running")
     if status == "completed":
-        return f"Pixelle job `{job_id}` completed.\n\n{data.get('result', '')}"
+        result = data.get("result", "")
+        media_notice = await _register_pixelle_media_from_result(job_id=job_id.strip(), result=result)
+        return f"Pixelle job `{job_id}` completed.\n\n{result}{media_notice}"
     if status == "failed":
         return _format_pixelle_failure(job_id, data.get("logs", "No logs returned."))
     return f"Pixelle job `{job_id}` status: {status}\n\n{data.get('logs', '')}"
+
+
+@tool
+async def register_media_asset(
+    source_url: str = "",
+    file_id: str = "",
+    media_type: str = "unknown",
+    role: str = "reference",
+    title: str = "",
+    caption: str = "",
+    source_key: str = "",
+    group_id: str = "",
+    download: bool = True,
+):
+    """Register an image/video/audio/document by URL or file id without dumping raw media into context."""
+
+    result = await _register_media_asset(
+        source_url=source_url,
+        file_id=file_id,
+        source_key=source_key or file_id or source_url,
+        media_type=media_type,
+        role=role,
+        title=title,
+        caption=caption,
+        group_id=group_id,
+        download=download,
+        metadata={"registered_by_tool": True},
+    )
+    return _json_tool_result(result)
+
+
+@tool
+async def semantic_media_search(query: str, media_type: str = "all", limit: int = 5, include_other_threads: bool = False):
+    """Search the optional vision/media pgvector index by semantic text query."""
+
+    if _pgvector_semantic_media_search is None or _pgvector_vision_enabled is None:
+        return "Vision pgvector module is unavailable in this runtime."
+    if not _pgvector_vision_enabled():
+        return "Vision/media vector memory is disabled. Set ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true."
+    try:
+        results = await _pgvector_semantic_media_search(
+            query=query,
+            thread_id=_state_thread_id(),
+            media_type=media_type,
+            include_other_threads=include_other_threads,
+            limit=limit,
+        )
+    except Exception as exc:
+        return f"Semantic media search failed cleanly: {exc}"
+    if not results:
+        return "No media vector hits matched that query."
+    lines = []
+    for item in results:
+        lines.append(
+            "\n".join(
+                [
+                    f"{item.get('media_type', 'media')} hit `{item.get('source_key')}` score={float(item.get('similarity') or 0):.3f}",
+                    f"URL: {item.get('media_url', '')}",
+                    f"Caption: {item.get('caption', '')}",
+                    f"Frame: {item.get('frame_index', 0)} {item.get('frame_timecode', '')}".strip(),
+                ]
+            )
+        )
+    return "\n\n".join(lines)
+
+
+@tool
+def plan_media_analysis(media_url: str, media_type: str = "video", user_goal: str = ""):
+    """Explain the current safe media-analysis path and what is still TODO."""
+
+    media_type = _media_type_from_value(media_url, media_type)
+    if media_type == "image":
+        return (
+            "Image handling is safe-by-default: AlphaRavis stores URL/file id and metadata, "
+            "and can register a vision embedding only when ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true "
+            "and a compatible vision embedding endpoint is configured. Full image caption/OCR analysis "
+            "is planned as a provider-backed pipeline, not automatic raw-context injection."
+        )
+    if media_type == "video":
+        return (
+            "Video handling is safe-by-default: AlphaRavis stores URL/file id and metadata. "
+            "Full video analysis is not marked complete yet. The planned pipeline is: fetch or expose "
+            "a stable URL, extract keyframes, keep timecodes, optionally transcribe audio, caption frames, "
+            "then write frame-level vision embeddings into the separate media pgvector table. "
+            f"Goal hint: {user_goal[:500]}"
+        )
+    return (
+        "Media handling stores metadata only by default. Use register_media_asset first; run a specific "
+        "analysis pipeline only when the user explicitly asks for it."
+    )
+
+
+@tool
+async def check_external_service(service_name: str, url: str = ""):
+    """Preflight an external service before using it; returns visible fallback information."""
+
+    service_map = {
+        "pixelle": f"{PIXELLE_URL.rstrip('/')}/health",
+        "comfyui": os.getenv("ALPHARAVIS_COMFY_HEALTH_URL", ""),
+        "hermes": f"{HERMES_API_BASE}/models",
+        "openwebui": f"{OPENWEBUI_URL}/",
+        "media_gallery": f"{MEDIA_GALLERY_URL}/health",
+        "litellm": os.getenv("OPENAI_API_BASE", "http://litellm:4000/v1").rstrip("/") + "/models",
+        "rag_api": os.getenv("ALPHARAVIS_RAG_API_URL", "http://rag_api:8000").rstrip("/") + "/health",
+    }
+    target = (url or service_map.get(service_name.strip().lower()) or "").strip()
+    if not target:
+        return f"No preflight URL is configured for `{service_name}`."
+    headers = {}
+    if "hermes" in service_name.lower() and HERMES_API_KEY:
+        headers["Authorization"] = f"Bearer {HERMES_API_KEY}"
+    if "litellm" in service_name.lower() and os.getenv("OPENAI_API_KEY"):
+        headers["Authorization"] = f"Bearer {os.getenv('OPENAI_API_KEY')}"
+    try:
+        async with httpx.AsyncClient(timeout=float(os.getenv("ALPHARAVIS_EXTERNAL_SERVICE_CHECK_TIMEOUT_SECONDS", "8"))) as client:
+            response = await client.get(target, headers=headers)
+        if response.status_code >= 400:
+            return {
+                "service": service_name,
+                "url": target,
+                "status": "degraded",
+                "http_status": response.status_code,
+                "message": response.text[:500],
+            }
+        return {"service": service_name, "url": target, "status": "ok", "http_status": response.status_code}
+    except Exception as exc:
+        return {"service": service_name, "url": target, "status": "offline", "error": str(exc)}
 
 
 @tool
@@ -1906,6 +2253,30 @@ async def list_alpha_ravis_artifacts(query: str = "artifact", limit: int = 10, i
     return "\n\n".join(lines[:limit])
 
 
+async def _check_hermes_health_raw(timeout_seconds: float | None = None) -> dict[str, Any]:
+    headers = {}
+    if HERMES_API_KEY:
+        headers["Authorization"] = f"Bearer {HERMES_API_KEY}"
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds or float(os.getenv("HERMES_TIMEOUT_SECONDS", "90"))) as client:
+            response = await client.get(f"{HERMES_API_BASE}/models", headers=headers)
+        if response.status_code >= 400:
+            return {
+                "status": "degraded",
+                "base_url": HERMES_API_BASE,
+                "http_status": response.status_code,
+                "message": response.text[:500],
+            }
+        return {
+            "status": "ok",
+            "base_url": HERMES_API_BASE,
+            "models": response.json(),
+        }
+    except Exception as exc:
+        return {"status": "offline", "base_url": HERMES_API_BASE, "error": str(exc)}
+
+
 @tool
 async def check_hermes_agent():
     """Check whether the Hermes OpenAI-compatible API server is reachable."""
@@ -1913,22 +2284,7 @@ async def check_hermes_agent():
     if not _env_bool("ALPHARAVIS_ENABLE_HERMES_AGENT", "false"):
         return "Hermes integration is disabled. Set ALPHARAVIS_ENABLE_HERMES_AGENT=true."
 
-    headers = {}
-    if HERMES_API_KEY:
-        headers["Authorization"] = f"Bearer {HERMES_API_KEY}"
-
-    try:
-        async with httpx.AsyncClient(timeout=float(os.getenv("HERMES_TIMEOUT_SECONDS", "90"))) as client:
-            response = await client.get(f"{HERMES_API_BASE}/models", headers=headers)
-        if response.status_code >= 400:
-            return f"Hermes API returned HTTP {response.status_code}: {response.text[:500]}"
-        return {
-            "status": "ok",
-            "base_url": HERMES_API_BASE,
-            "models": response.json(),
-        }
-    except Exception as exc:
-        return f"Hermes API is not reachable at {HERMES_API_BASE}: {exc}"
+    return await _check_hermes_health_raw()
 
 
 @tool
@@ -1937,6 +2293,14 @@ async def call_hermes_agent(task: str, context: str = "", max_output_chars: int 
 
     if not _env_bool("ALPHARAVIS_ENABLE_HERMES_AGENT", "false"):
         return "Hermes integration is disabled. Set ALPHARAVIS_ENABLE_HERMES_AGENT=true."
+
+    health = await _check_hermes_health_raw(timeout_seconds=float(os.getenv("HERMES_HEALTHCHECK_TIMEOUT_SECONDS", "10")))
+    if health.get("status") != "ok":
+        return (
+            "Hermes fallback: Hermes is configured for coding/system tasks but is not reachable now. "
+            f"Health: {json.dumps(health, ensure_ascii=False)[:1000]}\n"
+            "Use AlphaRavis/DeepAgents fallback and record this in the run profile/status."
+        )
 
     max_output_chars = max(1000, min(int(max_output_chars), int(os.getenv("HERMES_MAX_OUTPUT_CHARS", "8000"))))
     system_prompt = (
@@ -2137,12 +2501,35 @@ async def record_debugging_lesson(
 
 
 @tool
-def describe_optional_tool_registry():
-    """Describe optional lazy-loaded tool registries without loading them."""
+def describe_optional_tool_registry(category: str = ""):
+    """Describe lazy tool categories and optional MCP registries without loading concrete MCP tools."""
 
     lines = [
-        "Optional lazy tool registries known to AlphaRavis:",
+        "AlphaRavis lazy tool registry:",
     ]
+    selected = (category or "").strip().lower()
+    category_entries = TOOL_REGISTRY_CATEGORIES
+    if selected:
+        category_entries = [entry for entry in TOOL_REGISTRY_CATEGORIES if entry["category"].lower() == selected]
+        if not category_entries:
+            known = ", ".join(entry["category"] for entry in TOOL_REGISTRY_CATEGORIES)
+            return f"Unknown tool category `{category}`. Known categories: {known}"
+
+    for entry in category_entries:
+        lines.append(
+            "\n".join(
+                [
+                    f"- {entry['category']}",
+                    f"  Use: {entry['description']}",
+                    f"  Known tools: {', '.join(entry['tools'])}",
+                ]
+            )
+        )
+
+    lines.append(
+        "\nRule: start with categories and short descriptions. Load or call concrete tools only when the task actually needs them."
+    )
+    lines.append("\nOptional MCP registries known to AlphaRavis:")
     for entry in OPTIONAL_TOOL_MANIFEST:
         enabled = _env_bool(entry["env_flag"], "false")
         lines.append(
@@ -3410,6 +3797,31 @@ def _planner_needed(state: AlphaRavisState) -> bool:
     return any(trigger in query for trigger in triggers)
 
 
+def _looks_like_coding_task(text: str) -> bool:
+    query = (text or "").lower()
+    triggers = [
+        "code",
+        "repo",
+        "datei",
+        "file",
+        "terminal",
+        "shell",
+        "patch",
+        "implement",
+        "refactor",
+        "docker",
+        "git",
+        "python",
+        "typescript",
+        "javascript",
+        "fastapi",
+        "langgraph",
+        "fix",
+        "bug",
+    ]
+    return any(trigger in query for trigger in triggers)
+
+
 async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
     if not _planner_needed(state):
         return {}
@@ -3420,12 +3832,33 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
     if state.get("planner_last_key") == plan_key:
         return {}
 
+    hermes_hint = ""
+    if _looks_like_coding_task(latest) and _env_bool("ALPHARAVIS_ENABLE_HERMES_AGENT", "false"):
+        try:
+            hermes_health = await _check_hermes_health_raw(
+                timeout_seconds=float(os.getenv("HERMES_HEALTHCHECK_TIMEOUT_SECONDS", "10"))
+            )
+        except Exception as exc:
+            hermes_health = {"status": "offline", "error": str(exc)}
+        if hermes_health.get("status") == "ok":
+            hermes_hint = (
+                "\nHermes routing hint: This looks like a coding/repo/file/terminal task. "
+                "Prefer hermes_coding_agent for bounded coding or system-agent work. "
+                "Do not create recursive Hermes<->AlphaRavis loops.\n"
+            )
+        else:
+            hermes_hint = (
+                "\nHermes routing hint: This looks like a coding task, but Hermes preflight is "
+                f"{hermes_health.get('status')}. Use AlphaRavis/DeepAgents fallback visibly.\n"
+            )
+
     prompt = (
         "Create a compact execution plan for AlphaRavis before the swarm acts. "
         "Do not solve the task. Do not include hidden reasoning. Name likely "
         "agents/tools, retrieval needs, safety gates, and success criteria in "
         "5-8 short bullets.\n\n"
         f"Available agents: {_available_agent_names()}.\n\n"
+        f"{hermes_hint}"
         f"User request:\n{latest}"
     )
 
@@ -3471,7 +3904,11 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
         "current_task_brief": task_brief,
         "planner_context": content,
         "planner_last_key": plan_key,
-        "run_profile": _profile_update(state, planner_used=True),
+        "run_profile": _profile_update(
+            state,
+            planner_used=True,
+            hermes_route_hint=bool(hermes_hint),
+        ),
     }
 
 
@@ -4436,6 +4873,7 @@ def _create_debugger_subgraph(llm: Any, handoff_tools: list[Any]):
             execute_ssh_command,
             execute_local_command,
             fast_web_search,
+            check_external_service,
             describe_optional_tool_registry,
             search_agent_memory,
             record_agent_memory,
@@ -4640,6 +5078,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         tools=[
             deep_web_research,
             ask_documents,
+            check_external_service,
             describe_optional_tool_registry,
             search_agent_memory,
             record_agent_memory,
@@ -4647,6 +5086,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             record_curated_memory,
             search_session_history,
             semantic_memory_search,
+            semantic_media_search,
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
             list_alpha_ravis_artifacts,
@@ -4671,6 +5111,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "Use agent_id=`research_expert` for research-specific memories. "
             "Use semantic_memory_search for meaning-based recall across indexed "
             "memories, archives, artifacts, skills, and session turns. "
+            "Use semantic_media_search only for indexed media references; do not "
+            "load raw image/video bytes into context. "
             "Optional MCP registries are lazy-loaded; call "
             "describe_optional_tool_registry only when tool availability matters. "
             "Use list_repo_ai_skills/read_repo_ai_skill on demand for reviewed "
@@ -4699,6 +5141,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             start_pixelle_remote,
             start_pixelle_async,
             check_pixelle_job,
+            register_media_asset,
+            semantic_media_search,
+            plan_media_analysis,
+            check_external_service,
             wake_on_lan,
             *model_management_tools,
             *pixelle_management_tools,
@@ -4715,6 +5161,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             record_curated_memory,
             search_session_history,
             semantic_memory_search,
+            semantic_media_search,
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
             list_alpha_ravis_artifacts,
@@ -4742,6 +5189,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "SSH command diagnostics so the approval gate stays in force. "
             "For long Pixelle jobs, prefer start_pixelle_async and return the "
             "job_id unless the user explicitly wants to wait. "
+            "Images and videos are safe-by-default: register URL/file metadata "
+            "with register_media_asset, and run plan_media_analysis only when the "
+            "user explicitly asks to analyze media content. Never dump raw video "
+            "or base64 media into the LLM context. "
             f"{model_management_prompt}"
             "Use read_alpha_ravis_architecture only when the user asks what "
             "AlphaRavis is, what it can do, or how the stack works. "
@@ -4753,6 +5204,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "your agent memory before recording a new repeated lesson. "
             "Use semantic_memory_search when keyword search misses a likely "
             "older memory, artifact, archive, skill, or session turn. "
+            "Use semantic_media_search when the user asks to find past images or "
+            "videos by meaning. "
             "Use approved skill-library entries only as hints. Store new "
             "workflows as inactive skill candidates for human review. "
             "Use record_curated_memory only for stable, compact facts; use "
@@ -4798,6 +5251,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         tools=[
             check_hermes_agent,
             call_hermes_agent,
+            check_external_service,
             build_specialist_report,
             search_agent_memory,
             record_agent_memory,
@@ -4805,6 +5259,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             record_curated_memory,
             search_session_history,
             semantic_memory_search,
+            semantic_media_search,
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
             list_alpha_ravis_artifacts,
@@ -4845,7 +5300,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             search_archived_context,
             search_session_history,
             semantic_memory_search,
+            semantic_media_search,
             search_debugging_lessons,
+            check_external_service,
             describe_optional_tool_registry,
             search_agent_memory,
             record_agent_memory,
@@ -4880,7 +5337,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "Use search_session_history for recent indexed turns and artifact "
             "tools when exact disk-backed notes are needed. Use "
             "semantic_memory_search for meaning-based retrieval; by default it "
-            "only searches this thread plus global memories. "
+            "only searches this thread plus global memories. Use semantic_media_search "
+            "for media references and timecoded frame hits when vision indexing is enabled. "
             "Use build_specialist_report when returning retrieved facts, source "
             "keys, caveats, and next actions to another agent. Do not answer "
             "unrelated tasks yourself; transfer back."
@@ -4910,6 +5368,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             model=power_llm,
             tools=[
                 inspect_model_management_status,
+                check_external_service,
                 plan_embedding_maintenance,
                 run_embedding_memory_jobs,
                 queue_vector_memory_backfill,

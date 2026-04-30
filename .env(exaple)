@@ -17,6 +17,8 @@
 #   OPTIONAL BRIDGE SETTINGS           -> LibreChat <-> LangGraph behavior
 #   OPTIONAL MEMORY SETTINGS           -> compression, archives, architecture doc
 #   OPTIONAL VECTOR MEMORY             -> pgvector semantic memory sidecar
+#   OPTIONAL MEDIA / VISION            -> media gallery and vision embeddings
+#   OPTIONAL OPENWEBUI                 -> second OpenAI-compatible frontend
 #   OPTIONAL SKILL LIBRARY             -> reusable workflow skill candidates
 #   OPTIONAL SEARCH                    -> Tavily / research tools
 #   OPTIONAL OBSERVABILITY             -> LangSmith tracing
@@ -130,6 +132,13 @@ EMBEDDING_FALLBACK_LITELLM_MODEL=openai/bge-m3
 EMBEDDING_API_BASE=http://192.168.178.140:11434/v1
 EMBEDDING_TIMEOUT_SECONDS=30
 
+# Optional vision embedding route. Use a single multimodal model only if it
+# returns a consistent dimension for text queries and image/video-frame inputs.
+# Otherwise AlphaRavis keeps vision embeddings in a separate table.
+VISION_EMBEDDING_LITELLM_MODEL=openai/Qwen2BVL
+VISION_EMBEDDING_FALLBACK_LITELLM_MODEL=openai/bge-m3
+VISION_EMBEDDING_API_BASE=http://192.168.178.140:11434/v1
+
 # LiteLLM fallback policy.
 # Global LiteLLM fallbacks are intentionally off. edge-gemma is a small
 # starter/crisis model and should not handle complex agent workflows.
@@ -202,6 +211,19 @@ HERMES_MAX_ITERATIONS=30
 HERMES_TIMEOUT_SECONDS=180
 HERMES_MAX_OUTPUT_CHARS=8000
 HERMES_TEMPERATURE=0.2
+
+# Optional OpenWebUI frontend. It connects to the AlphaRavis Bridge, not directly
+# to the LLM, so AlphaRavis remains router/memory/RAG/tool orchestrator.
+OPENWEBUI_URL=http://openwebui:8080
+OPENWEBUI_PORT=3090
+OPENWEBUI_OPENAI_API_KEY=sk-local-dev
+OPENWEBUI_ENABLE_OPENAI_API=true
+OPENWEBUI_ENABLE_OPENAI_API_PASSTHROUGH=true
+OPENWEBUI_DEFAULT_MODELS=my-agent
+OPENWEBUI_ENABLE_WEB_SEARCH=false
+OPENWEBUI_RAG_WEB_SEARCH_ENGINE=searxng
+OPENWEBUI_SEARXNG_QUERY_URL=
+OPENWEBUI_SECRET_KEY=alpharavis-local-change-me
 
 
 # =====================================================================
@@ -383,6 +405,15 @@ BRIDGE_ENABLE_RESPONSES_API=true
 # enabled for LibreChat compatibility; Responses has richer output item events.
 # Allowed values: responses, chat_completions
 BRIDGE_PREFERRED_API_MODE=responses
+
+# Raw media safety for LibreChat/OpenWebUI inputs.
+# Allowed BRIDGE_MEDIA_CONTEXT_MODE values:
+#   metadata = replace media blocks with file_id/url/type metadata markers
+#   off      = drop media blocks unless text is present
+# BRIDGE_ALLOW_RAW_MEDIA_CONTEXT=true passes raw multimodal blocks through; keep
+# false until the target LangGraph/model path is explicitly vision-capable.
+BRIDGE_ALLOW_RAW_MEDIA_CONTEXT=false
+BRIDGE_MEDIA_CONTEXT_MODE=metadata
 
 # Bridge-level hard cutoff before the request is sent to LangGraph. Set 0 to
 # disable. If BRIDGE_HARD_INPUT_HTTP_ERROR=false, the bridge returns a visible
@@ -637,6 +668,47 @@ ALPHARAVIS_RAG_API_URL=http://rag_api:8000
 ALPHARAVIS_RAG_FEDERATED_TIMEOUT_SECONDS=20
 ALPHARAVIS_RAG_FEDERATED_MAX_FILE_IDS=200
 ALPHARAVIS_RAG_RESULT_PREVIEW_CHARS=1400
+
+
+# =====================================================================
+# OPTIONAL MEDIA / VISION - SAFE MEDIA CATALOG + SEPARATE VECTORS
+# =====================================================================
+
+# Media gallery stores Pixelle outputs and uploaded/linked media as files plus
+# Mongo metadata, then exposes them over HTTP. Raw media is not dumped into LLM
+# context by default.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_MEDIA_GALLERY=true
+ALPHARAVIS_MEDIA_GALLERY_URL=http://media-gallery:8130
+ALPHARAVIS_MEDIA_PUBLIC_BASE_URL=http://localhost:8130
+ALPHARAVIS_MEDIA_PORT=8130
+ALPHARAVIS_MEDIA_ROOT=/media-data
+ALPHARAVIS_MEDIA_MONGO_DB=alpharavis_media
+ALPHARAVIS_MEDIA_MONGO_COLLECTION=assets
+ALPHARAVIS_MEDIA_DOWNLOAD_ENABLED=true
+ALPHARAVIS_MEDIA_MAX_DOWNLOAD_BYTES=2147483648
+ALPHARAVIS_MEDIA_DOWNLOAD_TIMEOUT_SECONDS=120
+
+# Vision/media vector memory uses a separate pgvector table so text embeddings
+# and vision embeddings with different dimensions never collide.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=false
+ALPHARAVIS_VISION_PGVECTOR_TABLE=alpharavis_media_vectors
+ALPHARAVIS_VISION_EMBEDDING_BASE_URL=http://litellm:4000/v1
+ALPHARAVIS_VISION_EMBEDDING_API_KEY=sk-local-dev
+ALPHARAVIS_VISION_EMBEDDING_MODEL=vision-embed
+ALPHARAVIS_VISION_EMBEDDING_FALLBACK_MODEL=vision-embed-fallback
+ALPHARAVIS_VISION_EMBEDDING_TIMEOUT_SECONDS=60
+ALPHARAVIS_VISION_EMBEDDING_FALLBACK_TEXT=true
+ALPHARAVIS_VISION_QUERY_USES_VISION_MODEL=true
+ALPHARAVIS_VISION_PGVECTOR_CREATE_HNSW_INDEX=true
+ALPHARAVIS_VISION_PGVECTOR_SEARCH_LIMIT=5
+
+# Pixelle result registration. When Pixelle returns image/video URLs, AlphaRavis
+# registers them in the media gallery and, if vision vectors are enabled,
+# indexes captions/URLs in the separate media vector table.
+# Allowed values: true, false
+ALPHARAVIS_PIXELLE_MEDIA_REGISTER_LIMIT=8
 
 
 # =====================================================================

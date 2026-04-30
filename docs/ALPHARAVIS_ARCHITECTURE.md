@@ -931,6 +931,86 @@ Agents can call `describe_optional_tool_registry` to see configured MCP servers,
 load status, warning messages, and loaded tool names without loading the
 registry during normal graph startup.
 
+The same tool also exposes AlphaRavis's first-level lazy tool categories:
+
+```text
+coding/read
+coding/write
+coding/execute
+media/image
+media/video
+media/audio
+rag/documents
+rag/memory
+system/docker
+system/ssh
+system/power
+```
+
+The model should start with category awareness and only call/load concrete
+tools when the active task needs them. This is the current safe approximation of
+hierarchical lazy tool loading; true per-turn unbinding/rebinding of internal
+LangGraph tools is planned later.
+
+## Media, Vision, And pgvector Dimensions
+
+Text memory and vision/media memory use separate pgvector tables:
+
+```text
+ALPHARAVIS_PGVECTOR_TABLE=alpharavis_memory_vectors
+ALPHARAVIS_VISION_PGVECTOR_TABLE=alpharavis_media_vectors
+```
+
+This avoids mixing embeddings with different dimensions in one `vector(...)`
+column. If a future multimodal embedding model returns one shared dimension for
+text, image, and video-frame queries, the same model can still be used behind
+the vision route. Until then, media records are linked by `source_key`,
+`file_id`, `thread_id`, and metadata instead of being forced into the text
+vector table.
+
+Media is safe-by-default:
+
+- LibreChat/OpenWebUI media blocks are reduced to URL/file-id/type metadata by
+  the bridge unless `BRIDGE_ALLOW_RAW_MEDIA_CONTEXT=true`.
+- Pixelle output URLs are registered with `media-gallery`.
+- The gallery downloads/stores returned assets under `media-data` and records
+  metadata in MongoDB.
+- Optional vision embeddings are written only when
+  `ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true`.
+- Video analysis is not automatic. The planned pipeline is keyframes,
+  timecodes, optional transcription, frame captions, and frame-level embeddings.
+
+## OpenWebUI
+
+OpenWebUI is an optional second frontend, not a second brain. It should point to
+the AlphaRavis Bridge:
+
+```text
+OPENAI_API_BASE_URL=http://api-bridge:8123/v1
+```
+
+OpenWebUI passthrough is enabled in the example env so clients can use the
+bridge's OpenAI-compatible surface. Native tool calling must still be enabled
+per model in the OpenWebUI UI when the chosen model supports it. AlphaRavis
+keeps LangGraph routing, memory, RAG, Hermes delegation, Pixelle, and approval
+rules.
+
+## Tool Calling Mode
+
+AlphaRavis's LangGraph/DeepAgents workers use LangChain tools, not the old
+prompt-only "pretend to call a tool" style. When configured with:
+
+```text
+ALPHARAVIS_DEEPAGENTS_API_MODE=responses
+```
+
+the DeepAgents model binding uses LangChain `ChatOpenAI` with the Responses API
+path and `output_version=responses/v1`, falling back to Chat Completions only
+when the runtime/provider cannot support it. OpenWebUI's "Native" setting is
+separate: it controls how OpenWebUI calls tools inside OpenWebUI chats, while
+AlphaRavis still performs its own LangGraph-native tool execution behind the
+Bridge.
+
 The normal agent path remains:
 
 ```text

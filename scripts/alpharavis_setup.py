@@ -30,8 +30,15 @@ IMPORTANT_KEYS = [
     ("HERMES_OPENAI_BASE_URL", "LiteLLM/OpenAI-compatible URL used by Hermes"),
     ("HERMES_OPENAI_API_KEY", "API key Hermes uses for LiteLLM"),
     ("ALPHARAVIS_ENABLE_HERMES_AGENT", "enable LangGraph -> Hermes sub-agent"),
+    ("ALPHARAVIS_ENABLE_MEDIA_GALLERY", "enable Pixelle/upload media gallery registration"),
+    ("ALPHARAVIS_MEDIA_PUBLIC_BASE_URL", "host URL for the AlphaRavis media gallery"),
+    ("ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY", "enable separate pgvector table for image/video embeddings"),
+    ("ALPHARAVIS_VISION_EMBEDDING_MODEL", "LiteLLM model id for vision embeddings"),
     ("LIBRECHAT_OPENAI_API_KEY", "optional generic LibreChat OpenAI bucket key"),
     ("LIBRECHAT_OPENAI_REVERSE_PROXY", "optional generic LibreChat OpenAI reverse proxy"),
+    ("OPENWEBUI_PORT", "host port for optional OpenWebUI frontend"),
+    ("OPENWEBUI_ENABLE_OPENAI_API_PASSTHROUGH", "enable OpenWebUI OpenAI API passthrough"),
+    ("OPENWEBUI_ENABLE_WEB_SEARCH", "enable OpenWebUI web search"),
 ]
 
 
@@ -79,6 +86,11 @@ MODEL_MANAGEMENT_KEYS = [
     ("ALPHARAVIS_OLLAMA_CHAT_MODEL", "small Ollama chat/crisis model"),
     ("ALPHARAVIS_OLLAMA_EMBED_MODEL", "Ollama embedding model"),
     ("ALPHARAVIS_OLLAMA_EMBED_FALLBACK_MODEL", "fallback embedding model"),
+    ("ALPHARAVIS_ENABLE_MEDIA_GALLERY", "enable media gallery service"),
+    ("ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY", "enable separate media pgvector table"),
+    ("ALPHARAVIS_VISION_EMBEDDING_BASE_URL", "OpenAI-compatible vision embedding base URL"),
+    ("ALPHARAVIS_VISION_EMBEDDING_MODEL", "primary vision embedding model"),
+    ("OPENWEBUI_ENABLE_OPENAI_API_PASSTHROUGH", "OpenWebUI passthrough switch"),
 ]
 
 
@@ -90,6 +102,8 @@ SERVICE_URLS = [
     ("Hermes API", "HERMES_EXTERNAL_API_BASE"),
     ("LiteLLM", "http://localhost:4000/v1"),
     ("RAG API", "http://localhost:8000"),
+    ("Media Gallery", "http://localhost:8130/gallery"),
+    ("OpenWebUI", "http://localhost:3090"),
     ("DeepAgents UI", "http://localhost:3000"),
     ("Agent Custom UI", "http://localhost:3001"),
     ("Pixelle MCP", "http://localhost:9004"),
@@ -251,6 +265,67 @@ def configure_model_management() -> None:
     print("Model-management .env settings updated")
 
 
+def configure_media_vision() -> None:
+    ensure_env()
+    values = read_env(ENV_PATH)
+    media_enabled = ask_yes_no(
+        "Enable AlphaRavis media gallery registration",
+        default=values.get("ALPHARAVIS_ENABLE_MEDIA_GALLERY", "true").lower() in {"1", "true", "yes"},
+    )
+    update_env_value("ALPHARAVIS_ENABLE_MEDIA_GALLERY", "true" if media_enabled else "false")
+    vision_enabled = ask_yes_no(
+        "Enable separate vision/media pgvector table",
+        default=values.get("ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY", "false").lower() in {"1", "true", "yes"},
+    )
+    update_env_value("ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY", "true" if vision_enabled else "false")
+
+    values = read_env(ENV_PATH)
+    prompts = [
+        ("ALPHARAVIS_MEDIA_PUBLIC_BASE_URL", "host-visible media gallery base URL"),
+        ("ALPHARAVIS_MEDIA_PORT", "host port for media gallery"),
+        ("ALPHARAVIS_VISION_EMBEDDING_BASE_URL", "OpenAI-compatible /v1 base for vision embeddings"),
+        ("ALPHARAVIS_VISION_EMBEDDING_MODEL", "primary vision embedding LiteLLM model"),
+        ("ALPHARAVIS_VISION_EMBEDDING_FALLBACK_MODEL", "fallback vision embedding LiteLLM model"),
+        ("VISION_EMBEDDING_LITELLM_MODEL", "LiteLLM backend model name for vision-embed"),
+        ("VISION_EMBEDDING_API_BASE", "backend OpenAI/Ollama /v1 URL for vision embeddings"),
+    ]
+    print("Press Enter to keep text values.")
+    for key, description in prompts:
+        current = values.get(key, "")
+        answer = input(f"{key} [{current}] - {description}: ").strip()
+        if answer:
+            update_env_value(key, answer)
+    print("Media/vision .env settings updated")
+
+
+def configure_openwebui() -> None:
+    ensure_env()
+    values = read_env(ENV_PATH)
+    prompts_bool = [
+        ("OPENWEBUI_ENABLE_OPENAI_API_PASSTHROUGH", "Enable OpenWebUI passthrough to AlphaRavis Bridge", True),
+        ("OPENWEBUI_ENABLE_WEB_SEARCH", "Enable OpenWebUI web search", False),
+    ]
+    for key, prompt, default in prompts_bool:
+        current = values.get(key, "true" if default else "false").lower() in {"1", "true", "yes"}
+        update_env_value(key, "true" if ask_yes_no(prompt, default=current) else "false")
+
+    values = read_env(ENV_PATH)
+    prompts = [
+        ("OPENWEBUI_PORT", "host port for OpenWebUI"),
+        ("OPENWEBUI_DEFAULT_MODELS", "default model id shown in OpenWebUI"),
+        ("OPENWEBUI_OPENAI_API_KEY", "API key OpenWebUI sends to AlphaRavis Bridge"),
+        ("OPENWEBUI_RAG_WEB_SEARCH_ENGINE", "OpenWebUI web search engine"),
+        ("OPENWEBUI_SEARXNG_QUERY_URL", "SearXNG query URL if web search is enabled"),
+    ]
+    print("Press Enter to keep text values.")
+    for key, description in prompts:
+        current = values.get(key, "")
+        answer = input(f"{key} [{current}] - {description}: ").strip()
+        if answer:
+            update_env_value(key, answer)
+    print("OpenWebUI .env settings updated")
+
+
 def ask_yes_no(prompt: str, default: bool = True) -> bool:
     suffix = "Y/n" if default else "y/N"
     answer = input(f"{prompt} [{suffix}]: ").strip().lower()
@@ -265,6 +340,10 @@ def install() -> None:
         configure()
     if ask_yes_no("Configure custom model/power management now", default=False):
         configure_model_management()
+    if ask_yes_no("Configure media gallery / vision embeddings now", default=False):
+        configure_media_vision()
+    if ask_yes_no("Configure OpenWebUI frontend now", default=False):
+        configure_openwebui()
     if ask_yes_no("Initialize/update submodules now", default=True):
         run(["git", "submodule", "update", "--init", "--recursive"])
     print_status()
@@ -280,6 +359,10 @@ def update() -> None:
         configure()
     if ask_yes_no("Configure custom model/power management after update", default=False):
         configure_model_management()
+    if ask_yes_no("Configure media gallery / vision embeddings after update", default=False):
+        configure_media_vision()
+    if ask_yes_no("Configure OpenWebUI after update", default=False):
+        configure_openwebui()
     print_status()
 
 
@@ -323,6 +406,14 @@ def print_status() -> None:
     print(f"- Owner power tools: {env.get('ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS', 'false')}")
     print(f"- Crisis manager: {env.get('ALPHARAVIS_ENABLE_CRISIS_MANAGER', 'false')}")
     print(f"- Real action endpoint: {'configured' if env.get('ALPHARAVIS_MODEL_MGMT_ACTION_URL') else 'not configured'}")
+    print("\nMedia / vision")
+    print(f"- Media gallery: {env.get('ALPHARAVIS_ENABLE_MEDIA_GALLERY', 'true')}")
+    print(f"- Vision vector memory: {env.get('ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY', 'false')}")
+    print(f"- Raw media to bridge context: {env.get('BRIDGE_ALLOW_RAW_MEDIA_CONTEXT', 'false')}")
+    print("\nOpenWebUI")
+    print(f"- Profile: docker compose --profile openwebui up -d openwebui")
+    print(f"- Passthrough: {env.get('OPENWEBUI_ENABLE_OPENAI_API_PASSTHROUGH', 'true')}")
+    print("- Native tool calling: enable per model in OpenWebUI UI when the model supports it")
     print("\nDocker status")
     docker_ps()
 
@@ -363,6 +454,18 @@ def hermes_smoke() -> None:
     print(http_json(f"{base}/chat/completions", api_key=env.get("HERMES_API_KEY", ""), payload=body, timeout=60))
 
 
+def media_smoke() -> None:
+    env = read_env(ENV_PATH)
+    base = env.get("ALPHARAVIS_MEDIA_PUBLIC_BASE_URL", "http://localhost:8130").rstrip("/")
+    print(http_json(f"{base}/health", timeout=15))
+
+
+def openwebui_smoke() -> None:
+    env = read_env(ENV_PATH)
+    port = env.get("OPENWEBUI_PORT", "3090")
+    print(http_json(f"http://localhost:{port}/", timeout=15)[:1000])
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="AlphaRavis setup helper")
     parser.add_argument(
@@ -371,10 +474,14 @@ def main(argv: Iterable[str] | None = None) -> int:
             "install",
             "configure",
             "model-management",
+            "media-vision",
+            "openwebui",
             "update",
             "status",
             "bridge-smoke",
             "hermes-smoke",
+            "media-smoke",
+            "openwebui-smoke",
         ],
     )
     args = parser.parse_args(argv)
@@ -384,6 +491,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         configure()
     elif args.command == "model-management":
         configure_model_management()
+    elif args.command == "media-vision":
+        configure_media_vision()
+    elif args.command == "openwebui":
+        configure_openwebui()
     elif args.command == "update":
         update()
     elif args.command == "status":
@@ -392,6 +503,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         bridge_smoke()
     elif args.command == "hermes-smoke":
         hermes_smoke()
+    elif args.command == "media-smoke":
+        media_smoke()
+    elif args.command == "openwebui-smoke":
+        openwebui_smoke()
     return 0
 
 

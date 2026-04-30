@@ -43,6 +43,23 @@ BRIDGE_HARD_INPUT_HTTP_ERROR = os.getenv("BRIDGE_HARD_INPUT_HTTP_ERROR", "false"
     "true",
     "yes",
 }
+BRIDGE_ALLOW_RAW_MEDIA_CONTEXT = os.getenv("BRIDGE_ALLOW_RAW_MEDIA_CONTEXT", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+BRIDGE_MEDIA_CONTEXT_MODE = os.getenv("BRIDGE_MEDIA_CONTEXT_MODE", "metadata").lower()
+MEDIA_BLOCK_TYPES = {
+    "image_url",
+    "input_image",
+    "video_url",
+    "input_video",
+    "audio_url",
+    "input_audio",
+    "file",
+    "input_file",
+}
 BRIDGE_LLM_HEALTH_URL = os.getenv("BRIDGE_LLM_HEALTH_URL", "http://litellm:4000/v1").rstrip("/")
 BRIDGE_LLM_HEALTH_API_KEY = os.getenv("BRIDGE_LLM_HEALTH_API_KEY", os.getenv("OPENAI_API_KEY", "sk-local-dev"))
 BRIDGE_LLM_HEALTH_MODEL = os.getenv("BRIDGE_LLM_HEALTH_MODEL", "big-boss")
@@ -103,6 +120,59 @@ async def _ensure_thread(client: Any, thread_id: str, thread_key: str) -> str:
     return thread_id
 
 
+def _media_block_summary(part: dict[str, Any]) -> str:
+    block_type = str(part.get("type") or "media")
+    media_url = ""
+    file_id = str(part.get("file_id") or part.get("id") or "")
+    for key in ("image_url", "video_url", "audio_url", "file_url", "url"):
+        value = part.get(key)
+        if isinstance(value, dict):
+            media_url = str(value.get("url") or "")
+        elif isinstance(value, str):
+            media_url = value
+        if media_url:
+            break
+    mime_type = str(part.get("mime_type") or part.get("media_type") or "")
+    title = str(part.get("filename") or part.get("name") or part.get("title") or "")
+    fields = [f"type={block_type}"]
+    if title:
+        fields.append(f"title={title}")
+    if file_id:
+        fields.append(f"file_id={file_id}")
+    if media_url:
+        fields.append(f"url={media_url}")
+    if mime_type:
+        fields.append(f"mime_type={mime_type}")
+    return "[Media attachment withheld from raw LLM context: " + ", ".join(fields) + "]"
+
+
+def _sanitize_message_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content or "")
+    if BRIDGE_ALLOW_RAW_MEDIA_CONTEXT:
+        return _responses_content_to_text(content)
+
+    parts: list[str] = []
+    for part in content:
+        if isinstance(part, str):
+            parts.append(part)
+            continue
+        if not isinstance(part, dict):
+            parts.append(str(part))
+            continue
+        block_type = str(part.get("type") or "")
+        if block_type in {"text", "input_text"} and isinstance(part.get("text"), str):
+            parts.append(part["text"])
+        elif block_type in MEDIA_BLOCK_TYPES:
+            if BRIDGE_MEDIA_CONTEXT_MODE != "off":
+                parts.append(_media_block_summary(part))
+        elif isinstance(part.get("content"), str):
+            parts.append(part["content"])
+    return "\n".join(part for part in parts if part)
+
+
 def _normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized = []
     for message in messages:
@@ -111,7 +181,7 @@ def _normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             role = "ai"
         elif role == "user":
             role = "human"
-        normalized.append({"role": role, "content": message.get("content") or ""})
+        normalized.append({"role": role, "content": _sanitize_message_content(message.get("content") or "")})
     return normalized
 
 
@@ -806,7 +876,7 @@ def _responses_input_to_messages(body: dict[str, Any]) -> list[dict[str, Any]]:
             content = item.get("content", item.get("text", ""))
             if item.get("type") == "message":
                 content = item.get("content", content)
-            messages.append({"role": role, "content": _responses_content_to_text(content)})
+            messages.append({"role": role, "content": _sanitize_message_content(content)})
 
     if not messages and isinstance(body.get("messages"), list):
         return body["messages"]

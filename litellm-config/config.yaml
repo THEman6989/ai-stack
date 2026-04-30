@@ -43,6 +43,25 @@ model_list:
       timeout: 30
       max_retries: 0
 
+  # Optional unified text/image/video-frame embedding route. Use this only when
+  # the target model exposes compatible multimodal embeddings; otherwise keep
+  # AlphaRavis vision embeddings in a separate pgvector table.
+  - model_name: vision-embed
+    litellm_params:
+      model: os.environ/VISION_EMBEDDING_LITELLM_MODEL
+      api_base: os.environ/VISION_EMBEDDING_API_BASE
+      api_key: os.environ/LOCAL_LLM_API_KEY
+      timeout: 60
+      max_retries: 0
+
+  - model_name: vision-embed-fallback
+    litellm_params:
+      model: os.environ/VISION_EMBEDDING_FALLBACK_LITELLM_MODEL
+      api_base: os.environ/VISION_EMBEDDING_API_BASE
+      api_key: os.environ/LOCAL_LLM_API_KEY
+      timeout: 60
+      max_retries: 0
+
 litellm_settings:
   num_retries: 0
   request_timeout: 180

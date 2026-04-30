@@ -59,6 +59,9 @@ services:
       - EMBEDDING_FALLBACK_LITELLM_MODEL=${EMBEDDING_FALLBACK_LITELLM_MODEL:-openai/bge-m3}
       - EMBEDDING_API_BASE=${EMBEDDING_API_BASE:-http://192.168.178.140:11434/v1}
       - EMBEDDING_TIMEOUT_SECONDS=${EMBEDDING_TIMEOUT_SECONDS:-30}
+      - VISION_EMBEDDING_LITELLM_MODEL=${VISION_EMBEDDING_LITELLM_MODEL:-openai/Qwen2BVL}
+      - VISION_EMBEDDING_FALLBACK_LITELLM_MODEL=${VISION_EMBEDDING_FALLBACK_LITELLM_MODEL:-openai/bge-m3}
+      - VISION_EMBEDDING_API_BASE=${VISION_EMBEDDING_API_BASE:-http://192.168.178.140:11434/v1}
     env_file:
       - .env
     volumes:
@@ -194,6 +197,8 @@ services:
       - ALPHARAVIS_PGVECTOR_EMBEDDING_BASE_URL=${ALPHARAVIS_PGVECTOR_EMBEDDING_BASE_URL:-http://litellm:4000/v1}
       - ALPHARAVIS_PGVECTOR_EMBEDDING_API_KEY=${ALPHARAVIS_PGVECTOR_EMBEDDING_API_KEY:-sk-local-dev}
       - ALPHARAVIS_RAG_API_URL=${ALPHARAVIS_RAG_API_URL:-http://rag_api:8000}
+      - ALPHARAVIS_MEDIA_GALLERY_URL=${ALPHARAVIS_MEDIA_GALLERY_URL:-http://media-gallery:8130}
+      - OPENWEBUI_URL=${OPENWEBUI_URL:-http://openwebui:8080}
       - ALPHARAVIS_ARCHITECTURE_DOC_PATH=${ALPHARAVIS_ARCHITECTURE_DOC_PATH:-/workspace/docs/ALPHARAVIS_ARCHITECTURE.md}
       - MONGODB_URI=mongodb://mongodb:27017
       - LS_MONGODB_URI=${LS_MONGODB_URI:-mongodb://mongodb:27017/langgraph?replicaSet=rs0}
@@ -219,11 +224,36 @@ services:
         condition: service_started
       hermes-agent:
         condition: service_started
+      media-gallery:
+        condition: service_started
     env_file:
       - .env
     restart: always
 
   # --- DER MUND (OpenAI-kompatible Bridge fÃ¼r LibreChat) ---
+  # --- ALPHARAVIS MEDIA GALLERY ---
+  media-gallery:
+    build:
+      context: .
+      dockerfile: ./langgraph-app/Dockerfile
+    container_name: media-gallery
+    command: ["uvicorn", "media_server:app", "--host", "0.0.0.0", "--port", "8130"]
+    ports:
+      - "${ALPHARAVIS_MEDIA_PORT:-8130}:8130"
+    volumes:
+      - ./langgraph-app:/app
+      - ./media-data:/media-data
+    env_file:
+      - .env
+    environment:
+      - MONGODB_URI=mongodb://mongodb:27017
+      - ALPHARAVIS_MEDIA_ROOT=${ALPHARAVIS_MEDIA_ROOT:-/media-data}
+      - ALPHARAVIS_MEDIA_PUBLIC_BASE_URL=${ALPHARAVIS_MEDIA_PUBLIC_BASE_URL:-http://localhost:8130}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    restart: unless-stopped
+
   api-bridge:
     build:
       context: .
@@ -249,6 +279,9 @@ services:
       - BRIDGE_STREAM_REASONING_EVENTS=${BRIDGE_STREAM_REASONING_EVENTS:-false}
       - BRIDGE_REASONING_DELTA_FIELD=${BRIDGE_REASONING_DELTA_FIELD:-reasoning_content}
       - BRIDGE_ENABLE_RESPONSES_API=${BRIDGE_ENABLE_RESPONSES_API:-true}
+      - BRIDGE_PREFERRED_API_MODE=${BRIDGE_PREFERRED_API_MODE:-responses}
+      - BRIDGE_ALLOW_RAW_MEDIA_CONTEXT=${BRIDGE_ALLOW_RAW_MEDIA_CONTEXT:-false}
+      - BRIDGE_MEDIA_CONTEXT_MODE=${BRIDGE_MEDIA_CONTEXT_MODE:-metadata}
       - BRIDGE_LLM_HEALTH_URL=${BRIDGE_LLM_HEALTH_URL:-http://litellm:4000/v1}
       - BRIDGE_LLM_HEALTH_API_KEY=${BRIDGE_LLM_HEALTH_API_KEY:-sk-local-dev}
       - BRIDGE_LLM_HEALTH_MODEL=${BRIDGE_LLM_HEALTH_MODEL:-big-boss}
@@ -310,6 +343,7 @@ services:
       - rag_api
       - api-bridge
       - hermes-agent
+      - media-gallery
     environment:
       - MONGO_URI=mongodb://mongodb:27017/LibreChat
       - REDIS_URL=redis://redis:6379
@@ -331,6 +365,38 @@ services:
     restart: always
     env_file:
       - .env
+
+  # OpenWebUI as optional second frontend. It uses AlphaRavis's bridge as the
+  # OpenAI-compatible provider; AlphaRavis remains the brain/router.
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: openwebui
+    profiles:
+      - openwebui
+    ports:
+      - "${OPENWEBUI_PORT:-3090}:8080"
+    volumes:
+      - ./openwebui-data:/app/backend/data
+    env_file:
+      - .env
+    environment:
+      - OPENAI_API_BASE_URL=http://api-bridge:8123/v1
+      - OPENAI_API_BASE_URLS=http://api-bridge:8123/v1
+      - OPENAI_API_KEY=${OPENWEBUI_OPENAI_API_KEY:-sk-local-dev}
+      - OPENAI_API_KEYS=${OPENWEBUI_OPENAI_API_KEY:-sk-local-dev}
+      - ENABLE_OPENAI_API=${OPENWEBUI_ENABLE_OPENAI_API:-true}
+      - ENABLE_OPENAI_API_PASSTHROUGH=${OPENWEBUI_ENABLE_OPENAI_API_PASSTHROUGH:-true}
+      - WEBUI_SECRET_KEY=${OPENWEBUI_SECRET_KEY:-alpharavis-local-change-me}
+      - DEFAULT_MODELS=${OPENWEBUI_DEFAULT_MODELS:-my-agent}
+      - ENABLE_WEB_SEARCH=${OPENWEBUI_ENABLE_WEB_SEARCH:-false}
+      - RAG_WEB_SEARCH_ENGINE=${OPENWEBUI_RAG_WEB_SEARCH_ENGINE:-searxng}
+      - SEARXNG_QUERY_URL=${OPENWEBUI_SEARXNG_QUERY_URL:-}
+    depends_on:
+      api-bridge:
+        condition: service_started
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
   # --- PIXELLE MCP ---
   pixelle:
     build:
