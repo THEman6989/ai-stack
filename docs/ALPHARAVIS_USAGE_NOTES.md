@@ -323,17 +323,76 @@ The bridge also offers:
 POST /v1/responses
 ```
 
-`/v1/responses` is a compatibility wrapper around the same LangGraph run path.
+`/v1/responses` uses the same LangGraph run path, but exposes a Responses-style
+contract externally. Non-stream responses return `object=response` with output
+items, usage estimates with `input_tokens_details`, metadata,
+`previous_response_id`, `tools`, `reasoning`, `completed_at`, and other
+Responses fields. `previous_response_id` works against the bridge-local response
+store and injects the previous stored output into the next LangGraph run.
+Streamed responses use semantic SSE events such as:
+
+```text
+response.created
+response.in_progress
+response.output_item.added
+response.content_part.added
+response.output_text.delta
+response.output_text.done
+response.content_part.done
+response.output_item.done
+response.completed
+```
+
+The bridge also supports the bridge-local management endpoints that clients
+expect from the Responses surface:
+
+```text
+GET /v1/responses/{response_id}
+GET /v1/responses/{response_id}/input_items
+DELETE /v1/responses/{response_id}
+POST /v1/responses/{response_id}/cancel
+POST /v1/responses/input_tokens
+POST /v1/responses/compact
+```
+
+`cancel` returns the normal Response object only for cancellable background
+responses; AlphaRavis currently runs foreground jobs, so completed responses
+return an explicit `response_not_cancellable` error. `compact` returns a clear
+`501 compact_not_supported` because OpenAI's compact endpoint returns encrypted
+opaque items; AlphaRavis uses its own active compression plus archive retrieval
+instead.
+
+The response cache is controlled by:
+
+```text
+BRIDGE_RESPONSES_STORE=true
+BRIDGE_RESPONSES_STORE_MAX=200
+BRIDGE_RESPONSES_DONE_SENTINEL=true
+BRIDGE_RESPONSES_ALLOW_CLIENT_TOOLS=false
+```
+
+`BRIDGE_RESPONSES_ALLOW_CLIENT_TOOLS=false` is intentional. OpenAI-hosted
+Responses tools such as web search, file search, code interpreter, computer use,
+or shell execution are not executed by this bridge. AlphaRavis has its own
+LangGraph tools. If a client sends `tools`, the bridge returns a structured
+error instead of pretending to run unsupported hosted tools. Structured output
+formats and non-text output modalities also return explicit unsupported errors
+until they are wired to a real AlphaRavis capability.
+
 Chat Completions remains available for LibreChat compatibility. Clients that
-support richer Responses output items should prefer:
+support Responses output items should prefer:
 
 ```text
 BRIDGE_PREFERRED_API_MODE=responses
 ```
 
 LibreChat custom endpoints may still call `/v1/chat/completions` depending on
-LibreChat provider support. AlphaRavis exposes `/v1/responses` and uses OpenAPI
-`3.1.0`; clients that support the newer Responses endpoint can call it directly.
+LibreChat provider support. If LibreChat is configured with a provider/client
+mode that can call Responses, point it to `/v1/responses`; otherwise the bridge
+keeps Chat Completions as the compatibility surface while the internal
+AlphaRavis path stays the same. AlphaRavis exposes OpenAPI `3.1.0`.
+See `docs/ALPHARAVIS_RESPONSES_COMPATIBILITY.md` for the full implemented vs.
+explicitly unsupported Responses matrix.
 
 Reasoning/thinking is stripped from normal visible answer text. If a client can
 handle a separate reasoning delta field, enable:

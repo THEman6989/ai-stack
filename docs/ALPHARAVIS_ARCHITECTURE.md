@@ -146,10 +146,22 @@ Important behavior:
 
 - It exposes `/v1/models`.
 - It exposes `/v1/chat/completions`.
-- It exposes `/v1/responses` as a compatibility wrapper around the same
-  LangGraph run path.
+- It exposes `/v1/responses` over the same LangGraph run path, with
+  Responses-style output items, semantic SSE lifecycle events, and bridge-local
+  `GET`/`DELETE /v1/responses/{response_id}` retrieval support.
+- It also exposes bridge-local Responses compatibility routes for
+  `/v1/responses/{response_id}/input_items`, `/v1/responses/{response_id}/cancel`,
+  and `/v1/responses/input_tokens`. `previous_response_id` works when the
+  referenced response is still in the local bridge cache.
+- It returns explicit unsupported errors for OpenAI-hosted features that are not
+  genuinely implemented by AlphaRavis, including background Responses,
+  Conversations, hosted client-supplied tools, structured output formats,
+  non-text output modalities, prompt-template references, and encrypted
+  `/v1/responses/compact`.
 - It publishes an OpenAPI `3.1.0` schema.
-- It supports non-streaming and OpenAI-compatible SSE streaming.
+- It supports non-streaming and OpenAI-compatible SSE streaming. Chat
+  Completions streams data-only `chat.completion.chunk` events; Responses
+  streams typed semantic events such as `response.output_text.delta`.
 - It can stream LangGraph message events.
 - It can optionally forward reasoning/thinking deltas as a separate SSE delta
   field when `BRIDGE_STREAM_REASONING_EVENTS=true`. Normal visible content
@@ -159,6 +171,9 @@ Important behavior:
   - `approve`
   - `reject`
   - `replace: <safer command>`
+
+The detailed Responses compatibility matrix is documented in
+`docs/ALPHARAVIS_RESPONSES_COMPATIBILITY.md`.
 
 The bridge uses `BRIDGE_MESSAGE_SYNC_MODE=delta` by default. This means that
 after an existing LangGraph thread has state, the bridge sends only new user

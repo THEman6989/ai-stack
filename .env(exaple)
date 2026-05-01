@@ -409,9 +409,12 @@ BRIDGE_STREAM_REASONING_EVENTS=false
 #   reasoning         = some experimental clients
 BRIDGE_REASONING_DELTA_FIELD=reasoning_content
 
-# Adds POST /v1/responses as a compatibility wrapper around the same LangGraph
-# run path used by /v1/chat/completions. Chat Completions remains the primary
-# LibreChat path.
+# Adds POST /v1/responses over the same LangGraph run path used by
+# /v1/chat/completions. The bridge also exposes bridge-local compatibility
+# routes for GET/DELETE /v1/responses/{id}, GET /v1/responses/{id}/input_items,
+# POST /v1/responses/{id}/cancel, POST /v1/responses/input_tokens, and explicit
+# 501 for /v1/responses/compact.
+# Streaming uses Responses-style semantic SSE events.
 # Allowed values: true, false
 BRIDGE_ENABLE_RESPONSES_API=true
 
@@ -419,6 +422,24 @@ BRIDGE_ENABLE_RESPONSES_API=true
 # enabled for LibreChat compatibility; Responses has richer output item events.
 # Allowed values: responses, chat_completions
 BRIDGE_PREFERRED_API_MODE=responses
+
+# In-process retrieval support for GET/DELETE /v1/responses/{response_id}.
+# This is a bridge-local compatibility cache, not long-term memory.
+# Allowed values: true, false
+BRIDGE_RESPONSES_STORE=true
+BRIDGE_RESPONSES_STORE_MAX=200
+
+# Keep a final data: [DONE] sentinel after Responses SSE streams for broad client
+# compatibility. The semantic events still carry the real Responses lifecycle.
+# Allowed values: true, false
+BRIDGE_RESPONSES_DONE_SENTINEL=true
+
+# Client-supplied OpenAI-hosted Responses tools (web_search/file_search/code
+# interpreter/computer/shell/etc.) are not executed by the bridge. Keep this
+# false so clients receive an explicit error instead of a fake tool run.
+# AlphaRavis internal LangGraph tools remain available inside the graph.
+# Allowed values: true, false
+BRIDGE_RESPONSES_ALLOW_CLIENT_TOOLS=false
 
 # Raw media safety for LibreChat/OpenWebUI inputs.
 # Allowed BRIDGE_MEDIA_CONTEXT_MODE values:

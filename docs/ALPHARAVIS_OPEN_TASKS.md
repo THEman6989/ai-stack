@@ -260,9 +260,17 @@ Implemented:
 
 - `/v1/chat/completions`
 - `/v1/responses`
+- `/v1/responses/{response_id}`
+- `/v1/responses/{response_id}/input_items`
+- `/v1/responses/{response_id}/cancel`
+- `/v1/responses/input_tokens`
+- explicit unsupported response for `/v1/responses/compact`
 - OpenAPI schema version `3.1.0`
 - `response.output_item.*`, `response.output_text.*`, and optional
   `response.reasoning_text.*` stream events
+- local `previous_response_id` continuation through `BRIDGE_RESPONSES_STORE`
+- explicit errors for unsupported hosted Responses features instead of silent
+  fake support
 - bridge-level hard request cutoff before LangGraph is called
 - direct no-tool LangGraph calls can use `/v1/responses` with:
 
