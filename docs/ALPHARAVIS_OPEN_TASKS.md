@@ -634,6 +634,10 @@ Goal:
 
 ### Chunk 5: True Lazy Toolsets
 
+Status: implemented for static graph compile-time bundles and MCP category
+filtering. Full per-node runtime rebinding remains future work if LangGraph
+tool binding becomes hot-swappable.
+
 Goal:
 
 - Move from "the model sees a manifest" to actual bounded tool binding.
@@ -658,9 +662,12 @@ Scope:
 
 Acceptance:
 
-- `run_profile` records selected/loaded toolsets.
-- Toolset includes cannot recurse forever.
-- Fast/simple chats still do not pay MCP/tool context cost.
+- Done: `run_profile` records selected toolsets and loaded per-agent toolset
+  profiles.
+- Done: toolset includes detect cycles and cannot recurse forever.
+- Done: MCP schemas are cached by category and only matching MCP tools are
+  attached to the specialist bundles.
+- Done: fast/simple chats still do not pay MCP/tool context cost.
 
 ### Chunk 6: Optional Usage, Pricing, And Rate-Limit Telemetry
 
@@ -712,6 +719,11 @@ Acceptance:
 
 ### Chunk 7: Prompt Assembly And Provider Hardening
 
+Status: implemented for stable prompt context, head/tail context-reference
+truncation, and direct Responses compatibility retries. Chat fallback for
+DeepAgents remains controlled by the existing `ALPHARAVIS_DEEPAGENTS_API_MODE`
+and `ALPHARAVIS_DEEPAGENTS_REQUIRE_RESPONSES` switches.
+
 Goal:
 
 - Make prompt assembly and provider fallback more robust without a huge provider
@@ -729,9 +741,10 @@ Scope:
 
 Acceptance:
 
-- No provider adapter becomes a hard dependency.
-- LiteLLM remains the default abstraction.
-- Responses remains preferred where it is stable.
+- Done: no provider adapter became a hard dependency.
+- Done: LiteLLM remains the default abstraction.
+- Done: Responses remains preferred where it is stable.
+- Done: direct Responses calls retry once after unsupported parameter errors.
 
 ### Chunk 8: Maintenance And Metadata Helpers
 

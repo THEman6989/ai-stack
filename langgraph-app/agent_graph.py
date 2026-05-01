@@ -115,6 +115,36 @@ else:
     MODEL_METADATA_IMPORT_ERROR = None
 
 try:
+    from alpharavis_toolsets import (
+        build_mcp_schema_cache as _build_mcp_schema_cache,
+        infer_toolsets_from_text as _infer_toolsets_from_text,
+        materialize_toolsets as _materialize_toolsets,
+        render_toolset_registry as _render_toolset_registry,
+        schema_cache_fingerprint as _schema_cache_fingerprint,
+        tool_name as _toolset_tool_name,
+        toolset_profile as _toolset_profile,
+    )
+except Exception as exc:  # pragma: no cover - helper must not block graph import
+    _build_mcp_schema_cache = None
+    _infer_toolsets_from_text = None
+    _materialize_toolsets = None
+    _render_toolset_registry = None
+    _schema_cache_fingerprint = None
+    _toolset_tool_name = None
+    _toolset_profile = None
+    TOOLSETS_IMPORT_ERROR: Exception | None = exc
+else:
+    TOOLSETS_IMPORT_ERROR = None
+
+try:
+    from prompt_assembly import build_stable_prompt_context as _build_stable_prompt_context
+except Exception as exc:  # pragma: no cover - helper must not block graph import
+    _build_stable_prompt_context = None
+    PROMPT_ASSEMBLY_IMPORT_ERROR: Exception | None = exc
+else:
+    PROMPT_ASSEMBLY_IMPORT_ERROR = None
+
+try:
     from owner_power_tools import (
         owner_check_comfyui_server as _owner_check_comfyui_server,
         owner_check_llama_server as _owner_check_llama_server,
@@ -254,6 +284,10 @@ class AlphaRavisState(MessagesState):
     crisis_recovery_attempted: NotRequired[bool]
     bridge_context_references: NotRequired[list[dict[str, Any]]]
     run_profile: NotRequired[dict[str, Any]]
+    selected_toolsets: NotRequired[list[str]]
+    loaded_toolsets: NotRequired[dict[str, Any]]
+    toolset_context: NotRequired[str]
+    stable_prompt_context: NotRequired[str]
     thread_id: NotRequired[str]
     thread_key: NotRequired[str]
     context_summary: NotRequired[str]
@@ -293,6 +327,8 @@ ARCHIVE_COLLECTION_INDEX_NS = ("alpharavis", "archive_collection_index")
 DEBUGGING_LESSON_NS = ("alpharavis", "debugging_lessons")
 SKILL_LIBRARY_NS = ("alpharavis", "skill_library")
 SKILL_CONTEXT_MESSAGE_ID = "alpharavis_skill_library_context"
+TOOLSET_CONTEXT_MESSAGE_ID = "alpharavis_toolset_context"
+STABLE_PROMPT_CONTEXT_MESSAGE_ID = "alpharavis_stable_prompt_context"
 PLANNER_CONTEXT_MESSAGE_ID = "alpharavis_planner_context"
 CURRENT_TASK_BRIEF_MESSAGE_ID = "alpharavis_current_task_brief"
 HANDOFF_CONTEXT_MESSAGE_ID = "alpharavis_handoff_context_summary"
@@ -480,6 +516,8 @@ TOOL_REGISTRY_CATEGORIES = [
 ]
 MCP_SERVER_INFOS: list[dict[str, Any]] = []
 MCP_LOAD_WARNINGS: list[str] = []
+MCP_SCHEMA_CACHE: dict[str, list[dict[str, str]]] = {}
+GRAPH_TOOLSET_PROFILE: dict[str, Any] = {}
 
 if not COMFY_IP:
     print("WARNING: 'comfy_server' IP not found in REMOTE_PCS env variable.")
@@ -3171,31 +3209,54 @@ async def record_debugging_lesson(
 def describe_optional_tool_registry(category: str = ""):
     """Describe lazy tool categories and optional MCP registries without loading concrete MCP tools."""
 
-    lines = [
-        "AlphaRavis lazy tool registry:",
-    ]
-    selected = (category or "").strip().lower()
-    category_entries = TOOL_REGISTRY_CATEGORIES
-    if selected:
-        category_entries = [entry for entry in TOOL_REGISTRY_CATEGORIES if entry["category"].lower() == selected]
-        if not category_entries:
-            known = ", ".join(entry["category"] for entry in TOOL_REGISTRY_CATEGORIES)
-            return f"Unknown tool category `{category}`. Known categories: {known}"
-
-    for entry in category_entries:
+    lines: list[str] = []
+    if _render_toolset_registry is not None:
         lines.append(
-            "\n".join(
-                [
-                    f"- {entry['category']}",
-                    f"  Use: {entry['description']}",
-                    f"  Known tools: {', '.join(entry['tools'])}",
-                ]
+            _render_toolset_registry(
+                category,
+                include_tools=_env_bool("ALPHARAVIS_TOOLSET_MANIFEST_INCLUDE_TOOLS", "true"),
+                max_tools=int(os.getenv("ALPHARAVIS_TOOLSET_MANIFEST_MAX_TOOLS", "16")),
             )
         )
+    else:
+        lines.append("AlphaRavis lazy tool registry:")
+        selected = (category or "").strip().lower()
+        category_entries = TOOL_REGISTRY_CATEGORIES
+        if selected:
+            category_entries = [entry for entry in TOOL_REGISTRY_CATEGORIES if entry["category"].lower() == selected]
+            if not category_entries:
+                known = ", ".join(entry["category"] for entry in TOOL_REGISTRY_CATEGORIES)
+                return f"Unknown tool category `{category}`. Known categories: {known}"
+
+        for entry in category_entries:
+            lines.append(
+                "\n".join(
+                    [
+                        f"- {entry['category']}",
+                        f"  Use: {entry['description']}",
+                        f"  Known tools: {', '.join(entry['tools'])}",
+                    ]
+                )
+            )
 
     lines.append(
         "\nRule: start with categories and short descriptions. Load or call concrete tools only when the task actually needs them."
     )
+    if TOOLSETS_IMPORT_ERROR is not None:
+        lines.append(f"\nToolset helper warning: {TOOLSETS_IMPORT_ERROR}")
+    if MCP_SCHEMA_CACHE:
+        fingerprint = _schema_cache_fingerprint(MCP_SCHEMA_CACHE) if _schema_cache_fingerprint else ""
+        lines.append(
+            "\nMCP schema cache: "
+            f"{len(MCP_SCHEMA_CACHE)} categories"
+            + (f", fingerprint {fingerprint}" if fingerprint else "")
+            + "."
+        )
+        for cache_category, entries in sorted(MCP_SCHEMA_CACHE.items()):
+            shown = ", ".join(f"{item.get('server')}:{item.get('name')}" for item in entries[:8])
+            if len(entries) > 8:
+                shown += f", and {len(entries) - 8} more"
+            lines.append(f"- {cache_category}: {shown}")
     lines.append("\nOptional MCP registries known to AlphaRavis:")
     for entry in OPTIONAL_TOOL_MANIFEST:
         enabled = _env_bool(entry["env_flag"], "false")
@@ -3912,6 +3973,8 @@ def _current_task_brief_from_state(state: AlphaRavisState) -> str:
 
 def _protected_context_messages(messages: list[Any]) -> list[Any]:
     protected_ids = {
+        STABLE_PROMPT_CONTEXT_MESSAGE_ID,
+        TOOLSET_CONTEXT_MESSAGE_ID,
         CURRENT_TASK_BRIEF_MESSAGE_ID,
         PLANNER_CONTEXT_MESSAGE_ID,
         MEMORY_KERNEL_CONTEXT_MESSAGE_ID,
@@ -4413,6 +4476,111 @@ def _profile_update(state: AlphaRavisState, **updates: Any) -> dict[str, Any]:
     return profile
 
 
+def _tool_name_for_profile(tool_obj: Any) -> str:
+    if _toolset_tool_name is not None:
+        return _toolset_tool_name(tool_obj)
+    return str(getattr(tool_obj, "name", getattr(tool_obj, "__name__", "")) or "")
+
+
+def _dedupe_tools(tools: list[Any]) -> list[Any]:
+    selected: list[Any] = []
+    seen: set[str] = set()
+    for tool_obj in tools:
+        if tool_obj is None:
+            continue
+        name = _tool_name_for_profile(tool_obj) or str(id(tool_obj))
+        if name in seen:
+            continue
+        seen.add(name)
+        selected.append(tool_obj)
+    return selected
+
+
+def _tools_by_name(tools: list[Any]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for tool_obj in tools:
+        name = _tool_name_for_profile(tool_obj)
+        if name:
+            output[name] = tool_obj
+    return output
+
+
+def _materialized_profile(
+    toolset_names: list[str],
+    available_tools: dict[str, Any],
+    mcp_tools: list[Any],
+    mcp_schema_cache: dict[str, list[dict[str, str]]],
+) -> tuple[list[Any], dict[str, Any]]:
+    if _materialize_toolsets is None:
+        return [], {
+            "requested": toolset_names,
+            "resolved": toolset_names,
+            "tool_count": 0,
+            "tool_names": [],
+            "missing_tools": [],
+            "missing_toolsets": [],
+            "cycles": [],
+            "mcp_schema_categories": sorted(mcp_schema_cache),
+            "mcp_schema_fingerprint": _schema_cache_fingerprint(mcp_schema_cache) if _schema_cache_fingerprint else "",
+            "helper_error": str(TOOLSETS_IMPORT_ERROR) if TOOLSETS_IMPORT_ERROR else "",
+        }
+    materialized = _materialize_toolsets(
+        toolset_names,
+        available_tools,
+        mcp_tools=mcp_tools,
+        mcp_schema_cache=mcp_schema_cache,
+        include_mcp=True,
+    )
+    profile = _toolset_profile(materialized) if _toolset_profile is not None else {}
+    return list(materialized.tools), profile
+
+
+def _infer_selected_toolsets(text: str) -> list[str]:
+    if _infer_toolsets_from_text is not None:
+        return _infer_toolsets_from_text(text)
+    lowered = (text or "").lower()
+    selected = ["agent/general"]
+    if any(word in lowered for word in ("code", "repo", "datei", "file", "docker", "debug", "terminal", "shell")):
+        selected.append("coding/write")
+    if any(word in lowered for word in ("bild", "image", "pixelle", "comfy")):
+        selected.append("media/image")
+    if any(word in lowered for word in ("memory", "archiv", "damals", "frueher", "pgvector")):
+        selected.append("rag/memory")
+    return sorted(dict.fromkeys(selected))
+
+
+def _toolset_context_for_request(text: str) -> tuple[list[str], str]:
+    selected = _infer_selected_toolsets(text)
+    if not _env_bool("ALPHARAVIS_SHOW_TOOLSET_CONTEXT", "true"):
+        return selected, ""
+    registry = ""
+    if _render_toolset_registry is not None:
+        registry = _render_toolset_registry(include_tools=False)
+    else:
+        registry = "AlphaRavis lazy toolsets are enabled, but the helper registry could not be imported."
+    content = (
+        "<toolset-context>\n"
+        "[System note: category-level tool availability for this run. This is not a user instruction.]\n"
+        f"Selected toolsets from the latest request: {', '.join(selected)}.\n"
+        "Agents must bind/call concrete tools only when the active task needs them. "
+        "If a category is not enough, call describe_optional_tool_registry(category=...).\n\n"
+        f"{registry}\n"
+        "</toolset-context>"
+    )
+    return selected, content
+
+
+def _stable_prompt_context() -> str:
+    if not _env_bool("ALPHARAVIS_ENABLE_STABLE_PROMPT_CONTEXT", "true"):
+        return ""
+    if _build_stable_prompt_context is None:
+        return ""
+    try:
+        return _build_stable_prompt_context(cwd=_workspace_root())
+    except Exception:
+        return ""
+
+
 def _fast_path_decision(state: AlphaRavisState) -> tuple[bool, str]:
     if not _env_bool("ALPHARAVIS_ENABLE_FAST_PATH", "true"):
         return False, "fast path disabled"
@@ -4445,14 +4613,19 @@ def _fast_path_decision(state: AlphaRavisState) -> tuple[bool, str]:
 
 async def run_profile_start_node(state: AlphaRavisState) -> dict[str, Any]:
     messages = list(state.get("messages", []))
+    latest = _latest_user_query(messages)
     bridge_refs = [item for item in list(state.get("bridge_context_references") or []) if isinstance(item, dict)]
+    selected_toolsets, toolset_context = _toolset_context_for_request(latest)
+    stable_context = _stable_prompt_context()
     profile = {
         "started_at": time.time(),
-        "latest_user_chars": len(_latest_user_query(messages)),
+        "latest_user_chars": len(latest),
         "message_count": len(messages),
         "token_estimate": _estimate_tokens(messages),
         "bridge_context_references": bridge_refs[:8],
         "bridge_context_reference_count": sum(int(item.get("reference_count", 0)) for item in bridge_refs),
+        "selected_toolsets": selected_toolsets,
+        "loaded_toolsets": GRAPH_TOOLSET_PROFILE,
     }
     _log_event(
         logging.INFO,
@@ -4464,7 +4637,14 @@ async def run_profile_start_node(state: AlphaRavisState) -> dict[str, Any]:
         latest_user_chars=profile["latest_user_chars"],
         bridge_context_reference_count=profile["bridge_context_reference_count"],
     )
-    return {"run_profile": profile}
+    updates: dict[str, Any] = {
+        "run_profile": profile,
+        "selected_toolsets": selected_toolsets,
+        "loaded_toolsets": GRAPH_TOOLSET_PROFILE,
+        "toolset_context": toolset_context,
+        "stable_prompt_context": stable_context,
+    }
+    return updates
 
 
 async def route_decision_node(state: AlphaRavisState) -> dict[str, Any]:
@@ -4654,6 +4834,9 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
 
     messages = list(state.get("messages", []))
     latest = _latest_user_query(messages)
+    selected_toolsets = list(state.get("selected_toolsets") or _infer_selected_toolsets(latest))
+    toolset_context = str(state.get("toolset_context") or "")
+    stable_context = str(state.get("stable_prompt_context") or _stable_prompt_context())
     plan_key = hashlib.sha256(f"{_state_thread_id(state)}:{latest}".encode("utf-8")).hexdigest()[:16]
     if state.get("planner_last_key") == plan_key:
         return {}
@@ -4684,6 +4867,9 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
         "agents/tools, retrieval needs, safety gates, and success criteria in "
         "5-8 short bullets.\n\n"
         f"Available agents: {_available_agent_names()}.\n\n"
+        f"Likely toolsets for this request: {', '.join(selected_toolsets)}.\n"
+        "Use the toolset registry as categories first; do not request concrete "
+        "MCP tools unless the chosen category is needed.\n\n"
         f"{hermes_hint}"
         f"User request:\n{latest}"
     )
@@ -4736,9 +4922,14 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
     )
     return {
         "messages": [
+            *([SystemMessage(content=stable_context, id=STABLE_PROMPT_CONTEXT_MESSAGE_ID)] if stable_context else []),
+            *([SystemMessage(content=toolset_context, id=TOOLSET_CONTEXT_MESSAGE_ID)] if toolset_context else []),
             SystemMessage(content=task_brief, id=CURRENT_TASK_BRIEF_MESSAGE_ID),
             SystemMessage(content=content, id=PLANNER_CONTEXT_MESSAGE_ID),
         ],
+        "selected_toolsets": selected_toolsets,
+        "toolset_context": toolset_context,
+        "stable_prompt_context": stable_context,
         "current_task_brief": task_brief,
         "planner_context": content,
         "planner_last_key": plan_key,
@@ -4746,6 +4937,7 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
             state,
             planner_used=True,
             hermes_route_hint=bool(hermes_hint),
+            selected_toolsets=selected_toolsets,
         ),
     }
 
@@ -4869,6 +5061,8 @@ def _message_stable_key(message: Any) -> str:
 
 def _compression_protected_message_ids() -> set[str]:
     return {
+        STABLE_PROMPT_CONTEXT_MESSAGE_ID,
+        TOOLSET_CONTEXT_MESSAGE_ID,
         CURRENT_TASK_BRIEF_MESSAGE_ID,
         PLANNER_CONTEXT_MESSAGE_ID,
         MEMORY_KERNEL_CONTEXT_MESSAGE_ID,
@@ -5960,11 +6154,16 @@ def _create_debugger_subgraph(llm: Any, handoff_tools: list[Any]):
 
 
 def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
+    global MCP_SCHEMA_CACHE, GRAPH_TOOLSET_PROFILE
+
     _warn_about_mongo_checkpointer()
     _configure_llm_cache()
 
     llm = _deep_agent_model()
     mcp_tools = mcp_tools or []
+    MCP_SCHEMA_CACHE = _build_mcp_schema_cache(MCP_SERVER_INFOS) if _build_mcp_schema_cache is not None else {}
+    memory_manage_tool = create_manage_memory_tool(namespace=("memories",))
+    memory_search_tool = create_search_memory_tool(namespace=("memories",))
     handoff_requirement = (
         "Before calling this transfer tool, create a handoff packet with "
         "build_specialist_report. Include completed work, evidence, commands/files, "
@@ -6082,9 +6281,101 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         )
     crisis_handoff_tools = [transfer_to_crisis] if transfer_to_crisis is not None else []
 
+    local_tool_map = _tools_by_name(
+        [
+            start_pixelle_remote,
+            start_pixelle_async,
+            check_pixelle_job,
+            register_media_asset,
+            semantic_media_search,
+            plan_media_analysis,
+            check_external_service,
+            wake_on_lan,
+            inspect_model_management_status,
+            plan_embedding_maintenance,
+            run_embedding_memory_jobs,
+            prepare_comfy_for_pixelle,
+            request_power_management_action,
+            queue_vector_memory_backfill,
+            *owner_safe_power_tools,
+            *owner_protected_power_tools,
+            owner_check_llama_server,
+            owner_start_llama_server,
+            owner_restart_llama_server,
+            owner_get_llama_server_logs,
+            owner_check_comfyui_server,
+            owner_start_comfyui_server,
+            owner_start_all_model_services,
+            owner_get_pixelle_logs,
+            owner_shutdown_llama_server,
+            owner_shutdown_comfyui_server,
+            execute_ssh_command,
+            execute_local_command,
+            fast_web_search,
+            deep_web_research,
+            ask_documents,
+            read_alpha_ravis_architecture,
+            list_repo_ai_skills,
+            read_repo_ai_skill,
+            reload_repo_ai_skills,
+            export_skill_candidate_to_repo_draft,
+            normalize_research_sources,
+            build_specialist_report,
+            search_curated_memory,
+            record_curated_memory,
+            semantic_memory_search,
+            search_session_history,
+            write_alpha_ravis_artifact,
+            read_alpha_ravis_artifact,
+            list_alpha_ravis_artifacts,
+            check_hermes_agent,
+            call_hermes_agent,
+            search_archived_context,
+            read_archive_record,
+            read_archive_collection,
+            search_debugging_lessons,
+            record_debugging_lesson,
+            describe_optional_tool_registry,
+            search_agent_memory,
+            record_agent_memory,
+            search_skill_library,
+            record_skill_candidate,
+            list_skill_candidates,
+            activate_skill_candidate,
+            deactivate_skill,
+            memory_manage_tool,
+            memory_search_tool,
+        ]
+    )
+    mcp_tool_names = {_tool_name_for_profile(tool_obj) for tool_obj in mcp_tools if _tool_name_for_profile(tool_obj)}
+    agent_toolset_names = {
+        "research_expert": ["agent/research"],
+        "general_assistant": ["agent/general"],
+        "hermes_coding_agent": ["agent/hermes"],
+        "context_retrieval_agent": ["agent/context"],
+        "power_management_agent": ["agent/power"],
+        "crisis_manager_agent": ["agent/crisis"],
+    }
+    agent_toolset_profiles: dict[str, dict[str, Any]] = {}
+    agent_mcp_tools: dict[str, list[Any]] = {}
+    for agent_name, toolsets in agent_toolset_names.items():
+        materialized_tools, profile = _materialized_profile(toolsets, local_tool_map, mcp_tools, MCP_SCHEMA_CACHE)
+        agent_toolset_profiles[agent_name] = profile
+        agent_mcp_tools[agent_name] = [
+            tool_obj for tool_obj in materialized_tools if _tool_name_for_profile(tool_obj) in mcp_tool_names
+        ]
+    GRAPH_TOOLSET_PROFILE = {
+        "enabled": _env_bool("ALPHARAVIS_ENABLE_TRUE_LAZY_TOOLSETS", "true"),
+        "mcp_schema_categories": sorted(MCP_SCHEMA_CACHE),
+        "mcp_schema_fingerprint": _schema_cache_fingerprint(MCP_SCHEMA_CACHE)
+        if _schema_cache_fingerprint and MCP_SCHEMA_CACHE
+        else "",
+        "agents": agent_toolset_profiles,
+    }
+
     research_worker = create_deep_agent(
         model=llm,
-        tools=[
+        tools=_dedupe_tools([
             deep_web_research,
             ask_documents,
             check_external_service,
@@ -6111,7 +6402,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_context,
             *power_handoff_tools,
             *crisis_handoff_tools,
-        ],
+            *agent_mcp_tools.get("research_expert", []),
+        ]),
         name="research_expert",
         system_prompt=(
             "You are the Research Expert. Use deep_web_research for deep web "
@@ -6148,7 +6440,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
 
     general_worker = create_deep_agent(
         model=llm,
-        tools=[
+        tools=_dedupe_tools([
             start_pixelle_remote,
             start_pixelle_async,
             check_pixelle_job,
@@ -6177,8 +6469,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
             list_alpha_ravis_artifacts,
-            create_manage_memory_tool(namespace=("memories",)),
-            create_search_memory_tool(namespace=("memories",)),
+            memory_manage_tool,
+            memory_search_tool,
             search_skill_library,
             list_skill_candidates,
             record_skill_candidate,
@@ -6192,8 +6484,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_context,
             *power_handoff_tools,
             *crisis_handoff_tools,
-        ]
-        + mcp_tools,
+            *agent_mcp_tools.get("general_assistant", []),
+        ]),
         name="general_assistant",
         system_prompt=(
             "You are AlphaRavis's Generalist. Handle quick facts, Pixelle control, "
@@ -6267,7 +6559,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
 
     hermes_worker = create_deep_agent(
         model=llm,
-        tools=[
+        tools=_dedupe_tools([
             check_hermes_agent,
             call_hermes_agent,
             check_external_service,
@@ -6291,7 +6583,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_context,
             *power_handoff_tools,
             *crisis_handoff_tools,
-        ],
+            *agent_mcp_tools.get("hermes_coding_agent", []),
+        ]),
         name="hermes_coding_agent",
         system_prompt=(
             "You are the Hermes Coding Agent bridge inside AlphaRavis. Your job "
@@ -6317,7 +6610,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
 
     context_worker = create_deep_agent(
         model=llm,
-        tools=[
+        tools=_dedupe_tools([
             search_archived_context,
             read_archive_record,
             read_archive_collection,
@@ -6346,7 +6639,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_hermes,
             *power_handoff_tools,
             *crisis_handoff_tools,
-        ],
+            *agent_mcp_tools.get("context_retrieval_agent", []),
+        ]),
         name="context_retrieval_agent",
         system_prompt=(
             "You are the Context Retrieval Agent. Search long-term archived "
@@ -6394,7 +6688,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         )
         power_worker = create_deep_agent(
             model=power_llm,
-            tools=[
+            tools=_dedupe_tools([
                 inspect_model_management_status,
                 check_external_service,
                 plan_embedding_maintenance,
@@ -6417,7 +6711,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 transfer_to_research,
                 transfer_to_context,
                 *crisis_handoff_tools,
-            ],
+                *agent_mcp_tools.get("power_management_agent", []),
+            ]),
             name="power_management_agent",
             system_prompt=(
                 "You are the Power and Model Management Agent. Your job is to keep "
@@ -6447,13 +6742,14 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         )
         crisis_worker = create_deep_agent(
             model=crisis_llm,
-            tools=[
+            tools=_dedupe_tools([
                 *owner_safe_power_tools,
                 build_specialist_report,
                 transfer_to_generalist,
                 transfer_to_debugger,
                 transfer_to_power,
-            ],
+                *agent_mcp_tools.get("crisis_manager_agent", []),
+            ]),
             name="crisis_manager_agent",
             system_prompt=(
                 "You are AlphaRavis Crisis Manager. Keep context tiny. Use only "

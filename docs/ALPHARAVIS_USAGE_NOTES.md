@@ -58,6 +58,12 @@ Agents can still see a short manifest of optional registries through the
 `describe_optional_tool_registry` tool, so they know Pixelle MCP exists and how
 it can be enabled without paying the startup cost by default.
 
+The manifest now comes from composable AlphaRavis toolsets. Typical categories
+are `coding/read`, `coding/write`, `media/image`, `rag/memory`, `system/docker`,
+`system/ssh`, and `system/power`. The planner records likely categories in
+`run_profile.selected_toolsets`; each specialist gets only its bounded bundle
+and matching MCP category tools.
+
 Default MCP config:
 
 ```text
@@ -126,6 +132,17 @@ tool workers to the older ChatLiteLLM path. Set
 fail instead of falling back. Set `ALPHARAVIS_RESPONSES_REQUIRE_NATIVE=true`
 only when you want direct no-tool calls to fail instead of falling back to Chat
 Completions.
+
+Direct Responses calls have a small compatibility retry layer:
+
+```text
+ALPHARAVIS_RESPONSES_UNSUPPORTED_PARAM_RETRY=true
+ALPHARAVIS_RESPONSES_OMIT_TEMPERATURE_MODE=auto
+```
+
+If a local endpoint rejects a harmless parameter such as `parallel_tool_calls`,
+`truncation`, `temperature`, or a token-limit spelling, AlphaRavis retries once
+with the safer payload instead of failing the whole planner/summary call.
 
 ## Model And Power Management
 
@@ -482,7 +499,15 @@ by:
 BRIDGE_CONTEXT_REFERENCE_SOFT_RATIO=0.25
 BRIDGE_CONTEXT_REFERENCE_HARD_RATIO=0.50
 BRIDGE_CONTEXT_REFERENCE_CONTEXT_LENGTH=128000
+BRIDGE_CONTEXT_REFERENCE_MAX_FILE_CHARS=20000
+BRIDGE_CONTEXT_REFERENCE_MAX_GIT_CHARS=20000
+BRIDGE_CONTEXT_REFERENCE_MAX_URL_CHARS=12000
 ```
+
+Large file/git/URL references are truncated head+tail, not just first-N chars.
+That keeps openings, imports, command headers, final errors, and tail context
+while telling the agent to use exact file/archive tools when it needs the full
+source.
 
 Reference warnings and injected-token estimates are recorded in the LangGraph
 `run_profile`.

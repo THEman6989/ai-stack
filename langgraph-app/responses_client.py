@@ -9,6 +9,12 @@ import httpx
 
 from error_classifier import AlphaRavisAPIError, classify_api_error
 
+try:
+    from provider_hardening import harden_responses_payload, retry_responses_payload_for_error
+except Exception:  # pragma: no cover - optional helper during isolated imports
+    harden_responses_payload = None  # type: ignore[assignment]
+    retry_responses_payload_for_error = None  # type: ignore[assignment]
+
 
 @dataclass(frozen=True)
 class ResponsesResult:
@@ -201,6 +207,8 @@ async def invoke_responses(
     if instructions:
         payload["instructions"] = instructions
     payload.update(_responses_extra_kwargs(model_kwargs))
+    if harden_responses_payload is not None:
+        payload = harden_responses_payload(payload, base_url=_responses_base_url())
 
     headers = {"Content-Type": "application/json"}
     api_key = _responses_api_key()
@@ -211,7 +219,15 @@ async def invoke_responses(
     started = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(f"{_responses_base_url()}/responses", headers=headers, json=payload)
+            url = f"{_responses_base_url()}/responses"
+            response = await client.post(url, headers=headers, json=payload)
+            if response.status_code >= 400 and retry_responses_payload_for_error is not None:
+                retry_payload, _retry_reason = retry_responses_payload_for_error(payload, response.text)
+                if retry_payload is not None:
+                    retry_response = await client.post(url, headers=headers, json=retry_payload)
+                    if retry_response.status_code < 400:
+                        response = retry_response
+                        payload = retry_payload
     except Exception as exc:
         raise AlphaRavisAPIError(
             classify_api_error(exc, provider="responses", model=str(payload["model"])),

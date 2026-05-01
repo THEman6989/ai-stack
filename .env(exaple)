@@ -85,6 +85,17 @@ ALPHARAVIS_RESPONSES_TRUNCATION=disabled
 ALPHARAVIS_RESPONSES_PARALLEL_TOOL_CALLS=true
 ALPHARAVIS_RESPONSES_PARSE_TOOL_CALLS=true
 ALPHARAVIS_RESPONSES_REASONING_FORMAT=
+# Provider hardening for direct Responses calls.
+# ALPHARAVIS_RESPONSES_UNSUPPORTED_PARAM_RETRY retries once when a local
+# OpenAI-compatible endpoint rejects a parameter such as temperature,
+# parallel_tool_calls, truncation, store, max_output_tokens, or max_tokens.
+# ALPHARAVIS_RESPONSES_OMIT_TEMPERATURE_MODE:
+#   auto   = omit temperature for providers/models that manage it server-side
+#   always = never send temperature on Responses requests
+#   never  = send temperature when model kwargs request it
+ALPHARAVIS_RESPONSES_UNSUPPORTED_PARAM_RETRY=true
+ALPHARAVIS_RESPONSES_OMIT_TEMPERATURE_MODE=auto
+ALPHARAVIS_RESPONSES_DROP_NONE_VALUES=true
 
 # DeepAgents tool workers can use LangChain ChatOpenAI with the Responses API.
 # Allowed values:
@@ -478,7 +489,22 @@ BRIDGE_CONTEXT_REFERENCE_CONTEXT_LENGTH=128000
 BRIDGE_CONTEXT_REFERENCE_SOFT_RATIO=0.25
 BRIDGE_CONTEXT_REFERENCE_HARD_RATIO=0.50
 BRIDGE_CONTEXT_REFERENCE_MAX_URL_CHARS=12000
+BRIDGE_CONTEXT_REFERENCE_MAX_FILE_CHARS=20000
+BRIDGE_CONTEXT_REFERENCE_MAX_GIT_CHARS=20000
 BRIDGE_CONTEXT_REFERENCE_FOLDER_LIMIT=200
+
+# AlphaRavis stable prompt and lazy toolset assembly.
+# ALPHARAVIS_ENABLE_STABLE_PROMPT_CONTEXT injects a tiny platform/tool/archive
+# policy block into LangGraph state. It is stable runtime context, not a user
+# instruction.
+# ALPHARAVIS_ENABLE_TRUE_LAZY_TOOLSETS uses composable toolsets and category
+# MCP schema caches. Concrete MCP tools are attached only to matching agent
+# bundles instead of being dumped into the generalist.
+ALPHARAVIS_ENABLE_STABLE_PROMPT_CONTEXT=true
+ALPHARAVIS_ENABLE_TRUE_LAZY_TOOLSETS=true
+ALPHARAVIS_SHOW_TOOLSET_CONTEXT=true
+ALPHARAVIS_TOOLSET_MANIFEST_INCLUDE_TOOLS=true
+ALPHARAVIS_TOOLSET_MANIFEST_MAX_TOOLS=16
 
 # Central file safety.
 # Empty = no global write root limit, but sensitive files/directories are still

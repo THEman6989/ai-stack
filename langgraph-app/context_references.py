@@ -15,6 +15,11 @@ import httpx
 
 from file_safety import ensure_list_allowed, ensure_read_allowed, is_path_allowed
 
+try:
+    from prompt_assembly import truncate_context_content
+except Exception:  # pragma: no cover - optional helper during isolated imports
+    truncate_context_content = None  # type: ignore[assignment]
+
 
 _QUOTED_REFERENCE_VALUE = r'(?:`[^`\n]+`|"[^"\n]+"|\'[^\'\n]+\')'
 REFERENCE_PATTERN = re.compile(
@@ -59,6 +64,19 @@ class ContextReferenceResult:
 
 def estimate_tokens_rough(text: object) -> int:
     return max(1, len(str(text or "")) // 4)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _head_tail_truncate(content: str, label: str, *, max_chars: int) -> str:
+    if truncate_context_content is None:
+        return str(content or "")[:max_chars]
+    return truncate_context_content(str(content or ""), label, max_chars=max_chars)
 
 
 def parse_context_references(message: str) -> list[ContextReference]:
@@ -279,6 +297,8 @@ def _expand_file_reference(
 
     lang = _code_fence_language(path)
     rel = _display_path(path, allowed_root)
+    max_chars = _env_int("BRIDGE_CONTEXT_REFERENCE_MAX_FILE_CHARS", 20000)
+    text = _head_tail_truncate(text, rel, max_chars=max_chars)
     return None, f"File reference {ref.raw} -> {rel} ({estimate_tokens_rough(text)} estimated tokens)\n```{lang}\n{text}\n```"
 
 
@@ -323,6 +343,11 @@ def _expand_git_reference(
         stderr = (result.stderr or "").strip() or "git command failed"
         return f"{ref.raw}: {stderr}", None
     content = result.stdout.strip() or "(no output)"
+    content = _head_tail_truncate(
+        content,
+        label,
+        max_chars=_env_int("BRIDGE_CONTEXT_REFERENCE_MAX_GIT_CHARS", 20000),
+    )
     return None, f"{label} reference {ref.raw} ({estimate_tokens_rough(content)} estimated tokens)\n```diff\n{content}\n```"
 
 
@@ -340,7 +365,7 @@ async def _fetch_url_content(
         content = url_fetcher(url)
         if inspect.isawaitable(content):
             content = await content
-        return str(content or "")[:max_chars].strip()
+        return _head_tail_truncate(str(content or ""), url, max_chars=max_chars).strip()
 
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
         response = await client.get(url)
@@ -352,7 +377,7 @@ async def _fetch_url_content(
             text = re.sub(r"<style[\s\S]*?</style>", "", text, flags=re.IGNORECASE)
             text = re.sub(r"<[^>]+>", " ", text)
             text = re.sub(r"\s+", " ", text)
-        return text[:max_chars].strip()
+        return _head_tail_truncate(text, url, max_chars=max_chars).strip()
 
 
 def _resolve_path(cwd: Path, target: str, *, allowed_root: Path) -> Path:

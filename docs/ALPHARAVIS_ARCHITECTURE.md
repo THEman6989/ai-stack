@@ -125,6 +125,15 @@ ALPHARAVIS_MCP_ALLOW_STDIO=false
 This keeps the useful DeepAgents MCP pattern without letting arbitrary project
 MCP configs start local processes by accident.
 
+AlphaRavis also has a Hermes-style toolset layer in
+`langgraph-app/alpharavis_toolsets.py`. Toolsets are composable categories such
+as `coding/read`, `media/image`, `rag/memory`, `system/docker`, and
+`system/power`. The run start node infers likely toolsets from the latest user
+request and stores them in `run_profile.selected_toolsets`; the planner injects
+only a short category context on the agent path. MCP schemas are cached by
+category, and concrete MCP tools are bound only to matching specialist bundles
+instead of attaching every loaded MCP tool to the generalist.
+
 ## Core Request Flow
 
 1. The user chats in LibreChat.
@@ -192,6 +201,14 @@ The bridge also owns first-pass context hygiene:
 - Context references resolve under the AI-stack repo root by default and refuse
   sensitive credential/config paths. Warnings and injected-token estimates are
   copied into `run_profile` as `bridge_context_references`.
+- Large file, git, and URL context references use Hermes-style head/tail
+  truncation. The middle is replaced with a marker that points the agent back to
+  exact file/archive tools when the full source is needed.
+
+Stable prompt material is separated from ephemeral run context. A tiny
+`<stable-runtime-context>` block carries platform hints, archive policy, and
+toolset policy; the current task brief, planner context, MemoryKernel hints,
+skill hints, and handoff packet remain separate protected messages.
 
 ## File Safety
 
@@ -260,7 +277,10 @@ AlphaRavis currently uses a swarm-style multi-agent setup.
 Direct no-tool model calls inside the graph can use
 `ALPHARAVIS_LLM_API_MODE=responses`. That path calls the OpenAI-compatible
 `/v1/responses` endpoint on LiteLLM or llama.cpp for planner, fast path, and
-summary calls.
+summary calls. `langgraph-app/provider_hardening.py` hardens that path with
+Hermes-style compatibility retries: unsupported parameters can be removed or
+mapped once, Kimi/Moonshot-style models can omit server-managed temperature, and
+LiteLLM remains the default gateway abstraction.
 
 Tool-heavy DeepAgents workers can use Responses-native tool binding through
 LangChain `ChatOpenAI`:
