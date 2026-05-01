@@ -781,9 +781,42 @@ ALPHARAVIS_ALLOW_SKILL_PROMOTION=true
 Reviewed repo skill cards under `ai-skills/` are different from Mongo skill
 candidates. AlphaRavis may inject only a tiny metadata hint when a card seems
 relevant. It reads the full card only through `read_repo_ai_skill` when needed.
+The repo skill index is cached by an mtime/size manifest so normal runs do not
+rescan every skill file.
 
 ```text
 ALPHARAVIS_REPO_SKILL_HINT_LIMIT=3
+ALPHARAVIS_REPO_SKILL_CACHE=true
+ALPHARAVIS_REPO_SKILL_CACHE_PATH=.cache/alpharavis/repo_skill_manifest.json
+ALPHARAVIS_REPO_SKILL_SUPPORTING_FILE_LIMIT=40
+ALPHARAVIS_REPO_SKILL_INCLUDE_DRAFTS=false
+```
+
+Use `reload_repo_ai_skills` when you add, remove, or edit disk skills and want
+AlphaRavis to report what changed. Reloading only refreshes the manifest; it
+does not promote Mongo skill candidates or change routing.
+
+Disk skills may have supporting files in:
+
+```text
+references/
+templates/
+scripts/
+assets/
+```
+
+Use `read_repo_ai_skill("skill-name", "references/file.md")` or the matching
+supporting path to load one of those files. The same central file-safety guard
+keeps reads inside the requested skill directory.
+
+Candidate export is separate from activation. `record_skill_candidate` still
+creates an inactive Mongo candidate. When review mode is intentionally enabled,
+`export_skill_candidate_to_repo_draft` can write a draft under
+`ai-skills/_drafts/<slug>/SKILL.md`; the Store candidate remains inactive.
+
+```text
+ALPHARAVIS_ALLOW_SKILL_DRAFT_EXPORT=false
+ALPHARAVIS_REPO_SKILL_DRAFT_DIR=ai-skills/_drafts
 ```
 
 ## Run Profile

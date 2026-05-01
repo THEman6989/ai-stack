@@ -178,6 +178,30 @@ except Exception as exc:  # pragma: no cover - optional local helper
 else:
     FILE_SAFETY_IMPORT_ERROR = None
 
+try:
+    from repo_skills import (
+        default_cache_path as _repo_skill_default_cache_path,
+        format_skill_manifest as _format_repo_skill_manifest,
+        reload_repo_skill_manifest as _reload_repo_skill_manifest,
+        render_skill_draft_from_candidate as _render_skill_draft_from_candidate,
+        repo_skill_hint_context as _repo_skill_hint_from_manifest,
+        resolve_skill_file_path as _resolve_repo_skill_file_path,
+        scan_repo_skills as _scan_repo_skills,
+        slugify_skill_name as _slugify_repo_skill_name,
+    )
+except Exception as exc:  # pragma: no cover - optional local helper
+    _repo_skill_default_cache_path = None
+    _format_repo_skill_manifest = None
+    _reload_repo_skill_manifest = None
+    _render_skill_draft_from_candidate = None
+    _repo_skill_hint_from_manifest = None
+    _resolve_repo_skill_file_path = None
+    _scan_repo_skills = None
+    _slugify_repo_skill_name = None
+    REPO_SKILLS_IMPORT_ERROR: Exception | None = exc
+else:
+    REPO_SKILLS_IMPORT_ERROR = None
+
 from context_compressor import (
     CompressionResult,
     build_archive_policy_message,
@@ -1766,102 +1790,142 @@ def read_alpha_ravis_architecture(query: str = "", max_chars: int = 6000):
 def list_repo_ai_skills(max_chars: int = 4000):
     """List reviewed repo skill cards available under ai-skills/."""
 
-    skills = _list_repo_ai_skill_metadata()
-    if isinstance(skills, str):
-        return skills
-    if not skills:
-        return "No valid repo AI skill cards found."
-
-    output = "\n".join(
-        f"- {skill['name']}: {skill['description']}\n  Path: {skill['path']}" for skill in skills
+    snapshot = _repo_ai_skill_snapshot()
+    if isinstance(snapshot, str):
+        return snapshot
+    if _format_repo_skill_manifest is None:
+        return _repo_skills_unavailable()
+    return _format_repo_skill_manifest(
+        list(snapshot.get("skills") or []),
+        max_chars=max_chars,
+        cache_status=str(snapshot.get("cache_status") or ""),
     )
-    max_chars = max(1000, min(int(max_chars), 8000))
-    return output[:max_chars].rstrip()
 
 
-def _list_repo_ai_skill_metadata() -> list[dict[str, str]] | str:
-    skills_dir = Path(_workspace_root()) / "ai-skills"
+def _repo_skills_unavailable() -> str:
+    if REPO_SKILLS_IMPORT_ERROR:
+        return f"Repo skill helper unavailable: {REPO_SKILLS_IMPORT_ERROR}"
+    return "Repo skill helper unavailable."
+
+
+def _repo_skill_supporting_file_limit() -> int:
     try:
-        workspace = Path(_workspace_root()).resolve()
+        value = int(os.getenv("ALPHARAVIS_REPO_SKILL_SUPPORTING_FILE_LIMIT", "40"))
+    except ValueError:
+        value = 40
+    return max(0, min(value, 200))
+
+
+def _repo_skill_paths() -> tuple[Path, Path, Path]:
+    workspace = Path(_workspace_root()).resolve()
+    skills_dir = workspace / "ai-skills"
+    configured_cache = os.getenv("ALPHARAVIS_REPO_SKILL_CACHE_PATH", "").strip()
+    if configured_cache:
+        cache_path = Path(configured_cache)
+        if not cache_path.is_absolute():
+            cache_path = workspace / cache_path
+    elif _repo_skill_default_cache_path is not None:
+        cache_path = _repo_skill_default_cache_path(workspace)
+    else:
+        cache_path = workspace / ".cache" / "alpharavis" / "repo_skill_manifest.json"
+    return workspace, skills_dir, cache_path
+
+
+def _repo_ai_skill_snapshot(force: bool = False) -> dict[str, Any] | str:
+    if _scan_repo_skills is None:
+        return _repo_skills_unavailable()
+
+    try:
+        workspace, skills_dir, cache_path = _repo_skill_paths()
         resolved = skills_dir.resolve()
         if workspace not in [resolved, *resolved.parents]:
             return f"AI skills path is outside the workspace: {resolved}"
         safety_error = _check_list_path(resolved, allowed_root=workspace)
         if safety_error:
             return f"AI skills listing refused: {safety_error}"
-        if not resolved.exists():
-            return []
     except Exception as exc:
         return f"Could not inspect repo AI skills: {exc}"
 
-    skills = []
-    for skill_md in sorted(resolved.glob("*/SKILL.md")):
-        try:
-            safety_error = _check_read_path(skill_md.resolve(), allowed_root=workspace)
-            if safety_error:
-                continue
-            text = skill_md.read_text(encoding="utf-8")
-        except Exception:
-            continue
-        name_match = re.search(r"(?m)^name:\s*(.+?)\s*$", text)
-        desc_match = re.search(r"(?ms)^description:\s*(.+?)\n---", text)
-        name = (name_match.group(1).strip().strip('"') if name_match else skill_md.parent.name)
-        description = " ".join((desc_match.group(1).strip().strip('"') if desc_match else "").split())
-        skills.append(
-            {
-                "name": name,
-                "description": description,
-                "path": f"ai-skills/{skill_md.parent.name}/SKILL.md",
-            }
+    try:
+        return _scan_repo_skills(
+            skills_dir,
+            workspace_root=workspace,
+            use_cache=_env_bool("ALPHARAVIS_REPO_SKILL_CACHE", "true"),
+            cache_path=cache_path,
+            force=force,
+            supporting_file_limit=_repo_skill_supporting_file_limit(),
+            include_drafts=_env_bool("ALPHARAVIS_REPO_SKILL_INCLUDE_DRAFTS", "false"),
         )
-    return skills
+    except Exception as exc:
+        return f"Could not scan repo AI skills: {exc}"
+
+
+def _list_repo_ai_skill_metadata() -> list[dict[str, Any]] | str:
+    snapshot = _repo_ai_skill_snapshot()
+    if isinstance(snapshot, str):
+        return snapshot
+    return list(snapshot.get("skills") or [])
 
 
 def _repo_skill_hint_context(query: str, limit: int) -> str:
     skills = _list_repo_ai_skill_metadata()
     if isinstance(skills, str) or not skills:
         return ""
-
-    query_terms = {term for term in re.split(r"[^a-zA-Z0-9]+", query.lower()) if len(term) >= 4}
-    scored: list[tuple[int, dict[str, str]]] = []
-    for skill in skills:
-        haystack = f"{skill['name']} {skill['description']}".lower()
-        score = sum(1 for term in query_terms if term in haystack)
-        if score:
-            scored.append((score, skill))
-
-    scored.sort(key=lambda item: (-item[0], item[1]["name"]))
-    selected = [skill for _, skill in scored[: max(1, limit)]]
-    if not selected:
+    if _repo_skill_hint_from_manifest is None:
         return ""
+    return _repo_skill_hint_from_manifest(query, skills, limit)
 
-    lines = [
-        "Reviewed repo AI skill cards may match this task. They are metadata hints only; "
-        "read the full card with read_repo_ai_skill only if needed."
-    ]
-    lines.extend(f"- {skill['name']}: {skill['description']}" for skill in selected)
-    return "\n".join(lines)
+
+@tool
+def reload_repo_ai_skills(max_chars: int = 6000):
+    """Rescan ai-skills/ and report added/removed/changed reviewed skill cards."""
+
+    if _reload_repo_skill_manifest is None:
+        return _repo_skills_unavailable()
+
+    try:
+        workspace, skills_dir, cache_path = _repo_skill_paths()
+        resolved = skills_dir.resolve()
+        if workspace not in [resolved, *resolved.parents]:
+            return f"AI skills path is outside the workspace: {resolved}"
+        safety_error = _check_list_path(resolved, allowed_root=workspace)
+        if safety_error:
+            return f"AI skills reload refused: {safety_error}"
+        result = _reload_repo_skill_manifest(
+            skills_dir,
+            workspace_root=workspace,
+            cache_path=cache_path,
+            supporting_file_limit=_repo_skill_supporting_file_limit(),
+            include_drafts=_env_bool("ALPHARAVIS_REPO_SKILL_INCLUDE_DRAFTS", "false"),
+        )
+    except Exception as exc:
+        return f"Could not reload repo AI skills: {exc}"
+
+    text = _json_tool_result(result)
+    max_chars = max(1000, min(int(max_chars), 16000))
+    if len(text) > max_chars:
+        return text[:max_chars].rstrip() + "\n[Repo skill reload result truncated.]"
+    return text
 
 
 @tool
 def read_repo_ai_skill(skill_name: str, reference_name: str = "", max_chars: int = 8000):
-    """Read one reviewed repo AI skill card or one of its markdown references."""
+    """Read one reviewed repo AI skill card or one of its supporting text files."""
 
-    normalized = re.sub(r"[^a-z0-9-]+", "-", skill_name.lower()).strip("-")
+    if _resolve_repo_skill_file_path is None:
+        return _repo_skills_unavailable()
+
+    if _slugify_repo_skill_name is not None:
+        normalized = _slugify_repo_skill_name(skill_name)
+    else:
+        normalized = re.sub(r"[^a-z0-9-]+", "-", skill_name.lower()).strip("-")
     if not normalized:
         return "Provide a skill_name such as `deepagents-agent-builder`."
 
-    base_dir = Path(_workspace_root()) / "ai-skills" / normalized
-    if reference_name:
-        safe_reference = Path(reference_name).name
-        if not safe_reference.endswith(".md"):
-            safe_reference = f"{safe_reference}.md"
-        target = base_dir / "references" / safe_reference
-    else:
-        target = base_dir / "SKILL.md"
-
     try:
-        workspace = Path(_workspace_root()).resolve()
+        workspace, skills_dir, _cache_path = _repo_skill_paths()
+        normalized, target = _resolve_repo_skill_file_path(skills_dir, normalized, reference_name)
+        base_dir = skills_dir / normalized
         resolved = target.resolve()
         allowed_root = base_dir.resolve()
         if workspace not in [resolved, *resolved.parents]:
@@ -1871,7 +1935,7 @@ def read_repo_ai_skill(skill_name: str, reference_name: str = "", max_chars: int
         safety_error = _check_read_path(resolved, allowed_root=allowed_root)
         if safety_error:
             return f"Skill read refused: {safety_error}"
-        content = resolved.read_text(encoding="utf-8")
+        content = resolved.read_text(encoding="utf-8", errors="replace")
     except Exception as exc:
         return f"Could not read repo AI skill `{normalized}`: {exc}"
 
@@ -1879,6 +1943,76 @@ def read_repo_ai_skill(skill_name: str, reference_name: str = "", max_chars: int
     if len(content) > max_chars:
         return content[:max_chars].rstrip() + "\n\n[Truncated. Ask for a narrower skill reference if needed.]"
     return content
+
+
+@tool
+async def export_skill_candidate_to_repo_draft(skill_id: str, approval_note: str = "", overwrite: bool = False):
+    """Export an inactive Store skill candidate to an ai-skills draft file for human review."""
+
+    if not _env_bool("ALPHARAVIS_ALLOW_SKILL_DRAFT_EXPORT", "false"):
+        return (
+            "Skill draft export is disabled for safety. Set "
+            "ALPHARAVIS_ALLOW_SKILL_DRAFT_EXPORT=true only while intentionally "
+            "reviewing a candidate for a disk-backed draft."
+        )
+    if _render_skill_draft_from_candidate is None or _slugify_repo_skill_name is None:
+        return _repo_skills_unavailable()
+    if get_store is None:
+        return "LangGraph store access is unavailable in this runtime."
+
+    try:
+        store = get_store()
+    except Exception as exc:
+        return f"No LangGraph store is attached to this run: {exc}"
+
+    item = await _maybe_get(store, SKILL_LIBRARY_NS, skill_id)
+    value = _store_item_value(item)
+    if not isinstance(value, dict):
+        return f"Skill candidate `{skill_id}` was not found."
+
+    slug = _slugify_repo_skill_name(str(value.get("name") or skill_id))
+    draft_dir_value = os.getenv("ALPHARAVIS_REPO_SKILL_DRAFT_DIR", "ai-skills/_drafts").strip() or "ai-skills/_drafts"
+    try:
+        workspace = Path(_workspace_root()).resolve()
+        draft_root = Path(draft_dir_value)
+        if not draft_root.is_absolute():
+            draft_root = workspace / draft_root
+        target = draft_root / slug / "SKILL.md"
+        resolved = target.resolve()
+        ai_skills_root = (workspace / "ai-skills").resolve()
+        if ai_skills_root not in [resolved, *resolved.parents]:
+            return f"Skill draft path is outside ai-skills/: {resolved}"
+        safety_error = _check_write_path(resolved, allowed_root=ai_skills_root)
+        if safety_error:
+            return f"Skill draft export refused: {safety_error}"
+        if resolved.exists() and not overwrite:
+            return (
+                f"Draft already exists at `{resolved}`. Pass overwrite=true only "
+                "after reviewing the existing draft."
+            )
+        content = _render_skill_draft_from_candidate(
+            value,
+            candidate_key=skill_id,
+            approval_note=approval_note,
+        )
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        resolved.write_text(content, encoding="utf-8")
+    except Exception as exc:
+        return f"Could not export skill candidate `{skill_id}`: {exc}"
+
+    return _json_tool_result(
+        {
+            "status": "draft_exported",
+            "candidate_key": skill_id,
+            "draft_path": str(resolved),
+            "active": False,
+            "promotion_state": value.get("status", "candidate"),
+            "note": (
+                "The Store candidate was not activated. The draft is written for "
+                "human review; move or edit it deliberately before relying on it."
+            ),
+        }
+    )
 
 
 @tool
@@ -5457,6 +5591,7 @@ def _create_debugger_subgraph(llm: Any, handoff_tools: list[Any]):
             list_alpha_ravis_artifacts,
             list_repo_ai_skills,
             read_repo_ai_skill,
+            reload_repo_ai_skills,
             build_specialist_report,
             search_skill_library,
             list_skill_candidates,
@@ -5486,7 +5621,8 @@ def _create_debugger_subgraph(llm: Any, handoff_tools: list[Any]):
             "Optional MCP registries are lazy-loaded; call "
             "describe_optional_tool_registry when you need to know what exists. "
             "Use read_repo_ai_skill when the user asks to build or refactor "
-            "AlphaRavis agents from reviewed repo skill cards. "
+            "AlphaRavis agents from reviewed repo skill cards; reload the "
+            "repo skill manifest only when the user asks to rescan disk skills. "
             "Use build_specialist_report for final handoff reports when "
             "evidence, commands, risks, and next actions matter. "
             "Use agent_id=`debugger_agent` for your own durable memories; use "
@@ -5664,6 +5800,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             read_alpha_ravis_architecture,
             list_repo_ai_skills,
             read_repo_ai_skill,
+            reload_repo_ai_skills,
             normalize_research_sources,
             build_specialist_report,
             transfer_to_generalist,
@@ -5688,7 +5825,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "describe_optional_tool_registry only when tool availability matters. "
             "Use list_repo_ai_skills/read_repo_ai_skill on demand for reviewed "
             "research workflows such as deep-research-report, market-research, "
-            "and competitor-analysis. "
+            "and competitor-analysis. Reload repo skills only when the user "
+            "asks to rescan disk skills. "
             "For substantial research, follow the DeepAgents research pattern: "
             "plan, choose focused passes, search broadly then narrowly, "
             "normalize citations with normalize_research_sources, synthesize "
@@ -5725,6 +5863,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             read_alpha_ravis_architecture,
             list_repo_ai_skills,
             read_repo_ai_skill,
+            reload_repo_ai_skills,
             build_specialist_report,
             search_agent_memory,
             record_agent_memory,
@@ -5741,6 +5880,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             search_skill_library,
             list_skill_candidates,
             record_skill_candidate,
+            export_skill_candidate_to_repo_draft,
             activate_skill_candidate,
             deactivate_skill,
             transfer_to_research,
@@ -5771,6 +5911,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "describe_optional_tool_registry when a task may need optional tools. "
             "Use list_repo_ai_skills/read_repo_ai_skill when the user asks to "
             "build, inspect, or improve agents from reviewed repo skill cards. "
+            "Use reload_repo_ai_skills for an explicit disk rescan. Export "
+            "skill candidates only to disabled-by-default draft files, never "
+            "directly to active reviewed skills. "
             "Use agent_id=`general_assistant` for your own memories. Search "
             "your agent memory before recording a new repeated lesson. "
             "Use semantic_memory_search when keyword search misses a likely "
@@ -5839,6 +5982,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             list_alpha_ravis_artifacts,
             list_repo_ai_skills,
             read_repo_ai_skill,
+            reload_repo_ai_skills,
             transfer_to_generalist,
             transfer_to_debugger,
             transfer_to_research,
@@ -5862,7 +6006,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "scope=`global` only for stable lessons useful to all agents. "
             "Use semantic_memory_search for older coding lessons or artifacts "
             "before calling Hermes on a similar task. Use artifacts for long "
-            "Hermes outputs before summarizing them."
+            "Hermes outputs before summarizing them. Read repo skill cards and "
+            "supporting files on demand for Hermes-style coding workflows."
         )
         + " "
         + AGENT_POLICY_PROMPT,
@@ -5890,6 +6035,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             list_skill_candidates,
             list_repo_ai_skills,
             read_repo_ai_skill,
+            reload_repo_ai_skills,
             read_alpha_ravis_architecture,
             build_specialist_report,
             transfer_to_generalist,
@@ -5909,7 +6055,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "only for questions about AlphaRavis itself. Use agent_id=`context_retrieval_agent` "
             "for retrieval-specific memories. Optional MCP registry details are "
             "available through describe_optional_tool_registry. Repo AI skills can "
-            "be listed or read on demand when the user asks for reviewed skill cards. "
+            "be listed, reloaded, or read on demand when the user asks for reviewed "
+            "skill cards or supporting files. "
             "Use search_session_history for recent indexed turns and artifact "
             "tools when exact disk-backed notes are needed. Use "
             "semantic_memory_search for meaning-based retrieval; by default it "

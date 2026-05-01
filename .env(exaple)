@@ -875,11 +875,38 @@ ALPHARAVIS_SKILL_CONTEXT_MAX_CHARS=2500
 # the agent calls read_repo_ai_skill.
 ALPHARAVIS_REPO_SKILL_HINT_LIMIT=3
 
+# Enables the Hermes-style disk manifest cache for reviewed ai-skills.
+# The cache stores names, descriptions, mtimes, and supporting-file paths only.
+# Allowed values: true, false
+ALPHARAVIS_REPO_SKILL_CACHE=true
+
+# Repo skill manifest cache path. Relative paths are resolved from the repo root.
+# Keep this under .cache/alpharavis unless you intentionally move runtime caches.
+ALPHARAVIS_REPO_SKILL_CACHE_PATH=.cache/alpharavis/repo_skill_manifest.json
+
+# Max supporting files listed per reviewed repo skill. Supporting folders are:
+# references/, templates/, scripts/, and assets/.
+ALPHARAVIS_REPO_SKILL_SUPPORTING_FILE_LIMIT=40
+
+# Include draft skills in repo skill listings and hints. Keep false by default:
+# drafts under ai-skills/_drafts are for human review and do not affect routing.
+# Allowed values: true, false
+ALPHARAVIS_REPO_SKILL_INCLUDE_DRAFTS=false
+
 # Safety switch for promoting an inactive skill candidate into an active skill.
 # Keep false by default. Temporarily set true only while intentionally reviewing
 # and promoting a specific candidate.
 # Allowed values: true, false
 ALPHARAVIS_ALLOW_SKILL_PROMOTION=false
+
+# Safety switch for exporting a Mongo/LangGraph Store skill candidate to a
+# disk-backed draft SKILL.md. Exporting does not activate the candidate.
+# Allowed values: true, false
+ALPHARAVIS_ALLOW_SKILL_DRAFT_EXPORT=false
+
+# Draft export directory for reviewed candidates. Relative paths resolve from
+# the repo root. Drafts stay outside normal repo skill hints by default.
+ALPHARAVIS_REPO_SKILL_DRAFT_DIR=ai-skills/_drafts
 
 
 # =====================================================================

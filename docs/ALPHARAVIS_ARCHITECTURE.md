@@ -581,6 +581,7 @@ Agents can use:
 ```text
 list_repo_ai_skills
 read_repo_ai_skill
+reload_repo_ai_skills
 ```
 
 These tools are restricted to the repo `ai-skills/` directory.
@@ -588,6 +589,25 @@ These tools are restricted to the repo `ai-skills/` directory.
 Before the agent path, AlphaRavis may inject a tiny metadata hint for matching
 repo skill cards. This hint contains only names and descriptions. Full skill
 instructions are loaded only when an agent calls `read_repo_ai_skill`.
+
+The repo skill index borrows the Hermes manifest pattern: `SKILL.md`,
+`DESCRIPTION.md`, and supporting-file mtimes/sizes are cached under
+`.cache/alpharavis/repo_skill_manifest.json`. `reload_repo_ai_skills` forces a
+rescan and returns added/removed/changed/unchanged status without changing skill
+promotion state.
+
+Reviewed disk skills may carry supporting files in `references/`, `templates/`,
+`scripts/`, and `assets/`. `read_repo_ai_skill` can load those by relative path,
+while the central file-safety guard keeps access inside the requested skill
+directory.
+
+Mongo/LangGraph Store skill candidates remain separate from reviewed disk
+skills. `record_skill_candidate` writes inactive candidates. `activate_skill_candidate`
+still requires `ALPHARAVIS_ALLOW_SKILL_PROMOTION=true`. The optional
+`export_skill_candidate_to_repo_draft` tool requires
+`ALPHARAVIS_ALLOW_SKILL_DRAFT_EXPORT=true` and writes review-only drafts under
+`ai-skills/_drafts/<slug>/SKILL.md`; exporting a draft does not activate the
+candidate or make it a normal routing hint.
 
 ## Context Compression
 

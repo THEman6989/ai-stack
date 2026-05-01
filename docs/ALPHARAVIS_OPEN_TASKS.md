@@ -514,6 +514,33 @@ Acceptance:
 
 ### Chunk 4: Skill Evolution And Self-Crystallizing Workflows
 
+Status: implemented as safe repo skill manifest/cache plus review-only draft export.
+
+Implemented files:
+
+```text
+langgraph-app/repo_skills.py
+langgraph-app/agent_graph.py
+tests/test_repo_skills.py
+.env(exaple)
+docs/ALPHARAVIS_ARCHITECTURE.md
+docs/ALPHARAVIS_USAGE_NOTES.md
+```
+
+AlphaRavis-specific integration:
+
+- `repo_skills.py` adds a Hermes-style mtime/size manifest cache for reviewed
+  `ai-skills/` cards and their supporting folders.
+- `reload_repo_ai_skills` reports added/removed/changed/unchanged disk skill
+  status without changing Mongo skill candidate promotion state.
+- `read_repo_ai_skill` can now read safe supporting files under `references/`,
+  `templates/`, `scripts/`, and `assets/` in addition to `SKILL.md`.
+- `export_skill_candidate_to_repo_draft` can write review-only drafts under
+  `ai-skills/_drafts/<slug>/SKILL.md` when
+  `ALPHARAVIS_ALLOW_SKILL_DRAFT_EXPORT=true`; candidates stay inactive.
+- Normal repo skill hints still contain only compact metadata and never inject
+  full skills into every run.
+
 Goal:
 
 - Keep AlphaRavis's safe candidate-review model, while borrowing Hermes's better
