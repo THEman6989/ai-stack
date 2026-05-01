@@ -1265,6 +1265,31 @@ Available observation points:
 - LangGraph Studio: graph nodes, state, checkpoints, time travel.
 - DeepAgents UI: agent-oriented visual inspection.
 - Docker logs: service-level debugging.
+- Local rotating AlphaRavis logs:
+
+```text
+logs/operational/alpharavis.log
+logs/operational/alpharavis.jsonl
+logs/debug/alpharavis-debug.log
+logs/debug/alpharavis-debug.jsonl
+```
+
+`langgraph-app/operational_logging.py` records timestamped operational events
+for bridge requests, run start/finish, route decisions, LLM call duration and
+failures, Pixelle/ComfyUI preflight, semantic memory search, and dependency
+health. Operational logs are always meant for owner debugging, not model
+context. The separate debug-all logger is disabled by default and can be turned
+on only while diagnosing noisy issues.
+
+```text
+ALPHARAVIS_OPERATIONAL_LOGGING=true
+ALPHARAVIS_DEBUG_ALL_LOGGING=false
+ALPHARAVIS_LOG_RETENTION_DAYS=4
+```
+
+The file and JSONL formatters redact obvious secrets before writing. In Docker,
+`langgraph-api` and `api-bridge` mount the shared host folder `./logs` to
+`/logs`.
 
 ## How Agents Should Use This File
 

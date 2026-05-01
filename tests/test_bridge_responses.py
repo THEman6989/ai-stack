@@ -38,6 +38,9 @@ if importlib.util.find_spec("fastapi") is None:
         def delete(self, *args, **kwargs):
             return lambda fn: fn
 
+        def middleware(self, *args, **kwargs):
+            return lambda fn: fn
+
     fastapi_stub.FastAPI = FastAPI
     fastapi_stub.HTTPException = HTTPException
     fastapi_stub.Request = Request

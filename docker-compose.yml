@@ -182,6 +182,7 @@ services:
       - ./langchain-bridge-repo/langchain_fastapi_chat_completion:/app/langchain_fastapi_chat_completion
       - ./local-deep-researcher-repo:/app/local_deep_researcher
       - ./:/workspace # WICHTIG: Die Sandbox braucht Zugriff auf deine Files zum Coden!
+      - ./logs:/logs
     environment:
       # Most AlphaRavis switches live in .env. This block only pins container
       # wiring that differs from local/non-Docker development.
@@ -200,6 +201,7 @@ services:
       - ALPHARAVIS_MEDIA_GALLERY_URL=${ALPHARAVIS_MEDIA_GALLERY_URL:-http://media-gallery:8130}
       - OPENWEBUI_URL=${OPENWEBUI_URL:-http://openwebui:8080}
       - ALPHARAVIS_ARCHITECTURE_DOC_PATH=${ALPHARAVIS_ARCHITECTURE_DOC_PATH:-/workspace/docs/ALPHARAVIS_ARCHITECTURE.md}
+      - ALPHARAVIS_LOG_DIR=${ALPHARAVIS_DOCKER_LOG_DIR:-/logs}
       - MONGODB_URI=mongodb://mongodb:27017
       - LS_MONGODB_URI=${LS_MONGODB_URI:-mongodb://mongodb:27017/langgraph?replicaSet=rs0}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379}
@@ -267,6 +269,7 @@ services:
     volumes:
       - ./langgraph-app:/app
       - ./langchain-bridge-repo/langchain_fastapi_chat_completion:/app/langchain_fastapi_chat_completion
+      - ./logs:/logs
     environment:
       - LANGGRAPH_API_URL=http://langgraph-api:2024
       - LANGGRAPH_ASSISTANT_ID=alpha_ravis
@@ -291,6 +294,7 @@ services:
       - BRIDGE_ENABLE_LANGGRAPH_TOOL=${BRIDGE_ENABLE_LANGGRAPH_TOOL:-false}
       - BRIDGE_LANGGRAPH_TOOL_API_KEY=${BRIDGE_LANGGRAPH_TOOL_API_KEY:-}
       - BRIDGE_LANGGRAPH_TOOL_TIMEOUT_SECONDS=${BRIDGE_LANGGRAPH_TOOL_TIMEOUT_SECONDS:-120}
+      - ALPHARAVIS_LOG_DIR=${ALPHARAVIS_DOCKER_LOG_DIR:-/logs}
     depends_on:
       langgraph-api:
         condition: service_healthy

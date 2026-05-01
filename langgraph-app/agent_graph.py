@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import inspect
 import json
+import logging
 import os
 import re
 import shlex
@@ -142,6 +143,22 @@ else:
     OWNER_POWER_TOOLS_IMPORT_ERROR = None
 
 try:
+    from operational_logging import (
+        log_dependency_status as _op_log_dependency_status,
+        log_event as _op_log_event,
+        log_exception as _op_log_exception,
+        setup_logging as _setup_operational_logging,
+    )
+except Exception as exc:  # pragma: no cover - optional local helper
+    _op_log_dependency_status = None
+    _op_log_event = None
+    _op_log_exception = None
+    _setup_operational_logging = None
+    OPERATIONAL_LOGGING_IMPORT_ERROR: Exception | None = exc
+else:
+    OPERATIONAL_LOGGING_IMPORT_ERROR = None
+
+try:
     from responses_client import invoke_responses as _invoke_responses
     from responses_client import responses_enabled as _responses_enabled
 except Exception as exc:  # pragma: no cover - optional local module/deps
@@ -210,6 +227,12 @@ from context_compressor import (
     estimate_tokens_rough as _compressor_estimate_tokens,
     redacted_message_to_json,
 )
+
+if _setup_operational_logging is not None:
+    try:
+        _setup_operational_logging(component="agent_graph")
+    except Exception as exc:  # pragma: no cover - logging must never block graph import
+        print(f"WARNING: AlphaRavis operational logging could not initialize: {exc}")
 
 
 class AlphaRavisState(MessagesState):
@@ -713,6 +736,7 @@ async def _ainvoke_direct_model(
     purpose: str = "direct",
 ) -> AIMessage:
     if _responses_direct_calls_enabled():
+        started = time.perf_counter()
         try:
             result = await _invoke_responses(
                 messages,
@@ -720,6 +744,15 @@ async def _ainvoke_direct_model(
                 timeout_seconds=timeout_seconds,
                 model_kwargs=model_kwargs,
                 purpose=purpose,
+            )
+            _log_event(
+                logging.INFO,
+                "llm.responses_call.completed",
+                purpose=purpose,
+                model=result.model or model_name or "",
+                elapsed_seconds=result.elapsed_seconds or round(time.perf_counter() - started, 3),
+                message_count=len(messages),
+                approx_tokens=_estimate_tokens(messages),
             )
             return AIMessage(
                 content=result.content,
@@ -741,6 +774,18 @@ async def _ainvoke_direct_model(
                 context_length=_hard_context_token_limit(),
                 num_messages=len(messages),
             )
+            _log_exception(
+                "llm.responses_call.failed",
+                exc,
+                level=logging.WARNING,
+                provider="responses",
+                purpose=purpose,
+                model=model_name or os.getenv("ALPHARAVIS_RESPONSES_MODEL", ""),
+                elapsed_seconds=round(time.perf_counter() - started, 3),
+                classification=classified,
+                approx_tokens=_estimate_tokens(messages),
+                num_messages=len(messages),
+            )
             print(
                 "WARNING: Responses API direct call failed for "
                 f"{purpose} ({classified.get('reason')}/{classified.get('action')}), "
@@ -752,7 +797,32 @@ async def _ainvoke_direct_model(
     llm = _model(model_name=model_name, timeout_seconds=timeout_seconds)
     if model_kwargs:
         llm = llm.bind(**model_kwargs)
-    return await llm.ainvoke(messages)
+    started = time.perf_counter()
+    try:
+        response = await llm.ainvoke(messages)
+    except Exception as exc:
+        _log_exception(
+            "llm.chat_call.failed",
+            exc,
+            provider="chat_litellm",
+            purpose=purpose,
+            model=model_name or os.getenv("ALPHARAVIS_MODEL", ""),
+            elapsed_seconds=round(time.perf_counter() - started, 3),
+            approx_tokens=_estimate_tokens(messages),
+            num_messages=len(messages),
+        )
+        raise
+    _log_event(
+        logging.INFO,
+        "llm.chat_call.completed",
+        provider="chat_litellm",
+        purpose=purpose,
+        model=model_name or os.getenv("ALPHARAVIS_MODEL", ""),
+        elapsed_seconds=round(time.perf_counter() - started, 3),
+        approx_tokens=_estimate_tokens(messages),
+        num_messages=len(messages),
+    )
+    return response
 
 
 async def _ainvoke_direct_text(
@@ -927,6 +997,40 @@ def _json_tool_result(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2, default=str)
 
 
+def _log_event(level: int | str, event: str, *, message: str = "", **fields: Any) -> None:
+    if _op_log_event is None:
+        return
+    try:
+        _op_log_event(level, event, component="agent_graph", message=message, **fields)
+    except Exception:
+        pass
+
+
+def _log_exception(event: str, exc: BaseException, *, level: int | str = logging.ERROR, message: str = "", **fields: Any) -> None:
+    if _op_log_exception is None:
+        return
+    try:
+        _op_log_exception(event, exc, component="agent_graph", level=level, message=message, **fields)
+    except Exception:
+        pass
+
+
+def _log_dependency(dependency: str, status: str, *, level: int | str = logging.INFO, message: str = "", **fields: Any) -> None:
+    if _op_log_dependency_status is None:
+        return
+    try:
+        _op_log_dependency_status(
+            dependency,
+            status,
+            component="agent_graph",
+            level=level,
+            message=message,
+            **fields,
+        )
+    except Exception:
+        pass
+
+
 async def _pixelle_preflight() -> dict[str, Any]:
     if not _advanced_model_management_enabled() or not _env_bool("ALPHARAVIS_PIXELLE_PREPARE_COMFY", "false"):
         return {"ready": True, "skipped": True, "message": ""}
@@ -939,8 +1043,16 @@ async def _pixelle_preflight() -> dict[str, Any]:
         }
 
     try:
+        started = time.perf_counter()
         result = await _model_mgmt_prepare_comfy(REMOTE_PCS)
     except Exception as exc:
+        _log_exception(
+            "pixelle.preflight.failed",
+            exc,
+            level=logging.WARNING,
+            dependency="comfyui",
+            block_if_offline=_env_bool("ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE", "false"),
+        )
         return {
             "ready": not _env_bool("ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE", "false"),
             "error": str(exc),
@@ -948,8 +1060,26 @@ async def _pixelle_preflight() -> dict[str, Any]:
         }
 
     if result.get("ready"):
+        _log_event(
+            logging.INFO,
+            "pixelle.preflight.ready",
+            dependency="comfyui",
+            status="ready",
+            elapsed_seconds=round(time.perf_counter() - started, 3),
+            skipped=bool(result.get("skipped")),
+            url=result.get("url", ""),
+        )
         return result
 
+    _log_event(
+        logging.WARNING,
+        "pixelle.preflight.not_ready",
+        dependency="comfyui",
+        status="not_ready",
+        elapsed_seconds=round(time.perf_counter() - started, 3),
+        message=str(result.get("message") or "ComfyUI is not ready for Pixelle."),
+        result_preview=str(result)[:1000],
+    )
     if (
         _owner_power_tools_enabled()
         and _env_bool("ALPHARAVIS_PIXELLE_OWNER_WAKE_COMFY", "true")
@@ -967,6 +1097,12 @@ async def _pixelle_preflight() -> dict[str, Any]:
                     return retry | {"owner_wake_result": wake_result}
         except Exception as exc:
             result["owner_wake_error"] = str(exc)
+            _log_exception(
+                "pixelle.owner_wake.failed",
+                exc,
+                level=logging.WARNING,
+                dependency="comfyui",
+            )
 
     result["block_job"] = _env_bool("ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE", "false")
     return result
@@ -1133,9 +1269,18 @@ async def start_pixelle_remote(prompt: str, config: RunnableConfig):
     """Starts a Pixelle image job and monitors it through a durable LangGraph task."""
 
     current_thread_id = config["configurable"].get("thread_id", "default_thread")
+    started = time.perf_counter()
     preflight = await _pixelle_preflight()
     preflight_notice = _pixelle_preflight_notice(preflight)
     if preflight.get("block_job"):
+        _log_event(
+            logging.WARNING,
+            "pixelle.job.blocked",
+            dependency="pixelle",
+            thread_id=current_thread_id,
+            prompt_chars=len(prompt or ""),
+            reason="comfyui_preflight_blocked",
+        )
         return (
             f"{preflight_notice}\n\n"
             "Pixelle job was not started because ComfyUI appears offline and "
@@ -1148,13 +1293,38 @@ async def start_pixelle_remote(prompt: str, config: RunnableConfig):
             response.raise_for_status()
             job_id = response.json().get("job_id")
         except Exception as exc:
+            _log_exception(
+                "pixelle.job.start_failed",
+                exc,
+                level=logging.ERROR,
+                dependency="pixelle",
+                thread_id=current_thread_id,
+                prompt_chars=len(prompt or ""),
+                elapsed_seconds=round(time.perf_counter() - started, 3),
+            )
             prefix = f"{preflight_notice}\n\n" if preflight_notice else ""
             return f"{prefix}Error: Could not reach Pixelle. ({exc})"
 
     if not job_id:
+        _log_event(
+            logging.ERROR,
+            "pixelle.job.missing_job_id",
+            dependency="pixelle",
+            thread_id=current_thread_id,
+            prompt_chars=len(prompt or ""),
+        )
         prefix = f"{preflight_notice}\n\n" if preflight_notice else ""
         return f"{prefix}Error: Pixelle did not return a job_id."
 
+    _log_event(
+        logging.INFO,
+        "pixelle.job.started",
+        dependency="pixelle",
+        thread_id=current_thread_id,
+        job_id=job_id,
+        mode="wait",
+        prompt_chars=len(prompt or ""),
+    )
     result = await monitor_pixelle_job(job_id, current_thread_id)
     prefix = f"{preflight_notice}\n\n" if preflight_notice else ""
     if result["status"] == "completed":
@@ -1164,8 +1334,25 @@ async def start_pixelle_remote(prompt: str, config: RunnableConfig):
             prompt=prompt,
             thread_id=current_thread_id,
         )
+        _log_event(
+            logging.INFO,
+            "pixelle.job.completed",
+            dependency="pixelle",
+            thread_id=current_thread_id,
+            job_id=job_id,
+            elapsed_seconds=round(time.perf_counter() - started, 3),
+        )
         return f"{prefix}Image ready. Job `{job_id}` completed.\n\n{result['message']}{media_notice}"
 
+    _log_event(
+        logging.WARNING if result.get("status") == "failed" else logging.INFO,
+        "pixelle.job.finished_noncompleted",
+        dependency="pixelle",
+        thread_id=current_thread_id,
+        job_id=job_id,
+        status=result.get("status"),
+        elapsed_seconds=round(time.perf_counter() - started, 3),
+    )
     return f"{prefix}{result['message']}"
 
 
@@ -1173,9 +1360,18 @@ async def start_pixelle_remote(prompt: str, config: RunnableConfig):
 async def start_pixelle_async(prompt: str):
     """Start a Pixelle image job and return immediately with a job id."""
 
+    started = time.perf_counter()
     preflight = await _pixelle_preflight()
     preflight_notice = _pixelle_preflight_notice(preflight)
     if preflight.get("block_job"):
+        _log_event(
+            logging.WARNING,
+            "pixelle.job.blocked",
+            dependency="pixelle",
+            prompt_chars=len(prompt or ""),
+            reason="comfyui_preflight_blocked",
+            mode="async",
+        )
         return (
             f"{preflight_notice}\n\n"
             "Pixelle job was not started because ComfyUI appears offline and "
@@ -1188,13 +1384,38 @@ async def start_pixelle_async(prompt: str):
             response.raise_for_status()
             job_id = response.json().get("job_id")
         except Exception as exc:
+            _log_exception(
+                "pixelle.job.start_failed",
+                exc,
+                level=logging.ERROR,
+                dependency="pixelle",
+                mode="async",
+                prompt_chars=len(prompt or ""),
+                elapsed_seconds=round(time.perf_counter() - started, 3),
+            )
             prefix = f"{preflight_notice}\n\n" if preflight_notice else ""
             return f"{prefix}Error: Could not reach Pixelle. ({exc})"
 
     if not job_id:
+        _log_event(
+            logging.ERROR,
+            "pixelle.job.missing_job_id",
+            dependency="pixelle",
+            mode="async",
+            prompt_chars=len(prompt or ""),
+        )
         prefix = f"{preflight_notice}\n\n" if preflight_notice else ""
         return f"{prefix}Error: Pixelle did not return a job_id."
 
+    _log_event(
+        logging.INFO,
+        "pixelle.job.started",
+        dependency="pixelle",
+        job_id=job_id,
+        mode="async",
+        prompt_chars=len(prompt or ""),
+        elapsed_seconds=round(time.perf_counter() - started, 3),
+    )
     prefix = f"{preflight_notice}\n\n" if preflight_notice else ""
     return (
         f"{prefix}Pixelle job started. job_id: {job_id}\n"
@@ -2201,6 +2422,7 @@ async def semantic_memory_search(
 ):
     """Semantic retrieval over AlphaRavis pgvector memory and federated document RAG."""
 
+    started = time.perf_counter()
     limit = max(1, min(int(limit), int(os.getenv("ALPHARAVIS_PGVECTOR_SEARCH_LIMIT", "5"))))
     if include_other_threads:
         limit = min(limit, int(os.getenv("ALPHARAVIS_CROSS_THREAD_VECTOR_SEARCH_LIMIT", "3")))
@@ -2218,6 +2440,15 @@ async def semantic_memory_search(
             )
         except Exception as exc:
             vector_warning = f"AlphaRavis pgvector search failed cleanly: {exc}"
+            _log_exception(
+                "memory.semantic_search.pgvector_failed",
+                exc,
+                level=logging.WARNING,
+                dependency="pgvector",
+                source_type=source_type,
+                include_other_threads=include_other_threads,
+                limit=limit,
+            )
     elif PGVECTOR_IMPORT_ERROR:
         vector_warning = f"AlphaRavis pgvector memory is unavailable: {PGVECTOR_IMPORT_ERROR}"
     else:
@@ -2233,6 +2464,18 @@ async def semantic_memory_search(
         rag_results, rag_warning = await _rag_federated_search(query, limit=limit)
 
     if not results and not rag_results:
+        _log_event(
+            logging.INFO,
+            "memory.semantic_search.completed",
+            dependency="pgvector",
+            source_type=source_type,
+            include_other_threads=include_other_threads,
+            limit=limit,
+            memory_hits=0,
+            document_hits=0,
+            warnings=[warning for warning in [vector_warning, rag_warning] if warning],
+            elapsed_seconds=round(time.perf_counter() - started, 3),
+        )
         scope = "across threads" if include_other_threads else "in this thread plus global memory"
         return _json_tool_result(
             {
@@ -2249,6 +2492,18 @@ async def semantic_memory_search(
 
     memory_hits = [_vector_result_to_tool_hit(record) for record in results[:limit]]
     document_hits = rag_results[:limit]
+    _log_event(
+        logging.INFO,
+        "memory.semantic_search.completed",
+        dependency="pgvector",
+        source_type=source_type,
+        include_other_threads=include_other_threads,
+        limit=limit,
+        memory_hits=len(memory_hits),
+        document_hits=len(document_hits),
+        warnings=[warning for warning in [vector_warning, rag_warning] if warning],
+        elapsed_seconds=round(time.perf_counter() - started, 3),
+    )
     return _json_tool_result(
         {
             "query": query,
@@ -4191,16 +4446,25 @@ def _fast_path_decision(state: AlphaRavisState) -> tuple[bool, str]:
 async def run_profile_start_node(state: AlphaRavisState) -> dict[str, Any]:
     messages = list(state.get("messages", []))
     bridge_refs = [item for item in list(state.get("bridge_context_references") or []) if isinstance(item, dict)]
-    return {
-        "run_profile": {
-            "started_at": time.time(),
-            "latest_user_chars": len(_latest_user_query(messages)),
-            "message_count": len(messages),
-            "token_estimate": _estimate_tokens(messages),
-            "bridge_context_references": bridge_refs[:8],
-            "bridge_context_reference_count": sum(int(item.get("reference_count", 0)) for item in bridge_refs),
-        }
+    profile = {
+        "started_at": time.time(),
+        "latest_user_chars": len(_latest_user_query(messages)),
+        "message_count": len(messages),
+        "token_estimate": _estimate_tokens(messages),
+        "bridge_context_references": bridge_refs[:8],
+        "bridge_context_reference_count": sum(int(item.get("reference_count", 0)) for item in bridge_refs),
     }
+    _log_event(
+        logging.INFO,
+        "run.started",
+        thread_id=_state_thread_id(state),
+        thread_key=_state_thread_key(state),
+        message_count=profile["message_count"],
+        token_estimate=profile["token_estimate"],
+        latest_user_chars=profile["latest_user_chars"],
+        bridge_context_reference_count=profile["bridge_context_reference_count"],
+    )
+    return {"run_profile": profile}
 
 
 async def route_decision_node(state: AlphaRavisState) -> dict[str, Any]:
@@ -4213,6 +4477,14 @@ async def route_decision_node(state: AlphaRavisState) -> dict[str, Any]:
             f"aktive Kontext mit ca. {token_estimate} Tokens ueber dem Limit "
             f"von {hard_limit} liegt. Bitte kuerze die Eingabe oder frage nach "
             "Archiv-/RAG-Suche statt den ganzen Verlauf direkt zu senden."
+        )
+        _log_event(
+            logging.ERROR,
+            "route.hard_stop",
+            thread_id=_state_thread_id(state),
+            token_estimate=token_estimate,
+            hard_context_limit=hard_limit,
+            message="Hard context cutoff triggered.",
         )
         return {
             "fast_path_route": "hard_stop",
@@ -4228,6 +4500,15 @@ async def route_decision_node(state: AlphaRavisState) -> dict[str, Any]:
 
     use_fast_path, reason = _fast_path_decision(state)
     route = "fast_path" if use_fast_path else "swarm"
+    _log_event(
+        logging.INFO,
+        "route.decided",
+        thread_id=_state_thread_id(state),
+        route=route,
+        reason=reason,
+        token_estimate=token_estimate,
+        fast_path_locked=bool(state.get("fast_path_locked")),
+    )
     lock_thread = (
         route == "swarm"
         and _env_bool("ALPHARAVIS_FAST_PATH_LOCK_AFTER_SWARM", "true")
@@ -4519,6 +4800,14 @@ async def fast_chat_node(state: AlphaRavisState) -> dict[str, Any]:
             raise
         fallback_used = True
         used_model = fallback_model
+        _log_exception(
+            "fast_path.primary_failed_using_fallback",
+            exc,
+            level=logging.WARNING,
+            model=primary_model,
+            fallback_model=fallback_model,
+            classification=fallback_error_classification,
+        )
         response = await _ainvoke_direct_model(
             [prompt, *messages],
             model_name=fallback_model,
@@ -5518,6 +5807,19 @@ async def run_profile_finish_node(state: AlphaRavisState) -> dict[str, Any]:
     if isinstance(started_at, (int, float)):
         profile["total_seconds"] = round(time.time() - started_at, 3)
     profile["finished_at"] = time.time()
+    _log_event(
+        logging.INFO,
+        "run.finished",
+        thread_id=_state_thread_id(state),
+        thread_key=_state_thread_key(state),
+        route=profile.get("route", "unknown"),
+        route_reason=profile.get("route_reason", ""),
+        total_seconds=profile.get("total_seconds"),
+        message_count=profile.get("message_count"),
+        token_estimate=profile.get("token_estimate"),
+        fast_path_fallback_used=bool(profile.get("fast_path_fallback_used")),
+        compressed=bool(profile.get("context_compressed")),
+    )
 
     if not _env_bool("ALPHARAVIS_SHOW_RUN_PROFILE", "false"):
         return {"run_profile": profile}

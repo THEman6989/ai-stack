@@ -17,6 +17,7 @@ Thumbs.db
 
 data
 hermes-data/
+logs/
 
 # Lokaler LangGraph-Dev-Cache
 langgraph-app/.langgraph_api/

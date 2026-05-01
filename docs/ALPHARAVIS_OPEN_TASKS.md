@@ -591,6 +591,47 @@ Acceptance:
 - It does not silently make a candidate active.
 - Reviewed disk skills become faster and more ergonomic to use.
 
+### Chunk 4.5: Operational Logging And Dependency Trace Files
+
+Status: implemented as local rotating operational/debug log files.
+
+Implemented files:
+
+```text
+langgraph-app/operational_logging.py
+langgraph-app/agent_graph.py
+langgraph-app/bridge_server.py
+tests/test_operational_logging.py
+.env(exaple)
+docker-compose.yml
+.gitignore
+docs/ALPHARAVIS_ARCHITECTURE.md
+docs/ALPHARAVIS_USAGE_NOTES.md
+```
+
+AlphaRavis-specific integration:
+
+- Operational logs default to `logs/operational/alpharavis.log` and
+  `logs/operational/alpharavis.jsonl`.
+- The optional all-debug logger writes to `logs/debug/` only when
+  `ALPHARAVIS_DEBUG_ALL_LOGGING=true`.
+- Both loggers use daily rotation and keep `ALPHARAVIS_LOG_RETENTION_DAYS`
+  backups, default 4 days.
+- Logs include timestamps, severity, component, event, dependency, thread/run
+  hints, duration, status, and redacted error data.
+- `agent_graph.py` logs run start/finish, route decisions, LLM call
+  duration/failure, Pixelle/ComfyUI preflight/job status, and semantic memory
+  search results.
+- `bridge_server.py` logs OpenAI-compatible bridge requests, Responses/Chat
+  start/completion, LangGraph stream/wait failures, and LLM health probes.
+- Docker mounts `./logs` to `/logs` for both `langgraph-api` and `api-bridge`.
+
+Goal:
+
+- Have local, time-correlated operational evidence even without LangSmith.
+- Keep normal logs compact and enable a separate all-debug mode only while
+  diagnosing issues.
+
 ### Chunk 5: True Lazy Toolsets
 
 Goal:

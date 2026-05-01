@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 import uuid
@@ -17,6 +18,28 @@ from langgraph_sdk import get_client
 from context_references import preprocess_context_references
 from error_classifier import classify_api_error, format_user_error
 from internal_context import StreamingInternalContextScrubber, sanitize_internal_context
+
+try:
+    from operational_logging import (
+        log_dependency_status as _op_log_dependency_status,
+        log_event as _op_log_event,
+        log_exception as _op_log_exception,
+        setup_logging as _setup_operational_logging,
+    )
+except Exception as exc:  # pragma: no cover - logging must never block bridge startup
+    _op_log_dependency_status = None
+    _op_log_event = None
+    _op_log_exception = None
+    _setup_operational_logging = None
+    OPERATIONAL_LOGGING_IMPORT_ERROR: Exception | None = exc
+else:
+    OPERATIONAL_LOGGING_IMPORT_ERROR = None
+
+if _setup_operational_logging is not None:
+    try:
+        _setup_operational_logging(component="bridge")
+    except Exception:
+        pass
 
 
 LANGGRAPH_API_URL = os.getenv("LANGGRAPH_API_URL", "http://langgraph-api:2024")
@@ -139,6 +162,70 @@ BRIDGE_CONTEXT_REFERENCE_CWD = Path(
 app = FastAPI(title="AlphaRavis OpenAI Bridge", openapi_version="3.1.0")
 _RESPONSES_STORE: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _RESPONSES_INPUT_ITEMS: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+
+
+def _log_event(level: int | str, event: str, *, message: str = "", **fields: Any) -> None:
+    if _op_log_event is None:
+        return
+    try:
+        _op_log_event(level, event, component="bridge", message=message, **fields)
+    except Exception:
+        pass
+
+
+def _log_exception(event: str, exc: BaseException, *, level: int | str = logging.ERROR, message: str = "", **fields: Any) -> None:
+    if _op_log_exception is None:
+        return
+    try:
+        _op_log_exception(event, exc, component="bridge", level=level, message=message, **fields)
+    except Exception:
+        pass
+
+
+def _log_dependency(dependency: str, status: str, *, level: int | str = logging.INFO, message: str = "", **fields: Any) -> None:
+    if _op_log_dependency_status is None:
+        return
+    try:
+        _op_log_dependency_status(
+            dependency,
+            status,
+            component="bridge",
+            level=level,
+            message=message,
+            **fields,
+        )
+    except Exception:
+        pass
+
+
+@app.middleware("http")
+async def _operational_request_logging(request: Request, call_next):
+    started = time.perf_counter()
+    request_id = request.headers.get("x-request-id") or f"req_{uuid.uuid4().hex[:12]}"
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        _log_exception(
+            "bridge.request.failed",
+            exc,
+            path=request.url.path,
+            method=request.method,
+            request_id=request_id,
+            client_host=getattr(request.client, "host", ""),
+            elapsed_seconds=round(time.perf_counter() - started, 3),
+        )
+        raise
+    _log_event(
+        logging.INFO if response.status_code < 500 else logging.ERROR,
+        "bridge.request.completed",
+        path=request.url.path,
+        method=request.method,
+        status_code=response.status_code,
+        request_id=request_id,
+        client_host=getattr(request.client, "host", ""),
+        elapsed_seconds=round(time.perf_counter() - started, 3),
+    )
+    return response
 
 
 def _client():
@@ -599,6 +686,15 @@ async def _smoke_test_litellm_model(model: str) -> dict[str, Any]:
             )
         elapsed = round(time.perf_counter() - started, 3)
         if response.status_code >= 400:
+            _log_dependency(
+                "llm_health_backend",
+                "error",
+                level=logging.WARNING,
+                model=model,
+                status_code=response.status_code,
+                elapsed_seconds=elapsed,
+                url=BRIDGE_LLM_HEALTH_URL,
+            )
             return {
                 "ok": False,
                 "model": model,
@@ -612,6 +708,15 @@ async def _smoke_test_litellm_model(model: str) -> dict[str, Any]:
         message = choice.get("message", {}) if isinstance(choice, dict) else {}
         content = str(message.get("content") or "").strip()
         reasoning = str(message.get("reasoning_content") or "").strip()
+        _log_dependency(
+            "llm_health_backend",
+            "ready" if (content or reasoning) else "empty_response",
+            level=logging.INFO if (content or reasoning) else logging.WARNING,
+            model=model,
+            status_code=response.status_code,
+            elapsed_seconds=elapsed,
+            url=BRIDGE_LLM_HEALTH_URL,
+        )
         return {
             "ok": bool(content or reasoning),
             "model": model,
@@ -620,6 +725,15 @@ async def _smoke_test_litellm_model(model: str) -> dict[str, Any]:
             "content_preview": (content or reasoning)[:120],
         }
     except Exception as exc:
+        _log_exception(
+            "bridge.llm_health.failed",
+            exc,
+            level=logging.WARNING,
+            dependency="llm_health_backend",
+            model=model,
+            url=BRIDGE_LLM_HEALTH_URL,
+            elapsed_seconds=round(time.perf_counter() - started, 3),
+        )
         return {
             "ok": False,
             "model": model,
@@ -879,6 +993,16 @@ async def _stream_chat_events(
                         saw_token = True
                         yield _stream_data(_chunk(visible_delta, model))
     except TimeoutError as exc:
+        _log_exception(
+            "bridge.langgraph_stream.timeout",
+            exc,
+            level=logging.ERROR,
+            dependency="langgraph-api",
+            thread_id=thread_id,
+            timeout_seconds=BRIDGE_RUN_TIMEOUT_SECONDS,
+            emitted_chars=len(emitted),
+            emitted_reasoning_chars=len(emitted_reasoning),
+        )
         if include_activity and BRIDGE_SHOW_ERROR_CLASSIFICATION and BRIDGE_SHOW_ACTIVITY_EVENTS and BRIDGE_ACTIVITY_DETAIL != "off":
             yield _activity_chunk(_error_activity_text(exc), model)
         yield _stream_data(_chunk(_clean_error_message(exc), model))
@@ -886,6 +1010,15 @@ async def _stream_chat_events(
         yield "data: [DONE]\n\n"
         return
     except Exception as exc:
+        _log_exception(
+            "bridge.langgraph_stream.failed",
+            exc,
+            level=logging.ERROR,
+            dependency="langgraph-api",
+            thread_id=thread_id,
+            emitted_chars=len(emitted),
+            emitted_reasoning_chars=len(emitted_reasoning),
+        )
         if include_activity and BRIDGE_SHOW_ERROR_CLASSIFICATION and BRIDGE_SHOW_ACTIVITY_EVENTS and BRIDGE_ACTIVITY_DETAIL != "off":
             yield _activity_chunk(_error_activity_text(exc), model)
         yield _stream_data(_chunk(_clean_error_message(exc), model))
@@ -918,6 +1051,7 @@ async def _stream_chat_events(
 
 
 async def _stream_chat(body: dict[str, Any], request: Request) -> AsyncIterator[str]:
+    started = time.perf_counter()
     model = str(body.get("model") or OPENAI_MODEL_NAME)
     hard_error = _hard_input_error(body.get("messages", []))
     if hard_error:
@@ -929,19 +1063,53 @@ async def _stream_chat(body: dict[str, Any], request: Request) -> AsyncIterator[
     thread_key = _extract_thread_key(body, request)
     thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
     run_payload = await _prepare_run_payload(client, thread_id, thread_key, body.get("messages", []))
+    _log_event(
+        logging.INFO,
+        "bridge.chat.stream.started",
+        thread_id=thread_id,
+        thread_key=thread_key,
+        model=model,
+        message_count=len(body.get("messages", [])),
+        input_tokens_estimate=_request_token_estimate(body.get("messages", [])),
+        stream_mode=BRIDGE_STREAM_MODE,
+    )
 
     if run_payload.get("direct_response"):
         for chunk in _openai_stream_response(str(run_payload["direct_response"]), model):
             yield chunk
+        _log_event(
+            logging.INFO,
+            "bridge.chat.stream.completed",
+            thread_id=thread_id,
+            model=model,
+            direct_response=True,
+            elapsed_seconds=round(time.perf_counter() - started, 3),
+        )
         return
 
     if BRIDGE_STREAM_MODE in {"final", "message", "messages"}:
         async for chunk in _stream_chat_final(client, thread_id, run_payload, model):
             yield chunk
+        _log_event(
+            logging.INFO,
+            "bridge.chat.stream.completed",
+            thread_id=thread_id,
+            model=model,
+            stream_mode=BRIDGE_STREAM_MODE,
+            elapsed_seconds=round(time.perf_counter() - started, 3),
+        )
         return
 
     async for chunk in _stream_chat_events(client, thread_id, run_payload, model):
         yield chunk
+    _log_event(
+        logging.INFO,
+        "bridge.chat.stream.completed",
+        thread_id=thread_id,
+        model=model,
+        stream_mode=BRIDGE_STREAM_MODE,
+        elapsed_seconds=round(time.perf_counter() - started, 3),
+    )
 
 
 async def _run_wait_content(client: Any, thread_id: str, run_payload: dict[str, Any]) -> str:
@@ -958,8 +1126,23 @@ async def _run_wait_content(client: Any, thread_id: str, run_payload: dict[str, 
         )
         return _last_ai_content(state)
     except TimeoutError as exc:
+        _log_exception(
+            "bridge.langgraph_run.timeout",
+            exc,
+            level=logging.ERROR,
+            dependency="langgraph-api",
+            thread_id=thread_id,
+            timeout_seconds=BRIDGE_RUN_TIMEOUT_SECONDS,
+        )
         return _clean_error_message(exc)
     except Exception as exc:
+        _log_exception(
+            "bridge.langgraph_run.failed",
+            exc,
+            level=logging.ERROR,
+            dependency="langgraph-api",
+            thread_id=thread_id,
+        )
         return _clean_error_message(exc)
 
 
@@ -1308,6 +1491,7 @@ def _response_created_payload(response_id: str, model: str, body: dict[str, Any]
 
 
 async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIterator[str]:
+    started = time.perf_counter()
     model = str(body.get("model") or OPENAI_MODEL_NAME)
     messages = _responses_messages_for_body(body)
     response_id = f"resp_{uuid.uuid4().hex}"
@@ -1462,6 +1646,16 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
     thread_key = _extract_thread_key(chat_body, request)
     thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
     run_payload = await _prepare_run_payload(client, thread_id, thread_key, chat_body.get("messages", []))
+    _log_event(
+        logging.INFO,
+        "bridge.responses.stream.started",
+        response_id=response_id,
+        thread_id=thread_id,
+        thread_key=thread_key,
+        model=model,
+        message_count=len(messages),
+        input_tokens_estimate=_request_token_estimate(messages),
+    )
 
     if run_payload.get("direct_response"):
         content = str(run_payload["direct_response"])
@@ -1519,6 +1713,16 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
         )
         if done := _done_sentinel():
             yield done
+        _log_event(
+            logging.INFO,
+            "bridge.responses.stream.completed",
+            response_id=response_id,
+            thread_id=thread_id,
+            model=model,
+            direct_response=True,
+            output_chars=len(content),
+            elapsed_seconds=round(time.perf_counter() - started, 3),
+        )
         return
 
     full_content = ""
@@ -1620,6 +1824,17 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
     )
     if done := _done_sentinel():
         yield done
+    _log_event(
+        logging.INFO,
+        "bridge.responses.stream.completed",
+        response_id=response_id,
+        thread_id=thread_id,
+        model=model,
+        direct_response=False,
+        output_chars=len(full_content),
+        reasoning_chars=len(full_reasoning),
+        elapsed_seconds=round(time.perf_counter() - started, 3),
+    )
 
 
 @app.get("/health")
@@ -1740,6 +1955,7 @@ async def models():
 
 @app.post("/v1/responses")
 async def responses(request: Request):
+    started = time.perf_counter()
     if not BRIDGE_ENABLE_RESPONSES_API:
         raise HTTPException(status_code=404, detail="Responses API bridge is disabled.")
 
@@ -1769,6 +1985,16 @@ async def responses(request: Request):
     thread_key = _extract_thread_key(chat_body, request)
     thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
     run_payload = await _prepare_run_payload(client, thread_id, thread_key, messages)
+    _log_event(
+        logging.INFO,
+        "bridge.responses.request.started",
+        thread_id=thread_id,
+        thread_key=thread_key,
+        model=model,
+        message_count=len(messages),
+        input_tokens_estimate=_request_token_estimate(messages),
+        stream=False,
+    )
 
     if run_payload.get("direct_response"):
         content = str(run_payload["direct_response"])
@@ -1777,6 +2003,15 @@ async def responses(request: Request):
 
     response = _response_object(content, model, body=body, messages=messages)
     _store_response_object(response, body)
+    _log_event(
+        logging.INFO,
+        "bridge.responses.request.completed",
+        response_id=response.get("id", ""),
+        thread_id=thread_id,
+        model=model,
+        output_chars=len(content),
+        elapsed_seconds=round(time.perf_counter() - started, 3),
+    )
     return JSONResponse(response)
 
 
@@ -1881,6 +2116,7 @@ async def delete_response(response_id: str):
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
+    started = time.perf_counter()
     body = await request.json()
     if not body.get("messages"):
         raise HTTPException(status_code=400, detail="messages is required")
@@ -1898,10 +2134,28 @@ async def chat_completions(request: Request):
     thread_key = _extract_thread_key(body, request)
     thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
     run_payload = await _prepare_run_payload(client, thread_id, thread_key, body.get("messages", []))
+    _log_event(
+        logging.INFO,
+        "bridge.chat.request.started",
+        thread_id=thread_id,
+        thread_key=thread_key,
+        model=model,
+        message_count=len(body.get("messages", [])),
+        input_tokens_estimate=_request_token_estimate(body.get("messages", [])),
+        stream=False,
+    )
 
     if run_payload.get("direct_response"):
         content = str(run_payload["direct_response"])
     else:
         content = await _run_wait_content(client, thread_id, run_payload)
 
+    _log_event(
+        logging.INFO,
+        "bridge.chat.request.completed",
+        thread_id=thread_id,
+        model=model,
+        output_chars=len(content),
+        elapsed_seconds=round(time.perf_counter() - started, 3),
+    )
     return JSONResponse(_chat_completion_response(content, model))

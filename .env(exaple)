@@ -1007,6 +1007,49 @@ ALPHARAVIS_HANDOFF_SUMMARY_TIMEOUT_SECONDS=45
 # Allowed values: true, false
 ALPHARAVIS_SHOW_RUN_PROFILE=false
 
+# =====================================================================
+# OPERATIONAL LOGGING
+# =====================================================================
+
+# Writes essential AlphaRavis runtime events to rotating local files:
+# bridge requests, LangGraph route decisions, LLM call failures/durations,
+# Pixelle/ComfyUI/Hermes/RAG/pgvector health, compression and handoff signals.
+# Allowed values: true, false
+ALPHARAVIS_OPERATIONAL_LOGGING=true
+
+# Optional "all logger" for debugging. This writes extra structured details to
+# logs/debug/. Keep false by default because it is noisier and can include
+# redacted/truncated tool and routing details.
+# Allowed values: true, false
+ALPHARAVIS_DEBUG_ALL_LOGGING=false
+
+# Log root directory. In Docker, docker-compose maps this to /logs via
+# ALPHARAVIS_DOCKER_LOG_DIR so both langgraph-api and api-bridge share ./logs.
+ALPHARAVIS_LOG_DIR=logs
+ALPHARAVIS_DOCKER_LOG_DIR=/logs
+
+# Retain rotated log files for this many days. Default: 4 days.
+ALPHARAVIS_LOG_RETENTION_DAYS=4
+
+# Also write JSONL files beside human-readable .log files.
+# Allowed values: true, false
+ALPHARAVIS_LOG_JSONL=true
+
+# Print color-coded operational logs to stderr. ERROR/CRITICAL appear red,
+# WARNING appears yellow in terminals that support ANSI color.
+# Allowed values: true, false
+ALPHARAVIS_LOG_CONSOLE=true
+
+# Normal file log level and debug-all file log level.
+# Allowed values: DEBUG, INFO, WARNING, ERROR, CRITICAL
+ALPHARAVIS_LOG_LEVEL=INFO
+ALPHARAVIS_DEBUG_LOG_LEVEL=DEBUG
+
+# Per-field truncation limits after secret redaction. Increase only while
+# actively debugging.
+ALPHARAVIS_LOG_MAX_FIELD_CHARS=4000
+ALPHARAVIS_DEBUG_LOG_MAX_FIELD_CHARS=12000
+
 # Loads optional MCP tools during graph construction.
 # Default false because MCP loading can add seconds to every request. The native
 # Pixelle HTTP tool still works without this.

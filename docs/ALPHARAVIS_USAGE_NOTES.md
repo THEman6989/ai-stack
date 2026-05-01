@@ -836,6 +836,41 @@ Typical fields:
 Set `ALPHARAVIS_SHOW_RUN_PROFILE=true` if you want this appended visibly in
 LibreChat. Otherwise inspect it in LangGraph Studio or DeepAgents UI.
 
+## Operational Logging
+
+AlphaRavis has a local rotating log layer in addition to LangGraph Studio and
+optional LangSmith tracing.
+
+Default files:
+
+```text
+logs/operational/alpharavis.log
+logs/operational/alpharavis.jsonl
+```
+
+Enable the noisier all-debug logger only while diagnosing a problem:
+
+```text
+logs/debug/alpharavis-debug.log
+logs/debug/alpharavis-debug.jsonl
+```
+
+The operational logger records route decisions, run start/finish, bridge
+requests, LLM call duration/failures, Pixelle/ComfyUI preflight, pgvector/RAG
+search status, and dependency health. It does not intentionally write full chat
+content into the normal log. The debug-all logger can include more routing/tool
+detail, but values are still secret-redacted and truncated.
+
+```text
+ALPHARAVIS_OPERATIONAL_LOGGING=true
+ALPHARAVIS_DEBUG_ALL_LOGGING=false
+ALPHARAVIS_LOG_RETENTION_DAYS=4
+ALPHARAVIS_LOG_DIR=logs
+```
+
+In Docker, `langgraph-api` and `api-bridge` mount `./logs` into `/logs`, so both
+services write to the same host-side log folder.
+
 ## Current Optimization Notes
 
 Already available:
