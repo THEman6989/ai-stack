@@ -174,6 +174,32 @@ LANGGRAPH_API_URL=http://langgraph-api:2024
 # Must match graph id `alpha_ravis`.
 LANGGRAPH_ASSISTANT_ID=alpha_ravis
 
+# AionUi Custom ACP adapter. This is a separate JSON-RPC-over-stdio bridge for
+# AionUi toolcards/permissions and does not replace the OpenAI/FastAPI bridge.
+# AionUi usually starts it as:
+#   python /workspace/langgraph-app/alpharavis_acp_adapter.py
+#
+# Workspace path reported to LangGraph for ACP runs.
+ALPHARAVIS_ACP_WORKSPACE=/workspace
+
+# Max visible characters per ACP tool output before the adapter truncates it.
+ALPHARAVIS_ACP_TOOL_OUTPUT_MAX_CHARS=8000
+
+# ACP status/detail level.
+# Allowed values:
+#   summary = short LangGraph node/status summaries
+#   debug   = includes extra non-message event names and reasoning summaries
+#   off     = only final assistant text/toolcards
+ALPHARAVIS_ACP_TRACE_DETAIL=summary
+
+# If true, strip internal AlphaRavis context blocks and redact common secrets
+# before streaming output into AionUi.
+# Allowed values: true, false
+ALPHARAVIS_ACP_SCRUB_INTERNAL_CONTEXT=true
+
+# Max seconds one ACP prompt may stream before the adapter returns a clean error.
+ALPHARAVIS_ACP_RUN_TIMEOUT_SECONDS=300
+
 # Model name shown to LibreChat through /v1/models.
 # This is only the bridge-facing display id, not the real LiteLLM model id.
 OPENAI_MODEL_NAME=my-agent

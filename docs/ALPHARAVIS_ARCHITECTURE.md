@@ -7,8 +7,9 @@ stack is wired.
 
 ## Identity
 
-AlphaRavis is a multi-agent AI system built around a native LangGraph "brain"
-and an OpenAI-compatible FastAPI bridge for LibreChat.
+AlphaRavis is a multi-agent AI system built around a native LangGraph "brain",
+an OpenAI-compatible FastAPI bridge for LibreChat, and a separate ACP adapter
+for AionUi/custom-agent clients.
 
 The system is designed to be:
 
@@ -26,6 +27,9 @@ The current Docker architecture is split into these main roles:
 - `api-bridge`: the mouth. Exposes OpenAI-compatible `/v1/models`,
   `/v1/chat/completions`, and a compatibility `/v1/responses` wrapper for
   LibreChat or other OpenAI-style clients.
+- `alpharavis_acp_adapter.py`: optional AionUi bridge. Runs as a JSON-RPC-over-stdio
+  custom ACP agent and maps LangGraph streams to AionUi text chunks, toolcards,
+  plan updates, and permission requests.
 - `litellm`: model gateway. Routes AlphaRavis model calls to configured backends such as llama.cpp or Ollama.
 - `mongodb`: LangGraph checkpointing and long-term store backing.
 - `vectordb`: Postgres with pgvector. It can act as an optional semantic
@@ -37,6 +41,36 @@ The current Docker architecture is split into these main roles:
 - Pixelle/MCP services: image generation and Pixelle tool integration when available.
 - `hermes-agent`: optional external coding/system agent reached through its
   OpenAI-compatible API on the host.
+
+## AionUi ACP Adapter
+
+AionUi can use AlphaRavis through a separate custom ACP agent:
+
+```text
+python /workspace/langgraph-app/alpharavis_acp_adapter.py
+```
+
+This adapter is not the OpenAI bridge. It does not expose `/v1/chat/completions`
+or `/v1/responses`; it speaks ACP-style JSON-RPC over stdio and calls the native
+LangGraph API on `LANGGRAPH_API_URL`.
+
+Supported ACP flow:
+
+```text
+AionUi -> alpharavis_acp_adapter.py -> langgraph-api -> alpha_ravis
+```
+
+The adapter maps LangGraph events to AionUi-native UI updates:
+
+- message deltas -> `agent_message_chunk`
+- node/status summaries -> `agent_thought_chunk`
+- planner state -> `plan`
+- tool calls/results -> `tool_call` / `tool_call_update`
+- command approval interrupts -> `session/request_permission`
+
+It strips internal AlphaRavis context blocks, redacts common secrets, truncates
+tool outputs, and keeps tool logs out of thought/reasoning updates. Detailed
+setup is in `docs/AIONUI_LANGGRAPH_ACP_INTEGRATION.md`.
 
 ## Hermes Integration
 
