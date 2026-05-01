@@ -15,7 +15,10 @@ from alpharavis_acp_adapter import (  # noqa: E402
     AlphaRavisAcpAdapter,
     build_permission_request,
     build_tool_call_update,
+    classify_tool_kind,
     extract_prompt_text,
+    extract_locations,
+    JsonRpcError,
     permission_result_to_resume,
     scrub_text,
 )
@@ -61,6 +64,38 @@ async def _tool_stream(_session: AcpSessionState, _prompt: str, _command: dict[s
     yield {"event": "messages", "data": (_FakeMessage("ai", "Fertig"), {})}
 
 
+async def _diff_tool_stream(_session: AcpSessionState, _prompt: str, _command: dict[str, Any] | None) -> AsyncIterator[Any]:
+    yield {
+        "event": "messages",
+        "data": (
+            _FakeMessage(
+                "ai",
+                "",
+                tool_calls=[
+                    {
+                        "id": "call_diff",
+                        "name": "apply_patch",
+                        "args": {"path": "src/app.py"},
+                    }
+                ],
+            ),
+            {},
+        ),
+    }
+    yield {
+        "event": "messages",
+        "data": (
+            _FakeMessage(
+                "tool",
+                "--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-old\n+new",
+                tool_call_id="call_diff",
+                name="apply_patch",
+            ),
+            {},
+        ),
+    }
+
+
 async def _permission_stream(
     _session: AcpSessionState,
     _prompt: str,
@@ -103,6 +138,9 @@ def _adapter_with_collector(stream_factory):
             "trace_detail": "summary",
             "scrub_internal_context": True,
             "run_timeout_seconds": 10,
+            "debug_io": False,
+            "allow_file_writes": False,
+            "send_available_commands": True,
         },
     )
     return adapter, messages
@@ -160,6 +198,33 @@ def test_tool_calls_are_toolcards_not_thoughts() -> None:
     assert "container up" not in thought_text
 
 
+def test_tool_kind_classification_and_locations() -> None:
+    assert classify_tool_kind("read_file", {"path": "a.py"}) == "read"
+    assert classify_tool_kind("apply_patch", {"path": "a.py"}) == "edit"
+    assert classify_tool_kind("execute_ssh_command", {"command": "docker ps"}) == "execute"
+    assert extract_locations({"path": "a.py", "files": ["b.py", "c.py"]}) == [
+        {"path": "a.py"},
+        {"path": "b.py"},
+        {"path": "c.py"},
+    ]
+
+
+def test_diff_output_mapping_and_edit_locations() -> None:
+    adapter, messages = _adapter_with_collector(_diff_tool_stream)
+    adapter.new_session({"sessionId": "aion-diff"})
+
+    asyncio.run(adapter.prompt({"sessionId": "aion-diff", "prompt": [{"type": "text", "text": "Patch"}]}))
+
+    updates = [m["params"]["update"] for m in messages if m.get("method") == "session/update"]
+    tool_call = next(update for update in updates if update["sessionUpdate"] == "tool_call")
+    assert tool_call["kind"] == "edit"
+    assert tool_call["locations"] == [{"path": "src/app.py"}]
+    tool_update = next(update for update in updates if update["sessionUpdate"] == "tool_call_update")
+    text = tool_update["content"][0]["content"]["text"]
+    assert text.startswith("```diff")
+    assert "+++ b/src/app.py" in text
+
+
 def test_permission_request_and_resume_mapping() -> None:
     request = build_permission_request(
         123,
@@ -174,7 +239,9 @@ def test_permission_request_and_resume_mapping() -> None:
     assert request["method"] == "session/request_permission"
     assert request["params"]["options"][0]["optionId"] == "allow_once"
     assert permission_result_to_resume({"outcome": {"optionId": "allow_once"}}) == {"action": "approve"}
+    assert permission_result_to_resume({"outcome": {"optionId": "allow_always"}}) == {"action": "approve"}
     assert permission_result_to_resume({"outcome": {"optionId": "reject_once"}}) == {"action": "reject"}
+    assert permission_result_to_resume({"outcome": {"optionId": "reject_always"}}) == {"action": "reject"}
 
 
 def test_permission_interrupt_roundtrip() -> None:
@@ -210,6 +277,28 @@ def test_permission_interrupt_roundtrip() -> None:
     )
 
 
+def test_permission_response_method_variant() -> None:
+    adapter, _messages = _adapter_with_collector(_text_stream)
+
+    async def resolve_with_method() -> Any:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[Any] = loop.create_future()
+        adapter._pending_responses[77] = future
+        await adapter.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "session/permission_response",
+                "params": {"requestId": 77, "outcome": {"optionId": "reject_once"}},
+            }
+        )
+        return await future
+
+    result = asyncio.run(resolve_with_method())
+
+    assert result["outcome"]["optionId"] == "reject_once"
+
+
 def test_secret_scrubbing_and_output_truncation() -> None:
     text = "api_key=sk-test-secret-value Bearer abcdefghijklmnopqrstuvwxyz"
     assert "secret-value" not in scrub_text(text)
@@ -217,6 +306,56 @@ def test_secret_scrubbing_and_output_truncation() -> None:
     visible = update["params"]["update"]["content"][0]["content"]["text"]
     assert len(visible) < 140
     assert "output truncated" in visible
+
+
+def test_fs_read_text_file_inside_workspace(tmp_path: Path) -> None:
+    adapter, _messages = _adapter_with_collector(_text_stream)
+    adapter.config["workspace"] = str(tmp_path)
+    (tmp_path / "note.txt").write_text("hello", encoding="utf-8")
+
+    result = adapter.read_text_file({"path": "note.txt"})
+
+    assert result == {"content": "hello"}
+
+
+def test_fs_read_text_file_outside_workspace_blocked(tmp_path: Path) -> None:
+    adapter, _messages = _adapter_with_collector(_text_stream)
+    adapter.config["workspace"] = str(tmp_path / "workspace")
+    (tmp_path / "workspace").mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("nope", encoding="utf-8")
+
+    try:
+        adapter.read_text_file({"path": str(outside)})
+    except JsonRpcError as exc:
+        assert exc.code == -32040
+    else:
+        raise AssertionError("outside workspace read was not blocked")
+
+
+def test_fs_write_text_file_default_blocked(tmp_path: Path) -> None:
+    adapter, _messages = _adapter_with_collector(_text_stream)
+    adapter.config["workspace"] = str(tmp_path)
+
+    try:
+        adapter.write_text_file({"path": "new.txt", "content": "hello"})
+    except JsonRpcError as exc:
+        assert exc.code == -32042
+    else:
+        raise AssertionError("write should be disabled by default")
+
+
+def test_debug_io_logs_to_stderr_not_stdout(capsys) -> None:
+    adapter, messages = _adapter_with_collector(_text_stream)
+    adapter.config["debug_io"] = True
+
+    asyncio.run(adapter.send_json({"jsonrpc": "2.0", "result": {"api_key": "sk-secret-value"}}))
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "[alpharavis-acp:out]" in captured.err
+    assert "secret-value" not in captured.err
+    assert messages
 
 
 def test_extract_prompt_text_handles_attachments_as_metadata() -> None:

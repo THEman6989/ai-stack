@@ -8,6 +8,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 try:
@@ -68,6 +69,14 @@ class AcpSessionState:
     created_at: float = field(default_factory=time.time)
     cancelled: bool = False
     last_prompt: str = ""
+    active_run_id: str | None = None
+
+
+class JsonRpcError(Exception):
+    def __init__(self, code: int, message: str) -> None:
+        self.code = code
+        self.message = message
+        super().__init__(message)
 
 
 def env_bool(name: str, default: str = "false") -> bool:
@@ -97,6 +106,9 @@ def config() -> dict[str, Any]:
         "trace_detail": trace_detail,
         "scrub_internal_context": env_bool("ALPHARAVIS_ACP_SCRUB_INTERNAL_CONTEXT", "true"),
         "run_timeout_seconds": env_int("ALPHARAVIS_ACP_RUN_TIMEOUT_SECONDS", 300, minimum=5),
+        "debug_io": env_bool("ALPHARAVIS_ACP_DEBUG_IO", "false"),
+        "allow_file_writes": env_bool("ALPHARAVIS_ACP_ALLOW_FILE_WRITES", "false"),
+        "send_available_commands": env_bool("ALPHARAVIS_ACP_SEND_AVAILABLE_COMMANDS", "true"),
     }
 
 
@@ -115,6 +127,22 @@ def scrub_text(text: Any, *, max_chars: int | None = None) -> str:
         omitted = len(value) - max_chars
         value = value[:max_chars] + f"\n[output truncated: original_length={len(str(text))}, omitted_chars={omitted}]"
     return value
+
+
+def scrub_json(value: Any, *, max_field_chars: int = 4000) -> Any:
+    return redact_for_logs(value, max_field_chars=max_field_chars)
+
+
+def debug_io(direction: str, payload: dict[str, Any], *, enabled: bool) -> None:
+    if not enabled:
+        return
+    safe_payload = scrub_json(payload, max_field_chars=2000)
+    print(
+        f"[alpharavis-acp:{direction}] "
+        f"{json.dumps(safe_payload, ensure_ascii=False, default=str, separators=(',', ':'))}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _message_type(message: Any) -> str:
@@ -196,6 +224,19 @@ def _stream_event_data(part: Any) -> Any:
     if isinstance(part, dict):
         return part.get("data")
     return getattr(part, "data", None)
+
+
+def _extract_run_id(part: Any) -> str:
+    for key in ("run_id", "runId", "id"):
+        value = _get_value(part, key, "")
+        if value:
+            return str(value)
+    data = _stream_event_data(part)
+    if isinstance(data, dict):
+        for key in ("run_id", "runId", "id"):
+            if data.get(key):
+                return str(data[key])
+    return ""
 
 
 def _extract_stream_text(part: Any) -> str:
@@ -295,6 +336,93 @@ def _extract_tool_result(data: Any) -> tuple[str, str, str] | None:
         tool_call_id = f"call_{uuid.uuid4().hex[:12]}"
     name = str(_get_value(candidate, "name", "") or _get_value(candidate, "tool", "") or "tool")
     return tool_call_id, name, _message_content(candidate)
+
+
+READ_TOOL_RE = re.compile(r"(read|list|search|grep|cat|lookup|find|fetch|open|inspect|scan)", re.IGNORECASE)
+EDIT_TOOL_RE = re.compile(
+    r"(write|edit|patch|apply_patch|create|delete|rename|move|replace|update_file|insert|append)",
+    re.IGNORECASE,
+)
+EXEC_TOOL_RE = re.compile(
+    r"(shell|ssh|docker|pm2|curl|npm|pnpm|yarn|python|bash|powershell|command|execute|run|start|restart|shutdown)",
+    re.IGNORECASE,
+)
+FILE_LOCATION_KEYS = {
+    "path",
+    "file",
+    "filepath",
+    "file_path",
+    "filename",
+    "target",
+    "relative_path",
+    "files",
+    "paths",
+}
+UNIFIED_DIFF_RE = re.compile(r"(?m)^(diff --git |--- .+\n\+\+\+ .+\n@@ |@@ .+ @@)")
+DIFF_FILE_RE = re.compile(r"(?m)^(?:\+\+\+ b/|--- a/|diff --git a/)([^\s]+)")
+
+
+def is_unified_diff(text: Any) -> bool:
+    return isinstance(text, str) and bool(UNIFIED_DIFF_RE.search(text))
+
+
+def classify_tool_kind(tool_name: str, args: Any = None, output: Any = None) -> str:
+    haystack = f"{tool_name} {json.dumps(args, default=str, ensure_ascii=False) if args is not None else ''}"
+    if EDIT_TOOL_RE.search(haystack) or is_unified_diff(output):
+        return "edit"
+    if EXEC_TOOL_RE.search(haystack):
+        return "execute"
+    if READ_TOOL_RE.search(haystack):
+        return "read"
+    return "execute"
+
+
+def _walk_location_values(value: Any) -> list[str]:
+    locations: list[str] = []
+    if isinstance(value, str):
+        if value.strip():
+            locations.append(value.strip())
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            locations.extend(_walk_location_values(item))
+    return locations
+
+
+def extract_locations(args: Any = None, output: Any = None) -> list[dict[str, str]]:
+    values: list[str] = []
+    if isinstance(args, dict):
+        for key, value in args.items():
+            if str(key) in FILE_LOCATION_KEYS:
+                values.extend(_walk_location_values(value))
+    if isinstance(output, str) and is_unified_diff(output):
+        values.extend(match.group(1) for match in DIFF_FILE_RE.finditer(output))
+
+    seen: set[str] = set()
+    locations: list[dict[str, str]] = []
+    for value in values:
+        path = value.strip().strip("\"'")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        locations.append({"path": path})
+    return locations
+
+
+def build_tool_content_items(text: str, *, max_chars: int, prefer_diff: bool = False) -> list[dict[str, Any]]:
+    safe_text = scrub_text(text, max_chars=max_chars)
+    if prefer_diff and is_unified_diff(safe_text):
+        path = extract_locations(output=safe_text)
+        return [
+            {
+                "type": "diff",
+                "path": path[0]["path"] if path else "diff.patch",
+                "oldText": None,
+                "newText": safe_text,
+            }
+        ]
+    if is_unified_diff(safe_text):
+        safe_text = f"```diff\n{safe_text}\n```"
+    return [{"type": "content", "content": {"type": "text", "text": safe_text}}]
 
 
 def _find_command_approval_interrupt(obj: Any) -> dict[str, Any] | None:
@@ -416,21 +544,25 @@ def build_tool_call(
     raw_input: dict[str, Any] | None = None,
     kind: str = "execute",
     status: str = "in_progress",
+    content: list[dict[str, Any]] | None = None,
+    locations: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
+    update: dict[str, Any] = {
+        "sessionUpdate": "tool_call",
+        "toolCallId": tool_call_id,
+        "status": status,
+        "title": title,
+        "kind": kind,
+        "rawInput": raw_input or {"tool": title},
+    }
+    if content:
+        update["content"] = content
+    if locations:
+        update["locations"] = locations
     return {
         "jsonrpc": JSONRPC_VERSION,
         "method": "session/update",
-        "params": {
-            "sessionId": session_id,
-            "update": {
-                "sessionUpdate": "tool_call",
-                "toolCallId": tool_call_id,
-                "status": status,
-                "title": title,
-                "kind": kind,
-                "rawInput": raw_input or {"tool": title},
-            },
-        },
+        "params": {"sessionId": session_id, "update": update},
     }
 
 
@@ -443,12 +575,11 @@ def build_tool_call_update(
     raw_input: dict[str, Any] | None = None,
     max_chars: int = 8000,
 ) -> dict[str, Any]:
-    safe_text = scrub_text(text, max_chars=max_chars)
     update: dict[str, Any] = {
         "sessionUpdate": "tool_call_update",
         "toolCallId": tool_call_id,
         "status": status,
-        "content": [{"type": "content", "content": {"type": "text", "text": safe_text}}],
+        "content": build_tool_content_items(text, max_chars=max_chars, prefer_diff=False),
     }
     if raw_input is not None:
         update["rawInput"] = raw_input
@@ -477,6 +608,33 @@ def build_usage_update(session_id: str, *, used: int, size: int) -> dict[str, An
         "params": {
             "sessionId": session_id,
             "update": {"sessionUpdate": "usage_update", "used": used, "size": size},
+        },
+    }
+
+
+def build_available_commands_update(session_id: str) -> dict[str, Any]:
+    commands = [
+        ("debug", "Diagnose an error, logs, services, or a failing workflow.", "debug <problem>"),
+        ("research", "Research a topic or document context.", "research <topic>"),
+        ("fix", "Plan and implement a bounded fix.", "fix <issue>"),
+        ("inspect", "Inspect repo, files, memory, or service state.", "inspect <target>"),
+        ("run", "Run a safe AlphaRavis workflow.", "run <task>"),
+        ("search", "Search memory, RAG, repo, or web context.", "search <query>"),
+        ("open", "Open/read a specific file or known source.", "open <path-or-source>"),
+        ("reload-context", "Refresh tool, skill, or architecture context.", "reload-context"),
+    ]
+    return {
+        "jsonrpc": JSONRPC_VERSION,
+        "method": "session/update",
+        "params": {
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": "available_commands_update",
+                "availableCommands": [
+                    {"name": name, "description": description, "input": {"hint": hint}}
+                    for name, description, hint in commands
+                ],
+            },
         },
     }
 
@@ -517,15 +675,53 @@ def build_permission_request(
 
 def permission_result_to_resume(result: Any) -> dict[str, Any]:
     option_id = ""
+    replacement = ""
     if isinstance(result, dict):
         outcome = result.get("outcome")
         if isinstance(outcome, dict):
             option_id = str(outcome.get("optionId") or "")
+            replacement = str(outcome.get("command") or outcome.get("replacement") or "")
         option_id = option_id or str(result.get("optionId") or "")
+        replacement = replacement or str(result.get("command") or result.get("replacement") or "")
     option_id = option_id.lower()
     if "allow" in option_id or "approve" in option_id:
         return {"action": "approve"}
+    if "replace" in option_id and replacement.strip():
+        return {"action": "replace", "command": replacement.strip()}
     return {"action": "reject"}
+
+
+SENSITIVE_PATH_RE = re.compile(
+    r"(^|[\\/])(\.env($|[.\\/])|\.ssh($|[\\/])|id_rsa$|id_ed25519$|.*private.*key.*|.*token.*|.*secret.*)",
+    re.IGNORECASE,
+)
+
+
+def resolve_workspace_path(workspace: str, requested_path: str) -> Path:
+    root = Path(workspace).expanduser().resolve()
+    candidate = Path(requested_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise JsonRpcError(-32040, f"Path outside ALPHARAVIS_ACP_WORKSPACE is blocked: {requested_path}") from exc
+    return resolved
+
+
+def ensure_file_read_allowed(path: Path) -> None:
+    normalized = str(path).replace("\\", "/")
+    if SENSITIVE_PATH_RE.search(normalized):
+        raise JsonRpcError(-32041, f"Sensitive file read is blocked: {path.name}")
+
+
+def ensure_file_write_allowed(path: Path, *, allow_writes: bool) -> None:
+    if not allow_writes:
+        raise JsonRpcError(-32042, "fs/write_text_file is disabled. Set ALPHARAVIS_ACP_ALLOW_FILE_WRITES=true to enable.")
+    normalized = str(path).replace("\\", "/")
+    if SENSITIVE_PATH_RE.search(normalized):
+        raise JsonRpcError(-32043, f"Sensitive file write is blocked: {path.name}")
 
 
 class AlphaRavisAcpAdapter:
@@ -546,6 +742,7 @@ class AlphaRavisAcpAdapter:
 
     async def send_json(self, payload: dict[str, Any]) -> None:
         async with self._write_lock:
+            debug_io("out", payload, enabled=bool(self.config.get("debug_io")))
             if self._writer is not None:
                 result = self._writer(payload)
                 if asyncio.iscoroutine(result):
@@ -567,6 +764,7 @@ class AlphaRavisAcpAdapter:
         await self.send_json(payload)
 
     async def handle_message(self, message: dict[str, Any]) -> None:
+        debug_io("in", message, enabled=bool(self.config.get("debug_io")))
         if "method" in message:
             asyncio.create_task(self._handle_request_or_notification(message))
             return
@@ -582,29 +780,41 @@ class AlphaRavisAcpAdapter:
         request_id = message.get("id")
         method = str(message.get("method") or "")
         params = message.get("params") if isinstance(message.get("params"), dict) else {}
+        session_started_id: str | None = None
         try:
             if method == "initialize":
                 result = self.initialize(params)
             elif method == "session/new":
                 result = self.new_session(params)
+                session_started_id = str(result.get("sessionId") or "")
             elif method in {"session/prompt", "session/send_message"}:
                 result = await self.prompt(params)
             elif method == "session/cancel":
-                result = self.cancel(params)
+                result = await self.cancel(params)
             elif method == "session/close":
                 result = self.close(params)
             elif method == "session/load":
                 result = self.load_session(params)
+                session_started_id = str(result.get("sessionId") or "")
             elif method == "session/set_config_option":
                 result = {}
             elif method in {"session/response", "session/permission_response"}:
                 result = self.permission_response(params)
+            elif method == "fs/read_text_file":
+                result = self.read_text_file(params)
+            elif method == "fs/write_text_file":
+                result = self.write_text_file(params)
             else:
                 if request_id is not None:
                     await self.send_error(request_id, -32601, f"Unsupported ACP method: {method}")
                 return
             if request_id is not None:
                 await self.send_response(request_id, result)
+            if session_started_id:
+                await self.emit_session_started_updates(session_started_id)
+        except JsonRpcError as exc:
+            if request_id is not None:
+                await self.send_error(request_id, exc.code, exc.message)
         except Exception as exc:
             log_exception("acp_adapter.request.failed", exc, component="alpharavis-acp", method=method)
             if request_id is not None:
@@ -693,6 +903,10 @@ class AlphaRavisAcpAdapter:
             ],
         }
 
+    async def emit_session_started_updates(self, session_id: str) -> None:
+        if self.config.get("send_available_commands"):
+            await self.send_json(build_available_commands_update(session_id))
+
     def load_session(self, params: dict[str, Any]) -> dict[str, Any]:
         return self.new_session(params)
 
@@ -701,16 +915,40 @@ class AlphaRavisAcpAdapter:
         self.sessions.pop(session_id, None)
         return {}
 
-    def cancel(self, params: dict[str, Any]) -> dict[str, Any]:
+    async def cancel(self, params: dict[str, Any]) -> dict[str, Any]:
         session_id = str(params.get("sessionId") or "")
-        if session_id in self.sessions:
-            self.sessions[session_id].cancelled = True
-        return {}
+        session = self.sessions.get(session_id)
+        if session is None:
+            return {"cancelled": False, "reason": "unknown_session"}
+        session.cancelled = True
+        cancelled_remote = await self._cancel_langgraph_run(session)
+        return {
+            "cancelled": True,
+            "langgraphRunCancel": "attempted" if cancelled_remote else "local_only",
+        }
 
     def permission_response(self, params: dict[str, Any]) -> dict[str, Any]:
-        request_id = params.get("requestId")
+        request_id = params.get("requestId") or params.get("id")
+        if not isinstance(request_id, int):
+            pending_ids = list(self._pending_responses.keys())
+            request_id = pending_ids[-1] if pending_ids else None
         if isinstance(request_id, int) and request_id in self._pending_responses:
             self._pending_responses.pop(request_id).set_result(params)
+        return {}
+
+    def read_text_file(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = resolve_workspace_path(str(self.config["workspace"]), str(params.get("path") or ""))
+        ensure_file_read_allowed(path)
+        if not path.is_file():
+            raise JsonRpcError(-32044, f"File not found: {path}")
+        return {"content": scrub_text(path.read_text(encoding="utf-8", errors="replace"))}
+
+    def write_text_file(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = resolve_workspace_path(str(self.config["workspace"]), str(params.get("path") or ""))
+        ensure_file_write_allowed(path, allow_writes=bool(self.config.get("allow_file_writes")))
+        content = str(params.get("content") or "")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
         return {}
 
     async def prompt(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -774,12 +1012,16 @@ class AlphaRavisAcpAdapter:
         emitted_reasoning = ""
         seen_tool_calls: set[str] = set()
         seen_tool_updates: set[str] = set()
+        tool_inputs: dict[str, dict[str, Any]] = {}
         content_scrubber = StreamingInternalContextScrubber() if self.config["scrub_internal_context"] and StreamingInternalContextScrubber else None
         thought_scrubber = StreamingInternalContextScrubber() if self.config["scrub_internal_context"] and StreamingInternalContextScrubber else None
 
         stream = self._langgraph_stream(session, prompt, command) if self._langgraph_stream else self._default_langgraph_stream(session, prompt, command)
         async with asyncio.timeout(float(self.config["run_timeout_seconds"])):
             async for part in stream:
+                run_id = _extract_run_id(part)
+                if run_id:
+                    session.active_run_id = run_id
                 if session.cancelled:
                     return None
                 interrupt_value = _find_command_approval_interrupt(part)
@@ -788,7 +1030,13 @@ class AlphaRavisAcpAdapter:
 
                 await self._emit_activity_or_plan(session.session_id, part)
 
-                for notification in self._tool_notifications_from_part(session.session_id, part, seen_tool_calls, seen_tool_updates):
+                for notification in self._tool_notifications_from_part(
+                    session.session_id,
+                    part,
+                    seen_tool_calls,
+                    seen_tool_updates,
+                    tool_inputs,
+                ):
                     await self.send_json(notification)
 
                 reasoning = _extract_stream_reasoning(part)
@@ -841,6 +1089,7 @@ class AlphaRavisAcpAdapter:
         part: Any,
         seen_tool_calls: set[str],
         seen_tool_updates: set[str],
+        tool_inputs: dict[str, dict[str, Any]],
     ) -> list[dict[str, Any]]:
         notifications: list[dict[str, Any]] = []
         event = _stream_event_name(part)
@@ -852,15 +1101,40 @@ class AlphaRavisAcpAdapter:
             call_id = str(data.get("run_id") or data.get("tool_call_id") or f"call_{uuid.uuid4().hex[:12]}")
             if call_id not in seen_tool_calls:
                 seen_tool_calls.add(call_id)
-                notifications.append(build_tool_call(session_id, call_id, tool_name, raw_input={"tool": tool_name, "args": raw_input}))
+                raw = {"tool": tool_name, "args": raw_input}
+                tool_inputs[call_id] = raw
+                notifications.append(
+                    build_tool_call(
+                        session_id,
+                        call_id,
+                        tool_name,
+                        raw_input=raw,
+                        kind=classify_tool_kind(tool_name, raw_input),
+                        locations=extract_locations(raw_input),
+                    )
+                )
             return notifications
 
         if event in {"on_tool_end", "tool_end", "on_tool_error", "tool_error"} and isinstance(data, dict):
             call_id = str(data.get("run_id") or data.get("tool_call_id") or f"call_{uuid.uuid4().hex[:12]}")
             output = data.get("output") or data.get("error") or data.get("content") or ""
+            raw = tool_inputs.get(call_id, {})
+            tool_name = str(raw.get("tool") or data.get("name") or data.get("tool") or "tool")
             status = "failed" if "error" in event else "completed"
             if call_id not in seen_tool_updates:
                 seen_tool_updates.add(call_id)
+                if call_id not in seen_tool_calls:
+                    seen_tool_calls.add(call_id)
+                    notifications.append(
+                        build_tool_call(
+                            session_id,
+                            call_id,
+                            tool_name,
+                            raw_input=raw or {"tool": tool_name},
+                            kind=classify_tool_kind(tool_name, raw.get("args", {}), output),
+                            locations=extract_locations(raw.get("args", {}), output),
+                        )
+                    )
                 notifications.append(
                     build_tool_call_update(
                         session_id,
@@ -880,12 +1154,16 @@ class AlphaRavisAcpAdapter:
                     if call_id in seen_tool_calls:
                         continue
                     seen_tool_calls.add(call_id)
+                    raw = {"tool": call["name"], "args": redact_for_logs(call.get("args", {}), max_field_chars=2000)}
+                    tool_inputs[call_id] = raw
                     notifications.append(
                         build_tool_call(
                             session_id,
                             call_id,
                             call["name"],
-                            raw_input={"tool": call["name"], "args": redact_for_logs(call.get("args", {}), max_field_chars=2000)},
+                            raw_input=raw,
+                            kind=classify_tool_kind(call["name"], call.get("args", {})),
+                            locations=extract_locations(call.get("args", {})),
                         )
                     )
             tool_result = _extract_tool_result(message)
@@ -893,6 +1171,19 @@ class AlphaRavisAcpAdapter:
                 call_id, _name, output = tool_result
                 if call_id not in seen_tool_updates:
                     seen_tool_updates.add(call_id)
+                    raw = tool_inputs.get(call_id, {"tool": _name})
+                    if call_id not in seen_tool_calls:
+                        seen_tool_calls.add(call_id)
+                        notifications.append(
+                            build_tool_call(
+                                session_id,
+                                call_id,
+                                str(raw.get("tool") or _name),
+                                raw_input=raw,
+                                kind=classify_tool_kind(str(raw.get("tool") or _name), raw.get("args", {}), output),
+                                locations=extract_locations(raw.get("args", {}), output),
+                            )
+                        )
                     notifications.append(
                         build_tool_call_update(
                             session_id,
@@ -913,12 +1204,16 @@ class AlphaRavisAcpAdapter:
                             if call_id in seen_tool_calls:
                                 continue
                             seen_tool_calls.add(call_id)
+                            raw = {"tool": call["name"], "args": redact_for_logs(call.get("args", {}), max_field_chars=2000)}
+                            tool_inputs[call_id] = raw
                             notifications.append(
                                 build_tool_call(
                                     session_id,
                                     call_id,
                                     call["name"],
-                                    raw_input={"tool": call["name"], "args": redact_for_logs(call.get("args", {}), max_field_chars=2000)},
+                                    raw_input=raw,
+                                    kind=classify_tool_kind(call["name"], call.get("args", {})),
+                                    locations=extract_locations(call.get("args", {})),
                                 )
                             )
                     tool_result = _extract_tool_result(message)
@@ -927,6 +1222,19 @@ class AlphaRavisAcpAdapter:
                         if call_id in seen_tool_updates:
                             continue
                         seen_tool_updates.add(call_id)
+                        raw = tool_inputs.get(call_id, {"tool": _name})
+                        if call_id not in seen_tool_calls:
+                            seen_tool_calls.add(call_id)
+                            notifications.append(
+                                build_tool_call(
+                                    session_id,
+                                    call_id,
+                                    str(raw.get("tool") or _name),
+                                    raw_input=raw,
+                                    kind=classify_tool_kind(str(raw.get("tool") or _name), raw.get("args", {}), output),
+                                    locations=extract_locations(raw.get("args", {}), output),
+                                )
+                            )
                         notifications.append(
                             build_tool_call_update(
                                 session_id,
@@ -1004,6 +1312,32 @@ class AlphaRavisAcpAdapter:
         except asyncio.TimeoutError:
             self._pending_responses.pop(request_id, None)
             return {"outcome": {"outcome": "rejected", "optionId": "reject_once"}}
+
+    async def _cancel_langgraph_run(self, session: AcpSessionState) -> bool:
+        if not session.active_run_id or get_client is None:
+            return False
+        try:
+            client = get_client(url=self.config["langgraph_api_url"])
+            cancel = getattr(client.runs, "cancel", None) or getattr(client.runs, "cancel_run", None)
+            if cancel is None:
+                return False
+            try:
+                result = cancel(session.thread_id, session.active_run_id)
+            except TypeError:
+                result = cancel(thread_id=session.thread_id, run_id=session.active_run_id)
+            if asyncio.iscoroutine(result):
+                await result
+            return True
+        except Exception as exc:
+            log_exception(
+                "acp_adapter.langgraph_cancel.failed",
+                exc,
+                component="alpharavis-acp",
+                session_id=session.session_id,
+                thread_id=session.thread_id,
+                run_id=session.active_run_id,
+            )
+            return False
 
     async def _default_langgraph_stream(
         self,

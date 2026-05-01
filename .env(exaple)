@@ -197,6 +197,20 @@ ALPHARAVIS_ACP_TRACE_DETAIL=summary
 # Allowed values: true, false
 ALPHARAVIS_ACP_SCRUB_INTERNAL_CONTEXT=true
 
+# If true, log incoming/outgoing ACP JSON-RPC packets to stderr for handshake
+# debugging. stdout must remain pure JSON-RPC for AionUi.
+# Allowed values: true, false
+ALPHARAVIS_ACP_DEBUG_IO=false
+
+# Allows AionUi-originated fs/write_text_file requests inside
+# ALPHARAVIS_ACP_WORKSPACE. Default false keeps the adapter read-only.
+# Allowed values: true, false
+ALPHARAVIS_ACP_ALLOW_FILE_WRITES=false
+
+# Sends AionUi available_commands_update after session/new.
+# Allowed values: true, false
+ALPHARAVIS_ACP_SEND_AVAILABLE_COMMANDS=true
+
 # Max seconds one ACP prompt may stream before the adapter returns a clean error.
 ALPHARAVIS_ACP_RUN_TIMEOUT_SECONDS=300
 
