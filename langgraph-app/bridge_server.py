@@ -1808,13 +1808,19 @@ async def response_input_tokens(request: Request):
         {
             "object": "response.input_tokens",
             "input_tokens": input_tokens,
-            "input_tokens_details": {"cached_tokens": 0},
         }
     )
 
 
 @app.get("/v1/responses/{response_id}")
-async def retrieve_response(response_id: str):
+async def retrieve_response(response_id: str, stream: bool = False):
+    if stream:
+        return _responses_error(
+            "Streaming retrieval for stored Responses is not implemented by AlphaRavis Bridge. "
+            "Create a new streamed response with POST /v1/responses and stream=true.",
+            status_code=501,
+            code="retrieve_stream_not_supported",
+        )
     response = _RESPONSES_STORE.get(response_id)
     if response is None:
         raise HTTPException(status_code=404, detail="Response not found or not stored by this bridge process.")

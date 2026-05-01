@@ -360,7 +360,8 @@ responses; AlphaRavis currently runs foreground jobs, so completed responses
 return an explicit `response_not_cancellable` error. `compact` returns a clear
 `501 compact_not_supported` because OpenAI's compact endpoint returns encrypted
 opaque items; AlphaRavis uses its own active compression plus archive retrieval
-instead.
+instead. `GET /v1/responses/{response_id}?stream=true` returns
+`retrieve_stream_not_supported` rather than replaying a fake event history.
 
 The response cache is controlled by:
 

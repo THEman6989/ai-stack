@@ -178,7 +178,7 @@ def test_input_tokens_endpoint_returns_count_object() -> None:
 
     assert result["object"] == "response.input_tokens"
     assert result["input_tokens"] > 0
-    assert result["input_tokens_details"] == {"cached_tokens": 0}
+    assert "input_tokens_details" not in result
 
 
 def test_input_items_and_delete_routes_use_stored_response() -> None:
@@ -199,6 +199,13 @@ def test_input_items_and_delete_routes_use_stored_response() -> None:
     deleted = asyncio.run(bridge_server.delete_response("resp_items"))
     assert deleted == {"id": "resp_items", "object": "response", "deleted": True}
     assert "resp_items" not in bridge_server._RESPONSES_STORE
+
+
+def test_retrieve_stream_query_returns_explicit_unsupported_error() -> None:
+    result = asyncio.run(bridge_server.retrieve_response("resp_any", stream=True))
+
+    assert result.status_code == 501
+    assert result["error"]["code"] == "retrieve_stream_not_supported"
 
 
 def test_responses_event_is_sse_with_semantic_type() -> None:
@@ -222,6 +229,7 @@ def _run_all() -> None:
         test_responses_validation_rejects_unsupported_hosted_features,
         test_input_tokens_endpoint_returns_count_object,
         test_input_items_and_delete_routes_use_stored_response,
+        test_retrieve_stream_query_returns_explicit_unsupported_error,
         test_responses_event_is_sse_with_semantic_type,
     ]
     for test in tests:

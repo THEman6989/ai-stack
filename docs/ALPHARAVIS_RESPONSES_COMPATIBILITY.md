@@ -24,6 +24,8 @@ features return explicit structured errors instead of being silently ignored.
   - usage estimates with `input_tokens_details`, `output_tokens_details`, and
     `total_tokens`
 - `GET /v1/responses/{response_id}`
+  - returns an explicit `retrieve_stream_not_supported` error for
+    `?stream=true`; replay streaming of stored responses is not faked
 - `DELETE /v1/responses/{response_id}`
 - `GET /v1/responses/{response_id}/input_items`
 - `POST /v1/responses/{response_id}/cancel`
@@ -61,6 +63,7 @@ These are not faked:
 - non-text output modalities
 - `text.format` values other than plain text
 - encrypted `POST /v1/responses/compact`
+- streaming retrieval via `GET /v1/responses/{response_id}?stream=true`
 
 AlphaRavis has its own LangGraph tools, memory, RAG, compression, and archive
 retrieval. Those features remain inside the graph rather than being exposed as
