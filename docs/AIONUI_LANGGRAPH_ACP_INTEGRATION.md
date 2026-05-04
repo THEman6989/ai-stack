@@ -73,6 +73,9 @@ ALPHARAVIS_ACP_TOOL_OUTPUT_MAX_CHARS=8000
 ALPHARAVIS_ACP_TRACE_DETAIL=summary
 ALPHARAVIS_ACP_SCRUB_INTERNAL_CONTEXT=true
 ALPHARAVIS_ACP_DEBUG_IO=false
+ALPHARAVIS_ACP_STREAM_HEARTBEAT_SECONDS=5
+ALPHARAVIS_ACP_DEBUG_EVENT_PAYLOAD_CHARS=12000
+ALPHARAVIS_ACP_DEBUG_STATUS_TO_AION=true
 ALPHARAVIS_ACP_ALLOW_FILE_WRITES=false
 ALPHARAVIS_ACP_SEND_AVAILABLE_COMMANDS=true
 ALPHARAVIS_ACP_RUN_TIMEOUT_SECONDS=300
@@ -83,6 +86,17 @@ ALPHARAVIS_ACP_RUN_TIMEOUT_SECONDS=300
 - `summary`: short LangGraph node/status summaries
 - `debug`: includes additional non-message event names and reasoning summaries
 - `off`: only assistant text/toolcards
+
+Debug-related behavior:
+
+- `ALPHARAVIS_ACP_DEBUG_IO=true` logs raw JSON-RPC in/out packets to `stderr`.
+- `ALPHARAVIS_ACP_TRACE_DETAIL=debug` logs structured timing traces to `stderr`.
+- `ALPHARAVIS_ACP_STREAM_HEARTBEAT_SECONDS` controls how often the adapter logs
+  that it is still waiting for the LangGraph/LLM stream.
+- `ALPHARAVIS_ACP_DEBUG_STATUS_TO_AION=true` mirrors short wait/status updates
+  into AionUi as `agent_thought_chunk` when trace detail is `debug`.
+- `ALPHARAVIS_ACP_DEBUG_EVENT_PAYLOAD_CHARS` caps large raw event fields in
+  debug logs.
 
 ## Debugging The Handshake
 
@@ -95,6 +109,31 @@ ALPHARAVIS_ACP_DEBUG_IO=true
 The adapter logs incoming and outgoing JSON-RPC packets to `stderr` only. It
 never writes debug text to `stdout`, because stdout must remain pure JSON-RPC for
 AionUi. Debug packets are secret-scrubbed before printing.
+
+For a full timing trace while debugging slow first-token behavior, set:
+
+```env
+ALPHARAVIS_ACP_DEBUG_IO=true
+ALPHARAVIS_ACP_TRACE_DETAIL=debug
+ALPHARAVIS_ACP_STREAM_HEARTBEAT_SECONDS=5
+```
+
+The `stderr` trace then shows:
+
+- JSON-RPC receive/dispatch/write timings
+- request start/end timings
+- prompt start/end timings
+- LangGraph client creation and thread ensure timings
+- each LangGraph stream event with event gaps
+- `langgraph.stream.waiting` heartbeats while no event has arrived
+- `langgraph.stream.first_text_delta` when the first visible token arrives
+- tool start/end, permission request/response, and cancel timings
+
+If AionUi appears to wait for 40 seconds before the first answer, look for
+`langgraph.thread.ensure.end`, repeated `langgraph.stream.waiting`, and
+`langgraph.stream.first_text_delta`. Those three timestamps show whether the
+delay is connection setup, LangGraph scheduling, model first-token latency, or
+tool/approval waiting.
 
 You should see AionUi send:
 
@@ -175,6 +214,13 @@ The adapter never auto-approves destructive commands.
 LangGraph SDK stream exposes a run id and the SDK provides a cancel method, the
 adapter attempts a real LangGraph cancel. If that is unavailable, cancellation
 is local-only and documented in the JSON-RPC result.
+
+If AionUi sends another `session/prompt` while a previous prompt for the same
+session is still running, the adapter interrupts the previous in-process prompt,
+attempts a best-effort LangGraph cancel, sends the old JSON-RPC request a
+`stopReason: cancelled` response, and starts the new prompt with a fresh local
+session state. This avoids a common ACP hang where the second message waits
+behind an abandoned first stream.
 
 ## Safety
 

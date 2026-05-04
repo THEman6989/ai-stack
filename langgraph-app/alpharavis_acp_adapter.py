@@ -7,6 +7,7 @@ import re
 import sys
 import time
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
@@ -91,6 +92,14 @@ def env_int(name: str, default: int, *, minimum: int = 0, maximum: int = 1_000_0
     return max(minimum, min(maximum, value))
 
 
+def env_float(name: str, default: float, *, minimum: float = 0.0, maximum: float = 1_000_000.0) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except Exception:
+        return default
+    return max(minimum, min(maximum, value))
+
+
 def config() -> dict[str, Any]:
     trace_detail = os.getenv("ALPHARAVIS_ACP_TRACE_DETAIL", "summary").strip().lower()
     if trace_detail not in {"summary", "debug", "off"}:
@@ -109,6 +118,9 @@ def config() -> dict[str, Any]:
         "debug_io": env_bool("ALPHARAVIS_ACP_DEBUG_IO", "false"),
         "allow_file_writes": env_bool("ALPHARAVIS_ACP_ALLOW_FILE_WRITES", "false"),
         "send_available_commands": env_bool("ALPHARAVIS_ACP_SEND_AVAILABLE_COMMANDS", "true"),
+        "stream_heartbeat_seconds": env_float("ALPHARAVIS_ACP_STREAM_HEARTBEAT_SECONDS", 5.0, minimum=0.25),
+        "debug_event_payload_chars": env_int("ALPHARAVIS_ACP_DEBUG_EVENT_PAYLOAD_CHARS", 12000, minimum=1000),
+        "debug_status_to_aion": env_bool("ALPHARAVIS_ACP_DEBUG_STATUS_TO_AION", "true"),
     }
 
 
@@ -139,6 +151,23 @@ def debug_io(direction: str, payload: dict[str, Any], *, enabled: bool) -> None:
     safe_payload = scrub_json(payload, max_field_chars=2000)
     print(
         f"[alpharavis-acp:{direction}] "
+        f"{json.dumps(safe_payload, ensure_ascii=False, default=str, separators=(',', ':'))}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def debug_trace(event: str, *, enabled: bool, max_chars: int = 12000, **fields: Any) -> None:
+    if not enabled:
+        return
+    payload = {
+        "event": event,
+        "ts": time.time(),
+        **fields,
+    }
+    safe_payload = scrub_json(payload, max_field_chars=max_chars)
+    print(
+        f"[alpharavis-acp:trace] "
         f"{json.dumps(safe_payload, ensure_ascii=False, default=str, separators=(',', ':'))}",
         file=sys.stderr,
         flush=True,
@@ -739,17 +768,50 @@ class AlphaRavisAcpAdapter:
         self._next_request_id = 10_000
         self._pending_responses: dict[int, asyncio.Future[Any]] = {}
         self._langgraph_stream = langgraph_stream
+        self._active_prompt_tasks: dict[str, asyncio.Task[Any]] = {}
+
+    def _debug_enabled(self) -> bool:
+        return bool(self.config.get("debug_io")) or str(self.config.get("trace_detail")) == "debug"
+
+    def _trace(self, event: str, **fields: Any) -> None:
+        debug_trace(
+            event,
+            enabled=self._debug_enabled(),
+            max_chars=int(self.config.get("debug_event_payload_chars") or 12000),
+            **fields,
+        )
+
+    async def _visible_debug(self, session_id: str, text: str) -> None:
+        if self.config.get("trace_detail") == "debug" and self.config.get("debug_status_to_aion"):
+            await self.send_json(build_agent_thought_chunk(session_id, text))
 
     async def send_json(self, payload: dict[str, Any]) -> None:
         async with self._write_lock:
+            started = time.perf_counter()
             debug_io("out", payload, enabled=bool(self.config.get("debug_io")))
             if self._writer is not None:
                 result = self._writer(payload)
                 if asyncio.iscoroutine(result):
                     await result
+                self._trace(
+                    "jsonrpc.out.written",
+                    elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+                    method=payload.get("method"),
+                    id=payload.get("id"),
+                    bytes=len(json.dumps(payload, ensure_ascii=False, default=str)),
+                    writer="test",
+                )
                 return
             sys.stdout.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
             sys.stdout.flush()
+            self._trace(
+                "jsonrpc.out.written",
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+                method=payload.get("method"),
+                id=payload.get("id"),
+                bytes=len(json.dumps(payload, ensure_ascii=False, default=str)),
+                writer="stdout",
+            )
 
     async def send_response(self, request_id: int | str, result: Any = None) -> None:
         await self.send_json({"jsonrpc": JSONRPC_VERSION, "id": request_id, "result": result})
@@ -764,9 +826,22 @@ class AlphaRavisAcpAdapter:
         await self.send_json(payload)
 
     async def handle_message(self, message: dict[str, Any]) -> None:
+        received_at = time.perf_counter()
         debug_io("in", message, enabled=bool(self.config.get("debug_io")))
+        self._trace(
+            "jsonrpc.in.received",
+            method=message.get("method"),
+            id=message.get("id"),
+            bytes=len(json.dumps(message, ensure_ascii=False, default=str)),
+        )
         if "method" in message:
-            asyncio.create_task(self._handle_request_or_notification(message))
+            task = asyncio.create_task(self._handle_request_or_notification(message))
+            self._trace(
+                "jsonrpc.in.dispatched",
+                method=message.get("method"),
+                id=message.get("id"),
+                dispatch_elapsed_ms=round((time.perf_counter() - received_at) * 1000, 2),
+            )
             return
         request_id = message.get("id")
         if isinstance(request_id, int) and request_id in self._pending_responses:
@@ -775,12 +850,15 @@ class AlphaRavisAcpAdapter:
                 future.set_exception(RuntimeError(str(message["error"])))
             else:
                 future.set_result(message.get("result"))
+            self._trace("jsonrpc.response.matched_pending", id=request_id)
 
     async def _handle_request_or_notification(self, message: dict[str, Any]) -> None:
+        started = time.perf_counter()
         request_id = message.get("id")
         method = str(message.get("method") or "")
         params = message.get("params") if isinstance(message.get("params"), dict) else {}
         session_started_id: str | None = None
+        self._trace("request.start", method=method, id=request_id, params=params)
         try:
             if method == "initialize":
                 result = self.initialize(params)
@@ -788,7 +866,7 @@ class AlphaRavisAcpAdapter:
                 result = self.new_session(params)
                 session_started_id = str(result.get("sessionId") or "")
             elif method in {"session/prompt", "session/send_message"}:
-                result = await self.prompt(params)
+                result = await self._run_prompt_request(params)
             elif method == "session/cancel":
                 result = await self.cancel(params)
             elif method == "session/close":
@@ -812,13 +890,43 @@ class AlphaRavisAcpAdapter:
                 await self.send_response(request_id, result)
             if session_started_id:
                 await self.emit_session_started_updates(session_started_id)
+            self._trace(
+                "request.end",
+                method=method,
+                id=request_id,
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+            )
         except JsonRpcError as exc:
             if request_id is not None:
                 await self.send_error(request_id, exc.code, exc.message)
+            self._trace(
+                "request.error",
+                method=method,
+                id=request_id,
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+                error=exc.message,
+                code=exc.code,
+            )
+        except asyncio.CancelledError:
+            self._trace(
+                "request.cancelled",
+                method=method,
+                id=request_id,
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+            )
+            if request_id is not None and method in {"session/prompt", "session/send_message"}:
+                await self.send_response(request_id, {"stopReason": "cancelled"})
         except Exception as exc:
             log_exception("acp_adapter.request.failed", exc, component="alpharavis-acp", method=method)
             if request_id is not None:
                 await self.send_error(request_id, -32603, str(exc))
+            self._trace(
+                "request.failed",
+                method=method,
+                id=request_id,
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+                error=str(exc),
+            )
 
     def initialize(self, params: dict[str, Any]) -> dict[str, Any]:
         protocol_version = int(params.get("protocolVersion") or 1)
@@ -951,7 +1059,29 @@ class AlphaRavisAcpAdapter:
         path.write_text(content, encoding="utf-8")
         return {}
 
+    async def _run_prompt_request(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = str(params.get("sessionId") or "")
+        existing = self._active_prompt_tasks.get(session_id)
+        if existing and not existing.done():
+            self._trace("prompt.interrupt_previous.start", session_id=session_id)
+            session = self.sessions.get(session_id)
+            if session is not None:
+                session.cancelled = True
+                await self._cancel_langgraph_run(session)
+            existing.cancel()
+            self._trace("prompt.interrupt_previous.done", session_id=session_id)
+
+        current = asyncio.current_task()
+        if current is not None and session_id:
+            self._active_prompt_tasks[session_id] = current
+        try:
+            return await self.prompt(params)
+        finally:
+            if session_id and self._active_prompt_tasks.get(session_id) is current:
+                self._active_prompt_tasks.pop(session_id, None)
+
     async def prompt(self, params: dict[str, Any]) -> dict[str, Any]:
+        started = time.perf_counter()
         session_id = str(params.get("sessionId") or "")
         if not session_id:
             raise ValueError("sessionId is required")
@@ -960,9 +1090,18 @@ class AlphaRavisAcpAdapter:
             session = AcpSessionState(session_id=session_id, thread_id=stable_thread_id(session_id), cwd=self.config["workspace"])
             self.sessions[session_id] = session
         session.cancelled = False
+        session.active_run_id = None
         prompt = extract_prompt_text(params.get("prompt") or params.get("message") or params.get("input"))
         session.last_prompt = prompt
+        self._trace(
+            "prompt.start",
+            session_id=session_id,
+            thread_id=session.thread_id,
+            prompt_chars=len(prompt),
+            prompt_preview=prompt[:500],
+        )
         if not prompt.strip():
+            self._trace("prompt.empty", session_id=session_id)
             return {"stopReason": "end_turn"}
 
         await self.send_json(
@@ -983,16 +1122,45 @@ class AlphaRavisAcpAdapter:
             )
             message = scrub_text(f"AlphaRavis-ACP konnte LangGraph nicht erreichen: {exc}", max_chars=2000)
             await self.send_json(build_agent_message_chunk(session.session_id, message))
-        return {"stopReason": "cancelled" if session.cancelled else "end_turn"}
+        result = {"stopReason": "cancelled" if session.cancelled else "end_turn"}
+        self._trace(
+            "prompt.end",
+            session_id=session_id,
+            thread_id=session.thread_id,
+            elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+            stop_reason=result["stopReason"],
+        )
+        return result
 
     async def _stream_prompt(self, session: AcpSessionState, prompt: str) -> None:
         command: dict[str, Any] | None = None
-        for _attempt in range(4):
+        for attempt in range(4):
             if session.cancelled:
                 return
+            self._trace(
+                "prompt.run_attempt.start",
+                session_id=session.session_id,
+                thread_id=session.thread_id,
+                attempt=attempt + 1,
+                command=command,
+            )
             interrupt_value = await self._stream_one_run(session, prompt, command)
             if not interrupt_value:
+                self._trace(
+                    "prompt.run_attempt.end",
+                    session_id=session.session_id,
+                    thread_id=session.thread_id,
+                    attempt=attempt + 1,
+                    interrupted=False,
+                )
                 return
+            self._trace(
+                "prompt.run_attempt.interrupted",
+                session_id=session.session_id,
+                thread_id=session.thread_id,
+                attempt=attempt + 1,
+                interrupt=interrupt_value,
+            )
             resume = await self._handle_permission_interrupt(session, interrupt_value)
             command = {"resume": resume}
         await self.send_json(
@@ -1008,6 +1176,10 @@ class AlphaRavisAcpAdapter:
         prompt: str,
         command: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
+        started = time.perf_counter()
+        last_event_at = started
+        event_count = 0
+        token_count = 0
         emitted_text = ""
         emitted_reasoning = ""
         seen_tool_calls: set[str] = set()
@@ -1018,44 +1190,121 @@ class AlphaRavisAcpAdapter:
 
         stream = self._langgraph_stream(session, prompt, command) if self._langgraph_stream else self._default_langgraph_stream(session, prompt, command)
         async with asyncio.timeout(float(self.config["run_timeout_seconds"])):
-            async for part in stream:
-                run_id = _extract_run_id(part)
-                if run_id:
-                    session.active_run_id = run_id
-                if session.cancelled:
-                    return None
-                interrupt_value = _find_command_approval_interrupt(part)
-                if interrupt_value:
-                    return interrupt_value
+            iterator = stream.__aiter__()
+            heartbeat_seconds = float(self.config.get("stream_heartbeat_seconds") or 5.0)
+            next_event_task = asyncio.create_task(iterator.__anext__())
+            try:
+                while True:
+                    done, _pending = await asyncio.wait({next_event_task}, timeout=heartbeat_seconds)
+                    if not done:
+                        waited = time.perf_counter() - last_event_at
+                        total = time.perf_counter() - started
+                        self._trace(
+                            "langgraph.stream.waiting",
+                            session_id=session.session_id,
+                            thread_id=session.thread_id,
+                            waited_since_last_event_seconds=round(waited, 3),
+                            total_wait_seconds=round(total, 3),
+                            emitted_text_chars=len(emitted_text),
+                            emitted_reasoning_chars=len(emitted_reasoning),
+                        )
+                        await self._visible_debug(
+                            session.session_id,
+                            (
+                                "ACP wartet weiter auf LangGraph/LLM-Stream "
+                                f"({round(total, 1)}s seit Run-Start, {round(waited, 1)}s seit letztem Event)."
+                            ),
+                        )
+                        continue
 
-                await self._emit_activity_or_plan(session.session_id, part)
+                    try:
+                        part = next_event_task.result()
+                    except StopAsyncIteration:
+                        self._trace(
+                            "langgraph.stream.completed",
+                            session_id=session.session_id,
+                            thread_id=session.thread_id,
+                            elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+                            event_count=event_count,
+                            emitted_text_chars=len(emitted_text),
+                            emitted_reasoning_chars=len(emitted_reasoning),
+                        )
+                        break
+                    next_event_task = asyncio.create_task(iterator.__anext__())
 
-                for notification in self._tool_notifications_from_part(
-                    session.session_id,
-                    part,
-                    seen_tool_calls,
-                    seen_tool_updates,
-                    tool_inputs,
-                ):
-                    await self.send_json(notification)
+                    event_count += 1
+                    now = time.perf_counter()
+                    gap_ms = round((now - last_event_at) * 1000, 2)
+                    last_event_at = now
+                    run_id = _extract_run_id(part)
+                    if run_id:
+                        session.active_run_id = run_id
+                    self._trace(
+                        "langgraph.stream.event",
+                        session_id=session.session_id,
+                        thread_id=session.thread_id,
+                        run_id=run_id or session.active_run_id,
+                        event_index=event_count,
+                        stream_event=_stream_event_name(part),
+                        gap_ms=gap_ms,
+                        data_summary=self._summarize_stream_part(part),
+                        raw_part=part,
+                    )
+                    if session.cancelled:
+                        self._trace("langgraph.stream.cancelled_local", session_id=session.session_id)
+                        return None
+                    interrupt_value = _find_command_approval_interrupt(part)
+                    if interrupt_value:
+                        self._trace(
+                            "langgraph.stream.interrupt",
+                            session_id=session.session_id,
+                            thread_id=session.thread_id,
+                            interrupt=interrupt_value,
+                        )
+                        return interrupt_value
 
-                reasoning = _extract_stream_reasoning(part)
-                reasoning_delta = _delta_text(reasoning, emitted_reasoning)
-                if reasoning_delta and self.config["trace_detail"] == "debug":
-                    emitted_reasoning += reasoning_delta
-                    clean = thought_scrubber.feed(reasoning_delta) if thought_scrubber else reasoning_delta
-                    clean = scrub_text(clean, max_chars=1200)
-                    if clean.strip():
-                        await self.send_json(build_agent_thought_chunk(session.session_id, clean))
+                    await self._emit_activity_or_plan(session.session_id, part)
 
-                text = _extract_stream_text(part)
-                delta = _delta_text(text, emitted_text)
-                if delta:
-                    emitted_text += delta
-                    visible = content_scrubber.feed(delta) if content_scrubber else delta
-                    visible = scrub_text(visible)
-                    if visible:
-                        await self.send_json(build_agent_message_chunk(session.session_id, visible))
+                    for notification in self._tool_notifications_from_part(
+                        session.session_id,
+                        part,
+                        seen_tool_calls,
+                        seen_tool_updates,
+                        tool_inputs,
+                    ):
+                        await self.send_json(notification)
+
+                    reasoning = _extract_stream_reasoning(part)
+                    reasoning_delta = _delta_text(reasoning, emitted_reasoning)
+                    if reasoning_delta and self.config["trace_detail"] == "debug":
+                        emitted_reasoning += reasoning_delta
+                        clean = thought_scrubber.feed(reasoning_delta) if thought_scrubber else reasoning_delta
+                        clean = scrub_text(clean, max_chars=1200)
+                        if clean.strip():
+                            await self.send_json(build_agent_thought_chunk(session.session_id, clean))
+
+                    text = _extract_stream_text(part)
+                    delta = _delta_text(text, emitted_text)
+                    if delta:
+                        token_count += 1
+                        if not emitted_text:
+                            self._trace(
+                                "langgraph.stream.first_text_delta",
+                                session_id=session.session_id,
+                                thread_id=session.thread_id,
+                                first_text_elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+                                event_index=event_count,
+                            )
+                        emitted_text += delta
+                        visible = content_scrubber.feed(delta) if content_scrubber else delta
+                        visible = scrub_text(visible)
+                        if visible:
+                            await self.send_json(build_agent_message_chunk(session.session_id, visible))
+            finally:
+                if not next_event_task.done():
+                    next_event_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await next_event_task
 
         if content_scrubber:
             tail = scrub_text(content_scrubber.flush())
@@ -1065,7 +1314,39 @@ class AlphaRavisAcpAdapter:
             tail = scrub_text(thought_scrubber.flush(), max_chars=1200)
             if tail:
                 await self.send_json(build_agent_thought_chunk(session.session_id, tail))
+        self._trace(
+            "stream_one_run.end",
+            session_id=session.session_id,
+            thread_id=session.thread_id,
+            elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+            event_count=event_count,
+            text_delta_count=token_count,
+            emitted_text_chars=len(emitted_text),
+        )
         return None
+
+    def _summarize_stream_part(self, part: Any) -> dict[str, Any]:
+        data = _stream_event_data(part)
+        summary: dict[str, Any] = {
+            "event": _stream_event_name(part),
+            "run_id": _extract_run_id(part),
+            "data_type": type(data).__name__,
+        }
+        if isinstance(data, dict):
+            summary["data_keys"] = list(data.keys())[:20]
+            summary["node_names"] = [str(key) for key in data.keys() if not str(key).startswith("__")][:10]
+            if "chunk" in data:
+                summary["chunk_type"] = type(data["chunk"]).__name__
+                summary["chunk_text_chars"] = len(_message_content(data["chunk"]))
+            if "messages" in data and isinstance(data["messages"], list):
+                summary["messages_count"] = len(data["messages"])
+        elif isinstance(data, tuple) and data:
+            summary["tuple_len"] = len(data)
+            summary["message_type"] = _message_type(data[0])
+            summary["message_text_chars"] = len(_message_content(data[0]))
+        elif isinstance(data, list):
+            summary["list_len"] = len(data)
+        return summary
 
     async def _emit_activity_or_plan(self, session_id: str, part: Any) -> None:
         entries = _plan_entries_from_update(part)
@@ -1100,6 +1381,13 @@ class AlphaRavisAcpAdapter:
             tool_name = str(data.get("name") or data.get("tool") or data.get("run_name") or "tool")
             call_id = str(data.get("run_id") or data.get("tool_call_id") or f"call_{uuid.uuid4().hex[:12]}")
             if call_id not in seen_tool_calls:
+                self._trace(
+                    "tool.start",
+                    session_id=session_id,
+                    tool_call_id=call_id,
+                    tool_name=tool_name,
+                    raw_input=raw_input,
+                )
                 seen_tool_calls.add(call_id)
                 raw = {"tool": tool_name, "args": raw_input}
                 tool_inputs[call_id] = raw
@@ -1122,6 +1410,14 @@ class AlphaRavisAcpAdapter:
             tool_name = str(raw.get("tool") or data.get("name") or data.get("tool") or "tool")
             status = "failed" if "error" in event else "completed"
             if call_id not in seen_tool_updates:
+                self._trace(
+                    "tool.end",
+                    session_id=session_id,
+                    tool_call_id=call_id,
+                    tool_name=tool_name,
+                    status=status,
+                    output_chars=len(str(output)),
+                )
                 seen_tool_updates.add(call_id)
                 if call_id not in seen_tool_calls:
                     seen_tool_calls.add(call_id)
@@ -1153,6 +1449,13 @@ class AlphaRavisAcpAdapter:
                     call_id = call["id"]
                     if call_id in seen_tool_calls:
                         continue
+                    self._trace(
+                        "tool.call_from_message",
+                        session_id=session_id,
+                        tool_call_id=call_id,
+                        tool_name=call["name"],
+                        args=call.get("args", {}),
+                    )
                     seen_tool_calls.add(call_id)
                     raw = {"tool": call["name"], "args": redact_for_logs(call.get("args", {}), max_field_chars=2000)}
                     tool_inputs[call_id] = raw
@@ -1170,6 +1473,13 @@ class AlphaRavisAcpAdapter:
             if tool_result:
                 call_id, _name, output = tool_result
                 if call_id not in seen_tool_updates:
+                    self._trace(
+                        "tool.result_from_message",
+                        session_id=session_id,
+                        tool_call_id=call_id,
+                        tool_name=_name,
+                        output_chars=len(str(output)),
+                    )
                     seen_tool_updates.add(call_id)
                     raw = tool_inputs.get(call_id, {"tool": _name})
                     if call_id not in seen_tool_calls:
@@ -1203,6 +1513,13 @@ class AlphaRavisAcpAdapter:
                             call_id = call["id"]
                             if call_id in seen_tool_calls:
                                 continue
+                            self._trace(
+                                "tool.call_from_update_messages",
+                                session_id=session_id,
+                                tool_call_id=call_id,
+                                tool_name=call["name"],
+                                args=call.get("args", {}),
+                            )
                             seen_tool_calls.add(call_id)
                             raw = {"tool": call["name"], "args": redact_for_logs(call.get("args", {}), max_field_chars=2000)}
                             tool_inputs[call_id] = raw
@@ -1221,6 +1538,13 @@ class AlphaRavisAcpAdapter:
                         call_id, _name, output = tool_result
                         if call_id in seen_tool_updates:
                             continue
+                        self._trace(
+                            "tool.result_from_update_messages",
+                            session_id=session_id,
+                            tool_call_id=call_id,
+                            tool_name=_name,
+                            output_chars=len(str(output)),
+                        )
                         seen_tool_updates.add(call_id)
                         raw = tool_inputs.get(call_id, {"tool": _name})
                         if call_id not in seen_tool_calls:
@@ -1247,10 +1571,20 @@ class AlphaRavisAcpAdapter:
         return notifications
 
     async def _handle_permission_interrupt(self, session: AcpSessionState, interrupt_value: dict[str, Any]) -> dict[str, Any]:
+        started = time.perf_counter()
         command = str(interrupt_value.get("command") or "")
         target = str(interrupt_value.get("target") or "")
         risk = str(interrupt_value.get("risk") or "This command requires approval.")
         call_id = f"approval_{uuid.uuid4().hex[:12]}"
+        self._trace(
+            "permission.interrupt.start",
+            session_id=session.session_id,
+            thread_id=session.thread_id,
+            tool_call_id=call_id,
+            command=command,
+            target=target,
+            risk=risk,
+        )
         await self.send_json(
             build_tool_call(
                 session.session_id,
@@ -1270,6 +1604,14 @@ class AlphaRavisAcpAdapter:
             target=target,
         )
         resume = permission_result_to_resume(result)
+        self._trace(
+            "permission.interrupt.result",
+            session_id=session.session_id,
+            thread_id=session.thread_id,
+            tool_call_id=call_id,
+            elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+            resume=resume,
+        )
         await self.send_json(
             build_tool_call_update(
                 session.session_id,
@@ -1296,6 +1638,14 @@ class AlphaRavisAcpAdapter:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[Any] = loop.create_future()
         self._pending_responses[request_id] = future
+        self._trace(
+            "permission.request.send",
+            session_id=session_id,
+            request_id=request_id,
+            tool_call_id=tool_call_id,
+            title=title,
+            command=command,
+        )
         await self.send_json(
             build_permission_request(
                 request_id,
@@ -1308,18 +1658,36 @@ class AlphaRavisAcpAdapter:
             )
         )
         try:
-            return await asyncio.wait_for(future, timeout=3600)
+            result = await asyncio.wait_for(future, timeout=3600)
+            self._trace("permission.request.response", session_id=session_id, request_id=request_id, result=result)
+            return result
         except asyncio.TimeoutError:
             self._pending_responses.pop(request_id, None)
+            self._trace("permission.request.timeout", session_id=session_id, request_id=request_id)
             return {"outcome": {"outcome": "rejected", "optionId": "reject_once"}}
 
     async def _cancel_langgraph_run(self, session: AcpSessionState) -> bool:
         if not session.active_run_id or get_client is None:
+            self._trace(
+                "langgraph.cancel.skipped",
+                session_id=session.session_id,
+                thread_id=session.thread_id,
+                run_id=session.active_run_id,
+                reason="missing_run_id_or_sdk",
+            )
             return False
+        started = time.perf_counter()
+        self._trace(
+            "langgraph.cancel.start",
+            session_id=session.session_id,
+            thread_id=session.thread_id,
+            run_id=session.active_run_id,
+        )
         try:
             client = get_client(url=self.config["langgraph_api_url"])
             cancel = getattr(client.runs, "cancel", None) or getattr(client.runs, "cancel_run", None)
             if cancel is None:
+                self._trace("langgraph.cancel.unavailable", session_id=session.session_id, run_id=session.active_run_id)
                 return False
             try:
                 result = cancel(session.thread_id, session.active_run_id)
@@ -1327,6 +1695,13 @@ class AlphaRavisAcpAdapter:
                 result = cancel(thread_id=session.thread_id, run_id=session.active_run_id)
             if asyncio.iscoroutine(result):
                 await result
+            self._trace(
+                "langgraph.cancel.end",
+                session_id=session.session_id,
+                thread_id=session.thread_id,
+                run_id=session.active_run_id,
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+            )
             return True
         except Exception as exc:
             log_exception(
@@ -1336,6 +1711,14 @@ class AlphaRavisAcpAdapter:
                 session_id=session.session_id,
                 thread_id=session.thread_id,
                 run_id=session.active_run_id,
+            )
+            self._trace(
+                "langgraph.cancel.failed",
+                session_id=session.session_id,
+                thread_id=session.thread_id,
+                run_id=session.active_run_id,
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+                error=str(exc),
             )
             return False
 
@@ -1347,8 +1730,25 @@ class AlphaRavisAcpAdapter:
     ) -> AsyncIterator[Any]:
         if get_client is None:
             raise RuntimeError("langgraph_sdk is not installed; cannot reach LangGraph API")
+        started = time.perf_counter()
+        self._trace(
+            "langgraph.default_stream.start",
+            session_id=session.session_id,
+            thread_id=session.thread_id,
+            api_url=self.config["langgraph_api_url"],
+            assistant_id=self.config["assistant_id"],
+            command=command,
+            prompt_chars=len(prompt),
+        )
+        client_started = time.perf_counter()
         client = get_client(url=self.config["langgraph_api_url"])
+        self._trace(
+            "langgraph.client.created",
+            session_id=session.session_id,
+            elapsed_ms=round((time.perf_counter() - client_started) * 1000, 2),
+        )
         try:
+            thread_started = time.perf_counter()
             await client.threads.create(
                 thread_id=session.thread_id,
                 if_exists="do_nothing",
@@ -1359,9 +1759,30 @@ class AlphaRavisAcpAdapter:
                     "cwd": session.cwd,
                 },
             )
+            self._trace(
+                "langgraph.thread.ensure.end",
+                session_id=session.session_id,
+                thread_id=session.thread_id,
+                elapsed_ms=round((time.perf_counter() - thread_started) * 1000, 2),
+                status="created_or_existing",
+            )
         except Exception as exc:
             if "409" not in str(exc) and "already" not in str(exc).lower():
+                self._trace(
+                    "langgraph.thread.ensure.failed",
+                    session_id=session.session_id,
+                    thread_id=session.thread_id,
+                    elapsed_ms=round((time.perf_counter() - thread_started) * 1000, 2),
+                    error=str(exc),
+                )
                 raise
+            self._trace(
+                "langgraph.thread.ensure.end",
+                session_id=session.session_id,
+                thread_id=session.thread_id,
+                elapsed_ms=round((time.perf_counter() - thread_started) * 1000, 2),
+                status="already_exists",
+            )
 
         stream_kwargs: dict[str, Any] = {
             "stream_mode": ["messages", "updates"],
@@ -1377,8 +1798,23 @@ class AlphaRavisAcpAdapter:
                 "client": "aionui-acp",
                 "workspace": session.cwd,
             }
-        async for part in client.runs.stream(session.thread_id, self.config["assistant_id"], **stream_kwargs):
-            yield part
+        self._trace(
+            "langgraph.runs.stream.open",
+            session_id=session.session_id,
+            thread_id=session.thread_id,
+            stream_kwargs={key: value for key, value in stream_kwargs.items() if key != "input"},
+            has_input="input" in stream_kwargs,
+        )
+        try:
+            async for part in client.runs.stream(session.thread_id, self.config["assistant_id"], **stream_kwargs):
+                yield part
+        finally:
+            self._trace(
+                "langgraph.default_stream.end",
+                session_id=session.session_id,
+                thread_id=session.thread_id,
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+            )
 
     async def run_stdio(self) -> None:
         loop = asyncio.get_running_loop()

@@ -39,6 +39,27 @@ async def _text_stream(_session: AcpSessionState, _prompt: str, _command: dict[s
     yield {"event": "messages", "data": (_FakeMessage("ai", "Hallo Welt"), {})}
 
 
+async def _slow_then_text_stream(
+    _session: AcpSessionState,
+    _prompt: str,
+    _command: dict[str, Any] | None,
+) -> AsyncIterator[Any]:
+    await asyncio.sleep(0.03)
+    yield {"event": "messages", "data": (_FakeMessage("ai", "Spat"), {})}
+
+
+async def _interruptible_stream(
+    _session: AcpSessionState,
+    prompt: str,
+    _command: dict[str, Any] | None,
+) -> AsyncIterator[Any]:
+    if "first" in prompt:
+        await asyncio.sleep(30)
+        yield {"event": "messages", "data": (_FakeMessage("ai", "first answer"), {})}
+        return
+    yield {"event": "messages", "data": (_FakeMessage("ai", "second answer"), {})}
+
+
 async def _tool_stream(_session: AcpSessionState, _prompt: str, _command: dict[str, Any] | None) -> AsyncIterator[Any]:
     yield {
         "event": "messages",
@@ -141,6 +162,9 @@ def _adapter_with_collector(stream_factory):
             "debug_io": False,
             "allow_file_writes": False,
             "send_available_commands": True,
+            "stream_heartbeat_seconds": 1.0,
+            "debug_event_payload_chars": 12000,
+            "debug_status_to_aion": True,
         },
     )
     return adapter, messages
@@ -356,6 +380,88 @@ def test_debug_io_logs_to_stderr_not_stdout(capsys) -> None:
     assert "[alpharavis-acp:out]" in captured.err
     assert "secret-value" not in captured.err
     assert messages
+
+
+def test_debug_trace_logs_request_timings_to_stderr(capsys) -> None:
+    adapter, messages = _adapter_with_collector(_text_stream)
+    adapter.config["debug_io"] = True
+    adapter.config["trace_detail"] = "debug"
+
+    async def send_initialize() -> None:
+        await adapter.handle_message({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        for _ in range(50):
+            if any(message.get("id") == 1 for message in messages):
+                return
+            await asyncio.sleep(0.01)
+
+    asyncio.run(send_initialize())
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "[alpharavis-acp:in]" in captured.err
+    assert '"event":"request.start"' in captured.err
+    assert '"event":"request.end"' in captured.err
+
+
+def test_stream_heartbeat_does_not_cancel_slow_first_event() -> None:
+    adapter, messages = _adapter_with_collector(_slow_then_text_stream)
+    adapter.config["trace_detail"] = "debug"
+    adapter.config["stream_heartbeat_seconds"] = 0.01
+    adapter.new_session({"sessionId": "aion-slow"})
+
+    result = asyncio.run(adapter.prompt({"sessionId": "aion-slow", "prompt": [{"type": "text", "text": "Wait"}]}))
+
+    assert result["stopReason"] == "end_turn"
+    updates = [m["params"]["update"] for m in messages if m.get("method") == "session/update"]
+    assert any(
+        update["sessionUpdate"] == "agent_thought_chunk" and "ACP wartet weiter" in update["content"]["text"]
+        for update in updates
+    )
+    assert any(
+        update["sessionUpdate"] == "agent_message_chunk" and "Spat" in update["content"]["text"]
+        for update in updates
+    )
+
+
+def test_second_prompt_interrupts_previous_prompt() -> None:
+    adapter, messages = _adapter_with_collector(_interruptible_stream)
+    adapter.new_session({"sessionId": "aion-repeat"})
+
+    async def run_two_prompts() -> list[dict[str, Any]]:
+        await adapter.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "session/prompt",
+                "params": {"sessionId": "aion-repeat", "prompt": [{"type": "text", "text": "first"}]},
+            }
+        )
+        await asyncio.sleep(0.02)
+        await adapter.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "session/prompt",
+                "params": {"sessionId": "aion-repeat", "prompt": [{"type": "text", "text": "second"}]},
+            }
+        )
+        for _ in range(200):
+            response_ids = {message.get("id") for message in messages if "result" in message}
+            if {1, 2}.issubset(response_ids):
+                return messages
+            await asyncio.sleep(0.01)
+        return messages
+
+    asyncio.run(run_two_prompts())
+
+    responses = {m["id"]: m["result"] for m in messages if "result" in m}
+    assert responses[1]["stopReason"] == "cancelled"
+    assert responses[2]["stopReason"] == "end_turn"
+    updates = [m["params"]["update"] for m in messages if m.get("method") == "session/update"]
+    assert any(
+        update["sessionUpdate"] == "agent_message_chunk" and "second answer" in update["content"]["text"]
+        for update in updates
+    )
 
 
 def test_extract_prompt_text_handles_attachments_as_metadata() -> None:

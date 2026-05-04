@@ -202,6 +202,20 @@ ALPHARAVIS_ACP_SCRUB_INTERNAL_CONTEXT=true
 # Allowed values: true, false
 ALPHARAVIS_ACP_DEBUG_IO=false
 
+# Seconds between ACP stream wait heartbeats while LangGraph/LLM has not emitted
+# a new event yet. In debug mode this tells you exactly where a slow run is
+# waiting instead of looking frozen.
+ALPHARAVIS_ACP_STREAM_HEARTBEAT_SECONDS=5
+
+# Max characters kept per structured ACP debug event field before stderr logs
+# truncate it. Only affects debug logs, not normal AionUi output.
+ALPHARAVIS_ACP_DEBUG_EVENT_PAYLOAD_CHARS=12000
+
+# When ALPHARAVIS_ACP_TRACE_DETAIL=debug, also mirror short wait/status updates
+# into AionUi as reasoning/status chunks. stderr tracing still works when false.
+# Allowed values: true, false
+ALPHARAVIS_ACP_DEBUG_STATUS_TO_AION=true
+
 # Allows AionUi-originated fs/write_text_file requests inside
 # ALPHARAVIS_ACP_WORKSPACE. Default false keeps the adapter read-only.
 # Allowed values: true, false
@@ -941,6 +955,11 @@ ALPHARAVIS_SKILL_CONTEXT_MAX_CHARS=2500
 # the agent calls read_repo_ai_skill.
 ALPHARAVIS_REPO_SKILL_HINT_LIMIT=3
 
+# Directory for repo-local reviewed ai-skills. Docker default points at the
+# mounted workspace path; local runs can keep the relative ./ai-skills default
+# from ALPHARAVIS_REPO_SKILL_CACHE_PATH if preferred.
+ALPHARAVIS_REPO_SKILLS_DIR=/workspace/ai-skills
+
 # Enables the Hermes-style disk manifest cache for reviewed ai-skills.
 # The cache stores names, descriptions, mtimes, and supporting-file paths only.
 # Allowed values: true, false
@@ -949,6 +968,14 @@ ALPHARAVIS_REPO_SKILL_CACHE=true
 # Repo skill manifest cache path. Relative paths are resolved from the repo root.
 # Keep this under .cache/alpharavis unless you intentionally move runtime caches.
 ALPHARAVIS_REPO_SKILL_CACHE_PATH=.cache/alpharavis/repo_skill_manifest.json
+
+# Absolute Docker-style alias for the same repo skill manifest cache. Some
+# container entrypoints prefer this path because /workspace is stable there.
+ALPHARAVIS_REPO_SKILLS_CACHE_PATH=/workspace/.cache/alpharavis/repo_skill_manifest.json
+
+# Max characters from one loaded repo skill card injected as a hint. The full
+# skill file can still be read explicitly with read_repo_ai_skill when needed.
+ALPHARAVIS_REPO_SKILL_HINT_MAX_CHARS=3000
 
 # Max supporting files listed per reviewed repo skill. Supporting folders are:
 # references/, templates/, scripts/, and assets/.
@@ -1173,6 +1200,14 @@ ALPHARAVIS_REQUIRE_COMMAND_APPROVAL=true
 # Max seconds allowed for local diagnostic shell commands in the LangGraph
 # container, such as read-only docker logs/ps checks.
 ALPHARAVIS_LOCAL_COMMAND_TIMEOUT_SECONDS=45
+
+# Max seconds allowed for debugger-agent shell/SSH commands before the tool
+# reports a timeout instead of hanging the agent workflow.
+ALPHARAVIS_DEBUGGER_COMMAND_TIMEOUT_SECONDS=45
+
+# Max characters kept from local command output before the tool returns a
+# truncated diagnostic summary to the model.
+ALPHARAVIS_LOCAL_COMMAND_MAX_OUTPUT_CHARS=12000
 
 # Optional cloud model keys, only needed if you add cloud fallback models.
 # OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
