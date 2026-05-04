@@ -411,6 +411,7 @@ services:
       - "9004:9004"
     volumes:
       - ./pixelle-data:/app/data
+      - ./pixelle-mcp-custom/.env:/app/.env
     env_file:
       - path: ./pixelle-mcp-custom/.env.local
         required: false
