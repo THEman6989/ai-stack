@@ -18,6 +18,8 @@ Thumbs.db
 data
 hermes-data/
 logs/
+.cache/
+old\ cobvsresation-chaty.txt
 
 # Lokaler LangGraph-Dev-Cache
 langgraph-app/.langgraph_api/
