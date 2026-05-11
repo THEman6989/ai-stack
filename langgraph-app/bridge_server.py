@@ -672,9 +672,10 @@ async def _smoke_test_litellm_model(model: str) -> dict[str, Any]:
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": BRIDGE_LLM_HEALTH_PROMPT}],
-        "max_tokens": 4,
+        "max_tokens": 8,
         "temperature": 0,
         "stream": False,
+        "chat_template_kwargs": {"enable_thinking": False},
     }
 
     try:
@@ -888,6 +889,22 @@ def _extract_stream_reasoning(part: Any) -> str:
     return ""
 
 
+def _stream_part_is_delta(part: Any) -> bool:
+    data = getattr(part, "data", None)
+    if data is None and isinstance(part, dict):
+        data = part.get("data")
+
+    if isinstance(data, tuple) and data:
+        message = data[0]
+        type_name = type(message).__name__.lower()
+        return "chunk" in type_name or "chunk" in _message_type(message)
+
+    if isinstance(data, dict) and "chunk" in data:
+        return True
+
+    return False
+
+
 def _stream_event_name(part: Any) -> str:
     if isinstance(part, dict):
         return str(part.get("event") or "")
@@ -975,7 +992,7 @@ async def _stream_chat_events(
                     yield _activity_chunk(activity, model)
 
                 reasoning = _extract_stream_reasoning(part)
-                reasoning_delta = _delta_text(reasoning, emitted_reasoning)
+                reasoning_delta = reasoning if _stream_part_is_delta(part) else _delta_text(reasoning, emitted_reasoning)
                 if reasoning_delta:
                     emitted_reasoning += reasoning_delta
                     visible_reasoning_delta = (
@@ -985,7 +1002,7 @@ async def _stream_chat_events(
                         yield _stream_data(_chunk("", model, reasoning_content=visible_reasoning_delta))
 
                 text = _extract_stream_text(part)
-                delta = _delta_text(text, emitted)
+                delta = text if _stream_part_is_delta(part) else _delta_text(text, emitted)
                 if delta:
                     emitted += delta
                     visible_delta = content_scrubber.feed(delta) if content_scrubber else delta

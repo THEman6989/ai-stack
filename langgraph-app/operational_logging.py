@@ -261,14 +261,17 @@ def reset_logging_for_tests() -> None:
 
 
 def _attach_text_handler(logger: logging.Logger, path: Path, *, retention_days: int, level: int) -> None:
-    handler = TimedRotatingFileHandler(
-        path,
-        when="midnight",
-        interval=1,
-        backupCount=retention_days,
-        encoding="utf-8",
-        utc=True,
-    )
+    try:
+        handler = TimedRotatingFileHandler(
+            path,
+            when="midnight",
+            interval=1,
+            backupCount=retention_days,
+            encoding="utf-8",
+            utc=True,
+        )
+    except OSError:
+        handler = logging.NullHandler()
     handler.setLevel(level)
     handler.setFormatter(_TextEventFormatter())
     _mark_managed(handler)
@@ -276,14 +279,17 @@ def _attach_text_handler(logger: logging.Logger, path: Path, *, retention_days: 
 
 
 def _attach_jsonl_handler(logger: logging.Logger, path: Path, *, retention_days: int, level: int) -> None:
-    handler = TimedRotatingFileHandler(
-        path,
-        when="midnight",
-        interval=1,
-        backupCount=retention_days,
-        encoding="utf-8",
-        utc=True,
-    )
+    try:
+        handler = TimedRotatingFileHandler(
+            path,
+            when="midnight",
+            interval=1,
+            backupCount=retention_days,
+            encoding="utf-8",
+            utc=True,
+        )
+    except OSError:
+        handler = logging.NullHandler()
     handler.setLevel(level)
     handler.setFormatter(_JsonEventFormatter())
     _mark_managed(handler)

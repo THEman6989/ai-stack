@@ -84,6 +84,77 @@ Keep `BRIDGE_RESPONSES_ALLOW_CLIENT_TOOLS=false` unless you intentionally want
 to accept tool metadata without executing those tools. The safe default is to
 reject unsupported client tool requests.
 
+LangGraph-internal model calls have separate Responses flags:
+
+```env
+ALPHARAVIS_LLM_API_MODE=responses
+ALPHARAVIS_RESPONSES_API_BASE=http://litellm:4000/v1
+ALPHARAVIS_RESPONSES_MODEL=big-boss
+ALPHARAVIS_DEEPAGENTS_API_MODE=responses
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
+ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
+```
+
+AlphaRavis applies a startup patch equivalent to the important part of
+langchain-ai/langchain PR #35457, so LangChain's documented
+`disable_streaming="tool_calling"` hybrid no longer crashes with `AsyncStream`
+when tool-bound Responses calls are routed through non-streaming code paths.
+The bridge's external `/v1/responses` SSE stream is separate from the internal
+DeepAgents model streaming setting.
+
+Verified package state after the May 2026 update:
+
+```text
+langgraph-api:
+  langchain-openai==1.2.1
+  langchain==1.2.18
+  langchain-core==1.3.3
+  langgraph==1.1.10
+  deepagents==0.5.9
+  openai==2.36.0
+  litellm==1.83.0
+
+litellm proxy image:
+  litellm==1.82.6
+```
+
+The DeepAgents upgrade did not by itself fix internal Responses streaming with
+tool-capable LangChain calls. Before the local patch, a direct repro using
+`ChatOpenAI(use_responses_api=True, streaming=True,
+disable_streaming="tool_calling")` with a bound tool failed in
+`langchain_openai` with:
+
+```text
+AttributeError: 'AsyncStream' object has no attribute 'error'
+```
+
+After applying the local PR #35457-style patch, the same direct repro passes
+and the Bridge `/v1/responses` Agent Path returns streamed SSE output. Keep the
+patch until `langchain-openai` ships the upstream fix and the repro still passes
+without local modification.
+
+## Internal Streaming Modes
+
+There are three separate modes for DeepAgents Responses model calls:
+
+| Mode | Env | What happens |
+| --- | --- | --- |
+| Fully non-streaming | `STREAMING=false`, `DISABLE_STREAMING=true` | Every internal model call waits for a complete response before LangChain continues. Stable, but no internal token stream. |
+| Hybrid default | `STREAMING=true`, `DISABLE_STREAMING=tool_calling` | LangChain may stream calls without tools. Calls with tools are sent non-streaming so tool-call JSON is complete before execution. |
+| Full streaming | `STREAMING=true`, `DISABLE_STREAMING=false` | Tool-bound model calls are also streamed. This is still experimental with the local LiteLLM/llama.cpp stack. |
+
+The hybrid mode is not "stream only until a tool call appears." LangChain cannot
+know whether the next model response will contain a tool call before it asks the
+model. It only knows whether tools are bound to the request. Therefore, if tools
+are bound, `tool_calling` bypasses internal streaming for that whole model call.
+
+This still improves the previous state:
+
+- before the patch, hybrid mode crashed in `langchain_openai`
+- after the patch, hybrid mode works and avoids malformed streamed tool calls
+- external `/v1/responses` SSE events still work through the Bridge
+- full internal tool-call streaming remains opt-in for future provider fixes
+
 ## LibreChat Notes
 
 LibreChat may still call `/v1/chat/completions` depending on its provider

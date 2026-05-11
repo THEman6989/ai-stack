@@ -323,11 +323,35 @@ LangChain `ChatOpenAI`:
 ALPHARAVIS_DEEPAGENTS_API_MODE=responses
 ALPHARAVIS_DEEPAGENTS_RESPONSES_API_BASE=http://litellm:4000/v1
 ALPHARAVIS_DEEPAGENTS_RESPONSES_OUTPUT_VERSION=responses/v1
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
+ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
 ```
 
 This keeps DeepAgents on its native `create_agent(...)` path while swapping the
-model object underneath it. If a local provider has a Responses/tool-call bug,
-set `ALPHARAVIS_DEEPAGENTS_API_MODE=chat_completions` or leave
+model object underneath it. AlphaRavis applies a local startup patch equivalent
+to the important part of langchain-ai/langchain PR #35457. That patch fixes the
+`AsyncStream` crash when LangChain routes
+`disable_streaming="tool_calling"` calls through non-streaming OpenAI code
+paths.
+
+Streaming remains configurable for future provider/library upgrades:
+
+```text
+# force fully non-streaming internal model calls
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=false
+ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=true
+
+# experimental full streaming with tool-bound calls
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
+ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false
+
+# default patched LangChain hybrid: stream unless tools are passed
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
+ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
+```
+
+If a local provider has a Responses/tool-call bug, set
+`ALPHARAVIS_DEEPAGENTS_API_MODE=chat_completions` or leave
 `ALPHARAVIS_DEEPAGENTS_REQUIRE_RESPONSES=false` to fall back to ChatLiteLLM.
 
 Every specialist prompt includes a local specialist-planning rule. The global
@@ -1296,6 +1320,13 @@ when the runtime/provider cannot support it. OpenWebUI's "Native" setting is
 separate: it controls how OpenWebUI calls tools inside OpenWebUI chats, while
 AlphaRavis still performs its own LangGraph-native tool execution behind the
 Bridge.
+
+DeepAgents Responses token streaming is intentionally disabled by default for
+the current local stack. Tool loops still work normally: the model returns a
+complete tool call, LangGraph executes the tool, the tool result is added back
+to state, and the next model step continues. What is disabled is live token
+deltas from the internal DeepAgents model call. The bridge can still expose
+Responses-style SSE events to clients.
 
 The normal agent path remains:
 

@@ -107,6 +107,19 @@ ALPHARAVIS_DEEPAGENTS_RESPONSES_API_BASE=http://litellm:4000/v1
 ALPHARAVIS_DEEPAGENTS_RESPONSES_API_KEY=sk-local-dev
 ALPHARAVIS_DEEPAGENTS_RESPONSES_MODEL=big-boss
 ALPHARAVIS_DEEPAGENTS_RESPONSES_OUTPUT_VERSION=responses/v1
+# LangChain/OpenAI Responses streaming control for DeepAgents.
+# AlphaRavis applies a local patch for langchain-ai/langchain#35436 at
+# langgraph-api startup, so the documented LangChain hybrid mode no longer
+# crashes with AsyncStream when tools are bound.
+# Values for ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING:
+#   true  = default; allow streaming when LangChain does not bypass it
+#   false = force non-streaming internal model calls
+# Values for ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING:
+#   tool_calling = default; bypass streaming when tools are passed
+#   true         = force stream()/astream to defer to invoke()/ainvoke()
+#   false        = full Responses streaming; still experimental with tools
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
+ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
 ALPHARAVIS_DEEPAGENTS_REQUIRE_RESPONSES=false
 ALPHARAVIS_DEEPAGENTS_USE_PREVIOUS_RESPONSE_ID=false
 

@@ -63,6 +63,8 @@ MODEL_MANAGEMENT_KEYS = [
     ("ALPHARAVIS_DEEPAGENTS_API_MODE", "responses or chat_completions for DeepAgents tool workers"),
     ("ALPHARAVIS_DEEPAGENTS_RESPONSES_API_BASE", "OpenAI-compatible /v1 base for DeepAgents Responses tool calls"),
     ("ALPHARAVIS_DEEPAGENTS_RESPONSES_MODEL", "model id for DeepAgents Responses mode"),
+    ("ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING", "enable DeepAgents Responses token streaming"),
+    ("ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING", "false, true, or tool_calling"),
     ("ALPHARAVIS_DEEPAGENTS_REQUIRE_RESPONSES", "fail startup instead of falling back for DeepAgents"),
     ("BRIDGE_PREFERRED_API_MODE", "responses or chat_completions"),
     ("BRIDGE_HARD_INPUT_TOKEN_LIMIT", "hard bridge request cutoff"),

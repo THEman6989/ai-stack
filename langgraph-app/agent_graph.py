@@ -527,6 +527,13 @@ def _env_bool(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).lower() in {"1", "true", "yes"}
 
 
+def _env_disable_streaming(name: str, default: str = "false") -> bool | str:
+    value = os.getenv(name, default).strip().lower()
+    if value in {"tool_calling", "tool-calling", "tools"}:
+        return "tool_calling"
+    return value in {"1", "true", "yes", "on", "always"}
+
+
 def _env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
     if not raw:
@@ -709,7 +716,11 @@ def _deepagents_responses_model(
         "api_key": os.getenv("ALPHARAVIS_DEEPAGENTS_RESPONSES_API_KEY", os.getenv("ALPHARAVIS_RESPONSES_API_KEY", os.getenv("OPENAI_API_KEY", "sk-local-dev"))),
         "timeout": timeout_seconds or float(os.getenv("ALPHARAVIS_LLM_TIMEOUT_SECONDS", "120")),
         "max_retries": int(os.getenv("ALPHARAVIS_LLM_MAX_RETRIES", "0")),
-        "streaming": _env_bool("ALPHARAVIS_LLM_STREAMING", "true"),
+        "streaming": _env_bool("ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING", "false"),
+        "disable_streaming": _env_disable_streaming(
+            "ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING",
+            "true",
+        ),
         "use_responses_api": True,
         "store": _env_bool("ALPHARAVIS_RESPONSES_STORE", "false"),
         "output_version": os.getenv("ALPHARAVIS_DEEPAGENTS_RESPONSES_OUTPUT_VERSION", "responses/v1"),

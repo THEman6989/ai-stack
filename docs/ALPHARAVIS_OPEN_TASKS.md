@@ -3,6 +3,58 @@
 This is the running backlog for features that are intentionally prepared but
 not fully wired yet.
 
+## Responses Streaming Follow-up
+
+Status: local PR #35457-style patch applied; hybrid streaming mode passes.
+
+Implemented:
+
+- LangGraph container packages were updated to:
+
+```text
+langchain-openai==1.2.1
+langchain==1.2.18
+langchain-core==1.3.3
+langgraph==1.1.10
+deepagents==0.5.9
+openai==2.36.0
+litellm==1.83.0
+```
+
+- Patched DeepAgents Responses hybrid mode works with:
+
+```text
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
+ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
+```
+
+- Live test after the update:
+  - `/v1/responses` Fast Path returned 200.
+  - `/v1/responses` Agent Path returned 200 in about 48 seconds.
+  - External `/v1/responses` SSE streaming returned chunks.
+- Live test after the local patch:
+  - Direct `ChatOpenAI(use_responses_api=True, streaming=True,
+    disable_streaming="tool_calling")` with a bound tool returned
+    `DIRECT_TOOL_STREAM_TEST_OK`.
+  - Bridge `/v1/responses` Agent Path streaming returned
+    `PATCHED_AGENT_STREAM_OK`.
+
+Still needed:
+
+- Track the upstream LangChain issue and remove the local patch when
+  `langchain-openai` includes the fix.
+- Retest the LiteLLM proxy after its Docker image reports a newer package than
+  `litellm==1.82.6`.
+- Keep full streaming
+  `ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false` experimental until
+  a direct tool-call streaming repro passes without malformed tool chunks.
+- Consider a two-phase final-answer stream:
+  - tool-capable worker calls stay hybrid/non-streaming for reliable tool JSON
+  - after tool execution, run a final answer call without tools and stream that
+    text to the client
+  - this requires orchestration changes because current DeepAgents workers keep
+    tools bound on final answer turns too
+
 ## Custom Model / Power Management
 
 Status: prepared, default off. Owner tool file exists and safe owner tools are wired.
@@ -283,13 +335,29 @@ ALPHARAVIS_LLM_API_MODE=responses
 ALPHARAVIS_DEEPAGENTS_API_MODE=responses
 ```
 
+Current live-test status:
+- Done: direct no-tool LangGraph calls use Responses successfully for
+  fast-path/planner style calls.
+- Done: DeepAgents can use Responses successfully with the patched LangChain
+  hybrid streaming mode:
+
+```text
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
+ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
+```
+
+- Not stable yet: full internal Responses streaming for tool-bound DeepAgents
+  calls with `ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false`. Earlier
+  full streaming failed with `item['content'] is empty`.
+
 Still needed:
 
 - Test whether LibreChat preserves `reasoning_content` as a separate reasoning
   panel or shows it as normal text.
 - Keep `BRIDGE_STREAM_REASONING_EVENTS=false` until verified.
-- Live smoke-test DeepAgents tool calls against the actual llama.cpp Responses
-  backend and keep ChatLiteLLM fallback enabled until that passes repeatedly.
+- Re-test DeepAgents internal Responses token streaming after LiteLLM,
+  `langchain-openai`, or llama.cpp upgrades. Keep the stable non-streaming
+  DeepAgents default until repeated smoke tests pass.
 
 ## Parallel Agent Work
 
@@ -745,6 +813,8 @@ Acceptance:
 - Done: LiteLLM remains the default abstraction.
 - Done: Responses remains preferred where it is stable.
 - Done: direct Responses calls retry once after unsupported parameter errors.
+- Done: DeepAgents Responses streaming is ENV-controlled and documented with a
+  stable default plus experimental full/hybrid streaming opt-ins.
 
 ### Chunk 8: Maintenance And Metadata Helpers
 

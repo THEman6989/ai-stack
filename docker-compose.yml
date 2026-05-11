@@ -165,7 +165,7 @@ services:
       context: .
       dockerfile: ./langgraph-app/Dockerfile
     container_name: langgraph-api
-    command: ["sh", "-c", "rm -f /tmp/.X0-lock && Xvfb :0 -screen 0 1280x720x24 & fluxbox & x11vnc -display :0 -forever -nopw -listen 0.0.0.0 & cd /workspace/langgraph-app && langgraph dev --config langgraph.json --host 0.0.0.0 --port 2024 --no-browser"]
+    command: ["sh", "-c", "python /workspace/langgraph-app/patches/patch_langchain_openai_disable_streaming.py && rm -f /tmp/.X0-lock && Xvfb :0 -screen 0 1280x720x24 & fluxbox & x11vnc -display :0 -forever -nopw -listen 0.0.0.0 & cd /workspace/langgraph-app && langgraph dev --config langgraph.json --host 0.0.0.0 --port 2024 --no-browser"]
     ports:
       - "2024:2024"
       - "5900:5900" # VNC Port für die Sandbox
@@ -202,6 +202,16 @@ services:
       - OPENWEBUI_URL=${OPENWEBUI_URL:-http://openwebui:8080}
       - ALPHARAVIS_ARCHITECTURE_DOC_PATH=${ALPHARAVIS_ARCHITECTURE_DOC_PATH:-/workspace/docs/ALPHARAVIS_ARCHITECTURE.md}
       - ALPHARAVIS_LOG_DIR=${ALPHARAVIS_DOCKER_LOG_DIR:-/logs}
+      - ALPHARAVIS_LLM_API_MODE=${ALPHARAVIS_LLM_API_MODE:-responses}
+      - ALPHARAVIS_RESPONSES_API_BASE=${ALPHARAVIS_RESPONSES_API_BASE:-http://litellm:4000/v1}
+      - ALPHARAVIS_RESPONSES_API_KEY=${ALPHARAVIS_RESPONSES_API_KEY:-sk-local-dev}
+      - ALPHARAVIS_RESPONSES_MODEL=${ALPHARAVIS_RESPONSES_MODEL:-big-boss}
+      - ALPHARAVIS_DEEPAGENTS_API_MODE=${ALPHARAVIS_DEEPAGENTS_API_MODE:-responses}
+      - ALPHARAVIS_DEEPAGENTS_RESPONSES_API_BASE=${ALPHARAVIS_DEEPAGENTS_RESPONSES_API_BASE:-http://litellm:4000/v1}
+      - ALPHARAVIS_DEEPAGENTS_RESPONSES_API_KEY=${ALPHARAVIS_DEEPAGENTS_RESPONSES_API_KEY:-sk-local-dev}
+      - ALPHARAVIS_DEEPAGENTS_RESPONSES_MODEL=${ALPHARAVIS_DEEPAGENTS_RESPONSES_MODEL:-big-boss}
+      - ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=${ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING:-true}
+      - ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=${ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING:-tool_calling}
       - MONGODB_URI=mongodb://mongodb:27017
       - LS_MONGODB_URI=${LS_MONGODB_URI:-mongodb://mongodb:27017/langgraph?replicaSet=rs0}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379}
@@ -424,4 +434,3 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
-

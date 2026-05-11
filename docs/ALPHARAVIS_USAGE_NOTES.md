@@ -124,6 +124,8 @@ ALPHARAVIS_DEEPAGENTS_API_MODE=responses
 ALPHARAVIS_DEEPAGENTS_RESPONSES_API_BASE=http://litellm:4000/v1
 ALPHARAVIS_DEEPAGENTS_RESPONSES_MODEL=big-boss
 ALPHARAVIS_DEEPAGENTS_RESPONSES_OUTPUT_VERSION=responses/v1
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
+ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
 ```
 
 Set `ALPHARAVIS_DEEPAGENTS_API_MODE=chat_completions` to return only DeepAgents
@@ -132,6 +134,43 @@ tool workers to the older ChatLiteLLM path. Set
 fail instead of falling back. Set `ALPHARAVIS_RESPONSES_REQUIRE_NATIVE=true`
 only when you want direct no-tool calls to fail instead of falling back to Chat
 Completions.
+
+The DeepAgents Responses streaming flags are separate from the external bridge
+stream. The stable local default is:
+
+```text
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
+ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
+```
+
+AlphaRavis applies a local startup patch equivalent to the important part of
+langchain-ai/langchain PR #35457. Without that patch, LangChain's documented
+hybrid mode can crash because the non-streaming `_generate` / `_agenerate`
+paths still send `stream=true` to the provider.
+
+Live testing after the patch showed:
+
+- direct `ChatOpenAI(use_responses_api=True, streaming=True,
+  disable_streaming="tool_calling")` with a bound tool passes
+- Bridge `/v1/responses` Agent Path streaming returns SSE output text chunks
+- full streaming with `ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false`
+  is still experimental for tool-capable calls
+
+Those modes remain available as opt-ins for provider/library upgrades:
+
+```text
+# force fully non-streaming internal model calls
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=false
+ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=true
+
+# experimental full streaming
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
+ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false
+
+# default patched LangChain hybrid
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
+ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
+```
 
 Direct Responses calls have a small compatibility retry layer:
 
@@ -928,7 +967,9 @@ Already available:
 - OpenAPI 3.1 bridge schema and richer Responses streaming event names
 - Responses-native direct LangGraph calls for planner/fast-path/summarizers
 - Responses-native DeepAgents model binding through LangChain `ChatOpenAI`,
-  feature-flagged with ChatLiteLLM fallback
+  feature-flagged with ChatLiteLLM fallback; internal DeepAgents token
+  streaming is disabled by default until the LiteLLM/llama.cpp Responses
+  streaming path is stable
 - `make model-management` / `make owner-model-management` for custom hardware setup
 - durable pgvector embedding queue, scheduler, manual queue runner, and bounded
   backfill queueing
@@ -947,8 +988,8 @@ Still open / planned next:
 - mid-run backend watchdog and crisis recovery for timeouts/502s after a graph
   run already started
 - post-crisis readiness gate before continuing to the normal planner
-- live smoke test against your llama.cpp Responses endpoint for full DeepAgents
-  tool calls
+- remove the local LangChain #35436 patch after `langchain-openai` ships an
+  upstream fix and the direct tool-calling repro still passes
 - agent time/tool/handoff budget guard
 - richer activity stream in LibreChat
 - test whether LibreChat shows `reasoning_content` in a separate reasoning

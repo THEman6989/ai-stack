@@ -2,11 +2,11 @@ fastapi
 uvicorn
 httpx
 wakeonlan
-langgraph
+langgraph==1.1.10
 langgraph-cli[inmem]
 langgraph-sdk>=0.3.5
 langgraph-swarm
-deepagents==0.4.12
+deepagents==0.5.9
 langchain-litellm
 langgraph-checkpoint-mongodb
 langgraph-store-mongodb
@@ -21,10 +21,11 @@ html2text
 tavily-python
 langmem
 langchain-mcp-adapters
-langchain>=0.2.0
+langchain==1.2.18
 langchain-community>=0.2.0
-langchain-core>=0.2.0
-langchain-openai>=0.3.29
+langchain-core==1.3.3
+langchain-openai==1.2.1
+openai==2.36.0
 # --- VISUALISIERUNG & DEBUGGING (Awesome LangGraph) ---
 langgraphics
 # agent-tackle-box
