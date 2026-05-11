@@ -4,6 +4,57 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-11 - LibreChat Command Approval Memory
+
+### Summary
+
+LibreChat command approvals still use the chat-text fallback because the
+external custom endpoint path does not expose an AlphaRavis-native clickable
+permission callback.
+
+Accepted replies while a command approval interrupt is pending:
+
+```text
+approve
+reject
+replace: <safer command>
+approve always
+immer erlauben
+```
+
+`approve always` / `immer erlauben` stores a bridge-local allow entry for the
+exact scope/target/command in the current LibreChat thread only. It is not a
+global allowlist and is cleared when `api-bridge` restarts.
+
+### Why This Was Needed
+
+OpenAI Responses has MCP approval request/response items for remote MCP tools,
+and AionUI/ACP has a native `session/request_permission` flow. LibreChat's
+custom OpenAI-compatible endpoint path does not provide that same AlphaRavis
+permission callback, so the robust path is to keep text approvals and make the
+"remember this exact command in this chat" case explicit.
+
+### Files Changed
+
+- `langgraph-app/bridge_server.py`
+  - parses `approve always` / `immer erlauben`
+  - stores exact command fingerprints in process memory per thread
+  - auto-resumes only when the same pending interrupt reappears in that thread
+- `tests/test_bridge_responses.py`
+  - covers command-memory parsing and exact-command matching
+- Responses, usage, architecture, and open-task docs
+  - document the LibreChat limitation and the supported fallback commands
+
+### Verification
+
+```text
+pytest -q tests/test_bridge_responses.py tests/test_alpharavis_acp_adapter.py
+36 passed
+
+pytest -q tests
+110 passed
+```
+
 ## 2026-05-11 - Responses / DeepAgents Streaming Fix
 
 ### Summary

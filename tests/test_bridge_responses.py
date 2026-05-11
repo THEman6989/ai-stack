@@ -100,11 +100,14 @@ class _FakeMessage:
 
 
 class _FakeThreads:
+    def __init__(self, state: dict | None = None) -> None:
+        self.state = state or {"values": {"messages": []}}
+
     async def create(self, *args, **kwargs) -> dict:
         return {}
 
     async def get_state(self, *args, **kwargs) -> dict:
-        return {"values": {"messages": []}}
+        return self.state
 
 
 class _FakeRuns:
@@ -117,8 +120,8 @@ class _FakeRuns:
 
 
 class _FakeClient:
-    def __init__(self, parts: list[dict]) -> None:
-        self.threads = _FakeThreads()
+    def __init__(self, parts: list[dict], *, state: dict | None = None) -> None:
+        self.threads = _FakeThreads(state)
         self.runs = _FakeRuns(parts)
 
 
@@ -139,9 +142,31 @@ def _parse_sse_events(chunks: list[str]) -> list[dict]:
     return events
 
 
+def _parse_chat_chunks(chunks: list[str]) -> list[dict]:
+    parsed: list[dict] = []
+    for raw in chunks:
+        if raw.strip() == "data: [DONE]" or not raw.startswith("data: "):
+            continue
+        parsed.append(json.loads(raw.split("data: ", 1)[1]))
+    return parsed
+
+
 async def _collect_response_stream(body: dict, parts: list[dict]) -> list[dict]:
     chunks = [chunk async for chunk in bridge_server._stream_responses(body, _StubRequest(body))]
     return _parse_sse_events(chunks)
+
+
+async def _collect_chat_event_stream(parts: list[dict]) -> list[dict]:
+    chunks = [
+        chunk
+        async for chunk in bridge_server._stream_chat_events(
+            _FakeClient(parts),
+            "thread_test",
+            {"input": {"messages": [{"role": "human", "content": "Hi"}]}},
+            "my-agent",
+        )
+    ]
+    return _parse_chat_chunks(chunks)
 
 
 def _patch_stream_env(monkeypatch, parts: list[dict]) -> None:
@@ -242,6 +267,58 @@ def test_responses_validation_rejects_unsupported_hosted_features() -> None:
     assert tools and tools["error"]["code"] == "client_tools_not_supported"
     assert structured and structured["error"]["code"] == "text_format_not_supported"
     assert missing_previous and missing_previous["error"]["code"] == "previous_response_not_found"
+
+
+def test_approval_resume_supports_thread_command_memory() -> None:
+    resume = bridge_server._approval_resume_from_messages([{"role": "user", "content": "immer erlauben"}])
+
+    assert resume == {"action": "approve", "remember": "thread_command"}
+
+
+def test_prepare_run_payload_remembers_exact_command_approval() -> None:
+    bridge_server._APPROVAL_MEMORY.clear()
+    interrupt = {
+        "type": "command_approval",
+        "scope": "local",
+        "target": "langgraph-api",
+        "command": "docker compose up -d api-bridge",
+        "risk": "state-changing",
+    }
+    state = {"values": {"__interrupt__": [{"value": interrupt}]}}
+    client = _FakeClient([], state=state)
+
+    first = asyncio.run(
+        bridge_server._prepare_run_payload(
+            client,
+            "thread_approval",
+            "conversation-a",
+            [{"role": "user", "content": "approve always"}],
+        )
+    )
+    second = asyncio.run(
+        bridge_server._prepare_run_payload(
+            client,
+            "thread_approval",
+            "conversation-a",
+            [{"role": "user", "content": "weiter"}],
+        )
+    )
+    changed = asyncio.run(
+        bridge_server._prepare_run_payload(
+            _FakeClient(
+                [],
+                state={"values": {"__interrupt__": [{"value": {**interrupt, "command": "docker compose down"}}]}},
+            ),
+            "thread_approval",
+            "conversation-a",
+            [{"role": "user", "content": "weiter"}],
+        )
+    )
+
+    assert first == {"command": {"resume": {"action": "approve", "remember": "thread_command"}}}
+    assert second == {"command": {"resume": {"action": "approve", "remembered": "thread_command"}}}
+    assert "direct_response" in changed
+    assert "docker compose down" in changed["direct_response"]
 
 
 def test_input_tokens_endpoint_returns_count_object() -> None:
@@ -357,6 +434,106 @@ def test_stream_responses_maps_internal_tools_to_function_items(monkeypatch) -> 
     assert "wrote app.py" in function_output["output"]
     assert any(event["event"] == "response.function_call_arguments.delta" for event in events)
     assert any(event["event"] == "response.function_call_arguments.done" for event in events)
+
+
+def test_stream_responses_splits_visible_think_blocks(monkeypatch) -> None:
+    parts = [
+        {"event": "messages", "data": (_FakeMessage("ai", "<think>plan</think>Answer"), {})},
+    ]
+    _patch_stream_env(monkeypatch, parts)
+
+    events = asyncio.run(_collect_response_stream({"model": "my-agent", "input": "Hi", "stream": True}, parts))
+    reasoning_text = "".join(
+        event["data"].get("delta", "") for event in events if event["event"] == "response.reasoning.delta"
+    )
+    output_text = "".join(
+        event["data"].get("delta", "") for event in events if event["event"] == "response.output_text.delta"
+    )
+    output_done = next(event["data"]["text"] for event in events if event["event"] == "response.output_text.done")
+    completed = next(event["data"]["response"] for event in events if event["event"] == "response.completed")
+    assistant_item = next(item for item in completed["output"] if item["type"] == "message")
+
+    assert reasoning_text == "plan"
+    assert output_text == "Answer"
+    assert output_done == "Answer"
+    assert assistant_item["content"][0]["text"] == "Answer"
+    assert "<think>" not in output_done
+    assert "</think>" not in output_done
+
+
+def test_stream_responses_splits_think_markers_across_chunks(monkeypatch) -> None:
+    parts = [
+        {"event": "messages", "data": (_FakeMessage("AIMessageChunk", "<thi"), {})},
+        {"event": "messages", "data": (_FakeMessage("AIMessageChunk", "nk>plan</thi"), {})},
+        {"event": "messages", "data": (_FakeMessage("AIMessageChunk", "nk>Answer"), {})},
+    ]
+    _patch_stream_env(monkeypatch, parts)
+
+    events = asyncio.run(_collect_response_stream({"model": "my-agent", "input": "Hi", "stream": True}, parts))
+    reasoning_text = "".join(
+        event["data"].get("delta", "") for event in events if event["event"] == "response.reasoning.delta"
+    )
+    output_done = next(event["data"]["text"] for event in events if event["event"] == "response.output_text.done")
+
+    assert reasoning_text == "plan"
+    assert output_done == "Answer"
+    assert "<think>" not in output_done
+    assert "</think>" not in output_done
+
+
+def test_stream_chat_splits_visible_think_blocks(monkeypatch) -> None:
+    parts = [
+        {"event": "messages", "data": (_FakeMessage("AIMessageChunk", "<think>plan</think>Answer"), {})},
+    ]
+    _patch_stream_env(monkeypatch, parts)
+
+    chunks = asyncio.run(_collect_chat_event_stream(parts))
+    deltas = [chunk["choices"][0]["delta"] for chunk in chunks]
+    reasoning_text = "".join(delta.get("reasoning_content", "") for delta in deltas)
+    output_text = "".join(delta.get("content", "") for delta in deltas)
+
+    assert reasoning_text == "plan"
+    assert output_text == "Answer"
+    assert "<think>" not in output_text
+    assert "</think>" not in output_text
+
+
+def test_stream_responses_splits_think_blocks_from_state_fallback(monkeypatch) -> None:
+    state = {"values": {"messages": [_FakeMessage("ai", "<think>plan</think>Answer")]}}
+    monkeypatch.setattr(bridge_server, "_client", lambda: _FakeClient([], state=state))
+    monkeypatch.setattr(bridge_server, "BRIDGE_STREAM_REASONING_EVENTS", True)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS", True)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_STREAM_TOOL_EVENTS", True)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_DONE_SENTINEL", False)
+
+    events = asyncio.run(_collect_response_stream({"model": "my-agent", "input": "Hi", "stream": True}, []))
+    reasoning_text = "".join(
+        event["data"].get("delta", "") for event in events if event["event"] == "response.reasoning.delta"
+    )
+    output_done = next(event["data"]["text"] for event in events if event["event"] == "response.output_text.done")
+
+    assert reasoning_text == "plan"
+    assert output_done == "Answer"
+
+
+def test_explicit_reasoning_wins_over_string_think_blocks(monkeypatch) -> None:
+    parts = [
+        {
+            "event": "messages",
+            "data": (_FakeMessage("ai", "<think>duplicate</think>Answer", reasoning_content="Explicit."), {}),
+        },
+    ]
+    _patch_stream_env(monkeypatch, parts)
+
+    events = asyncio.run(_collect_response_stream({"model": "my-agent", "input": "Hi", "stream": True}, parts))
+    reasoning_text = "".join(
+        event["data"].get("delta", "") for event in events if event["event"] == "response.reasoning.delta"
+    )
+    output_done = next(event["data"]["text"] for event in events if event["event"] == "response.output_text.done")
+
+    assert reasoning_text == "Explicit."
+    assert "duplicate" not in reasoning_text
+    assert output_done == "Answer"
 
 
 def _run_all() -> None:

@@ -430,6 +430,16 @@ Still needed:
       `response.function_call_arguments.delta/done`, and
       `function_call_output` items.
     - `POST /v1/chat/completions stream=true` still works as the fallback path.
+  - Approval UX status:
+    - OpenAI Responses supports MCP approval request/response items for remote
+      MCP tools, but LibreChat's custom endpoint path does not expose an
+      AlphaRavis-native click-to-approve permission callback.
+    - `api-bridge` therefore keeps the chat-text approval path for LibreChat:
+      `approve`, `reject`, `replace: <safer command>`, `approve always`, and
+      `immer erlauben`.
+    - `approve always` / `immer erlauben` stores an exact scope/target/command
+      allow entry for the current LibreChat thread only, in bridge process
+      memory. It is cleared by `api-bridge` restart and is not global.
   - Still verify visually in the LibreChat browser UI that `AlphaRavis
     Responses` renders reasoning/tool activity in the intended panes.
 - llama.cpp/local-model visible thinking follow-up:
@@ -450,55 +460,37 @@ Still needed:
       `type: "thinking"` or `type: "reasoning"`.
     - `langgraph-app/bridge_server.py::_message_content` already skips list
       content blocks with `type: "thinking"` or `type: "reasoning"`.
-    - Missing piece: if llama.cpp or LiteLLM streams thinking as normal string
-      content like `<think>...</think>`, the Bridge currently does not split
-      that string into reasoning output. It may leak into normal assistant text
-      or be handled only by the generic scrubber instead of being shown in the
-      LibreChat reasoning bubble.
-  - Next patch should add a stateful visible-thinking splitter, probably in
-    `langgraph-app/bridge_server.py`, before final text is emitted:
-    - Support at least `<think>...</think>` markers. Consider also
-      `<thinking>...</thinking>` only if local llama.cpp templates actually use
-      it.
-    - Handle streaming boundaries correctly: tags can arrive split across
-      chunks, e.g. `<thi` + `nk>` and `</thi` + `nk>`.
-    - Maintain parser state across chunks: outside-thinking text goes to normal
-      assistant output; inside-thinking text goes to reasoning output.
-    - Do not emit marker text itself.
-    - At stream end, flush any remaining buffered visible text. If a closing
-      tag is missing, route the unterminated inside-thinking buffer to reasoning
-      rather than normal assistant text.
-    - Avoid duplicating text when provider also supplies `reasoning_content`.
-      Prefer explicit `reasoning_content`/`reasoning` fields for reasoning; use
-      `<think>` extraction only for normal string `content`.
-    - Keep `StreamingInternalContextScrubber` after the split: visible answer
-      text should go through the content scrubber, reasoning text should go
-      through the reasoning scrubber.
-  - Wire the splitter into both external streaming paths:
-    - Responses path: in `_stream_responses`, split `_extract_stream_text(part)`
-      deltas before `builder.text_delta(...)`; send extracted thinking via
-      `builder.reasoning_delta(...)` and visible answer text via
-      `builder.text_delta(...)`.
-    - Chat Completions fallback: in `_stream_chat_events`, split text deltas
-      before `_chunk(...)`; send extracted thinking as
-      `_chunk("", model, reasoning_content=...)` and visible answer text as the
-      normal `content` delta.
-    - Also handle the fallback state-read path used when no token was streamed:
-      split the final `_last_ai_content(...)` string so stored `<think>` blocks
-      do not appear in the visible final answer.
-  - Required tests in `tests/test_bridge_responses.py` or a focused new test:
-    - Responses stream: chunks containing `<think>plan</think>Answer` emit
+    - Added `_VisibleThinkingSplitter` in `langgraph-app/bridge_server.py` for
+      normal string content containing visible local-model thinking markers.
+      It supports `<think>...</think>` and `<thinking>...</thinking>`, handles
+      split marker boundaries across chunks, routes inside-thinking text to
+      reasoning output, routes outside text to assistant output, and suppresses
+      the marker text itself.
+    - The splitter is wired into both external streaming paths:
+      `_stream_responses` emits extracted thinking through
+      `response.reasoning.delta`, and `_stream_chat_events` emits extracted
+      thinking through the configured Chat Completions reasoning delta field.
+    - The fallback state-read path used when no token was streamed also splits
+      final `_last_ai_content(...)` text so stored `<think>` blocks do not leak
+      into the visible final answer.
+    - Explicit provider reasoning fields still win. If a part already exposes
+      `reasoning_content` or `reasoning`, string `<think>` blocks in that part
+      are stripped from visible output but not duplicated into reasoning.
+    - `StreamingInternalContextScrubber` remains after the split: answer text
+      goes through the content scrubber and reasoning text goes through the
+      reasoning scrubber.
+  - Added focused tests in `tests/test_bridge_responses.py`:
+    - Responses stream: `<think>plan</think>Answer` emits
       `response.reasoning.delta` containing `plan` and `response.output_text`
       containing only `Answer`.
-    - Responses stream with split markers across chunks still routes thinking
+    - Responses stream with split markers across chunks routes thinking
       correctly and does not leak `<think>` or `</think>` into
       `response.output_text.done` or the completed Response object's assistant
       message.
-    - Chat Completions stream: the same content emits
-      `delta.reasoning_content` for the thinking and normal `delta.content` for
-      the answer.
-    - Explicit provider reasoning fields (`reasoning_content`/`reasoning`) still
-      work and are not double-counted when no `<think>` string is present.
+    - Chat Completions stream emits `delta.reasoning_content` for thinking and
+      normal `delta.content` for the answer.
+    - Explicit provider reasoning fields still work and are not double-counted
+      when string `<think>` blocks are also present.
   - Live smoke after patch:
     - Use `AlphaRavis Responses` in LibreChat with the llama.cpp model and a
       prompt that reliably produces a visible `<think>` block.

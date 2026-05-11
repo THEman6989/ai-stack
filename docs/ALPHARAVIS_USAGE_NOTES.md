@@ -355,7 +355,20 @@ Reply with:
 approve
 reject
 replace: <safer command>
+approve always
+immer erlauben
 ```
+
+`approve`/`ja` approves only the pending command once. `approve always` or
+`immer erlauben` approves the pending command and remembers that exact
+scope/target/command combination for the current LibreChat thread. The memory
+is bridge-local and process-local, so it is intentionally lost when the
+`api-bridge` container restarts.
+
+LibreChat does not currently expose AlphaRavis command approvals as native
+clickable approval buttons on the external custom endpoint path. AionUI/ACP has
+native permission requests; LibreChat uses the chat-text fallback above unless
+LibreChat itself is extended with a custom permission event.
 
 ## Pixelle Jobs
 

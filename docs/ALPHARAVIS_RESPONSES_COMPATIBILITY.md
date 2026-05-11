@@ -210,7 +210,33 @@ Live smoke on 2026-05-11 confirmed that the bridge emits LibreChat-compatible
 Responses reasoning events, LangGraph node activity, and function-call/tool
 output items through `POST /v1/responses` with `stream=true`.
 
+Command approval interrupts are not exposed to LibreChat as native clickable
+approval buttons on the external custom endpoint path. The bridge instead uses
+chat-text approval for both Chat Completions and Responses requests:
+
+```text
+approve
+reject
+replace: <safer command>
+approve always
+immer erlauben
+```
+
+`approve always` / `immer erlauben` remembers only the exact
+scope/target/command in the current LibreChat thread, in bridge process memory.
+It is not a global allowlist and it is cleared by an `api-bridge` restart.
+AionUI/ACP has a separate native `session/request_permission` permission UI;
+LibreChat would need a custom frontend/backend permission event to get the same
+one-click approval UX for AlphaRavis.
+
 OpenAI-hosted reasoning models do not expose raw chain-of-thought through the
 API; they expose reasoning summaries. Full visible thinking appears only when
 the selected local/OpenAI-compatible provider emits visible reasoning fields
 such as `reasoning_content`, `reasoning`, or `<think>` text.
+
+For local llama.cpp-style models that stream visible thinking inside normal
+string content, the bridge splits `<think>...</think>` and
+`<thinking>...</thinking>` before emitting client events. The marker body is
+sent as Responses reasoning or Chat Completions `reasoning_content`; the final
+assistant text does not include the raw markers. Explicit provider reasoning
+fields still take precedence so the same thinking is not emitted twice.

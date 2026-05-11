@@ -92,6 +92,8 @@ BRIDGE_LANGGRAPH_TOOL_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_LANGGRAPH_TOOL_T
 BRIDGE_SHOW_ERROR_CLASSIFICATION = _env_bool("BRIDGE_SHOW_ERROR_CLASSIFICATION", "true")
 BRIDGE_SCRUB_INTERNAL_CONTEXT = _env_bool("BRIDGE_SCRUB_INTERNAL_CONTEXT", "true")
 BRIDGE_ENABLE_CONTEXT_REFERENCES = _env_bool("BRIDGE_ENABLE_CONTEXT_REFERENCES", "true")
+BRIDGE_ENABLE_APPROVAL_MEMORY = _env_bool("BRIDGE_ENABLE_APPROVAL_MEMORY", "true")
+BRIDGE_APPROVAL_MEMORY_MAX = int(os.getenv("BRIDGE_APPROVAL_MEMORY_MAX", "200"))
 BRIDGE_CONTEXT_REFERENCES_FETCH_URLS = _env_bool("BRIDGE_CONTEXT_REFERENCES_FETCH_URLS", "true")
 BRIDGE_CONTEXT_REFERENCE_CONTEXT_LENGTH = int(
     os.getenv("BRIDGE_CONTEXT_REFERENCE_CONTEXT_LENGTH", str(BRIDGE_HARD_INPUT_TOKEN_LIMIT or 128000))
@@ -110,6 +112,7 @@ BRIDGE_CONTEXT_REFERENCE_CWD = Path(
 app = FastAPI(title="AlphaRavis OpenAI Bridge", openapi_version="3.1.0")
 _RESPONSES_STORE: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _RESPONSES_INPUT_ITEMS: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+_APPROVAL_MEMORY: OrderedDict[str, float] = OrderedDict()
 
 
 def _log_event(level: int | str, event: str, *, message: str = "", **fields: Any) -> None:
@@ -375,6 +378,94 @@ def _message_reasoning_content(message: Any) -> str:
                     text_parts.append(part["content"])
         return "".join(text_parts)
     return ""
+
+
+class _VisibleThinkingSplitter:
+    OPEN_TAGS = ("<think>", "<thinking>")
+    CLOSE_TAGS = ("</think>", "</thinking>")
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._inside = False
+
+    @staticmethod
+    def _longest_pending_prefix(text: str, tags: tuple[str, ...]) -> int:
+        max_len = 0
+        max_tag_len = max(len(tag) for tag in tags)
+        for size in range(1, min(len(text), max_tag_len - 1) + 1):
+            suffix = text[-size:]
+            if any(tag.startswith(suffix) for tag in tags):
+                max_len = size
+        return max_len
+
+    @staticmethod
+    def _next_tag(text: str, tags: tuple[str, ...]) -> tuple[int, str] | None:
+        matches = [(index, tag) for tag in tags if (index := text.find(tag)) >= 0]
+        if not matches:
+            return None
+        return min(matches, key=lambda item: item[0])
+
+    def feed(self, text: str, *, emit_reasoning: bool = True) -> tuple[str, str]:
+        if not text:
+            return "", ""
+
+        visible_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        remaining = self._pending + text
+        self._pending = ""
+
+        while remaining:
+            tags = self.CLOSE_TAGS if self._inside else self.OPEN_TAGS
+            match = self._next_tag(remaining, tags)
+            if match is not None:
+                index, tag = match
+                before = remaining[:index]
+                if self._inside:
+                    if emit_reasoning:
+                        reasoning_parts.append(before)
+                else:
+                    visible_parts.append(before)
+                remaining = remaining[index + len(tag) :]
+                self._inside = not self._inside
+                continue
+
+            pending_size = self._longest_pending_prefix(remaining, tags)
+            if pending_size:
+                emit_part = remaining[:-pending_size]
+                self._pending = remaining[-pending_size:]
+            else:
+                emit_part = remaining
+
+            if self._inside:
+                if emit_reasoning:
+                    reasoning_parts.append(emit_part)
+            else:
+                visible_parts.append(emit_part)
+            break
+
+        return "".join(visible_parts), "".join(reasoning_parts)
+
+    def flush(self, *, emit_reasoning: bool = True) -> tuple[str, str]:
+        pending = self._pending
+        self._pending = ""
+        was_inside = self._inside
+        self._inside = False
+        if not pending:
+            return "", ""
+        if was_inside:
+            if pending.startswith("</t") and any(tag.startswith(pending) for tag in self.CLOSE_TAGS):
+                return "", ""
+            return "", pending if emit_reasoning else ""
+        if pending.startswith("<t") and any(tag.startswith(pending) for tag in self.OPEN_TAGS):
+            return "", ""
+        return pending, ""
+
+
+def _split_visible_thinking_once(text: str, *, emit_reasoning: bool = True) -> tuple[str, str]:
+    splitter = _VisibleThinkingSplitter()
+    visible, reasoning = splitter.feed(text, emit_reasoning=emit_reasoning)
+    visible_tail, reasoning_tail = splitter.flush(emit_reasoning=emit_reasoning)
+    return visible + visible_tail, reasoning + reasoning_tail
 
 
 def _message_type(message: Any) -> str:
@@ -762,6 +853,39 @@ def _approval_resume_from_messages(messages: list[dict[str, Any]]) -> dict[str, 
     except Exception:
         pass
 
+    approve_memory_phrases = {
+        "approve always",
+        "always approve",
+        "allow always",
+        "always allow",
+        "approve this command",
+        "allow this command",
+        "approve for this chat",
+        "allow for this chat",
+        "do not ask again",
+        "don't ask again",
+        "dont ask again",
+        "remember approval",
+        "remember this command",
+        "immer erlauben",
+        "immer genehmigen",
+        "immer freigeben",
+        "diesen befehl erlauben",
+        "diesen befehl genehmigen",
+        "diesen befehl merken",
+        "fuer diesen chat erlauben",
+        "für diesen chat erlauben",
+        "fuer diesen befehl erlauben",
+        "für diesen befehl erlauben",
+        "fuer diesen befehl nicht mehr fragen",
+        "für diesen befehl nicht mehr fragen",
+        "nicht mehr fragen",
+        "ja immer",
+        "ok immer",
+    }
+    if any(phrase in lowered for phrase in approve_memory_phrases):
+        return {"action": "approve", "remember": "thread_command"}
+
     approve_words = {"approve", "approved", "yes", "ja", "ok", "go", "genehmigt", "mach", "mach es"}
     reject_words = {"reject", "rejected", "no", "nein", "stop", "abbrechen", "ablehnen"}
     if lowered in approve_words:
@@ -777,6 +901,50 @@ def _approval_resume_from_messages(messages: list[dict[str, Any]]) -> dict[str, 
                 return {"action": "replace", "command": replacement}
 
     return None
+
+
+def _approval_fingerprint(interrupt_value: dict[str, Any]) -> str:
+    payload = {
+        "scope": str(interrupt_value.get("scope") or ""),
+        "target": str(interrupt_value.get("target") or ""),
+        "command": str(interrupt_value.get("command") or "").strip(),
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _approval_memory_key(thread_id: str, interrupt_value: dict[str, Any]) -> str:
+    return f"{thread_id}:{_approval_fingerprint(interrupt_value)}"
+
+
+def _approval_should_remember(resume: dict[str, Any]) -> bool:
+    action = str(resume.get("action") or "").lower().strip()
+    if action not in {"approve", "approved", "yes", "ja", "genehmigt"}:
+        return False
+    remember = resume.get("remember")
+    if isinstance(remember, bool):
+        return remember
+    marker = str(remember or resume.get("scope") or resume.get("remember_scope") or "").lower().strip()
+    return marker in {"thread_command", "chat_command", "this_chat", "conversation", "always", "true", "1"}
+
+
+def _remember_approval(thread_id: str, interrupt_value: dict[str, Any], resume: dict[str, Any]) -> None:
+    if not BRIDGE_ENABLE_APPROVAL_MEMORY or not _approval_should_remember(resume):
+        return
+    key = _approval_memory_key(thread_id, interrupt_value)
+    _APPROVAL_MEMORY[key] = time.time()
+    _APPROVAL_MEMORY.move_to_end(key)
+    while len(_APPROVAL_MEMORY) > max(1, BRIDGE_APPROVAL_MEMORY_MAX):
+        _APPROVAL_MEMORY.popitem(last=False)
+
+
+def _approval_auto_resume(thread_id: str, interrupt_value: dict[str, Any]) -> dict[str, Any] | None:
+    if not BRIDGE_ENABLE_APPROVAL_MEMORY:
+        return None
+    key = _approval_memory_key(thread_id, interrupt_value)
+    if key not in _APPROVAL_MEMORY:
+        return None
+    _APPROVAL_MEMORY.move_to_end(key)
+    return {"action": "approve", "remembered": "thread_command"}
 
 
 def _find_command_approval_interrupt(state: Any) -> dict[str, Any] | None:
@@ -811,7 +979,8 @@ def _approval_prompt(interrupt_value: dict[str, Any]) -> str:
         f"Ziel: {interrupt_value.get('target', 'unknown')}\n"
         f"Befehl: `{interrupt_value.get('command', '')}`\n"
         f"Risiko: {interrupt_value.get('risk', 'unknown')}\n\n"
-        "Antworte mit `approve`, `reject` oder `replace: <sichererer Befehl>`."
+        "Antworte mit `approve`, `reject` oder `replace: <sichererer Befehl>`.\n"
+        "Mit `approve always` oder `immer erlauben` wird exakt dieser Befehl in diesem Chat gemerkt."
     )
 
 
@@ -828,9 +997,13 @@ async def _prepare_run_payload(
 
     interrupt_value = _find_command_approval_interrupt(state)
     if interrupt_value:
+        auto_resume = _approval_auto_resume(thread_id, interrupt_value)
+        if auto_resume is not None:
+            return {"command": {"resume": auto_resume}}
         resume = _approval_resume_from_messages(messages)
         if resume is None:
             return {"direct_response": _approval_prompt(interrupt_value)}
+        _remember_approval(thread_id, interrupt_value, resume)
         return {"command": {"resume": resume}}
 
     input_payload = await _build_input_payload(
@@ -977,6 +1150,9 @@ async def _stream_chat_events(
     emitted = ""
     emitted_reasoning = ""
     emitted_activity: set[str] = set()
+    explicit_reasoning_seen = False
+    thinking_splitter = _VisibleThinkingSplitter()
+    used_state_fallback = False
     content_scrubber = StreamingInternalContextScrubber() if BRIDGE_SCRUB_INTERNAL_CONTEXT else None
     reasoning_scrubber = StreamingInternalContextScrubber() if BRIDGE_SCRUB_INTERNAL_CONTEXT else None
 
@@ -1000,6 +1176,7 @@ async def _stream_chat_events(
                 reasoning = _extract_stream_reasoning(part)
                 reasoning_delta = reasoning if _stream_part_is_delta(part) else _delta_text(reasoning, emitted_reasoning)
                 if reasoning_delta:
+                    explicit_reasoning_seen = True
                     emitted_reasoning += reasoning_delta
                     visible_reasoning_delta = (
                         reasoning_scrubber.feed(reasoning_delta) if reasoning_scrubber else reasoning_delta
@@ -1011,7 +1188,17 @@ async def _stream_chat_events(
                 delta = text if _stream_part_is_delta(part) else _delta_text(text, emitted)
                 if delta:
                     emitted += delta
-                    visible_delta = content_scrubber.feed(delta) if content_scrubber else delta
+                    answer_delta, thinking_delta = thinking_splitter.feed(
+                        delta,
+                        emit_reasoning=BRIDGE_STREAM_REASONING_EVENTS and not explicit_reasoning_seen,
+                    )
+                    if thinking_delta:
+                        visible_thinking_delta = (
+                            reasoning_scrubber.feed(thinking_delta) if reasoning_scrubber else thinking_delta
+                        )
+                        if visible_thinking_delta:
+                            yield _stream_data(_chunk("", model, reasoning_content=visible_thinking_delta))
+                    visible_delta = content_scrubber.feed(answer_delta) if content_scrubber else answer_delta
                     if visible_delta:
                         saw_token = True
                         yield _stream_data(_chunk(visible_delta, model))
@@ -1050,15 +1237,39 @@ async def _stream_chat_events(
         return
 
     if not saw_token:
+        used_state_fallback = True
         try:
             state = await client.threads.get_state(thread_id)
             content = _last_ai_content(state.get("values", state))
         except Exception as exc:
             content = _clean_error_message(exc)
         if content:
-            visible = _visible_content(content)
+            visible, thinking = _split_visible_thinking_once(
+                content,
+                emit_reasoning=BRIDGE_STREAM_REASONING_EVENTS and not explicit_reasoning_seen,
+            )
+            visible_thinking = reasoning_scrubber.feed(thinking) if reasoning_scrubber else thinking
+            if visible_thinking:
+                yield _stream_data(_chunk("", model, reasoning_content=visible_thinking))
+            visible = content_scrubber.feed(visible) if content_scrubber else visible
             if visible:
                 yield _stream_data(_chunk(visible, model))
+
+    answer_tail, thinking_tail = (
+        ("", "")
+        if used_state_fallback
+        else thinking_splitter.flush(
+            emit_reasoning=BRIDGE_STREAM_REASONING_EVENTS and not explicit_reasoning_seen,
+        )
+    )
+    if thinking_tail:
+        visible_thinking_tail = reasoning_scrubber.feed(thinking_tail) if reasoning_scrubber else thinking_tail
+        if visible_thinking_tail:
+            yield _stream_data(_chunk("", model, reasoning_content=visible_thinking_tail))
+    if answer_tail:
+        visible_answer_tail = content_scrubber.feed(answer_tail) if content_scrubber else answer_tail
+        if visible_answer_tail:
+            yield _stream_data(_chunk(visible_answer_tail, model))
 
     if reasoning_scrubber:
         reasoning_tail = reasoning_scrubber.flush()
@@ -1960,6 +2171,9 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
     seen_tool_calls: set[str] = set()
     seen_tool_updates: set[str] = set()
     tool_inputs: dict[str, dict[str, Any]] = {}
+    explicit_reasoning_seen = False
+    thinking_splitter = _VisibleThinkingSplitter()
+    used_state_fallback = False
     content_scrubber = StreamingInternalContextScrubber() if BRIDGE_SCRUB_INTERNAL_CONTEXT else None
     reasoning_scrubber = StreamingInternalContextScrubber() if BRIDGE_SCRUB_INTERNAL_CONTEXT else None
 
@@ -2005,6 +2219,7 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
                 reasoning = _extract_stream_reasoning(part)
                 reasoning_delta = reasoning if _stream_part_is_delta(part) else _delta_text(reasoning, emitted_reasoning)
                 if reasoning_delta:
+                    explicit_reasoning_seen = True
                     emitted_reasoning += reasoning_delta
                     visible_reasoning_delta = (
                         reasoning_scrubber.feed(reasoning_delta) if reasoning_scrubber else reasoning_delta
@@ -2017,7 +2232,18 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
                 delta = text if _stream_part_is_delta(part) else _delta_text(text, emitted)
                 if delta:
                     emitted += delta
-                    visible_delta = content_scrubber.feed(delta) if content_scrubber else delta
+                    answer_delta, thinking_delta = thinking_splitter.feed(
+                        delta,
+                        emit_reasoning=BRIDGE_STREAM_REASONING_EVENTS and not explicit_reasoning_seen,
+                    )
+                    if thinking_delta:
+                        visible_thinking_delta = (
+                            reasoning_scrubber.feed(thinking_delta) if reasoning_scrubber else thinking_delta
+                        )
+                        if visible_thinking_delta:
+                            for event in builder.reasoning_delta(visible_thinking_delta):
+                                yield event
+                    visible_delta = content_scrubber.feed(answer_delta) if content_scrubber else answer_delta
                     if visible_delta:
                         saw_token = True
                         yield builder.text_delta(visible_delta)
@@ -2050,15 +2276,41 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
         saw_token = True
 
     if not saw_token:
+        used_state_fallback = True
         try:
             state = await client.threads.get_state(thread_id)
             content = _last_ai_content(state.get("values", state))
         except Exception as exc:
             content = _clean_error_message(exc)
         if content:
-            visible = _visible_content(content)
+            visible, thinking = _split_visible_thinking_once(
+                content,
+                emit_reasoning=BRIDGE_STREAM_REASONING_EVENTS and not explicit_reasoning_seen,
+            )
+            visible_thinking = reasoning_scrubber.feed(thinking) if reasoning_scrubber else thinking
+            if visible_thinking:
+                for event in builder.reasoning_delta(visible_thinking):
+                    yield event
+            visible = content_scrubber.feed(visible) if content_scrubber else visible
             if visible:
                 yield builder.text_delta(visible)
+
+    answer_tail, thinking_tail = (
+        ("", "")
+        if used_state_fallback
+        else thinking_splitter.flush(
+            emit_reasoning=BRIDGE_STREAM_REASONING_EVENTS and not explicit_reasoning_seen,
+        )
+    )
+    if thinking_tail:
+        visible_thinking_tail = reasoning_scrubber.feed(thinking_tail) if reasoning_scrubber else thinking_tail
+        if visible_thinking_tail:
+            for event in builder.reasoning_delta(visible_thinking_tail):
+                yield event
+    if answer_tail:
+        visible_answer_tail = content_scrubber.feed(answer_tail) if content_scrubber else answer_tail
+        if visible_answer_tail:
+            yield builder.text_delta(visible_answer_tail)
 
     if reasoning_scrubber:
         reasoning_tail = reasoning_scrubber.flush()

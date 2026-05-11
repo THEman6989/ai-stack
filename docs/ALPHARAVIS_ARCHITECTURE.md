@@ -265,6 +265,14 @@ Important behavior:
   - `approve`
   - `reject`
   - `replace: <safer command>`
+  - `approve always` / `immer erlauben`
+- `approve always` stores a bridge-local allow entry for the exact
+  scope/target/command in the current LibreChat thread only. It does not create
+  a global command bypass and is lost on `api-bridge` restart.
+- LibreChat's custom endpoint path does not provide an AlphaRavis-native
+  approval button callback. AionUI/ACP maps the same interrupt to
+  `session/request_permission`; LibreChat uses chat-text approval unless a
+  LibreChat-specific permission event is added later.
 
 The detailed Responses compatibility matrix is documented in
 `docs/ALPHARAVIS_RESPONSES_COMPATIBILITY.md`.
