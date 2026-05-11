@@ -1,0 +1,41 @@
+diff --git a/hermes_cli/kanban_db.py b/hermes_cli/kanban_db.py
+index f905dd89a..03a2dd78d 100644
+--- a/hermes_cli/kanban_db.py
++++ b/hermes_cli/kanban_db.py
+@@ -993,18 +993,30 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
+     # the *original* snapshot; this is intentional and safe as long as
+     # no step depends on a column added by a previous step in the same call.
+     if "consecutive_failures" not in cols:
+-        conn.execute(
+-            "ALTER TABLE tasks ADD COLUMN consecutive_failures "
+-            "INTEGER NOT NULL DEFAULT 0"
+-        )
++        try:
++            conn.execute(
++                "ALTER TABLE tasks ADD COLUMN consecutive_failures "
++                "INTEGER NOT NULL DEFAULT 0"
++            )
++        except sqlite3.OperationalError as e:
++            if "duplicate column name" not in str(e):
++                raise
+         if "spawn_failures" in cols:
+             conn.execute(
+                 "UPDATE tasks SET consecutive_failures = COALESCE(spawn_failures, 0)"
+             )
+     if "worker_pid" not in cols:
+-        conn.execute("ALTER TABLE tasks ADD COLUMN worker_pid INTEGER")
++        try:
++            conn.execute("ALTER TABLE tasks ADD COLUMN worker_pid INTEGER")
++        except sqlite3.OperationalError as e:
++            if "duplicate column name" not in str(e):
++                raise
+     if "last_failure_error" not in cols:
+-        conn.execute("ALTER TABLE tasks ADD COLUMN last_failure_error TEXT")
++        try:
++            conn.execute("ALTER TABLE tasks ADD COLUMN last_failure_error TEXT")
++        except sqlite3.OperationalError as e:
++            if "duplicate column name" not in str(e):
++                raise
+         if "last_spawn_error" in cols:
+             conn.execute(
+                 "UPDATE tasks SET last_failure_error = last_spawn_error"
