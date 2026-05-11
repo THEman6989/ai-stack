@@ -103,6 +103,10 @@ Bridge smoke tests, and relevant docs all support that change.
 ## Verification
 
 Run the narrowest useful test first, then broaden when touching shared paths.
+Do not consider a code change complete without running at least one relevant
+`pytest` target or an equivalent focused test command for the touched area.
+For behavior changes, prefer a narrow test first and widen only when shared
+paths are involved.
 
 Common checks:
 
@@ -137,6 +141,7 @@ If a live UI check is still needed, leave it explicitly in
 
 ## Commit Hygiene
 
-Do not commit or push unless the user asks. When asked to prepare a commit,
-include related code, tests, and documentation together so the repository state
-stays explainable.
+Do not commit or push unless the user asks. When the user asks for a commit or
+for the work to be finished on GitHub, include related code, tests, and
+documentation together so the repository state stays explainable, then push the
+result to the remote branch.
