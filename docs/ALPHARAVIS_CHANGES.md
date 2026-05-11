@@ -4,6 +4,103 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-12 - Explicit Video Analysis Preparation
+
+### Summary
+
+AlphaRavis now has an explicit media preparation path for videos:
+
+```text
+prepare_media_for_model
+inspect_media_index_status
+```
+
+Media remains safe-by-default. The Bridge still converts raw media content
+parts into metadata markers, and media registration no longer implies
+vision-index processing unless explicitly requested.
+
+Media gallery presence is not treated as indexed. Assets and chat references
+are separate from vector index records. Automatic indexing is ENV-controlled
+for user uploads, Pixelle MCP / ComfyUI outputs, and link references, and
+media-analysis jobs dedupe by media source key plus model-card id, index
+version, and chunking config hash.
+
+The preparation tool decides between:
+
+- `register_only`: store metadata, no download
+- `pass_through`: keep the URL for Pixelle/downstream tools, no download
+- `analyze`: download, probe, sample bounded frames, and index sampled frames
+- `index`: queue a durable `media_analysis` job in `alpharavis_embedding_jobs`
+  for retrieval-oriented indexing
+
+Video download/frame extraction only runs when:
+
+```text
+ALPHARAVIS_VIDEO_ANALYSIS_ENABLED=true
+```
+
+Frame embeddings are written only when:
+
+```text
+ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true
+```
+
+### Why This Was Needed
+
+Videos should not silently enter the model context or vision embedding path.
+The model can decide from the user's wording whether a URL should be passed to
+Pixelle, merely registered, or actually analyzed, while the tool enforces
+download limits, FPS, frame caps, cache paths, and model-card defaults.
+
+### Files Changed
+
+- `langgraph-app/media_analysis.py`
+  - model-card resolution, mode decision, bounded download, `ffprobe` probing,
+    `ffmpeg` frame extraction, timestamped manifests
+- `langgraph-app/model_cards.json`
+  - Qwen3.6-35B-A3B defaults and `big-boss` aliases
+- `langgraph-app/agent_graph.py`
+  - `prepare_media_for_model`, `inspect_media_index_status`, metadata-only
+    registration default, `inspect_embedding_queue_status`, context-agent wiring
+- `langgraph-app/media_server.py`
+  - optional derivation/original/processed fields on `/assets/register`
+  - separate Mongo `references` collection for chat/tool appearances of a
+    media asset
+  - `/assets/resolve` to map copied gallery/source URLs back to Mongo asset
+    metadata and references
+  - `/assets` filtering by `asset_kind`
+  - `/gallery` tabs for All/Original/Processed and per-card copy/open actions
+- `langgraph-app/vector_memory.py`
+  - media analysis enqueueing through `alpharavis_embedding_jobs`, media queue
+    status query, media index status query, and video searches that include
+    indexed `video_frame` records
+- `langgraph-app/Dockerfile`
+  - installs `ffmpeg` / `ffprobe`
+- `.env(exaple)`, `Makefile`, `scripts/alpharavis_setup.py`
+  - video-analysis switches, `make video-analysis`, status output
+  - auto-indexing switches for user uploads, Pixelle MCP / ComfyUI outputs,
+    link references, media index version, and media vision model-card id
+- docs and tests
+  - usage/architecture/open-task notes plus focused media-analysis and Bridge
+    tests
+
+### Verification
+
+```text
+PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile \
+  langgraph-app/media_analysis.py \
+  langgraph-app/vector_memory.py \
+  langgraph-app/agent_graph.py \
+  scripts/alpharavis_setup.py
+
+pytest -q \
+  tests/test_media_analysis.py \
+  tests/test_bridge_responses.py::test_responses_input_supports_instructions_and_content_parts \
+  tests/test_alpharavis_toolsets.py
+
+12 passed
+```
+
 ## 2026-05-11 - LibreChat Command Approval Memory
 
 ### Summary

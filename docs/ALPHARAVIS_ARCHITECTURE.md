@@ -1370,10 +1370,55 @@ Media is safe-by-default:
 - Pixelle output URLs are registered with `media-gallery`.
 - The gallery downloads/stores returned assets under `media-data` and records
   metadata in MongoDB.
+- The media-gallery service stores optional original/processed derivation
+  fields and exposes `/gallery?view=all|original|processed` for grouped
+  operator inspection with copyable stable media URLs.
+- Media-gallery Mongo state is split conceptually:
+  - `assets`: one row per file/media asset
+  - `references`: where that asset appeared in chat/tool context
+  - `alpharavis_embedding_jobs`: durable index queue, including
+    `media_analysis` jobs
+  - `alpharavis_media_vectors`: searchable frame/media embedding rows
+- Registration is metadata-only by default. Immediate registration-time vision
+  indexing requires an explicit `index=true` tool argument or
+  `ALPHARAVIS_MEDIA_REGISTER_INDEX_ON_REGISTER=true`.
+- Gallery presence does not mean indexed. Agents must check
+  `inspect_media_index_status` or `inspect_embedding_queue_status` before
+  claiming that a video's visual contents are searchable.
+- Automatic video indexing is controlled by:
+
+```text
+ALPHARAVIS_MEDIA_AUTO_INDEX_ENABLED=true
+ALPHARAVIS_MEDIA_AUTO_INDEX_USER_UPLOADS=true
+ALPHARAVIS_MEDIA_AUTO_INDEX_PIXELLE_MCP_OUTPUTS=false
+ALPHARAVIS_MEDIA_AUTO_INDEX_LINK_REFERENCES=false
+ALPHARAVIS_MEDIA_INDEX_VERSION=2026-05-12-v1
+ALPHARAVIS_MEDIA_VISION_EMBEDDING_MODEL_CARD=vision-embed
+```
+
+- Dedupe is based on the media source key plus model-card id, media index
+  version, and chunking-config hash. Multiple chat references should create
+  multiple reference records, not repeated full video embeddings.
 - Optional vision embeddings are written only when
   `ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true`.
-- Video analysis is not automatic. The planned pipeline is keyframes,
-  timecodes, optional transcription, frame captions, and frame-level embeddings.
+- `prepare_media_for_model` is the explicit video preparation tool. Its default
+  fallback is `register_only`; it downloads and extracts frames only for
+  `analyze` or `index` decisions and only when
+  `ALPHARAVIS_VIDEO_ANALYSIS_ENABLED=true`.
+- Prepared videos produce timestamped frame files and a manifest under
+  `ALPHARAVIS_VIDEO_ANALYSIS_CACHE_ROOT`, with public URLs derived from the
+  media-gallery `/media/...` path.
+- `inspect_media_index_status` lets the context retrieval agent check which
+  media/frame records are already in `alpharavis_media_vectors` and whether
+  matching media-analysis jobs are still queued/running/failed in
+  `alpharavis_embedding_jobs`.
+- `inspect_embedding_queue_status` exposes the shared queue status for text,
+  archive, artifact, memory, session-turn, and media-analysis indexing work.
+- `prepare_media_for_model(mode="index")` creates durable `media_analysis`
+  jobs in the same queue that text/context indexing already uses, so
+  `run_embedding_memory_jobs` can drain both text and video work.
+- Optional audio transcription, frame captioning, and richer scene grouping
+  remain future provider/pipeline work.
 
 ## OpenWebUI
 

@@ -1022,7 +1022,7 @@ Already available:
 - Pixelle owner wake guard for ComfyUI, default off through model management
 - safe media handling in the Bridge: URL/file-id/type metadata is passed instead
   of raw images/videos unless explicitly enabled
-- media-gallery service for Pixelle outputs and uploaded/linked media metadata
+- media-gallery service for Pixelle MCP outputs and uploaded/linked media metadata
 - separate optional media/vision pgvector table to avoid text/vision dimension
   conflicts
 - lazy tool category registry for coding, media, RAG, and system tool families
@@ -1058,9 +1058,36 @@ BRIDGE_MEDIA_CONTEXT_MODE=metadata
 That means uploads/links arrive as metadata markers containing fields such as
 type, file id, URL, mime type, or title. This prevents a video or image blob from
 filling the LLM context. Use `register_media_asset` to save a URL/file id in the
-media gallery. Use `semantic_media_search` only after
-`ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true` and a compatible vision embedding
-route exists.
+media gallery. Registration is metadata-only by default; set the tool's
+`index=true` only when you explicitly want immediate vision indexing.
+
+When the user explicitly asks to analyze, inspect, describe, summarize,
+transcribe, compare, or index a video, AlphaRavis can use
+`prepare_media_for_model`. That tool decides between `register_only`,
+`pass_through`, `analyze`, and `index`; it only downloads video for
+`analyze`/`index`, and only when:
+
+```text
+ALPHARAVIS_VIDEO_ANALYSIS_ENABLED=true
+```
+
+The video preparation path uses `ffprobe`/`ffmpeg`, samples at no more than
+`ALPHARAVIS_VIDEO_ANALYSIS_MAX_FPS`, caps frames with
+`ALPHARAVIS_VIDEO_ANALYSIS_MAX_FRAMES`, stores timestamped frames/manifests
+under the media-data analysis cache, and indexes sampled frames into
+`alpharavis_media_vectors` when `ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true`
+and a compatible vision embedding route exists.
+
+Use `semantic_media_search` to search indexed media semantically. Use
+`inspect_media_index_status` to check whether media/frame records have already
+been processed by the vision embedding path. Use
+`inspect_embedding_queue_status` to see how much text/archive/media indexing
+work is still pending, running, failed, or done in `alpharavis_embedding_jobs`.
+
+When `prepare_media_for_model` is called with `mode=index`, it queues a durable
+`media_analysis` job in the same embedding queue used for text, archive,
+artifact, memory, and session-turn indexing. `run_embedding_memory_jobs` drains
+that shared queue during the existing embedding/model-management window.
 
 Pixelle output URLs are registered automatically when the job result contains a
 media URL. The gallery runs at:
@@ -1069,8 +1096,43 @@ media URL. The gallery runs at:
 http://localhost:8130/gallery
 ```
 
-Video analysis remains planned, not automatic. The agent should say this
-clearly and use `plan_media_analysis` when the user asks what would happen.
+Use the gallery tabs to inspect grouped assets:
+
+```text
+http://localhost:8130/gallery?view=all
+http://localhost:8130/gallery?view=original
+http://localhost:8130/gallery?view=processed
+```
+
+Video analysis remains explicit, not automatic. For Pixelle input, AlphaRavis
+should pass the copied URL through without downloading unless the downstream
+service requires a local file.
+
+Media gallery presence does not mean the visual content is indexed. A gallery
+asset means AlphaRavis knows the file URL/path and metadata. Indexing status is
+separate:
+
+```text
+inspect_media_index_status
+inspect_embedding_queue_status
+```
+
+The media server also records chat/tool appearances as media references, so one
+file can appear in multiple chat turns without being embedded repeatedly.
+Automatic indexing can be tuned:
+
+```text
+ALPHARAVIS_MEDIA_AUTO_INDEX_ENABLED=true
+ALPHARAVIS_MEDIA_AUTO_INDEX_USER_UPLOADS=true
+ALPHARAVIS_MEDIA_AUTO_INDEX_PIXELLE_MCP_OUTPUTS=false
+ALPHARAVIS_MEDIA_AUTO_INDEX_LINK_REFERENCES=false
+ALPHARAVIS_MEDIA_INDEX_VERSION=2026-05-12-v1
+ALPHARAVIS_MEDIA_VISION_EMBEDDING_MODEL_CARD=vision-embed
+```
+
+The dedupe key is based on media source key, model-card id, index version, and
+chunking config. If the same video is referenced five times, AlphaRavis should
+store five references but one index for that model/version/config.
 
 ## OpenWebUI
 

@@ -61,9 +61,12 @@ except Exception:  # pragma: no cover - older local CLI imports
 try:
     from vector_memory import (
         VectorMemoryError,
+        enqueue_media_analysis_record as _pgvector_enqueue_media_analysis_record,
         enqueue_memory_record as _pgvector_enqueue_memory_record,
         is_enabled as _pgvector_memory_enabled,
+        media_queue_status as _pgvector_media_queue_status,
         queue_stats as _pgvector_queue_stats,
+        media_index_status as _pgvector_media_index_status,
         run_embedding_jobs as _pgvector_run_embedding_jobs,
         semantic_media_search as _pgvector_semantic_media_search,
         semantic_search as _pgvector_semantic_search,
@@ -73,7 +76,10 @@ try:
     )
 except Exception as exc:  # pragma: no cover - optional local module/deps
     VectorMemoryError = RuntimeError  # type: ignore[misc,assignment]
+    _pgvector_enqueue_media_analysis_record = None
     _pgvector_enqueue_memory_record = None
+    _pgvector_media_index_status = None
+    _pgvector_media_queue_status = None
     _pgvector_memory_enabled = None
     _pgvector_queue_stats = None
     _pgvector_run_embedding_jobs = None
@@ -85,6 +91,16 @@ except Exception as exc:  # pragma: no cover - optional local module/deps
     PGVECTOR_IMPORT_ERROR: Exception | None = exc
 else:
     PGVECTOR_IMPORT_ERROR = None
+
+try:
+    from media_analysis import prepare_media_for_model as _prepare_media_for_model
+    from media_analysis import decide_media_mode as _decide_media_mode
+except Exception as exc:  # pragma: no cover - optional local helper/deps
+    _prepare_media_for_model = None
+    _decide_media_mode = None
+    MEDIA_ANALYSIS_IMPORT_ERROR: Exception | None = exc
+else:
+    MEDIA_ANALYSIS_IMPORT_ERROR = None
 
 try:
     from model_management import (
@@ -471,8 +487,15 @@ TOOL_REGISTRY_CATEGORIES = [
     },
     {
         "category": "media/video",
-        "description": "Register and catalog videos by URL/file id; frame extraction/captioning is a planned pipeline.",
-        "tools": ["register_media_asset", "semantic_media_search", "plan_media_analysis"],
+        "description": "Register and catalog videos by URL/file id; explicit analysis can prepare bounded frames for vision indexing.",
+        "tools": [
+            "register_media_asset",
+            "semantic_media_search",
+            "plan_media_analysis",
+            "prepare_media_for_model",
+            "inspect_media_index_status",
+            "inspect_embedding_queue_status",
+        ],
     },
     {
         "category": "media/audio",
@@ -1196,6 +1219,27 @@ def _media_type_from_value(value: str, fallback: str = "unknown") -> str:
     return fallback if fallback in {"image", "video", "audio", "document", "unknown"} else "unknown"
 
 
+def _media_auto_index_enabled(*, role: str, media_type: str, metadata: dict[str, Any] | None) -> bool:
+    if media_type != "video":
+        return False
+    if not _env_bool("ALPHARAVIS_MEDIA_AUTO_INDEX_ENABLED", "true"):
+        return False
+    metadata = metadata or {}
+    provider = str(metadata.get("provider") or metadata.get("processing_provider") or "").lower()
+    if metadata.get("registered_by_prepare_media_for_model"):
+        return False
+    if role == "input":
+        return _env_bool("ALPHARAVIS_MEDIA_AUTO_INDEX_USER_UPLOADS", "true")
+    if provider == "pixelle" or role == "output":
+        return _env_bool(
+            "ALPHARAVIS_MEDIA_AUTO_INDEX_PIXELLE_MCP_OUTPUTS",
+            os.getenv("ALPHARAVIS_MEDIA_AUTO_INDEX_PIXEL_OUTPUTS", "false"),
+        )
+    if role == "reference":
+        return _env_bool("ALPHARAVIS_MEDIA_AUTO_INDEX_LINK_REFERENCES", "false")
+    return _env_bool("ALPHARAVIS_MEDIA_AUTO_INDEX_REGISTERED_VIDEOS", "false")
+
+
 async def _register_media_asset(
     *,
     source_url: str = "",
@@ -1210,12 +1254,15 @@ async def _register_media_asset(
     thread_id: str = "",
     thread_key: str = "",
     download: bool = True,
+    index: bool | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not _env_bool("ALPHARAVIS_ENABLE_MEDIA_GALLERY", "true"):
         return {"ok": False, "disabled": True, "message": "media gallery disabled"}
     if not source_url and not file_id:
         return {"ok": False, "message": "source_url or file_id required"}
+    if index is None:
+        index = _env_bool("ALPHARAVIS_MEDIA_REGISTER_INDEX_ON_REGISTER", "false")
 
     detected_type = media_type if media_type != "unknown" else _media_type_from_value(source_url or file_id)
     payload = {
@@ -1242,7 +1289,36 @@ async def _register_media_asset(
     except Exception as exc:
         return {"ok": False, "error": str(exc), "payload": payload}
 
-    if _pgvector_upsert_media_record is not None and _pgvector_vision_enabled is not None:
+    should_queue_video = (
+        (index or _media_auto_index_enabled(role=role, media_type=detected_type, metadata=metadata))
+        and detected_type == "video"
+        and _pgvector_enqueue_media_analysis_record is not None
+    )
+    if should_queue_video:
+        try:
+            stable_source_key = str(record.get("source_key") or record.get("asset_id") or source_key or source_url)
+            job_id = await _pgvector_enqueue_media_analysis_record(
+                media_url=str(record.get("public_url") or record.get("source_url") or source_url),
+                user_goal=caption or prompt or str(record.get("title") or stable_source_key),
+                mode="index",
+                media_type="video",
+                source_key=stable_source_key,
+                title=str(record.get("title") or title or stable_source_key),
+                thread_id=str(record.get("thread_id") or thread_id or _state_thread_id()),
+                thread_key=str(record.get("thread_key") or thread_key or _state_thread_id()),
+                scope="global",
+                metadata={
+                    **(metadata or {}),
+                    "media_gallery_record": record,
+                    "auto_index": not bool(index),
+                    "reference_thread_id": str(record.get("thread_id") or thread_id or _state_thread_id()),
+                },
+            )
+            record["vision_index_queued"] = True
+            record["vision_index_job_id"] = job_id
+        except Exception as exc:
+            record["vision_index_warning"] = str(exc)
+    elif index and _pgvector_upsert_media_record is not None and _pgvector_vision_enabled is not None:
         try:
             if _pgvector_vision_enabled():
                 vector_url = str(record.get("public_url") or source_url or "")
@@ -1506,6 +1582,7 @@ async def register_media_asset(
     source_key: str = "",
     group_id: str = "",
     download: bool = True,
+    index: bool = False,
 ):
     """Register an image/video/audio/document by URL or file id without dumping raw media into context."""
 
@@ -1519,6 +1596,7 @@ async def register_media_asset(
         caption=caption,
         group_id=group_id,
         download=download,
+        index=index,
         metadata={"registered_by_tool": True},
     )
     return _json_tool_result(result)
@@ -1582,6 +1660,240 @@ def plan_media_analysis(media_url: str, media_type: str = "video", user_goal: st
     return (
         "Media handling stores metadata only by default. Use register_media_asset first; run a specific "
         "analysis pipeline only when the user explicitly asks for it."
+    )
+
+
+@tool
+async def prepare_media_for_model(
+    media_url: str,
+    user_goal: str = "",
+    mode: str = "auto",
+    media_type: str = "unknown",
+    source_key: str = "",
+    title: str = "",
+    model_id: str = "",
+    queue: bool = True,
+):
+    """Dynamically decide/register/pass-through/analyze a media URL; downloads only for explicit analysis/index modes."""
+
+    if _prepare_media_for_model is None or _decide_media_mode is None:
+        return f"Media analysis helper is unavailable: {MEDIA_ANALYSIS_IMPORT_ERROR}"
+
+    resolved_mode = _decide_media_mode(user_goal=user_goal, requested_mode=mode)
+    source_key = source_key or media_url
+    register_result = await _register_media_asset(
+        source_url=media_url,
+        source_key=source_key,
+        media_type=media_type,
+        role="reference" if resolved_mode in {"pass_through", "register_only"} else "input",
+        title=title or source_key,
+        caption=user_goal,
+        group_id=_state_thread_id(),
+        download=False,
+        index=False,
+        metadata={
+            "registered_by_prepare_media_for_model": True,
+            "requested_mode": mode,
+            "resolved_mode": resolved_mode,
+            "user_goal": user_goal[:1000],
+        },
+    )
+
+    if resolved_mode == "index" and queue and _pgvector_enqueue_media_analysis_record is not None:
+        try:
+            job_id = await _pgvector_enqueue_media_analysis_record(
+                media_url=media_url,
+                user_goal=user_goal,
+                mode="index",
+                media_type=media_type,
+                source_key=source_key,
+                title=title or source_key,
+                model_id=model_id,
+                thread_id=_state_thread_id(),
+                thread_key=_state_thread_id(),
+                metadata={
+                    "queued_by_prepare_media_for_model": True,
+                    "gallery_registration": register_result,
+                    "source_context": "user_explicit_media_index_request",
+                },
+            )
+            return _json_tool_result(
+                {
+                    "ok": True,
+                    "mode": resolved_mode,
+                    "decision": "queued_for_media_analysis",
+                    "job_id": job_id,
+                    "source_key": source_key,
+                    "media_url": media_url,
+                    "gallery_registration": register_result,
+                    "message": (
+                        "Media analysis/indexing was queued in alpharavis_embedding_jobs. "
+                        "Use run_embedding_memory_jobs to drain the queue and inspect_media_index_status "
+                        "to check pending/done status."
+                    ),
+                }
+            )
+        except Exception as exc:
+            return _json_tool_result(
+                {
+                    "ok": False,
+                    "mode": resolved_mode,
+                    "decision": "queue_failed",
+                    "error": str(exc),
+                    "gallery_registration": register_result,
+                }
+            )
+
+    prepared = await _prepare_media_for_model(
+        media_url=media_url,
+        user_goal=user_goal,
+        mode=resolved_mode,
+        media_type=media_type,
+        source_key=source_key,
+        title=title,
+        model_id=model_id,
+        thread_id=_state_thread_id(),
+    )
+    prepared["gallery_registration"] = register_result
+
+    indexed_frames: list[dict[str, Any]] = []
+    index_errors: list[str] = []
+    should_index = resolved_mode in {"analyze", "index"} and bool(prepared.get("frames"))
+    if should_index and _pgvector_upsert_media_record is not None and _pgvector_vision_enabled is not None:
+        try:
+            vision_enabled = _pgvector_vision_enabled()
+        except Exception as exc:
+            vision_enabled = False
+            index_errors.append(f"vision enabled check failed: {exc}")
+        if vision_enabled:
+            for frame in prepared.get("frames", [])[: int(os.getenv("ALPHARAVIS_VIDEO_ANALYSIS_MAX_FRAMES", "100"))]:
+                frame_url = str(frame.get("public_url") or "")
+                if not frame_url:
+                    continue
+                frame_index = int(frame.get("frame_index") or 0)
+                timecode = str(frame.get("timecode") or "")
+                caption = (
+                    f"Sampled frame from video `{title or source_key}` at {timecode}. "
+                    f"Original video URL: {media_url}. User goal: {user_goal[:500]}"
+                )
+                try:
+                    vector_key = await _pgvector_upsert_media_record(
+                        source_type="video_frame",
+                        source_key=str(source_key),
+                        file_id=str(prepared.get("manifest_path") or ""),
+                        media_type="image",
+                        media_url=frame_url,
+                        title=title or source_key,
+                        caption=caption,
+                        thread_id=_state_thread_id(),
+                        thread_key=_state_thread_id(),
+                        frame_index=frame_index,
+                        frame_timecode=timecode,
+                        metadata={
+                            "parent_media_url": media_url,
+                            "frame": frame,
+                            "manifest_path": prepared.get("manifest_path", ""),
+                            "manifest_url": prepared.get("manifest_url", ""),
+                            "analysis_mode": resolved_mode,
+                            "user_goal": user_goal[:1000],
+                        },
+                    )
+                    indexed_frames.append({"frame_index": frame_index, "timecode": timecode, "vector_key": vector_key})
+                except Exception as exc:
+                    index_errors.append(f"frame {frame_index}: {exc}")
+        else:
+            index_errors.append("Vision/media vector memory is disabled. Set ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true.")
+    elif should_index:
+        index_errors.append("Vision pgvector module is unavailable in this runtime.")
+
+    prepared["vision_index"] = {
+        "requested": should_index,
+        "indexed_frame_count": len(indexed_frames),
+        "indexed_frames": indexed_frames[:20],
+        "errors": index_errors[:20],
+    }
+    return _json_tool_result(prepared)
+
+
+@tool
+async def inspect_media_index_status(
+    source_key: str = "",
+    media_type: str = "all",
+    limit: int = 20,
+    include_other_threads: bool = False,
+):
+    """Inspect which media/frame records are present in the optional vision pgvector index."""
+
+    if _pgvector_media_index_status is None or _pgvector_vision_enabled is None:
+        return "Vision pgvector module is unavailable in this runtime."
+    queue_rows = []
+    if _pgvector_media_queue_status is not None:
+        try:
+            queue_rows = await _pgvector_media_queue_status(
+                thread_id=_state_thread_id(),
+                source_key=source_key,
+                include_other_threads=include_other_threads,
+                limit=limit,
+            )
+        except Exception as exc:
+            queue_rows = [{"error": f"media queue status unavailable: {exc}"}]
+    if not _pgvector_vision_enabled():
+        return _json_tool_result(
+            {
+                "thread_id": _state_thread_id(),
+                "source_key": source_key,
+                "media_type": media_type,
+                "vision_enabled": False,
+                "queue_records": queue_rows,
+                "indexed_records": [],
+                "message": "Vision/media vector memory is disabled. Set ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true.",
+            }
+        )
+    try:
+        rows = await _pgvector_media_index_status(
+            thread_id=_state_thread_id(),
+            source_key=source_key,
+            media_type=media_type,
+            include_other_threads=include_other_threads,
+            limit=limit,
+        )
+    except Exception as exc:
+        return f"Media index status failed cleanly: {exc}"
+    return _json_tool_result(
+        {
+            "thread_id": _state_thread_id(),
+            "source_key": source_key,
+            "media_type": media_type,
+            "vision_enabled": True,
+            "include_other_threads": include_other_threads,
+            "queue_count": len(queue_rows),
+            "indexed_count": len(rows),
+            "queue_records": queue_rows,
+            "indexed_records": rows,
+        }
+    )
+
+
+@tool
+async def inspect_embedding_queue_status():
+    """Inspect the shared pgvector embedding queue for text, archive, and media-analysis jobs."""
+
+    if _pgvector_queue_stats is None:
+        return f"pgvector queue module unavailable: {PGVECTOR_IMPORT_ERROR}"
+    try:
+        stats = await _pgvector_queue_stats()
+    except Exception as exc:
+        return f"Embedding queue status failed cleanly: {exc}"
+    return _json_tool_result(
+        {
+            "queue": stats,
+            "meaning": {
+                "pending": "queued but not indexed yet",
+                "running": "currently claimed by the embedding runner",
+                "failed": "not indexed; will retry until max attempts",
+                "done": "indexed or processed successfully",
+            },
+        }
     )
 
 
@@ -6300,6 +6612,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             register_media_asset,
             semantic_media_search,
             plan_media_analysis,
+            prepare_media_for_model,
+            inspect_media_index_status,
+            inspect_embedding_queue_status,
             check_external_service,
             wake_on_lan,
             inspect_model_management_status,
@@ -6398,6 +6713,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             search_session_history,
             semantic_memory_search,
             semantic_media_search,
+            inspect_embedding_queue_status,
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
             list_alpha_ravis_artifacts,
@@ -6425,7 +6741,11 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "Use semantic_memory_search for meaning-based recall across indexed "
             "memories, archives, artifacts, skills, and session turns. "
             "Use semantic_media_search only for indexed media references; do not "
-            "load raw image/video bytes into context. "
+            "load raw image/video bytes into context. Use inspect_media_index_status "
+            "when you need to know whether media has already been processed by "
+            "the vision index. Use inspect_embedding_queue_status when the user "
+            "asks how much indexing work is still queued or whether context/media "
+            "has not been indexed yet. "
             "Optional MCP registries are lazy-loaded; call "
             "describe_optional_tool_registry only when tool availability matters. "
             "Use list_repo_ai_skills/read_repo_ai_skill on demand for reviewed "
@@ -6458,6 +6778,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             register_media_asset,
             semantic_media_search,
             plan_media_analysis,
+            prepare_media_for_model,
+            inspect_media_index_status,
+            inspect_embedding_queue_status,
             check_external_service,
             wake_on_lan,
             *model_management_tools,
@@ -6506,9 +6829,11 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "For long Pixelle jobs, prefer start_pixelle_async and return the "
             "job_id unless the user explicitly wants to wait. "
             "Images and videos are safe-by-default: register URL/file metadata "
-            "with register_media_asset, and run plan_media_analysis only when the "
-            "user explicitly asks to analyze media content. Never dump raw video "
-            "or base64 media into the LLM context. "
+            "with register_media_asset. Use prepare_media_for_model only when the "
+            "user explicitly asks to analyze, inspect, summarize, transcribe, index, "
+            "or understand media content. For Pixelle input, pass URLs through "
+            "without downloading unless a downstream service requires a local file. "
+            "Never dump raw video or base64 media into the LLM context. "
             f"{model_management_prompt}"
             "Use read_alpha_ravis_architecture only when the user asks what "
             "AlphaRavis is, what it can do, or how the stack works. "
@@ -6527,7 +6852,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "inspect child_archive_keys and load only relevant raw archives with "
             "read_archive_record through the context agent; do not guess old details. "
             "Use semantic_media_search when the user asks to find past images or "
-            "videos by meaning. "
+            "videos by meaning. Use inspect_embedding_queue_status when the user "
+            "asks whether text, archives, or media are still pending indexing. "
             "Use approved skill-library entries only as hints. Store new "
             "workflows as inactive skill candidates for human review. "
             "Use record_curated_memory only for stable, compact facts; use "
@@ -6582,6 +6908,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             search_session_history,
             semantic_memory_search,
             semantic_media_search,
+            inspect_media_index_status,
+            inspect_embedding_queue_status,
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
             list_alpha_ravis_artifacts,
@@ -6628,6 +6956,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             search_session_history,
             semantic_memory_search,
             semantic_media_search,
+            inspect_media_index_status,
+            inspect_embedding_queue_status,
             search_debugging_lessons,
             check_external_service,
             describe_optional_tool_registry,
@@ -6672,6 +7002,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "only the relevant raw archive records with read_archive_record. "
             "Use semantic_media_search "
             "for media references and timecoded frame hits when vision indexing is enabled. "
+            "Use inspect_media_index_status to check whether a chat/media item has "
+            "already been processed by the vision embedding path. Use "
+            "inspect_embedding_queue_status to distinguish not indexed yet, queued, "
+            "running, failed, and done. "
             "Use build_specialist_report when returning retrieved facts, source "
             "keys, caveats, and next actions to another agent. Do not answer "
             "unrelated tasks yourself; transfer back."

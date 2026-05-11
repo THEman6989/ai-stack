@@ -472,6 +472,17 @@ def configure_media_vision() -> None:
     prompts = [
         ("ALPHARAVIS_MEDIA_PUBLIC_BASE_URL", "host-visible media gallery base URL"),
         ("ALPHARAVIS_MEDIA_PORT", "host port for media gallery"),
+        ("ALPHARAVIS_VIDEO_ANALYSIS_ENABLED", "enable explicit video download/frame analysis tools"),
+        ("ALPHARAVIS_VIDEO_ANALYSIS_FPS", "default video analysis FPS"),
+        ("ALPHARAVIS_VIDEO_ANALYSIS_MAX_FRAMES", "maximum sampled frames per video"),
+        ("ALPHARAVIS_VIDEO_ANALYSIS_CACHE_ROOT", "video analysis cache root"),
+        ("ALPHARAVIS_VIDEO_ANALYSIS_MODEL_CARD_PATH", "video analysis model-card JSON path"),
+        ("ALPHARAVIS_MEDIA_AUTO_INDEX_ENABLED", "master switch for automatic media indexing queues"),
+        ("ALPHARAVIS_MEDIA_AUTO_INDEX_USER_UPLOADS", "auto-index user-uploaded/input videos"),
+        ("ALPHARAVIS_MEDIA_AUTO_INDEX_PIXELLE_MCP_OUTPUTS", "auto-index Pixelle MCP / ComfyUI processed video outputs"),
+        ("ALPHARAVIS_MEDIA_AUTO_INDEX_LINK_REFERENCES", "auto-index pasted gallery/link references"),
+        ("ALPHARAVIS_MEDIA_INDEX_VERSION", "media index version used for dedupe"),
+        ("ALPHARAVIS_MEDIA_VISION_EMBEDDING_MODEL_CARD", "vision embedding model-card id"),
         ("ALPHARAVIS_VISION_EMBEDDING_BASE_URL", "OpenAI-compatible /v1 base for vision embeddings"),
         ("ALPHARAVIS_VISION_EMBEDDING_MODEL", "primary vision embedding LiteLLM model"),
         ("ALPHARAVIS_VISION_EMBEDDING_FALLBACK_MODEL", "fallback vision embedding LiteLLM model"),
@@ -485,6 +496,18 @@ def configure_media_vision() -> None:
         if answer:
             update_env_value(key, answer)
     print("Media/vision .env settings updated")
+
+
+def configure_video_analysis(*, enabled: str, fps: str, max_frames: str) -> None:
+    ensure_env()
+    if enabled.lower() not in {"keep", ""}:
+        update_env_value("ALPHARAVIS_VIDEO_ANALYSIS_ENABLED", "true" if enabled.lower() in {"1", "true", "yes", "on"} else "false")
+    if fps:
+        update_env_value("ALPHARAVIS_VIDEO_ANALYSIS_FPS", fps)
+        update_env_value("ALPHARAVIS_VIDEO_ANALYSIS_MAX_FPS", fps)
+    if max_frames:
+        update_env_value("ALPHARAVIS_VIDEO_ANALYSIS_MAX_FRAMES", max_frames)
+    print("Video-analysis .env settings updated")
 
 
 def configure_openwebui() -> None:
@@ -709,6 +732,9 @@ def print_status() -> None:
     print(f"- Media gallery: {env.get('ALPHARAVIS_ENABLE_MEDIA_GALLERY', 'true')}")
     print(f"- Vision vector memory: {env.get('ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY', 'false')}")
     print(f"- Raw media to bridge context: {env.get('BRIDGE_ALLOW_RAW_MEDIA_CONTEXT', 'false')}")
+    print(f"- Video analysis: {env.get('ALPHARAVIS_VIDEO_ANALYSIS_ENABLED', 'true')}")
+    print(f"- Video analysis FPS/max frames: {env.get('ALPHARAVIS_VIDEO_ANALYSIS_FPS', '1')} / {env.get('ALPHARAVIS_VIDEO_ANALYSIS_MAX_FRAMES', '100')}")
+    print(f"- Video analysis cache: {env.get('ALPHARAVIS_VIDEO_ANALYSIS_CACHE_ROOT', '/workspace/media-data/analysis-cache')}")
     print("\nOpenWebUI")
     print(f"- Profile: docker compose --profile openwebui up -d openwebui")
     print(f"- Passthrough: {env.get('OPENWEBUI_ENABLE_OPENAI_API_PASSTHROUGH', 'true')}")
@@ -776,6 +802,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             "streaming",
             "profiles",
             "media-vision",
+            "video-analysis",
             "openwebui",
             "update",
             "status",
@@ -814,6 +841,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         default=os.getenv("PROFILES", os.getenv("COMPOSE_PROFILES", "prompt")),
         help="Compose profiles to store/use: prompt, keep, none, openwebui, hermes-dashboard, or comma-separated.",
     )
+    parser.add_argument("--enabled", default=os.getenv("ENABLED", "keep"), help="For video-analysis: true, false, or keep.")
+    parser.add_argument("--fps", default=os.getenv("FPS", ""), help="For video-analysis: sample FPS and max FPS.")
+    parser.add_argument("--max-frames", default=os.getenv("MAX_FRAMES", ""), help="For video-analysis: maximum sampled frames.")
     args = parser.parse_args(argv)
     if args.command == "install":
         install(
@@ -833,6 +863,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         print_streaming_profiles()
     elif args.command == "media-vision":
         configure_media_vision()
+    elif args.command == "video-analysis":
+        configure_video_analysis(enabled=args.enabled, fps=args.fps, max_frames=args.max_frames)
     elif args.command == "openwebui":
         configure_openwebui()
     elif args.command == "update":

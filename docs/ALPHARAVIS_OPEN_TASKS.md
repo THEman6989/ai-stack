@@ -199,8 +199,9 @@ Still needed:
 
 ## Media / Vision Memory
 
-Status: safe media metadata handling, media-gallery service, and a separate
-vision pgvector table are implemented. Full image/video understanding is still
+Status: safe media metadata handling, media-gallery service, a separate vision
+pgvector table, explicit video-analysis preparation, and media-index status
+inspection are implemented. Full caption/OCR/transcription remains
 provider/pipeline work.
 
 Implemented:
@@ -214,6 +215,36 @@ Implemented:
   tools exist.
 - Vision/media embeddings use `alpharavis_media_vectors`, separate from the text
   table, so vector dimensions do not collide.
+- `prepare_media_for_model` decides `register_only`, `pass_through`, `analyze`,
+  or `index`; it only downloads video for explicit analyze/index modes and when
+  `ALPHARAVIS_VIDEO_ANALYSIS_ENABLED=true`.
+- `inspect_media_index_status` lets agents check which media/frame records are
+  already present in `alpharavis_media_vectors`, and also reports matching
+  pending/running/failed/done media-analysis queue records.
+- `inspect_embedding_queue_status` lets agents answer general queue questions
+  for text, archive, and media-analysis jobs in `alpharavis_embedding_jobs`.
+- `prepare_media_for_model(mode="index")` queues video analysis/indexing as a
+  durable `media_analysis` job in the same embedding queue used by text,
+  archives, artifacts, memories, and session turns.
+- Media-gallery registration now separates media assets from chat/tool
+  appearances through the Mongo `references` collection; repeated mentions of
+  one video should create references, not duplicate full embeddings.
+- Media indexing dedupes by media source key, media vision model-card id,
+  `ALPHARAVIS_MEDIA_INDEX_VERSION`, and the video chunking-config hash.
+- Auto-index policy is ENV-controlled for user uploads, Pixelle MCP / ComfyUI
+  outputs, and link references:
+
+```text
+ALPHARAVIS_MEDIA_AUTO_INDEX_ENABLED=true
+ALPHARAVIS_MEDIA_AUTO_INDEX_USER_UPLOADS=true
+ALPHARAVIS_MEDIA_AUTO_INDEX_PIXELLE_MCP_OUTPUTS=false
+ALPHARAVIS_MEDIA_AUTO_INDEX_LINK_REFERENCES=false
+```
+- Video frame extraction uses `ffprobe`/`ffmpeg`, bounded FPS, bounded
+  `ALPHARAVIS_VIDEO_ANALYSIS_MAX_FRAMES`, timestamped frame manifests, and the
+  model-card defaults in `langgraph-app/model_cards.json`.
+- `make video-analysis ENABLED=true FPS=1 MAX_FRAMES=100` can write the core
+  analysis switches into `.env`.
 
 Still needed:
 
@@ -223,13 +254,293 @@ Still needed:
 ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true
 ```
 
-- Build video analysis:
-  - stable URL/file mapping from LibreChat/Mongo attachments
-  - keyframe extraction
-  - scene/timecode grouping
-  - optional audio transcription
-  - frame captions
-  - frame-level vision embeddings
+- Build the Meet/media-gallery integration as the operator-facing video rack.
+  The current `media-gallery` already has its own port and Mongo-backed asset
+  registration, but the UI and analysis pipeline are still basic.
+
+  Current implementation checkpoint from 2026-05-12:
+
+  - `BRIDGE_ALLOW_RAW_MEDIA_CONTEXT=false` and
+    `BRIDGE_MEDIA_CONTEXT_MODE=metadata` are already the default path in
+    `bridge_server.py`, `.env(exaple)`, and Docker Compose.
+  - The Bridge converts OpenAI/LibreChat media content parts into metadata
+    markers instead of forwarding raw media blocks to LangGraph.
+  - `context_retrieval_agent` already has `semantic_media_search` for indexed
+    media references and `inspect_media_index_status` for processed/indexed
+    media plus pending queue status.
+  - The shared `alpharavis_embedding_jobs` queue now carries both text/archive
+    embedding jobs and video `media_analysis` jobs. `run_embedding_memory_jobs`
+    drains both kinds through the existing model-management embedding window.
+  - `/assets/resolve` can map a copied gallery/source URL back to the Mongo
+    asset and its recorded references.
+  - `plan_media_analysis` remains explanatory. The real bounded preparation
+    path is `prepare_media_for_model`.
+
+  Goal:
+
+  - Use the Meet/media-gallery service as the place where all videos from chat,
+    uploads, Pixelle MCP outputs, and future Meet-server flows become visible.
+  - Keep MongoDB/media-gallery metadata as the source of truth for original
+    uploads and processed outputs.
+  - Make every asset usable by link in later chats, either as a pass-through
+    URL for Pixelle or as an analysis target that AlphaRavis downloads and
+    preprocesses.
+  - Preserve the relation between a user-supplied source video, the chat turn
+    or Pixelle request that used it, and the processed video returned by Pixelle.
+
+  Research note from 2026-05-12:
+
+  - The active local target mentioned by the operator is assumed to be
+    `Qwen/Qwen3.6-35B-A3B` unless the runtime model id says otherwise.
+  - The official Qwen3.6 model card says it is a causal language model with a
+    vision encoder and a native context length of 262,144 tokens, extendable up
+    to 1,010,000 tokens with YaRN.
+  - Its Hugging Face `preprocessor_config.json` has image
+    `longest_edge=16777216`, `shortest_edge=65536`, `patch_size=16`,
+    `temporal_patch_size=2`, and `merge_size=2`.
+  - Its `video_preprocessor_config.json` has video
+    `longest_edge=25165824`, `shortest_edge=4096`, `patch_size=16`,
+    `temporal_patch_size=2`, and `merge_size=2`.
+  - The model card's vLLM video example says default video sampling is
+    `fps=2`, configurable through `mm_processor_kwargs`. For AlphaRavis, keep
+    the operator default stricter at `1 fps max` because the requested local
+    behavior prioritizes predictable load over maximum frame recall.
+  - The same model card recommends increasing the video preprocessor
+    `longest_edge` to `469762048` for hour-scale long-video workloads; keep
+    this as an optional advanced model-card value, not the default.
+
+  Data model plan:
+
+  - Extend media asset records with derivation fields:
+    - `asset_kind`: `original`, `processed`, `reference`, or `unknown`
+    - `origin`: `librechat_upload`, `chat_url`, `pixelle_output`,
+      `meet_server`, or `manual_register`
+    - `parent_asset_id`
+    - `root_asset_id`
+    - `derivation_group_id`
+    - `source_message_id`
+    - `result_message_id`
+    - `tool_call_id` or Pixelle `job_id`
+    - `processing_provider`, for example `pixelle`
+    - `processing_prompt` or compact prompt hash
+    - `public_url`
+    - `download_url`
+    - `local_path`
+    - `thumbnail_path` or `preview_path`
+    - `duration_seconds`, `width`, `height`, `fps`, and `bytes`
+  - Keep original videos distinct from processed videos, but group them under
+    one derivation tree so "All" can show source and result together.
+  - Add a stable lookup from LibreChat/Mongo upload ids to media-gallery assets
+    if the file exists only in LibreChat's Mongo/filesystem layer.
+  - Add idempotent registration keyed by source URL, upload id, local path, or
+    source hash so repeated registration does not create duplicate gallery
+    cards.
+  - Preserve existing media-server filter stages. First audit the current
+    filters, then insert derivation/grouping logic after safe metadata
+    extraction and before gallery rendering/download.
+
+  UI plan:
+
+  - Replace the current simple `/gallery` HTML with a real work UI, still
+    served by the media-gallery/Meet service port unless a separate frontend is
+    justified later.
+  - Add tabs or segmented controls:
+    - `All`
+    - `Original`
+    - `Processed`
+  - In `All`, group original input videos and Pixelle/processed result videos
+    together by `derivation_group_id` or `root_asset_id`.
+  - In `Original`, show only uploaded/input/reference videos.
+  - In `Processed`, show only Pixelle/generated/processed outputs.
+  - Use dense video cards with:
+    - thumbnail or lightweight preview
+    - title/source label
+    - original/processed badge
+    - thread/chat marker
+    - Pixelle job/result marker when present
+    - duration/resolution/filesize metadata
+    - link/copy action in a small bottom-right menu
+    - open/download actions
+  - Do not autoplay every full video by default. Use `preload="metadata"` plus
+    posters/thumbnails first. Add optional hover preview or low-rate muted
+    preview clips only after performance is measured.
+  - Generate thumbnails and tiny preview clips as background media jobs. The UI
+    must remain useful when thumbnails are pending.
+  - Add filters for media type, thread, source, date, and processing provider
+    once the basic Original/Processed/All flow works.
+  - Verify the UI on desktop and mobile with real videos before marking done.
+
+  Link and ingestion plan:
+
+  - Every gallery card needs a stable public/media URL that can be copied and
+    pasted into another chat.
+  - Default behavior must remain metadata-only: pasted or uploaded videos are
+    not pulled into model context unless the user explicitly asks to analyze,
+    inspect, describe, summarize, transcribe, compare, or otherwise understand
+    the media content.
+  - The copied link must be acceptable as:
+    - a normal media reference for AlphaRavis
+    - a pass-through input URL for Pixelle when the user asks to create a new
+      video from it
+    - a downloadable analysis target when the user asks to inspect/analyze it
+  - Add explicit tool behavior:
+    - For "send this to Pixelle", pass the URL through and avoid downloading
+      unless Pixelle requires a local file.
+    - For "analyze this video", download or resolve the asset into the media
+      analysis cache, then preprocess frames for the target model.
+    - For "copy link", return only the stable media URL, not internal local
+      paths or Mongo ids.
+  - Prefer a dedicated `analyze_media_asset` / `prepare_media_for_model` tool
+    over a new agent. The model can decide when to call that tool from user
+    intent; the tool should enforce the hard rules, caps, MIME checks, and
+    frame sampling. The context retrieval agent should retrieve references and
+    timecoded indexed hits, not perform heavy video preprocessing itself.
+  - Add an intent/decision helper inside that tool:
+    - `pass_through`: keep URL only for Pixelle or another downstream service.
+    - `register_only`: save metadata/gallery entry, no download.
+    - `analyze`: download/resolve locally, sample frames, and build bounded
+      model-ready content.
+    - `index`: enqueue media analysis/indexing for future retrieval without
+      answering from raw media immediately.
+    - The LLM may choose the mode, but the default fallback must be
+      `register_only`, not `analyze`.
+  - Add safety checks around download URLs:
+    - allowed schemes
+    - size limit
+    - media MIME validation
+    - path confinement under `ALPHARAVIS_MEDIA_ROOT`
+    - optional signed/internal token later if the media service is exposed
+      outside localhost.
+
+  Video analysis rack plan:
+
+  - Add a separate analysis pipeline instead of pushing raw videos into LLM
+    context.
+  - Resolve the model card for the active model id before preprocessing:
+    - static built-in entry for `Qwen/Qwen3.6-35B-A3B`
+    - optional JSON/YAML override for local aliases such as `big-boss`
+    - fallback defaults when the runtime model has no vision card
+  - Model-card fields should include:
+    - `supports_images`
+    - `supports_video`
+    - `native_context_tokens`
+    - `image_longest_edge`
+    - `image_shortest_edge`
+    - `video_longest_edge`
+    - `video_shortest_edge`
+    - `patch_size`
+    - `temporal_patch_size`
+    - `merge_size`
+    - `preferred_video_fps`
+    - `max_video_fps`
+    - `max_frames`
+    - provider-specific payload knobs such as
+      `mm_processor_kwargs.fps` / `do_sample_frames`
+  - Add ENV defaults:
+
+```text
+ALPHARAVIS_VIDEO_ANALYSIS_ENABLED=true
+ALPHARAVIS_VIDEO_ANALYSIS_FPS=1
+ALPHARAVIS_VIDEO_ANALYSIS_MAX_FPS=1
+ALPHARAVIS_VIDEO_ANALYSIS_MAX_FRAMES=100
+ALPHARAVIS_VIDEO_ANALYSIS_MAX_DOWNLOAD_BYTES=2147483648
+ALPHARAVIS_VIDEO_ANALYSIS_MODEL_CARD_PATH=/workspace/langgraph-app/model_cards.json
+ALPHARAVIS_VIDEO_ANALYSIS_PUBLIC_MEDIA_ROOT=/workspace/media-data
+ALPHARAVIS_VIDEO_ANALYSIS_CACHE_ROOT=/workspace/media-data/analysis-cache
+ALPHARAVIS_VIDEO_ANALYSIS_INCLUDE_AUDIO=false
+ALPHARAVIS_VIDEO_ANALYSIS_TRANSCRIBE_AUDIO=false
+```
+
+  - Add Makefile/setup support:
+    - `make media-vision` should be able to write the video-analysis switches.
+    - Add a direct target such as `make video-analysis FPS=1 MAX_FRAMES=100`
+      if that is simpler for repeat use.
+    - `make status` should show whether video analysis is enabled, FPS, frame
+      cap, cache root, and model-card path.
+  - Sampling rule:
+    - Never sample more than `ALPHARAVIS_VIDEO_ANALYSIS_MAX_FPS`.
+    - Default to at most one frame per second.
+    - For videos whose duration in seconds is less than or equal to the frame
+      cap, sample one frame per second.
+    - For longer videos, select at most `MAX_FRAMES` frames evenly across the
+      full duration, so a one-hour video with `MAX_FRAMES=100` stays near 100
+      frames instead of trying to keep one frame per second.
+    - Preserve timestamps for every extracted frame.
+  - Preprocessing rule:
+    - Scale frames according to the active model card's video/image limits.
+    - Keep aspect ratio.
+    - Store extracted frames and metadata in the analysis cache.
+    - Mark the model payload as video, not as unrelated still images, whenever
+      the provider/server supports video content parts.
+    - If the llama.cpp/OpenAI-compatible route cannot accept native video
+      blocks, send a bounded sequence of timestamped image frames with a clear
+      system/user message that they are sampled frames from one video.
+  - Retrieval/RAG behavior:
+    - Store analysis metadata, frame timestamps, captions, optional transcript,
+      and embeddings under `alpharavis_media_vectors`.
+    - Keep MongoDB/media-gallery as the asset source of truth and pgvector as
+      the searchable index.
+    - Allow later prompts such as "analyze this video" or "use this link as
+      input for a new video" to resolve the asset by URL or asset id.
+    - Use `inspect_embedding_queue_status` when the user asks how much indexing
+      work is still pending.
+    - Use `inspect_media_index_status` to distinguish "not indexed yet",
+      "queued", "running", "failed", and "indexed".
+
+  Implementation phases:
+
+  1. Audit current media-gallery and Meet-server routes, existing media filters,
+     LibreChat upload metadata, Pixelle result registration, and Mongo asset
+     records.
+  2. Extend the Mongo asset schema and registration API for original/processed
+     grouping without breaking current `/assets/register` callers. Implemented
+     for optional derivation fields, `asset_kind`, origin, parent/root asset,
+     and derivation group fields.
+  3. Add URL copy/download/open affordances and stable public links.
+     Implemented for copy/open links in `/gallery`; signed links remain future
+     work if the gallery is exposed outside localhost.
+  4. Build the improved gallery UI with Original/Processed/All grouping.
+     Partially implemented in the media server's `/gallery` route with
+     `view=all|original|processed` tabs and derivation-group sections.
+  5. Add thumbnail/preview generation and avoid heavy autoplay.
+  6. Add model-card config and Qwen3.6 defaults. Implemented.
+  7. Add video download, ffprobe/ffmpeg keyframe extraction, adaptive frame
+     sampling, scaling, and analysis-cache storage. Implemented for explicit
+     video analysis, without captions/transcription.
+  8. Add the dedicated media-analysis preparation tool and wire explicit
+     decisions for pass-through-to-Pixelle vs download-for-analysis.
+     Implemented.
+  9. Add optional frame captions, audio transcription, and media-vector indexing.
+     Frame-level vision indexing is implemented through the shared durable
+     embedding queue when vision pgvector is enabled; captioning and
+     transcription remain future work.
+  10. Add Makefile/setup/status controls and smoke tests. Partially
+     implemented: `make video-analysis`, setup/status output, helper tests, and
+     bridge media tests exist; live Docker/UI smoke remains needed.
+
+  Acceptance:
+
+  - A LibreChat-uploaded original video appears in the gallery as `Original`.
+  - A Pixelle-generated or processed result appears as `Processed`.
+  - `All` shows source and processed result grouped together when one was
+    derived from the other.
+  - Copying a card link and pasting it into a new chat gives AlphaRavis enough
+    metadata to pass it to Pixelle or download it for analysis.
+  - A prompt that only says to use a video as Pixelle input does not download or
+    sample the video in AlphaRavis.
+  - A prompt that explicitly asks to analyze the video calls the media-analysis
+    preparation tool and stays within FPS/frame/download caps.
+  - The UI can show many videos without starting all full video streams at
+    once.
+  - `ALPHARAVIS_VIDEO_ANALYSIS_MAX_FRAMES=100` keeps a one-hour video bounded
+    near 100 sampled frames, while a ten-second video samples up to ten frames
+    at the default one frame per second.
+  - The model payload preserves video semantics where the active provider
+    supports it; otherwise AlphaRavis states that it is sending sampled
+    timestamped frames from a video.
+  - The current media-server filter stages remain intact and covered by smoke
+    tests.
+
 - Build image analysis:
   - captioning
   - OCR

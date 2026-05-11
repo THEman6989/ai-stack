@@ -187,6 +187,7 @@ def test_responses_input_supports_instructions_and_content_parts() -> None:
                 "content": [
                     {"type": "input_text", "text": "Analysiere das bitte."},
                     {"type": "input_image", "image_url": {"url": "https://example.test/a.png"}},
+                    {"type": "input_video", "video_url": {"url": "https://example.test/v.mp4"}},
                 ],
             }
         ],
@@ -198,6 +199,7 @@ def test_responses_input_supports_instructions_and_content_parts() -> None:
     assert messages[1]["role"] == "user"
     assert "Analysiere das bitte." in messages[1]["content"]
     assert "Media attachment withheld" in messages[1]["content"]
+    assert "https://example.test/v.mp4" in messages[1]["content"]
 
 
 def test_response_object_has_stable_ids_and_usage() -> None:

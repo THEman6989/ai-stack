@@ -5,13 +5,16 @@ SUBMODULES ?= prompt
 BUILD ?= prompt
 START ?= prompt
 PROFILES ?= prompt
+ENABLED ?= keep
+FPS ?=
+MAX_FRAMES ?=
 UPDATE_STREAMING ?= prompt
 UPDATE_SUBMODULES ?= yes
 UPDATE_BUILD ?= yes
 UPDATE_START ?= yes
 UPDATE_PROFILES ?= prompt
 
-.PHONY: help install install-fullstreaming install-hybrid install-nonstreaming install-chat install-chat-fullstreaming install-chat-nonstreaming configure profiles streaming fullstreaming full-streaming hybrid-streaming nonstreaming chat-completions chat-fullstreaming chat-nonstreaming model-management owner-model-management media-vision openwebui update update-no-start status up up-fullstreaming up-chat-fullstreaming down logs submodules build bridge-smoke hermes-smoke media-smoke openwebui-smoke
+.PHONY: help install install-fullstreaming install-hybrid install-nonstreaming install-chat install-chat-fullstreaming install-chat-nonstreaming configure profiles streaming fullstreaming full-streaming hybrid-streaming nonstreaming chat-completions chat-fullstreaming chat-nonstreaming model-management owner-model-management media-vision video-analysis openwebui update update-no-start status up up-fullstreaming up-chat-fullstreaming down logs submodules build bridge-smoke hermes-smoke media-smoke openwebui-smoke
 
 help:
 	@printf '%s\n' \
@@ -24,6 +27,7 @@ help:
 		'  make install-chat-fullstreaming # Chat Completions full streaming, init submodules, build, start' \
 		'  make profiles                # show every runtime profile and the .env values it writes' \
 		'  make streaming STREAMING=full # only update .env runtime/streaming settings' \
+		'  make video-analysis ENABLED=true FPS=1 MAX_FRAMES=100' \
 		'' \
 		'Runtime:' \
 		'  make up                      # docker compose up -d --build' \
@@ -92,6 +96,9 @@ owner-model-management:
 
 media-vision:
 	$(PYTHON) scripts/alpharavis_setup.py media-vision
+
+video-analysis:
+	$(PYTHON) scripts/alpharavis_setup.py video-analysis --enabled "$(ENABLED)" --fps "$(FPS)" --max-frames "$(MAX_FRAMES)"
 
 openwebui:
 	$(PYTHON) scripts/alpharavis_setup.py openwebui

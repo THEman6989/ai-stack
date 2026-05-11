@@ -36,6 +36,34 @@ def _env_bool(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).lower() in {"1", "true", "yes"}
 
 
+def _media_index_version() -> str:
+    return os.getenv("ALPHARAVIS_MEDIA_INDEX_VERSION", "2026-05-12-v1").strip() or "2026-05-12-v1"
+
+
+def _media_model_card_id(model_id: str = "") -> str:
+    return (
+        model_id
+        or os.getenv("ALPHARAVIS_MEDIA_VISION_EMBEDDING_MODEL_CARD")
+        or os.getenv("ALPHARAVIS_VIDEO_ANALYSIS_MODEL_ID")
+        or os.getenv("ALPHARAVIS_VISION_EMBEDDING_MODEL")
+        or "vision-embed"
+    ).strip()
+
+
+def _media_chunking_config_hash() -> str:
+    raw = "|".join(
+        [
+            os.getenv("ALPHARAVIS_VIDEO_ANALYSIS_FPS", "1"),
+            os.getenv("ALPHARAVIS_VIDEO_ANALYSIS_MAX_FPS", "1"),
+            os.getenv("ALPHARAVIS_VIDEO_ANALYSIS_MAX_FRAMES", "100"),
+            os.getenv("ALPHARAVIS_VIDEO_ANALYSIS_MAX_FRAME_SIDE", ""),
+            os.getenv("ALPHARAVIS_VIDEO_ANALYSIS_INCLUDE_AUDIO", "false"),
+            os.getenv("ALPHARAVIS_VIDEO_ANALYSIS_TRANSCRIBE_AUDIO", "false"),
+        ]
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
 def is_enabled() -> bool:
     backend = os.getenv("ALPHARAVIS_VECTOR_BACKEND", "off").strip().lower()
     return backend == "pgvector" or _env_bool("ALPHARAVIS_ENABLE_PGVECTOR_MEMORY", "false")
@@ -710,8 +738,15 @@ def _enqueue_memory_record_sync(payload: dict[str, Any]) -> str:
                         source_key = EXCLUDED.source_key,
                         title = EXCLUDED.title,
                         payload = EXCLUDED.payload,
-                        status = CASE WHEN {table}.status = 'running' THEN {table}.status ELSE 'pending' END,
-                        last_error = '',
+                        status = CASE
+                            WHEN {table}.status = 'running' THEN {table}.status
+                            WHEN {table}.status = 'done' AND EXCLUDED.payload->>'dedupe_done' = 'true' THEN {table}.status
+                            ELSE 'pending'
+                        END,
+                        last_error = CASE
+                            WHEN {table}.status = 'done' AND EXCLUDED.payload->>'dedupe_done' = 'true' THEN {table}.last_error
+                            ELSE ''
+                        END,
                         updated_at = now()
                     """
                 ).format(table=table),
@@ -749,6 +784,57 @@ async def enqueue_memory_record(
         "source_key": source_key,
         "title": title,
         "content": content,
+        "thread_id": thread_id,
+        "thread_key": thread_key,
+        "scope": scope,
+        "namespace": namespace,
+        "metadata": metadata or {},
+    }
+    return await asyncio.to_thread(_enqueue_memory_record_sync, payload)
+
+
+async def enqueue_media_analysis_record(
+    *,
+    media_url: str,
+    user_goal: str = "",
+    mode: str = "index",
+    media_type: str = "unknown",
+    source_key: str = "",
+    title: str = "",
+    model_id: str = "",
+    thread_id: str = "",
+    thread_key: str = "",
+    scope: str = "thread",
+    namespace: str = "alpharavis",
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    if not is_enabled():
+        return ""
+    media_source_key = str(source_key or media_url or "").strip()
+    if not media_source_key:
+        raise VectorMemoryError("source_key or media_url is required for queued media analysis.")
+    model_card_id = _media_model_card_id(model_id)
+    index_version = _media_index_version()
+    chunking_hash = _media_chunking_config_hash()
+    index_key = hashlib.sha256(
+        f"{media_source_key}|{model_card_id}|{index_version}|{chunking_hash}".encode("utf-8")
+    ).hexdigest()[:32]
+    payload = {
+        "job_kind": "media_analysis",
+        "source_type": "media_analysis",
+        "source_key": index_key,
+        "media_source_key": media_source_key,
+        "title": title or media_source_key,
+        "content": user_goal or title or media_source_key,
+        "media_url": media_url,
+        "user_goal": user_goal,
+        "mode": mode,
+        "media_type": media_type,
+        "model_id": model_id or model_card_id,
+        "model_card_id": model_card_id,
+        "index_version": index_version,
+        "chunking_config_hash": chunking_hash,
+        "dedupe_done": True,
         "thread_id": thread_id,
         "thread_key": thread_key,
         "scope": scope,
@@ -1082,6 +1168,151 @@ async def upsert_media_record(
     return f"{source_type}:{source_key}:{media_type}:{frame_index}"
 
 
+def _media_index_status_sync(
+    *,
+    namespace: str,
+    thread_id: str,
+    source_key: str,
+    media_type: str,
+    include_other_threads: bool,
+    limit: int,
+) -> list[dict[str, Any]]:
+    _require_psycopg()
+    table = _vision_table_identifier()
+    where = ["namespace = %s"]
+    params: list[Any] = [namespace]
+
+    if not include_other_threads:
+        where.append("(thread_id = %s OR thread_id = '' OR thread_id IS NULL)")
+        params.append(thread_id or "")
+    if source_key:
+        where.append("(source_key = %s OR payload->>'media_source_key' = %s OR payload->>'media_url' = %s)")
+        params.extend([source_key, source_key, source_key])
+    if media_type and media_type != "all":
+        if media_type == "video":
+            where.append("(media_type = %s OR source_type = 'video_frame')")
+            params.append(media_type)
+        else:
+            where.append("media_type = %s")
+            params.append(media_type)
+    params.append(limit)
+
+    query = sql.SQL(
+        """
+        SELECT
+            id, scope, thread_id, thread_key, source_type, source_key, file_id,
+            media_type, media_url, title, caption, frame_index, frame_timecode,
+            embedding_model, metadata, created_at, updated_at
+        FROM {table}
+        WHERE {where_clause}
+        ORDER BY updated_at DESC
+        LIMIT %s
+        """
+    ).format(table=table, where_clause=sql.SQL(" AND ").join(sql.SQL(item) for item in where))
+
+    with psycopg.connect(_database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            columns = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
+
+    records = []
+    for row in rows:
+        record = dict(zip(columns, row))
+        if hasattr(record.get("created_at"), "isoformat"):
+            record["created_at"] = record["created_at"].isoformat()
+        if hasattr(record.get("updated_at"), "isoformat"):
+            record["updated_at"] = record["updated_at"].isoformat()
+        records.append(record)
+    return records
+
+
+async def media_index_status(
+    *,
+    thread_id: str = "",
+    source_key: str = "",
+    media_type: str = "all",
+    include_other_threads: bool = False,
+    limit: int = 50,
+    namespace: str = "alpharavis",
+) -> list[dict[str, Any]]:
+    if not vision_is_enabled():
+        return []
+    media_type = re.sub(r"[^a-zA-Z0-9_-]+", "_", media_type.strip().lower())[:40] or "all"
+    return await asyncio.to_thread(
+        _media_index_status_sync,
+        namespace=namespace,
+        thread_id=thread_id,
+        source_key=source_key.strip(),
+        media_type=media_type,
+        include_other_threads=include_other_threads,
+        limit=max(1, min(int(limit), int(os.getenv("ALPHARAVIS_VISION_INDEX_STATUS_LIMIT", "50")))),
+    )
+
+
+def _media_queue_status_sync(
+    *,
+    thread_id: str,
+    source_key: str,
+    include_other_threads: bool,
+    limit: int,
+) -> list[dict[str, Any]]:
+    _require_psycopg()
+    _ensure_queue_schema_sync()
+    table = _queue_table_identifier()
+    where = ["source_type = 'media_analysis'"]
+    params: list[Any] = []
+    if not include_other_threads:
+        where.append("(thread_id = %s OR thread_id = '' OR thread_id IS NULL)")
+        params.append(thread_id or "")
+    if source_key:
+        where.append("source_key = %s")
+        params.append(source_key)
+    params.append(limit)
+    query = sql.SQL(
+        """
+        SELECT id, namespace, scope, thread_id, source_type, source_key, title,
+               payload, status, attempts, last_error, created_at, updated_at
+        FROM {table}
+        WHERE {where_clause}
+        ORDER BY updated_at DESC
+        LIMIT %s
+        """
+    ).format(table=table, where_clause=sql.SQL(" AND ").join(sql.SQL(item) for item in where))
+    with psycopg.connect(_database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            columns = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
+    records = []
+    for row in rows:
+        record = dict(zip(columns, row))
+        if hasattr(record.get("created_at"), "isoformat"):
+            record["created_at"] = record["created_at"].isoformat()
+        if hasattr(record.get("updated_at"), "isoformat"):
+            record["updated_at"] = record["updated_at"].isoformat()
+        records.append(record)
+    return records
+
+
+async def media_queue_status(
+    *,
+    thread_id: str = "",
+    source_key: str = "",
+    include_other_threads: bool = False,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    if not is_enabled():
+        return []
+    return await asyncio.to_thread(
+        _media_queue_status_sync,
+        thread_id=thread_id,
+        source_key=source_key.strip(),
+        include_other_threads=include_other_threads,
+        limit=max(1, min(int(limit), int(os.getenv("ALPHARAVIS_VISION_INDEX_STATUS_LIMIT", "50")))),
+    )
+
+
 def _claim_embedding_jobs_sync(limit: int, max_attempts: int) -> list[dict[str, Any]]:
     _require_psycopg()
     _ensure_queue_schema_sync()
@@ -1185,7 +1416,10 @@ async def run_embedding_jobs(limit: int = 10) -> dict[str, Any]:
         payload = dict(job.get("payload") or {})
         job_id = str(job["id"])
         try:
-            result = await upsert_memory_record(**payload)
+            if payload.get("job_kind") == "media_analysis":
+                result = await _run_media_analysis_job(payload)
+            else:
+                result = await upsert_memory_record(**payload)
             await asyncio.to_thread(_finish_embedding_job_sync, job_id, ok=True)
             results.append({"id": job_id, "ok": True, "result": result})
         except Exception as exc:
@@ -1197,6 +1431,94 @@ async def run_embedding_jobs(limit: int = 10) -> dict[str, Any]:
         "processed": len(results),
         "results": results,
         "stats": await queue_stats(),
+    }
+
+
+async def _run_media_analysis_job(payload: dict[str, Any]) -> dict[str, Any]:
+    if not vision_is_enabled():
+        raise VectorMemoryError("Vision/media vector memory is disabled. Set ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true.")
+    try:
+        from media_analysis import prepare_media_for_model as _prepare_video
+    except Exception as exc:  # pragma: no cover - optional runtime helper
+        raise VectorMemoryError(f"media_analysis helper unavailable: {exc}") from exc
+
+    prepared = await _prepare_video(
+        media_url=str(payload.get("media_url") or ""),
+        user_goal=str(payload.get("user_goal") or payload.get("content") or ""),
+        mode=str(payload.get("mode") or "index"),
+        media_type=str(payload.get("media_type") or "unknown"),
+        source_key=str(payload.get("source_key") or ""),
+        title=str(payload.get("title") or ""),
+        model_id=str(payload.get("model_id") or ""),
+        thread_id=str(payload.get("thread_id") or ""),
+    )
+    if not prepared.get("ok"):
+        raise VectorMemoryError(str(prepared.get("error") or prepared))
+
+    indexed = []
+    errors = []
+    source_key = str(prepared.get("source_key") or payload.get("media_source_key") or payload.get("source_key") or "")
+    media_url = str(prepared.get("media_url") or payload.get("media_url") or "")
+    title = str(prepared.get("title") or payload.get("title") or source_key)
+    user_goal = str(payload.get("user_goal") or "")
+    for frame in prepared.get("frames", [])[: int(os.getenv("ALPHARAVIS_VIDEO_ANALYSIS_MAX_FRAMES", "100"))]:
+        frame_url = str(frame.get("public_url") or "")
+        if not frame_url:
+            continue
+        frame_index = int(frame.get("frame_index") or 0)
+        timecode = str(frame.get("timecode") or "")
+        caption = (
+            f"Sampled frame from video `{title}` at {timecode}. "
+            f"Original video URL: {media_url}. User goal: {user_goal[:500]}"
+        )
+        try:
+            vector_key = await upsert_media_record(
+                source_type="video_frame",
+                source_key=source_key,
+                file_id=str(prepared.get("manifest_path") or ""),
+                media_type="image",
+                media_url=frame_url,
+                title=title,
+                caption=caption,
+                thread_id=str(payload.get("thread_id") or ""),
+                thread_key=str(payload.get("thread_key") or payload.get("thread_id") or ""),
+                scope="global",
+                namespace=str(payload.get("namespace") or "alpharavis"),
+                frame_index=frame_index,
+                frame_timecode=timecode,
+                metadata={
+                    **(payload.get("metadata") or {}),
+                    "parent_media_url": media_url,
+                    "frame": frame,
+                    "manifest_path": prepared.get("manifest_path", ""),
+                    "manifest_url": prepared.get("manifest_url", ""),
+                    "analysis_mode": prepared.get("mode", "index"),
+                    "user_goal": user_goal[:1000],
+                    "queued_job": True,
+                    "origin_thread_id": str(payload.get("thread_id") or ""),
+                    "origin_thread_key": str(payload.get("thread_key") or ""),
+                    "model_card_id": str(payload.get("model_card_id") or ""),
+                    "index_version": str(payload.get("index_version") or ""),
+                    "chunking_config_hash": str(payload.get("chunking_config_hash") or ""),
+                },
+            )
+            indexed.append({"frame_index": frame_index, "timecode": timecode, "vector_key": vector_key})
+        except Exception as exc:
+            errors.append(f"frame {frame_index}: {exc}")
+
+    if errors and not indexed:
+        raise VectorMemoryError("Media analysis prepared frames but indexing failed: " + " | ".join(errors[:5]))
+    return {
+        "prepared": {
+            "source_key": source_key,
+            "media_url": media_url,
+            "frame_count": prepared.get("frame_count", 0),
+            "manifest_path": prepared.get("manifest_path", ""),
+            "manifest_url": prepared.get("manifest_url", ""),
+        },
+        "indexed_frame_count": len(indexed),
+        "indexed_frames": indexed[:20],
+        "errors": errors[:20],
     }
 
 

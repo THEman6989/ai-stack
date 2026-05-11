@@ -1,0 +1,37 @@
+{
+  "Qwen/Qwen3.6-35B-A3B": {
+    "supports_images": true,
+    "supports_video": true,
+    "native_context_tokens": 262144,
+    "image_longest_edge": 16777216,
+    "image_shortest_edge": 65536,
+    "video_longest_edge": 25165824,
+    "video_shortest_edge": 4096,
+    "patch_size": 16,
+    "temporal_patch_size": 2,
+    "merge_size": 2,
+    "preferred_video_fps": 1,
+    "max_video_fps": 1,
+    "max_frames": 100,
+    "provider_payload": {
+      "mm_processor_kwargs": {
+        "fps": 1,
+        "do_sample_frames": true
+      }
+    }
+  },
+  "big-boss": {
+    "alias_of": "Qwen/Qwen3.6-35B-A3B"
+  },
+  "openai/big-boss": {
+    "alias_of": "Qwen/Qwen3.6-35B-A3B"
+  },
+  "vision-embed": {
+    "alias_of": "Qwen/Qwen3.6-35B-A3B",
+    "type": "vision_embedding"
+  },
+  "qwen3vl-video-embed-v1": {
+    "alias_of": "Qwen/Qwen3.6-35B-A3B",
+    "type": "vision_embedding"
+  }
+}

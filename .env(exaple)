@@ -932,8 +932,8 @@ ALPHARAVIS_RAG_RESULT_PREVIEW_CHARS=1400
 # OPTIONAL MEDIA / VISION - SAFE MEDIA CATALOG + SEPARATE VECTORS
 # =====================================================================
 
-# Media gallery stores Pixelle outputs and uploaded/linked media as files plus
-# Mongo metadata, then exposes them over HTTP. Raw media is not dumped into LLM
+# Media gallery stores Pixelle MCP outputs and uploaded/linked media as files
+# plus Mongo metadata, then exposes them over HTTP. Raw media is not dumped into LLM
 # context by default.
 # Allowed values: true, false
 ALPHARAVIS_ENABLE_MEDIA_GALLERY=true
@@ -946,6 +946,33 @@ ALPHARAVIS_MEDIA_MONGO_COLLECTION=assets
 ALPHARAVIS_MEDIA_DOWNLOAD_ENABLED=true
 ALPHARAVIS_MEDIA_MAX_DOWNLOAD_BYTES=2147483648
 ALPHARAVIS_MEDIA_DOWNLOAD_TIMEOUT_SECONDS=120
+ALPHARAVIS_MEDIA_MONGO_REFERENCES_COLLECTION=references
+# Registering media stores metadata only by default. Explicit analysis/index
+# tools decide when to call the vision embedding path.
+ALPHARAVIS_MEDIA_REGISTER_INDEX_ON_REGISTER=false
+ALPHARAVIS_MEDIA_AUTO_INDEX_ENABLED=true
+ALPHARAVIS_MEDIA_AUTO_INDEX_USER_UPLOADS=true
+ALPHARAVIS_MEDIA_AUTO_INDEX_PIXELLE_MCP_OUTPUTS=false
+ALPHARAVIS_MEDIA_AUTO_INDEX_LINK_REFERENCES=false
+ALPHARAVIS_MEDIA_AUTO_INDEX_REGISTERED_VIDEOS=false
+ALPHARAVIS_MEDIA_INDEX_VERSION=2026-05-12-v1
+ALPHARAVIS_MEDIA_VISION_EMBEDDING_MODEL_CARD=vision-embed
+
+# Explicit video analysis. Default is enabled as a capability, but pasted or
+# uploaded videos still remain metadata-only until the user asks to analyze,
+# inspect, summarize, transcribe, compare, or index the media content.
+ALPHARAVIS_VIDEO_ANALYSIS_ENABLED=true
+ALPHARAVIS_VIDEO_ANALYSIS_FPS=1
+ALPHARAVIS_VIDEO_ANALYSIS_MAX_FPS=1
+ALPHARAVIS_VIDEO_ANALYSIS_MAX_FRAMES=100
+ALPHARAVIS_VIDEO_ANALYSIS_MAX_DOWNLOAD_BYTES=2147483648
+ALPHARAVIS_VIDEO_ANALYSIS_DOWNLOAD_TIMEOUT_SECONDS=180
+ALPHARAVIS_VIDEO_ANALYSIS_MODEL_CARD_PATH=/workspace/langgraph-app/model_cards.json
+ALPHARAVIS_VIDEO_ANALYSIS_PUBLIC_MEDIA_ROOT=/workspace/media-data
+ALPHARAVIS_VIDEO_ANALYSIS_CACHE_ROOT=/workspace/media-data/analysis-cache
+ALPHARAVIS_VIDEO_ANALYSIS_MAX_FRAME_SIDE=
+ALPHARAVIS_VIDEO_ANALYSIS_INCLUDE_AUDIO=false
+ALPHARAVIS_VIDEO_ANALYSIS_TRANSCRIBE_AUDIO=false
 
 # Vision/media vector memory uses a separate pgvector table so text embeddings
 # and vision embeddings with different dimensions never collide.

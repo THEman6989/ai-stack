@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y \
     nodejs \
     npm \
     curl \
+    ffmpeg \
     xvfb \
     x11vnc \
     fluxbox \

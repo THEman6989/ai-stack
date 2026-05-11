@@ -94,8 +94,16 @@ TOOLSETS: dict[str, Toolset] = {
     ),
     "media/video": Toolset(
         "media/video",
-        "Register videos, preserve URLs/file ids, search indexed media, and plan explicit analysis pipelines.",
-        tools=("register_media_asset", "semantic_media_search", "plan_media_analysis", "check_external_service"),
+        "Register videos, preserve URLs/file ids, prepare explicit analysis, inspect indexing, and search indexed media.",
+        tools=(
+            "register_media_asset",
+            "semantic_media_search",
+            "plan_media_analysis",
+            "prepare_media_for_model",
+            "inspect_media_index_status",
+            "inspect_embedding_queue_status",
+            "check_external_service",
+        ),
         mcp_categories=("pixelle", "media", "video"),
     ),
     "media/audio": Toolset(
@@ -114,6 +122,7 @@ TOOLSETS: dict[str, Toolset] = {
         "Search and update thread/global memories, archives, artifacts, sessions, and pgvector chunks.",
         tools=(
             "semantic_memory_search",
+            "inspect_embedding_queue_status",
             "search_archived_context",
             "read_archive_record",
             "read_archive_collection",
