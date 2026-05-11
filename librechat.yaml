@@ -1,4 +1,8 @@
-version: 1.0.8
+version: 1.3.9
+interface:
+  modelSelect: true
+  parameters: true
+  presets: false
 endpoints:
   custom:
     - name: "LangGraph Agent"
@@ -13,3 +17,29 @@ endpoints:
       models:
         default: ["${HERMES_MODEL}"]
         fetch: false
+modelSpecs:
+  enforce: false
+  prioritize: true
+  list:
+    - name: "alpharavis-responses"
+      label: "AlphaRavis Responses"
+      default: true
+      description: "LangGraph agent with Open Responses reasoning, tool, and activity events."
+      preset:
+        endpoint: "LangGraph Agent"
+        model: "my-agent"
+        modelLabel: "AlphaRavis Responses"
+        useResponsesApi: true
+        reasoning_summary: "detailed"
+        reasoning_effort: "medium"
+        verbosity: "medium"
+        disableStreaming: false
+    - name: "alpharavis-chat"
+      label: "AlphaRavis Chat"
+      description: "Legacy Chat Completions path for fallback compatibility."
+      preset:
+        endpoint: "LangGraph Agent"
+        model: "my-agent"
+        modelLabel: "AlphaRavis Chat"
+        useResponsesApi: false
+        disableStreaming: false

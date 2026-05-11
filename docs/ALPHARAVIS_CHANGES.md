@@ -159,6 +159,298 @@ Detailed follow-up plan:
 docs/ALPHARAVIS_RESPONSES_FULL_STREAMING_PLAN.md
 ```
 
+## 2026-05-11 - Responses Full-Streaming Probe Instrumentation
+
+### Summary
+
+The follow-up plan now has concrete instrumentation in:
+
+```text
+scripts/probe_responses_tool_streaming.py
+```
+
+The script records both sides of the suspected failure boundary before any
+runtime patch is attempted:
+
+- raw `/v1/responses` SSE events from LiteLLM/llama.cpp
+- direct LangChain `ChatOpenAI(... use_responses_api=True)` no-tool streaming
+- LangGraph `create_react_agent(...).astream_events(..., version="v2")`
+  chunks with `content`, `tool_call_chunks`, `tool_calls`,
+  `invalid_tool_calls`, metadata, exceptions, and tracebacks
+
+Artifacts are written under:
+
+```text
+artifacts/alpharavis/responses_streaming_probe/<run-id>/
+```
+
+That directory is ignored by git because the probe may capture prompts, model
+outputs, provider headers, and tracebacks.
+
+### Usage
+
+Inside `langgraph-api`:
+
+```bash
+python /workspace/scripts/probe_responses_tool_streaming.py
+```
+
+From the host against the exposed LiteLLM port:
+
+```bash
+python scripts/probe_responses_tool_streaming.py --base-url http://127.0.0.1:4000/v1
+```
+
+The script exits with `0` only if all enabled probes pass. It still writes
+`summary.json` and JSONL artifacts when a probe fails, so failed runs are the
+expected input for deciding the next patch point.
+
+Current probe result:
+
+```text
+run_id: codex_probe_20260511_repo_artifacts
+classification: provider_litellm_or_openai_sdk
+low_level_responses_sse: HTTP 408 from LiteLLM after 30 seconds
+langchain_no_tool_astream: same HTTP 408
+langchain_react_agent_astream_events: same HTTP 408
+```
+
+The actionable conclusion is to keep the existing hybrid runtime mode and not
+apply a LangChain tool-stream buffering patch yet. The provider stream must be
+fixed or bypassed first.
+
+Follow-up after restarting the local Lamma/LAMMPS backend:
+
+```text
+run_id: codex_probe_after_lamma_restart_classified_20260511
+classification: langchain_openai_conversion
+raw /v1/responses SSE: ok, function-call events observed
+LangChain no-tool Responses stream: ok
+LangChain create_react_agent Responses stream: failed with item['content'] is empty
+```
+
+That narrowed the failure from provider availability to LangChain's Responses
+stream chunk conversion/aggregation.
+
+### Experimental Full-Streaming Patch
+
+An env-gated patch now exists at:
+
+```text
+langgraph-app/patches/patch_langchain_openai_responses_tool_streaming.py
+```
+
+It is disabled by default and only applies when:
+
+```text
+ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=true
+```
+
+The patch keeps the production default hybrid mode unchanged, but allows
+explicit experiments with:
+
+```text
+ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false
+```
+
+Patch behavior:
+
+- keeps provider-reused `function_call` output indexes separate from the prior
+  reasoning item
+- emits final reasoning content from `response.output_item.done`
+- suppresses partial `response.function_call_arguments.delta` chunks so
+  incomplete JSON is not parsed as `invalid_tool_calls`
+- emits one complete LangChain tool call when `response.output_item.done` for
+  the function call arrives
+- upgrades the earlier partial experimental patch in-place if a running
+  container already has it
+
+Verification after applying the experimental patch inside `langgraph-api`:
+
+```text
+run_id: codex_probe_experimental_patch_v5_no_force_20260511
+classification: not_reproduced
+raw /v1/responses SSE: ok, function-call events observed
+LangChain no-tool Responses stream: ok
+LangChain create_react_agent Responses stream: ok
+invalid_tool_calls: 0
+marker_tool_ends: 1
+```
+
+The low-level probe with `--force-tool-choice` produced no raw tool-call events
+on this local provider, while the LangChain agent path still passed. Use the
+default non-forced probe as the local validation path unless LiteLLM/llama.cpp
+starts enforcing Responses `tool_choice` consistently.
+
+The hybrid runtime defaults remain unchanged until Bridge-level full-streaming
+checks also pass and the experimental patch has more soak time.
+
+## 2026-05-11 - Makefile Install And Streaming Profile Refresh
+
+### Summary
+
+The Makefile install flow has been updated so a fresh local setup can choose
+the current AlphaRavis runtime mode instead of inheriting old defaults.
+
+New Makefile flows:
+
+```bash
+make install
+make update
+make install-fullstreaming
+make install-chat-fullstreaming
+make profiles
+make streaming STREAMING=full
+make streaming STREAMING=chat-full
+make up-fullstreaming
+make up-chat-fullstreaming
+make status
+```
+
+`make install` now delegates to `scripts/alpharavis_setup.py` with explicit
+install options for:
+
+- runtime API/streaming profile
+- submodule initialization
+- Docker Compose profiles such as `openwebui`
+- optional image build
+- optional stack start
+
+The script writes `.env` directly through the existing safe key-update helper,
+so interactive and non-interactive Makefile targets use the same behavior.
+
+### Streaming Profiles
+
+The setup helper now supports these profiles:
+
+```text
+responses-hybrid       -> stable default Responses mode
+responses-full         -> experimental full Responses tool streaming
+responses-nonstreaming -> Responses mode without internal streaming
+chat-full              -> Chat Completions with ChatLiteLLM streaming enabled
+chat-nonstreaming      -> Chat Completions with ChatLiteLLM streaming disabled
+```
+
+Aliases remain available for short Makefile use:
+
+```text
+hybrid       -> responses-hybrid
+full         -> responses-full
+nonstreaming -> responses-nonstreaming
+chat         -> chat-full
+```
+
+The `responses-full` profile sets:
+
+```text
+ALPHARAVIS_LLM_API_MODE=responses
+ALPHARAVIS_LLM_STREAMING=true
+ALPHARAVIS_DEEPAGENTS_API_MODE=responses
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
+ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false
+ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=true
+BRIDGE_ENABLE_RESPONSES_API=true
+BRIDGE_PREFERRED_API_MODE=responses
+```
+
+The `responses-hybrid` profile keeps the stable runtime:
+
+```text
+ALPHARAVIS_LLM_API_MODE=responses
+ALPHARAVIS_LLM_STREAMING=true
+ALPHARAVIS_DEEPAGENTS_API_MODE=responses
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
+ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
+ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=false
+```
+
+The `chat-full` profile sets:
+
+```text
+ALPHARAVIS_LLM_API_MODE=chat_completions
+ALPHARAVIS_LLM_STREAMING=true
+ALPHARAVIS_DEEPAGENTS_API_MODE=chat_completions
+BRIDGE_PREFERRED_API_MODE=chat_completions
+```
+
+`make update` now uses the same profile menu as `make install`, updates
+submodules by default, and runs `docker compose up -d --build` by default after
+the update. `make update-no-start` keeps the update/build flow but does not
+start the stack.
+
+### Files Changed
+
+- `Makefile`
+  - added `help`, `streaming`, `fullstreaming`, `hybrid-streaming`,
+    `nonstreaming`, `chat-completions`, `chat-fullstreaming`,
+    `chat-nonstreaming`, `install-fullstreaming`, `install-hybrid`,
+    `install-nonstreaming`, `install-chat`, `install-chat-fullstreaming`,
+    `install-chat-nonstreaming`, `profiles`, `update-no-start`,
+    `up-fullstreaming`, and `up-chat-fullstreaming`
+  - `make install` now accepts `STREAMING`, `SUBMODULES`, `BUILD`, `START`, and
+    `PROFILES`
+  - `make update` now accepts `UPDATE_STREAMING`, `UPDATE_SUBMODULES`,
+    `UPDATE_BUILD`, `UPDATE_START`, and `UPDATE_PROFILES`
+- `scripts/alpharavis_setup.py`
+  - added streaming-profile application and status reporting
+  - added numbered terminal profile selection with an info view showing exact
+    env values
+  - added Compose profile persistence through `COMPOSE_PROFILES`
+  - added install/update-time build/start orchestration
+- `.env(exaple)`
+  - added documented `COMPOSE_PROFILES`
+  - moved `ALPHARAVIS_LLM_STREAMING` into the main model route section because
+    runtime profiles update it directly
+- `README.md`, `docs/ALPHARAVIS_ARCHITECTURE.md`,
+  `docs/ALPHARAVIS_USAGE_NOTES.md`, and
+  `docs/ALPHARAVIS_RESPONSES_COMPATIBILITY.md`
+  - document the current install and streaming architecture
+- `tests/test_alpharavis_setup.py`
+  - covers full-streaming env values, env update behavior, mode detection, and
+    Compose profile normalization
+
+### Verification
+
+Local verification after the Makefile/setup changes:
+
+```text
+pytest -q tests -> 101 passed
+docker compose config --quiet -> ok
+git diff --check -> ok
+py_compile setup/probe/test files -> ok
+```
+
+The local `.env` was then set through the same helper used by Makefile:
+
+```bash
+python scripts/alpharavis_setup.py streaming --streaming-mode full
+docker compose up -d --force-recreate langgraph-api api-bridge
+```
+
+Container ENV after recreate:
+
+```text
+ALPHARAVIS_LLM_API_MODE=responses
+ALPHARAVIS_DEEPAGENTS_API_MODE=responses
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
+ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false
+ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=true
+BRIDGE_ENABLE_RESPONSES_API=true
+BRIDGE_PREFERRED_API_MODE=responses
+```
+
+Full-streaming probe after the Makefile/ENV activation:
+
+```text
+run_id: codex_probe_makefile_fullstreaming_v2_20260511
+classification: not_reproduced
+raw /v1/responses SSE: ok, function-call events observed
+LangChain no-tool Responses stream: ok
+LangChain create_react_agent Responses stream: ok
+invalid_tool_calls: 0
+marker_tool_ends: 1
+```
+
 ## 2026-05-11 - Hermes-Agent Local Patch Handling
 
 ### Summary

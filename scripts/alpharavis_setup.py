@@ -57,6 +57,7 @@ MODEL_MANAGEMENT_KEYS = [
     ("ALPHARAVIS_OWNER_SSH_PASS", "private owner SSH password fallback; do not commit real values"),
     ("ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT", "hard LangGraph context cutoff"),
     ("ALPHARAVIS_LLM_API_MODE", "responses or chat_completions for direct no-tool calls"),
+    ("ALPHARAVIS_LLM_STREAMING", "enable ChatLiteLLM streaming for Chat Completions/fallback calls"),
     ("ALPHARAVIS_RESPONSES_API_BASE", "OpenAI-compatible /v1 base for Responses calls"),
     ("ALPHARAVIS_RESPONSES_MODEL", "model id used for native Responses direct calls"),
     ("ALPHARAVIS_RESPONSES_REQUIRE_NATIVE", "fail instead of falling back to ChatLiteLLM"),
@@ -110,6 +111,104 @@ SERVICE_URLS = [
     ("Agent Custom UI", "http://localhost:3001"),
     ("Pixelle MCP", "http://localhost:9004"),
 ]
+
+STREAMING_MODE_DESCRIPTIONS = {
+    "responses-hybrid": "Responses API; stream no-tool calls, run tool-bound calls non-streaming",
+    "responses-full": "Responses API; experimental full streaming for tool-bound DeepAgents calls",
+    "responses-nonstreaming": "Responses API; internal model streaming disabled",
+    "chat-full": "Chat Completions API; ChatLiteLLM streaming enabled",
+    "chat-nonstreaming": "Chat Completions API; ChatLiteLLM streaming disabled",
+}
+
+STREAMING_MODE_ALIASES = {
+    "": "prompt",
+    "ask": "prompt",
+    "default": "responses-hybrid",
+    "stable": "responses-hybrid",
+    "hybrid": "responses-hybrid",
+    "responses": "responses-hybrid",
+    "response": "responses-hybrid",
+    "responses-hybrid": "responses-hybrid",
+    "tool_calling": "responses-hybrid",
+    "tool-calling": "responses-hybrid",
+    "full": "responses-full",
+    "fullstreaming": "responses-full",
+    "full-streaming": "responses-full",
+    "responses-full": "responses-full",
+    "responses-fullstreaming": "responses-full",
+    "nonstreaming": "responses-nonstreaming",
+    "non-streaming": "responses-nonstreaming",
+    "responses-nonstreaming": "responses-nonstreaming",
+    "false": "responses-nonstreaming",
+    "off": "responses-nonstreaming",
+    "none": "responses-nonstreaming",
+    "no": "responses-nonstreaming",
+    "chat": "chat-full",
+    "chat-full": "chat-full",
+    "chat-fullstreaming": "chat-full",
+    "chat-completions": "chat-full",
+    "chat_completions": "chat-full",
+    "chat-completions-full": "chat-full",
+    "chat_completions_full": "chat-full",
+    "legacy": "chat-full",
+    "chat-nonstreaming": "chat-nonstreaming",
+    "chat-non-streaming": "chat-nonstreaming",
+    "chat-completions-nonstreaming": "chat-nonstreaming",
+    "chat_completions_nonstreaming": "chat-nonstreaming",
+}
+
+STREAMING_MODE_VALUES = {
+    "responses-hybrid": {
+        "ALPHARAVIS_LLM_API_MODE": "responses",
+        "ALPHARAVIS_DEEPAGENTS_API_MODE": "responses",
+        "ALPHARAVIS_LLM_STREAMING": "true",
+        "ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING": "true",
+        "ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING": "tool_calling",
+        "ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING": "false",
+        "BRIDGE_ENABLE_RESPONSES_API": "true",
+        "BRIDGE_PREFERRED_API_MODE": "responses",
+    },
+    "responses-full": {
+        "ALPHARAVIS_LLM_API_MODE": "responses",
+        "ALPHARAVIS_DEEPAGENTS_API_MODE": "responses",
+        "ALPHARAVIS_LLM_STREAMING": "true",
+        "ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING": "true",
+        "ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING": "false",
+        "ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING": "true",
+        "BRIDGE_ENABLE_RESPONSES_API": "true",
+        "BRIDGE_PREFERRED_API_MODE": "responses",
+    },
+    "responses-nonstreaming": {
+        "ALPHARAVIS_LLM_API_MODE": "responses",
+        "ALPHARAVIS_DEEPAGENTS_API_MODE": "responses",
+        "ALPHARAVIS_LLM_STREAMING": "false",
+        "ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING": "false",
+        "ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING": "true",
+        "ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING": "false",
+        "BRIDGE_ENABLE_RESPONSES_API": "true",
+        "BRIDGE_PREFERRED_API_MODE": "responses",
+    },
+    "chat-full": {
+        "ALPHARAVIS_LLM_API_MODE": "chat_completions",
+        "ALPHARAVIS_DEEPAGENTS_API_MODE": "chat_completions",
+        "ALPHARAVIS_LLM_STREAMING": "true",
+        "ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING": "false",
+        "ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING": "true",
+        "ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING": "false",
+        "BRIDGE_ENABLE_RESPONSES_API": "true",
+        "BRIDGE_PREFERRED_API_MODE": "chat_completions",
+    },
+    "chat-nonstreaming": {
+        "ALPHARAVIS_LLM_API_MODE": "chat_completions",
+        "ALPHARAVIS_DEEPAGENTS_API_MODE": "chat_completions",
+        "ALPHARAVIS_LLM_STREAMING": "false",
+        "ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING": "false",
+        "ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING": "true",
+        "ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING": "false",
+        "BRIDGE_ENABLE_RESPONSES_API": "true",
+        "BRIDGE_PREFERRED_API_MODE": "chat_completions",
+    },
+}
 
 
 def run(cmd: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -183,6 +282,94 @@ def configure() -> None:
 def set_many(values: dict[str, str]) -> None:
     for key, value in values.items():
         update_env_value(key, value)
+
+
+def normalize_streaming_mode(mode: str) -> str:
+    normalized = (mode or "prompt").strip().lower()
+    normalized = STREAMING_MODE_ALIASES.get(normalized, normalized)
+    if normalized in {"prompt", "keep"} or normalized in STREAMING_MODE_VALUES:
+        return normalized
+    valid = ", ".join(["prompt", "keep", *STREAMING_MODE_VALUES])
+    raise ValueError(f"Unsupported streaming mode {mode!r}. Use one of: {valid}")
+
+
+def current_streaming_mode(values: dict[str, str]) -> str:
+    llm_mode = values.get("ALPHARAVIS_LLM_API_MODE", "").lower()
+    deepagents_mode = values.get("ALPHARAVIS_DEEPAGENTS_API_MODE", "").lower()
+    chat_streaming = values.get("ALPHARAVIS_LLM_STREAMING", "true").lower()
+    streaming = values.get("ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING", "").lower()
+    disable_streaming = values.get("ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING", "").lower()
+    experimental = values.get("ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING", "").lower()
+    if llm_mode == "chat_completions" or deepagents_mode == "chat_completions":
+        return "chat-full" if chat_streaming != "false" else "chat-nonstreaming"
+    if streaming == "false" or disable_streaming == "true":
+        return "responses-nonstreaming"
+    if disable_streaming == "false":
+        return "responses-full" if experimental == "true" else "responses-full"
+    return "responses-hybrid"
+
+
+def format_profile_env(mode: str) -> list[str]:
+    values = STREAMING_MODE_VALUES[mode]
+    keys = [
+        "ALPHARAVIS_LLM_API_MODE",
+        "ALPHARAVIS_LLM_STREAMING",
+        "ALPHARAVIS_DEEPAGENTS_API_MODE",
+        "ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING",
+        "ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING",
+        "ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING",
+        "BRIDGE_PREFERRED_API_MODE",
+    ]
+    return [f"{key}={values[key]}" for key in keys if key in values]
+
+
+def print_streaming_profiles() -> None:
+    print("\nAvailable AlphaRavis runtime profiles")
+    for mode, description in STREAMING_MODE_DESCRIPTIONS.items():
+        print(f"\n[{mode}] {description}")
+        for line in format_profile_env(mode):
+            print(f"  {line}")
+
+
+def choose_streaming_mode(values: dict[str, str]) -> str:
+    current = current_streaming_mode(values)
+    print("\nResponses / DeepAgents streaming mode")
+    for index, mode in enumerate(STREAMING_MODE_VALUES, start=1):
+        marker = " (current)" if mode == current else ""
+        print(f"  {index}. {mode}{marker}: {STREAMING_MODE_DESCRIPTIONS[mode]}")
+    print("  i. show env values for all profiles")
+    print("  k. keep current .env streaming settings")
+    try:
+        answer = input(f"Select streaming mode [{current}]: ").strip().lower()
+    except EOFError:
+        return current
+    if not answer:
+        return current
+    if answer in {str(index) for index in range(1, len(STREAMING_MODE_VALUES) + 1)}:
+        return list(STREAMING_MODE_VALUES)[int(answer) - 1]
+    if answer in {"i", "info", "help", "?"}:
+        print_streaming_profiles()
+        return choose_streaming_mode(values)
+    if answer in {"k", "keep"}:
+        return "keep"
+    return normalize_streaming_mode(answer)
+
+
+def apply_streaming_mode(mode: str) -> str:
+    ensure_env()
+    resolved = normalize_streaming_mode(mode)
+    if resolved == "prompt":
+        resolved = choose_streaming_mode(read_env(ENV_PATH))
+    if resolved == "keep":
+        print("Streaming mode unchanged")
+        return current_streaming_mode(read_env(ENV_PATH))
+    set_many(STREAMING_MODE_VALUES[resolved])
+    print(f"Streaming mode set to {resolved}: {STREAMING_MODE_DESCRIPTIONS[resolved]}")
+    return resolved
+
+
+def configure_streaming(mode: str = "prompt") -> None:
+    apply_streaming_mode(mode)
 
 
 def configure_model_management() -> None:
@@ -330,14 +517,86 @@ def configure_openwebui() -> None:
 
 def ask_yes_no(prompt: str, default: bool = True) -> bool:
     suffix = "Y/n" if default else "y/N"
-    answer = input(f"{prompt} [{suffix}]: ").strip().lower()
+    try:
+        answer = input(f"{prompt} [{suffix}]: ").strip().lower()
+    except EOFError:
+        return default
     if not answer:
         return default
     return answer in {"y", "yes", "j", "ja", "true", "1"}
 
 
-def install() -> None:
+def normalize_yes_no_option(value: str) -> str:
+    normalized = (value or "prompt").strip().lower()
+    if normalized in {"", "prompt", "ask"}:
+        return "prompt"
+    if normalized in {"1", "true", "yes", "y", "ja", "j", "on"}:
+        return "yes"
+    if normalized in {"0", "false", "no", "n", "nein", "off"}:
+        return "no"
+    raise ValueError(f"Unsupported yes/no option {value!r}; use prompt, yes, or no")
+
+
+def should_run_option(value: str, prompt: str, *, default: bool) -> bool:
+    normalized = normalize_yes_no_option(value)
+    if normalized == "yes":
+        return True
+    if normalized == "no":
+        return False
+    return ask_yes_no(prompt, default=default)
+
+
+def split_profiles(value: str) -> list[str]:
+    cleaned = (value or "").strip()
+    if cleaned.lower() in {"", "none", "off", "false", "no", "-"}:
+        return []
+    return [item.strip() for item in cleaned.replace(";", ",").split(",") if item.strip()]
+
+
+def normalize_profiles(value: str) -> str:
+    return ",".join(split_profiles(value))
+
+
+def configure_compose_profiles(value: str = "prompt") -> str:
     ensure_env()
+    values = read_env(ENV_PATH)
+    current = values.get("COMPOSE_PROFILES", "")
+    requested = (value or "prompt").strip()
+    if requested.lower() in {"prompt", "ask"}:
+        print("\nOptional Docker Compose profiles")
+        print("- openwebui: start the optional OpenWebUI frontend")
+        print("- hermes-dashboard: start the optional Hermes dashboard")
+        print("Use comma-separated values, or none for the base stack only.")
+        try:
+            answer = input(f"COMPOSE_PROFILES [{current or 'none'}]: ").strip()
+        except EOFError:
+            answer = current
+        requested = current if not answer else answer
+    elif requested.lower() == "keep":
+        requested = current
+    profiles = normalize_profiles(requested)
+    update_env_value("COMPOSE_PROFILES", profiles)
+    print(f"Compose profiles set to {profiles or 'none'}")
+    return profiles
+
+
+def compose_command(profiles: str = "") -> list[str]:
+    cmd = ["docker", "compose"]
+    for profile in split_profiles(profiles):
+        cmd.extend(["--profile", profile])
+    return cmd
+
+
+def install(
+    *,
+    streaming_mode: str = "prompt",
+    submodules: str = "prompt",
+    build: str = "prompt",
+    start: str = "prompt",
+    profiles: str = "prompt",
+) -> None:
+    ensure_env()
+    configure_streaming(streaming_mode)
     if ask_yes_no("Edit important .env values now", default=False):
         configure()
     if ask_yes_no("Configure custom model/power management now", default=False):
@@ -346,16 +605,35 @@ def install() -> None:
         configure_media_vision()
     if ask_yes_no("Configure OpenWebUI frontend now", default=False):
         configure_openwebui()
-    if ask_yes_no("Initialize/update submodules now", default=True):
+    selected_profiles = configure_compose_profiles(profiles)
+    if should_run_option(submodules, "Initialize/update submodules now", default=True):
         run(["git", "submodule", "update", "--init", "--recursive"])
+    should_start = should_run_option(start, "Build images and start the stack now", default=True)
+    should_build = False if should_start else should_run_option(build, "Build Docker images now", default=True)
+    if should_start:
+        run([*compose_command(selected_profiles), "up", "-d", "--build"])
+    elif should_build:
+        run([*compose_command(selected_profiles), "build"])
     print_status()
-    print("Next: make up")
+    if should_start:
+        print("Stack start requested. Use make logs or make status to inspect it.")
+    else:
+        print("Next: make up")
 
 
-def update() -> None:
+def update(
+    *,
+    streaming_mode: str = "prompt",
+    submodules: str = "prompt",
+    build: str = "yes",
+    start: str = "yes",
+    profiles: str = "prompt",
+) -> None:
     ensure_env()
     run(["git", "pull", "--ff-only"])
-    if ask_yes_no("Update submodules to their configured remote branches", default=True):
+    configure_streaming(streaming_mode)
+    selected_profiles = configure_compose_profiles(profiles)
+    if should_run_option(submodules, "Update submodules to their configured remote branches", default=True):
         run(["git", "submodule", "update", "--init", "--recursive", "--remote"])
     if ask_yes_no("Edit important .env values after update", default=False):
         configure()
@@ -365,6 +643,12 @@ def update() -> None:
         configure_media_vision()
     if ask_yes_no("Configure OpenWebUI after update", default=False):
         configure_openwebui()
+    should_start = should_run_option(start, "Build images and start/recreate the stack after update", default=True)
+    should_build = False if should_start else should_run_option(build, "Build Docker images after update", default=True)
+    if should_start:
+        run([*compose_command(selected_profiles), "up", "-d", "--build"])
+    elif should_build:
+        run([*compose_command(selected_profiles), "build"])
     print_status()
 
 
@@ -408,6 +692,19 @@ def print_status() -> None:
     print(f"- Owner power tools: {env.get('ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS', 'false')}")
     print(f"- Crisis manager: {env.get('ALPHARAVIS_ENABLE_CRISIS_MANAGER', 'false')}")
     print(f"- Real action endpoint: {'configured' if env.get('ALPHARAVIS_MODEL_MGMT_ACTION_URL') else 'not configured'}")
+    print("\nResponses / streaming")
+    print(f"- Install profile: {current_streaming_mode(env)}")
+    print(f"- Direct calls API mode: {env.get('ALPHARAVIS_LLM_API_MODE', 'responses')}")
+    print(f"- ChatLiteLLM streaming: {env.get('ALPHARAVIS_LLM_STREAMING', 'true')}")
+    print(f"- DeepAgents API mode: {env.get('ALPHARAVIS_DEEPAGENTS_API_MODE', 'responses')}")
+    print(f"- DeepAgents streaming: {env.get('ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING', 'true')}")
+    print(
+        "- DeepAgents disable_streaming: "
+        f"{env.get('ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING', 'tool_calling')}"
+    )
+    print(f"- Experimental tool-stream patch: {env.get('ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING', 'false')}")
+    print(f"- Bridge preferred API: {env.get('BRIDGE_PREFERRED_API_MODE', 'responses')}")
+    print(f"- Compose profiles: {env.get('COMPOSE_PROFILES', '') or 'none'}")
     print("\nMedia / vision")
     print(f"- Media gallery: {env.get('ALPHARAVIS_ENABLE_MEDIA_GALLERY', 'true')}")
     print(f"- Vision vector memory: {env.get('ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY', 'false')}")
@@ -476,6 +773,8 @@ def main(argv: Iterable[str] | None = None) -> int:
             "install",
             "configure",
             "model-management",
+            "streaming",
+            "profiles",
             "media-vision",
             "openwebui",
             "update",
@@ -486,19 +785,64 @@ def main(argv: Iterable[str] | None = None) -> int:
             "openwebui-smoke",
         ],
     )
+    parser.add_argument(
+        "--streaming-mode",
+        default=os.getenv("STREAMING", os.getenv("ALPHARAVIS_INSTALL_STREAMING_MODE", "prompt")),
+        help=(
+            "Runtime profile: prompt, keep, responses-hybrid, responses-full, "
+            "responses-nonstreaming, chat-full, or chat-nonstreaming. "
+            "Aliases include hybrid, full, nonstreaming, and chat."
+        ),
+    )
+    parser.add_argument(
+        "--submodules",
+        default=os.getenv("SUBMODULES", os.getenv("ALPHARAVIS_INSTALL_SUBMODULES", "prompt")),
+        help="For install: prompt, yes, or no.",
+    )
+    parser.add_argument(
+        "--build",
+        default=os.getenv("BUILD", os.getenv("ALPHARAVIS_INSTALL_BUILD", "prompt")),
+        help="For install: prompt, yes, or no. Ignored when start is yes.",
+    )
+    parser.add_argument(
+        "--start",
+        default=os.getenv("START", os.getenv("ALPHARAVIS_INSTALL_START", "prompt")),
+        help="For install: prompt, yes, or no.",
+    )
+    parser.add_argument(
+        "--profiles",
+        default=os.getenv("PROFILES", os.getenv("COMPOSE_PROFILES", "prompt")),
+        help="Compose profiles to store/use: prompt, keep, none, openwebui, hermes-dashboard, or comma-separated.",
+    )
     args = parser.parse_args(argv)
     if args.command == "install":
-        install()
+        install(
+            streaming_mode=args.streaming_mode,
+            submodules=args.submodules,
+            build=args.build,
+            start=args.start,
+            profiles=args.profiles,
+        )
     elif args.command == "configure":
         configure()
     elif args.command == "model-management":
         configure_model_management()
+    elif args.command == "streaming":
+        configure_streaming(args.streaming_mode)
+    elif args.command == "profiles":
+        print_streaming_profiles()
     elif args.command == "media-vision":
         configure_media_vision()
     elif args.command == "openwebui":
         configure_openwebui()
     elif args.command == "update":
-        update()
+        update(
+            streaming_mode=args.streaming_mode,
+            submodules=args.submodules,
+            build=args.build,
+            start=args.start,
+            profiles=args.profiles,
+        )
     elif args.command == "status":
         print_status()
     elif args.command == "bridge-smoke":

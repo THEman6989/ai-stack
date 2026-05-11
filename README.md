@@ -31,13 +31,42 @@ Important current behavior:
 Use the Makefile for the common stack operations:
 
 ```bash
-make install      # create/sync .env, optionally configure important values, init submodules
-make update       # git pull, optional submodule update, optional env edit
-make status       # show URLs and docker compose ps
-make up           # docker compose up -d --build
-make down         # docker compose down
-make bridge-smoke # one small OpenAI-compatible request against api-bridge
-make hermes-smoke # one small OpenAI-compatible request against Hermes
+make help                        # show install/runtime targets and variables
+make install                     # guided .env sync, streaming/profile selection, submodules, optional build/start
+make update                      # git pull, profile selection, submodules, Docker build, stack restart
+make install-fullstreaming        # set full Responses tool streaming, init submodules, build, start
+make install-chat-fullstreaming   # set Chat Completions streaming, init submodules, build, start
+make profiles                     # show runtime profiles and the .env values they write
+make streaming STREAMING=full     # only update .env streaming settings
+make up-fullstreaming             # set full streaming and recreate langgraph-api/api-bridge
+make update                       # git pull, optional submodule update, optional env edit
+make status                       # show URLs, streaming mode, profiles, and docker compose ps
+make up                           # docker compose up -d --build
+make down                         # docker compose down
+make bridge-smoke                 # one small OpenAI-compatible request against api-bridge
+make hermes-smoke                 # one small OpenAI-compatible request against Hermes
+```
+
+Runtime profiles accepted by `make install STREAMING=...`, `make update`, and
+`make streaming STREAMING=...`:
+
+- `responses-hybrid` (`hybrid`): stable default. Responses API, no-tool calls
+  may stream, tool-bound calls stay non-streaming.
+- `responses-full` (`full`): Responses API full streaming with the AlphaRavis
+  experimental tool-streaming patch enabled.
+- `responses-nonstreaming` (`nonstreaming`): Responses API with internal
+  model streaming disabled.
+- `chat-full` (`chat`): Chat Completions API through ChatLiteLLM with
+  `ALPHARAVIS_LLM_STREAMING=true`.
+- `chat-nonstreaming`: Chat Completions API through ChatLiteLLM with streaming
+  disabled.
+
+Useful install examples:
+
+```bash
+make install STREAMING=full PROFILES=openwebui
+make install STREAMING=chat-full PROFILES=none
+make install STREAMING=hybrid START=no BUILD=no SUBMODULES=yes PROFILES=none
 ```
 
 Important endpoints:

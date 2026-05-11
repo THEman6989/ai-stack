@@ -25,6 +25,7 @@ ALPHARAVIS_LLM_API_MODE=responses
 ALPHARAVIS_DEEPAGENTS_API_MODE=responses
 ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
 ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
+ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=false
 ```
 
 Meaning:
@@ -33,6 +34,8 @@ Meaning:
 - model calls with tools are routed non-streaming by LangChain
 - Bridge `/v1/responses` can still emit SSE events to clients
 - full internal tool-call streaming remains experimental
+- the experimental LangChain tool-streaming patch is available but disabled by
+  default
 
 ## Important Files Already Changed
 
@@ -54,6 +57,11 @@ Meaning:
 
 - `.env(exaple)`
   - documents the hybrid streaming env defaults
+
+- `langgraph-app/patches/patch_langchain_openai_responses_tool_streaming.py`
+  - env-gated experimental patch for LangChain Responses tool streaming
+  - only applies when `ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=true`
+  - upgrades an already partially patched running container in-place
 
 - `langgraph-app/requirements.txt`
   - currently pins:
@@ -303,6 +311,11 @@ Create a script, preferably:
 scripts/probe_responses_tool_streaming.py
 ```
 
+Status: implemented. The script writes `low_level_responses_sse.jsonl`,
+`langchain_no_tool_astream.jsonl`,
+`langchain_react_agent_astream_events.jsonl`, and `summary.json` into a
+timestamped run directory below the artifact root.
+
 It should run inside `langgraph-api` or against the same container environment.
 
 The script should test direct `ChatOpenAI`, not the full AlphaRavis graph first:
@@ -368,6 +381,41 @@ Purpose:
 - decide if malformed data starts before LangChain
 - compare raw provider events to LangChain chunks
 
+Status: implemented through `httpx` SSE capture in
+`scripts/probe_responses_tool_streaming.py`.
+
+Observed result from `codex_probe_20260511_repo_artifacts`:
+
+```text
+bucket: provider_litellm_or_openai_sdk
+direct /v1/responses stream: HTTP 408 from LiteLLM after 30 seconds
+LangChain no-tool Responses stream: same HTTP 408
+LangChain create_react_agent Responses stream: same HTTP 408
+```
+
+Artifacts:
+
+```text
+artifacts/alpharavis/responses_streaming_probe/codex_probe_20260511_repo_artifacts/
+```
+
+This means the current failure happens before LangChain can assemble tool-call
+chunks. Do not enable `ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false`
+as a default from this result.
+
+Updated result after restarting the local Lamma/LAMMPS backend:
+
+```text
+run_id: codex_probe_after_lamma_restart_classified_20260511
+bucket: langchain_openai_conversion
+direct /v1/responses stream: ok, function-call events observed
+LangChain no-tool Responses stream: ok
+LangChain create_react_agent Responses stream: item['content'] is empty
+```
+
+That result made the LangChain Responses conversion layer the correct
+experimental patch point.
+
 ### 4. Classify Failure
 
 Classify any failure into one of these buckets:
@@ -395,6 +443,8 @@ Possible patch locations:
 1. `langchain_openai.chat_models.base._convert_responses_chunk_to_generation_chunk`
    - suppress `invalid_tool_calls` during partial tool argument chunks
    - ensure final `response.output_item.done` emits one complete tool call
+   - status: implemented experimentally in
+     `langgraph-app/patches/patch_langchain_openai_responses_tool_streaming.py`
 2. Wrapper around `ChatOpenAI._astream_responses`
    - buffer tool chunks internally
    - yield text chunks immediately
@@ -423,6 +473,51 @@ Possible patch locations:
    - no `invalid_tool_calls`
    - no `item['content'] is empty`
    - `pytest -q tests` passes
+
+Current experimental patch probe result:
+
+```text
+run_id: codex_probe_experimental_patch_v5_no_force_20260511
+bucket: not_reproduced
+direct /v1/responses stream: ok, function-call events observed
+LangChain no-tool Responses stream: ok
+LangChain create_react_agent Responses stream: ok
+invalid_tool_calls: 0
+marker_tool_ends: 1
+```
+
+After the Makefile/setup flow was updated and the local `.env` was switched to
+`STREAMING=full`, the recreated runtime also passed:
+
+```text
+run_id: codex_probe_makefile_fullstreaming_v2_20260511
+bucket: not_reproduced
+direct /v1/responses stream: ok, function-call events observed
+LangChain no-tool Responses stream: ok
+LangChain create_react_agent Responses stream: ok
+invalid_tool_calls: 0
+marker_tool_ends: 1
+```
+
+The low-level probe with `--force-tool-choice` did not observe raw tool-call
+events on this local provider, even though the LangChain agent path passed. Do
+not treat forced `tool_choice` as the validation source until the LiteLLM /
+llama.cpp Responses layer enforces it consistently.
+
+Operational shortcuts added after the probe:
+
+```bash
+make streaming STREAMING=full
+make install-fullstreaming
+make up-fullstreaming
+make streaming STREAMING=chat-full
+make up-chat-fullstreaming
+```
+
+These targets write the required `.env` combination, including
+`ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=true` for Responses full
+streaming or `ALPHARAVIS_LLM_STREAMING=true` for Chat Completions streaming,
+instead of requiring manual edits.
 
 ### 7. Acceptance Tests
 

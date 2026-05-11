@@ -42,6 +42,48 @@ The current Docker architecture is split into these main roles:
 - `hermes-agent`: optional external coding/system agent reached through its
   OpenAI-compatible API on the host.
 
+## Install And Runtime Profiles
+
+The Makefile is the supported operator entrypoint for local setup. It delegates
+stateful install/configuration work to `scripts/alpharavis_setup.py` so the
+interactive wizard, one-shot targets, and direct script calls all update `.env`
+through the same code path.
+
+Common flows:
+
+```bash
+make install
+make update
+make install-fullstreaming
+make install-chat-fullstreaming
+make profiles
+make streaming STREAMING=full
+make up-fullstreaming
+make up-chat-fullstreaming
+make status
+```
+
+`make install` now does more than copy `.env`: it syncs missing defaults from
+`.env(exaple)`, lets the operator choose a runtime API/streaming profile,
+optionally configures the existing model-management/media/OpenWebUI sections,
+stores Docker Compose profiles such as `openwebui`, initializes submodules, and
+can build/start the stack. `make update` uses the same menu, then updates
+submodules and builds/starts the stack by default.
+
+The streaming profiles write these architectural modes into `.env`:
+
+| Profile | Core effect |
+| --- | --- |
+| `responses-hybrid` | Responses API, `streaming=true`, `disable_streaming=tool_calling`, experimental tool-stream patch disabled. This is the stable default. |
+| `responses-full` | Responses API, `streaming=true`, `disable_streaming=false`, `ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=true`. This enables experimental tool-bound full streaming. |
+| `responses-nonstreaming` | Responses API with internal DeepAgents/ChatLiteLLM streaming disabled. |
+| `chat-full` | Direct calls and DeepAgents workers use Chat Completions through ChatLiteLLM with `ALPHARAVIS_LLM_STREAMING=true`. |
+| `chat-nonstreaming` | Direct calls and DeepAgents workers use Chat Completions through ChatLiteLLM with `ALPHARAVIS_LLM_STREAMING=false`. |
+
+Docker Compose profiles are stored in `.env` as `COMPOSE_PROFILES`. For example,
+`COMPOSE_PROFILES=openwebui` makes normal `docker compose up` / `make up` include
+the optional OpenWebUI service.
+
 ## AionUi ACP Adapter
 
 AionUi can use AlphaRavis through a separate custom ACP agent:
@@ -334,6 +376,7 @@ ALPHARAVIS_DEEPAGENTS_RESPONSES_API_BASE=http://litellm:4000/v1
 ALPHARAVIS_DEEPAGENTS_RESPONSES_OUTPUT_VERSION=responses/v1
 ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
 ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
+ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=false
 ```
 
 This keeps DeepAgents on its native `create_agent(...)` path while swapping the
@@ -342,6 +385,14 @@ to the important part of langchain-ai/langchain PR #35457. That patch fixes the
 `AsyncStream` crash when LangChain routes
 `disable_streaming="tool_calling"` calls through non-streaming OpenAI code
 paths.
+
+The `langgraph-api` container also runs
+`langgraph-app/patches/patch_langchain_openai_responses_tool_streaming.py` at
+startup. That second patch is inert unless
+`ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=true`. When enabled, it adjusts
+LangChain Responses stream conversion so reasoning items, function-call indexes,
+partial argument chunks, and final tool-call emission stay coherent for the
+local LiteLLM/llama.cpp stack.
 
 Streaming remains configurable for future provider/library upgrades:
 
@@ -353,15 +404,32 @@ ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=true
 # experimental full streaming with tool-bound calls
 ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
 ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false
+ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=true
 
 # default patched LangChain hybrid: stream unless tools are passed
 ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
 ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
+ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=false
 ```
 
 If a local provider has a Responses/tool-call bug, set
 `ALPHARAVIS_DEEPAGENTS_API_MODE=chat_completions` or leave
 `ALPHARAVIS_DEEPAGENTS_REQUIRE_RESPONSES=false` to fall back to ChatLiteLLM.
+For a deliberate Chat Completions full-streaming runtime, use:
+
+```text
+ALPHARAVIS_LLM_API_MODE=chat_completions
+ALPHARAVIS_DEEPAGENTS_API_MODE=chat_completions
+ALPHARAVIS_LLM_STREAMING=true
+BRIDGE_PREFERRED_API_MODE=chat_completions
+```
+
+The Makefile shortcut is:
+
+```bash
+make streaming STREAMING=chat-full
+make up-chat-fullstreaming
+```
 
 Every specialist prompt includes a local specialist-planning rule. The global
 planner creates the compact task contract once before the swarm; each specialist

@@ -80,6 +80,78 @@ class _StubRequest:
         return self._body
 
 
+class _FakeMessage:
+    def __init__(
+        self,
+        message_type: str,
+        content: str,
+        *,
+        reasoning_content: str = "",
+        tool_calls: list[dict] | None = None,
+        tool_call_id: str = "",
+        name: str = "",
+    ) -> None:
+        self.type = message_type
+        self.content = content
+        self.reasoning_content = reasoning_content
+        self.tool_calls = tool_calls
+        self.tool_call_id = tool_call_id
+        self.name = name
+
+
+class _FakeThreads:
+    async def create(self, *args, **kwargs) -> dict:
+        return {}
+
+    async def get_state(self, *args, **kwargs) -> dict:
+        return {"values": {"messages": []}}
+
+
+class _FakeRuns:
+    def __init__(self, parts: list[dict]) -> None:
+        self.parts = parts
+
+    async def stream(self, *args, **kwargs):
+        for part in self.parts:
+            yield part
+
+
+class _FakeClient:
+    def __init__(self, parts: list[dict]) -> None:
+        self.threads = _FakeThreads()
+        self.runs = _FakeRuns(parts)
+
+
+def _parse_sse_events(chunks: list[str]) -> list[dict]:
+    events: list[dict] = []
+    for raw in chunks:
+        if raw.strip() == "data: [DONE]" or not raw.startswith("event: "):
+            continue
+        event = ""
+        data = None
+        for line in raw.splitlines():
+            if line.startswith("event: "):
+                event = line.removeprefix("event: ")
+            elif line.startswith("data: "):
+                data = json.loads(line.removeprefix("data: "))
+        if event and data:
+            events.append({"event": event, "data": data})
+    return events
+
+
+async def _collect_response_stream(body: dict, parts: list[dict]) -> list[dict]:
+    chunks = [chunk async for chunk in bridge_server._stream_responses(body, _StubRequest(body))]
+    return _parse_sse_events(chunks)
+
+
+def _patch_stream_env(monkeypatch, parts: list[dict]) -> None:
+    monkeypatch.setattr(bridge_server, "_client", lambda: _FakeClient(parts))
+    monkeypatch.setattr(bridge_server, "BRIDGE_STREAM_REASONING_EVENTS", True)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS", True)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_STREAM_TOOL_EVENTS", True)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_DONE_SENTINEL", False)
+
+
 def test_responses_input_supports_instructions_and_content_parts() -> None:
     body = {
         "instructions": "Du bist AlphaRavis.",
@@ -221,6 +293,70 @@ def test_responses_event_is_sse_with_semantic_type() -> None:
     assert "\ndata: " in raw
     parsed = json.loads(raw.split("data: ", 1)[1])
     assert parsed["type"] == "response.output_text.delta"
+
+
+def test_stream_responses_uses_librechat_reasoning_events(monkeypatch) -> None:
+    parts = [
+        {"event": "updates", "data": {"general_assistant": {"status": "running"}}},
+        {"event": "messages", "data": (_FakeMessage("ai", "", reasoning_content="Reasoning delta."), {})},
+        {"event": "messages", "data": (_FakeMessage("ai", "Hallo"), {})},
+    ]
+    _patch_stream_env(monkeypatch, parts)
+
+    events = asyncio.run(_collect_response_stream({"model": "my-agent", "input": "Hi", "stream": True}, parts))
+    event_types = [event["event"] for event in events]
+
+    assert "response.reasoning.delta" in event_types
+    assert "response.reasoning.done" in event_types
+    assert "response.reasoning_text.delta" not in event_types
+    assert "response.reasoning_text.done" not in event_types
+
+    text_events = [event["data"] for event in events if event["event"] in {"response.output_text.delta", "response.output_text.done"}]
+    assert text_events
+    assert all(event.get("logprobs") == [] for event in text_events)
+
+    completed = next(event["data"]["response"] for event in events if event["event"] == "response.completed")
+    output_types = [item["type"] for item in completed["output"]]
+    assert "message" in output_types
+    assert "reasoning" in output_types
+
+
+def test_stream_responses_maps_internal_tools_to_function_items(monkeypatch) -> None:
+    parts = [
+        {
+            "event": "messages",
+            "data": (
+                _FakeMessage(
+                    "ai",
+                    "",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "name": "write_file",
+                            "args": {"path": "app.py", "content": "print('ok')"},
+                        }
+                    ],
+                ),
+                {},
+            ),
+        },
+        {"event": "messages", "data": (_FakeMessage("tool", "wrote app.py", tool_call_id="call_1", name="write_file"), {})},
+        {"event": "messages", "data": (_FakeMessage("ai", "Fertig"), {})},
+    ]
+    _patch_stream_env(monkeypatch, parts)
+
+    events = asyncio.run(_collect_response_stream({"model": "my-agent", "input": "Write", "stream": True}, parts))
+    added_items = [event["data"]["item"] for event in events if event["event"] == "response.output_item.added"]
+
+    function_call = next(item for item in added_items if item["type"] == "function_call")
+    function_output = next(item for item in added_items if item["type"] == "function_call_output")
+
+    assert function_call["call_id"] == "call_1"
+    assert function_call["name"] == "write_file"
+    assert function_output["call_id"] == "call_1"
+    assert "wrote app.py" in function_output["output"]
+    assert any(event["event"] == "response.function_call_arguments.delta" for event in events)
+    assert any(event["event"] == "response.function_call_arguments.done" for event in events)
 
 
 def _run_all() -> None:

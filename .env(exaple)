@@ -74,6 +74,12 @@ OPENAI_API_KEY=sk-local-dev
 #   chat_completions = direct no-tool LangGraph calls use /v1/chat/completions
 #
 ALPHARAVIS_LLM_API_MODE=responses
+# Chat Completions streaming switch used by ChatLiteLLM. This applies when
+# ALPHARAVIS_LLM_API_MODE=chat_completions, when DeepAgents are set to
+# ALPHARAVIS_DEEPAGENTS_API_MODE=chat_completions, or when Responses mode falls
+# back to ChatLiteLLM.
+# Allowed values: true, false
+ALPHARAVIS_LLM_STREAMING=true
 ALPHARAVIS_RESPONSES_API_BASE=http://litellm:4000/v1
 ALPHARAVIS_RESPONSES_API_KEY=sk-local-dev
 ALPHARAVIS_RESPONSES_MODEL=big-boss
@@ -111,6 +117,10 @@ ALPHARAVIS_DEEPAGENTS_RESPONSES_OUTPUT_VERSION=responses/v1
 # AlphaRavis applies a local patch for langchain-ai/langchain#35436 at
 # langgraph-api startup, so the documented LangChain hybrid mode no longer
 # crashes with AsyncStream when tools are bound.
+# Prefer changing these through:
+#   make profiles
+#   make streaming STREAMING=responses-full
+#   make streaming STREAMING=chat-full
 # Values for ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING:
 #   true  = default; allow streaming when LangChain does not bypass it
 #   false = force non-streaming internal model calls
@@ -120,6 +130,9 @@ ALPHARAVIS_DEEPAGENTS_RESPONSES_OUTPUT_VERSION=responses/v1
 #   false        = full Responses streaming; still experimental with tools
 ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
 ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
+# Optional experimental patch for full Responses tool streaming. Leave false
+# unless you are actively probing ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false.
+ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=false
 ALPHARAVIS_DEEPAGENTS_REQUIRE_RESPONSES=false
 ALPHARAVIS_DEEPAGENTS_USE_PREVIOUS_RESPONSE_ID=false
 
@@ -174,6 +187,14 @@ LITELLM_REQUEST_TIMEOUT_SECONDS=90
 # Docker default:
 #   mongodb://mongodb:27017/langgraph?replicaSet=rs0
 LS_MONGODB_URI=mongodb://mongodb:27017/langgraph?replicaSet=rs0
+
+# Optional Docker Compose profiles selected by make install.
+# Common values:
+#   empty            = base stack only
+#   openwebui        = also start OpenWebUI
+#   hermes-dashboard = also start Hermes dashboard
+# Multiple profiles use commas, e.g. openwebui,hermes-dashboard.
+COMPOSE_PROFILES=
 
 
 # =====================================================================
@@ -1200,10 +1221,8 @@ ALPHARAVIS_LLM_TIMEOUT_SECONDS=120
 # Recommended during development: 0, so failures stay visible.
 ALPHARAVIS_LLM_MAX_RETRIES=0
 
-# Enables streaming mode on the LLM client so LangGraph can expose token/message
-# events when the upstream model/provider supports them.
-# Allowed values: true, false
-ALPHARAVIS_LLM_STREAMING=true
+# ALPHARAVIS_LLM_STREAMING is defined in the MUST-HAVE model route section
+# because Makefile runtime profiles update it directly.
 
 # If true, SSH/local debugger commands that look destructive or state-changing
 # trigger a LangGraph human approval interrupt before execution.

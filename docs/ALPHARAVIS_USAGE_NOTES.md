@@ -126,10 +126,18 @@ ALPHARAVIS_DEEPAGENTS_RESPONSES_MODEL=big-boss
 ALPHARAVIS_DEEPAGENTS_RESPONSES_OUTPUT_VERSION=responses/v1
 ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
 ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
+ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=false
 ```
 
 Set `ALPHARAVIS_DEEPAGENTS_API_MODE=chat_completions` to return only DeepAgents
-tool workers to the older ChatLiteLLM path. Set
+tool workers to the older ChatLiteLLM path. Chat Completions streaming is
+controlled by:
+
+```text
+ALPHARAVIS_LLM_STREAMING=true
+```
+
+Set
 `ALPHARAVIS_DEEPAGENTS_REQUIRE_RESPONSES=true` only when you want startup to
 fail instead of falling back. Set `ALPHARAVIS_RESPONSES_REQUIRE_NATIVE=true`
 only when you want direct no-tool calls to fail instead of falling back to Chat
@@ -154,7 +162,8 @@ Live testing after the patch showed:
   disable_streaming="tool_calling")` with a bound tool passes
 - Bridge `/v1/responses` Agent Path streaming returns SSE output text chunks
 - full streaming with `ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false`
-  is still experimental for tool-capable calls
+  now has an env-gated AlphaRavis patch and passed the focused
+  LangChain/React-agent probe, but remains experimental as a runtime default
 
 Those modes remain available as opt-ins for provider/library upgrades:
 
@@ -166,10 +175,22 @@ ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=true
 # experimental full streaming
 ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
 ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false
+ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=true
 
 # default patched LangChain hybrid
 ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
 ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
+ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=false
+```
+
+The Makefile can write those combinations for you:
+
+```bash
+make install STREAMING=full
+make install STREAMING=chat-full
+make streaming STREAMING=hybrid
+make streaming STREAMING=chat-nonstreaming
+make up-fullstreaming
 ```
 
 Direct Responses calls have a small compatibility retry layer:

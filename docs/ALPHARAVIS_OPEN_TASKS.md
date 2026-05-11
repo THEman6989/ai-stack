@@ -38,6 +38,11 @@ ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
     `DIRECT_TOOL_STREAM_TEST_OK`.
   - Bridge `/v1/responses` Agent Path streaming returned
     `PATCHED_AGENT_STREAM_OK`.
+- Focused full-streaming probe after the env-gated tool-stream patch:
+  - raw `/v1/responses` SSE included function-call events
+  - LangChain no-tool Responses streaming passed
+  - LangChain `create_react_agent` streaming executed `marker_tool` exactly once
+  - `invalid_tool_calls=0`
 
 Still needed:
 
@@ -46,8 +51,9 @@ Still needed:
 - Retest the LiteLLM proxy after its Docker image reports a newer package than
   `litellm==1.82.6`.
 - Keep full streaming
-  `ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false` experimental until
-  a direct tool-call streaming repro passes without malformed tool chunks.
+  `ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false` experimental as a
+  stack default until Bridge-level repeated smoke tests pass and the local
+  provider consistently handles Responses tool-choice behavior.
 - Consider a two-phase final-answer stream:
   - tool-capable worker calls stay hybrid/non-streaming for reliable tool JSON
   - after tool execution, run a final answer call without tools and stream that
@@ -319,7 +325,8 @@ Implemented:
 - explicit unsupported response for `/v1/responses/compact`
 - OpenAPI schema version `3.1.0`
 - `response.output_item.*`, `response.output_text.*`, and optional
-  `response.reasoning_text.*` stream events
+  reasoning stream events; LibreChat compatibility still needs the
+  `response.reasoning.*` normalization listed below
 - local `previous_response_id` continuation through `BRIDGE_RESPONSES_STORE`
 - explicit errors for unsupported hosted Responses features instead of silent
   fake support
@@ -347,17 +354,171 @@ ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
 ```
 
 - Not stable yet: full internal Responses streaming for tool-bound DeepAgents
-  calls with `ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false`. Earlier
-  full streaming failed with `item['content'] is empty`.
+  calls as the default stack mode. The focused probe passes with
+  `ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=true`, but earlier full
+  streaming failed with `item['content'] is empty` and Bridge-level soak testing
+  is still needed.
 
 Still needed:
 
-- Test whether LibreChat preserves `reasoning_content` as a separate reasoning
-  panel or shows it as normal text.
-- Keep `BRIDGE_STREAM_REASONING_EVENTS=false` until verified.
+- LibreChat Responses/reasoning/tool UI pass:
+  - Status: implemented and live-smoked through the recreated `api-bridge`
+    and `librechat` containers on 2026-05-11.
+  - Added two explicit LibreChat model specs in `librechat.yaml` and updated
+    the config to `version: 1.3.9` with `interface.presets: false` so
+    `modelSpecs` is not competing with default presets:
+    - `AlphaRavis Chat` using the existing custom endpoint through
+      `/v1/chat/completions`.
+    - `AlphaRavis Responses` using the same custom endpoint with
+      `useResponsesApi: true`, `reasoning_summary: "detailed"` or `"auto"`,
+      `reasoning_effort`, and `verbosity`.
+  - Keep the Chat Completions model spec as the legacy/stable path.
+  - Make the Responses model spec the path for LibreChat's reasoning bubble,
+    tool execution timeline, and agent progress visibility.
+  - Updated `langgraph-app/bridge_server.py` Responses streaming from the
+    old `response.reasoning_text.delta/done` shape to LibreChat/Open
+    Responses compatible events:
+    - `response.output_item.added` for a `type: "reasoning"` item
+    - `response.content_part.added` with `part.type: "reasoning_text"`
+    - `response.reasoning.delta`
+    - `response.reasoning.done`
+    - `response.content_part.done`
+    - `response.output_item.done`
+  - Added `logprobs: []` to every `response.output_text.delta` and
+    `response.output_text.done` event, matching LibreChat v0.8.5 validation.
+  - Included the final reasoning item in the completed Response object's
+    `output` array when reasoning text or summaries were emitted.
+  - Preserved the old Chat Completions reasoning path by continuing to emit
+    `delta.reasoning_content` when `BRIDGE_STREAM_REASONING_EVENTS=true`.
+  - Do not promise raw OpenAI chain-of-thought. OpenAI-hosted reasoning models
+    expose reasoning summaries, not raw reasoning tokens; full visible thinking
+    is only possible when the selected local/OpenAI-compatible provider emits
+    visible `reasoning_content`, `reasoning`, or `<think>` text.
+  - Mapped LangGraph tool activity to Responses tool items when enabled:
+    - tool-call start -> `function_call` output item
+    - tool-call args -> `response.function_call_arguments.delta/done`
+    - tool result -> `function_call_output` item
+    - tool completion/failure -> matching `response.output_item.done`
+  - Reuse the proven tool extraction patterns from
+    `langgraph-app/alpharavis_acp_adapter.py` so tool names, call IDs, args,
+    status, file locations, and output snippets stay consistent across AionUI
+    and LibreChat.
+  - Emit agent/node progress separately from final assistant text. Candidate
+    sources:
+    - LangGraph `updates` node names such as `general_assistant`,
+      `debugger_agent`, `hermes_coding_agent`, `context_retrieval_agent`, and
+      `power_management_agent`
+    - LangChain `on_tool_start`, `on_tool_end`, and `on_tool_error` events
+    - DeepAgents tool call messages and tool result messages
+  - Added focused tests in `tests/test_bridge_responses.py`:
+    - no `response.reasoning_text.*` events in Responses streams
+    - `response.reasoning.delta/done` events contain `sequence_number`,
+      `item_id`, `output_index`, `content_index`, and text/delta fields
+    - output text delta/done events include `logprobs: []`
+    - completed Response output can contain both a `reasoning` item and an
+      assistant `message` item
+    - tool start/result events become valid `function_call` and
+      `function_call_output` items
+    - `/v1/chat/completions` streaming still emits normal text and optional
+      `reasoning_content`
+  - Live smoke checks completed:
+    - `POST /v1/responses stream=true` emitted `response.reasoning.delta/done`
+      plus `response.output_text.delta/done` with `logprobs: []`.
+    - Agent-path `POST /v1/responses stream=true` emitted LangGraph node
+      activity as reasoning deltas.
+    - Tool-path `POST /v1/responses stream=true` emitted `function_call`,
+      `response.function_call_arguments.delta/done`, and
+      `function_call_output` items.
+    - `POST /v1/chat/completions stream=true` still works as the fallback path.
+  - Still verify visually in the LibreChat browser UI that `AlphaRavis
+    Responses` renders reasoning/tool activity in the intended panes.
+- llama.cpp/local-model visible thinking follow-up:
+  - User backend is llama.cpp/local models behind the OpenAI-compatible stack,
+    not OpenAI-hosted reasoning models. Do not assume OpenAI raw chain-of-thought
+    restrictions apply to the local backend; instead preserve whatever visible
+    thinking the local provider actually emits.
+  - Recommended runtime shape is valid and should remain supported:
+    `LibreChat -> api-bridge /v1/responses -> LangGraph -> llama.cpp
+    /v1/chat/completions`. The outer LibreChat-facing Bridge can speak
+    Responses even when the internal LangGraph-to-llama.cpp model call uses
+    Chat Completions. The outer Responses translation is enough for LibreChat's
+    reasoning bubble, tool timeline, and LangGraph activity UI.
+  - Current code status:
+    - `langgraph-app/bridge_server.py::_message_reasoning_content` already
+      extracts visible reasoning from `reasoning_content`, `reasoning`,
+      `additional_kwargs.reasoning_content`, and list content blocks with
+      `type: "thinking"` or `type: "reasoning"`.
+    - `langgraph-app/bridge_server.py::_message_content` already skips list
+      content blocks with `type: "thinking"` or `type: "reasoning"`.
+    - Missing piece: if llama.cpp or LiteLLM streams thinking as normal string
+      content like `<think>...</think>`, the Bridge currently does not split
+      that string into reasoning output. It may leak into normal assistant text
+      or be handled only by the generic scrubber instead of being shown in the
+      LibreChat reasoning bubble.
+  - Next patch should add a stateful visible-thinking splitter, probably in
+    `langgraph-app/bridge_server.py`, before final text is emitted:
+    - Support at least `<think>...</think>` markers. Consider also
+      `<thinking>...</thinking>` only if local llama.cpp templates actually use
+      it.
+    - Handle streaming boundaries correctly: tags can arrive split across
+      chunks, e.g. `<thi` + `nk>` and `</thi` + `nk>`.
+    - Maintain parser state across chunks: outside-thinking text goes to normal
+      assistant output; inside-thinking text goes to reasoning output.
+    - Do not emit marker text itself.
+    - At stream end, flush any remaining buffered visible text. If a closing
+      tag is missing, route the unterminated inside-thinking buffer to reasoning
+      rather than normal assistant text.
+    - Avoid duplicating text when provider also supplies `reasoning_content`.
+      Prefer explicit `reasoning_content`/`reasoning` fields for reasoning; use
+      `<think>` extraction only for normal string `content`.
+    - Keep `StreamingInternalContextScrubber` after the split: visible answer
+      text should go through the content scrubber, reasoning text should go
+      through the reasoning scrubber.
+  - Wire the splitter into both external streaming paths:
+    - Responses path: in `_stream_responses`, split `_extract_stream_text(part)`
+      deltas before `builder.text_delta(...)`; send extracted thinking via
+      `builder.reasoning_delta(...)` and visible answer text via
+      `builder.text_delta(...)`.
+    - Chat Completions fallback: in `_stream_chat_events`, split text deltas
+      before `_chunk(...)`; send extracted thinking as
+      `_chunk("", model, reasoning_content=...)` and visible answer text as the
+      normal `content` delta.
+    - Also handle the fallback state-read path used when no token was streamed:
+      split the final `_last_ai_content(...)` string so stored `<think>` blocks
+      do not appear in the visible final answer.
+  - Required tests in `tests/test_bridge_responses.py` or a focused new test:
+    - Responses stream: chunks containing `<think>plan</think>Answer` emit
+      `response.reasoning.delta` containing `plan` and `response.output_text`
+      containing only `Answer`.
+    - Responses stream with split markers across chunks still routes thinking
+      correctly and does not leak `<think>` or `</think>` into
+      `response.output_text.done` or the completed Response object's assistant
+      message.
+    - Chat Completions stream: the same content emits
+      `delta.reasoning_content` for the thinking and normal `delta.content` for
+      the answer.
+    - Explicit provider reasoning fields (`reasoning_content`/`reasoning`) still
+      work and are not double-counted when no `<think>` string is present.
+  - Live smoke after patch:
+    - Use `AlphaRavis Responses` in LibreChat with the llama.cpp model and a
+      prompt that reliably produces a visible `<think>` block.
+    - Confirm the `<think>` body appears in LibreChat's reasoning area and the
+      final assistant message does not include the raw markers.
+    - Confirm tool calls still appear as `function_call`/`function_call_output`
+      items during the same run.
 - Re-test DeepAgents internal Responses token streaming after LiteLLM,
   `langchain-openai`, or llama.cpp upgrades. Keep the stable non-streaming
   DeepAgents default until repeated smoke tests pass.
+- Updated `docs/ALPHARAVIS_RESPONSES_COMPATIBILITY.md` so the documented
+  streaming event list matches the actual LibreChat-compatible event surface.
+- Updated `langchain-bridge-repo` separately:
+  - added Chat Completions `reasoning_content` passthrough for streamed chunks
+    where LangChain exposes visible reasoning
+  - added tests for reasoning passthrough
+  - committed and pushed to `THEman6989/langchain-fastapi-chat-completion` as
+    `3e647bf Preserve streamed reasoning content`
+  - main repo submodule pointer now needs to be included with the main
+    ai-stack commit when the surrounding Bridge/LibreChat changes are committed
 
 ## Parallel Agent Work
 

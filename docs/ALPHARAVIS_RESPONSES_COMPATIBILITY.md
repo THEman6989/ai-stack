@@ -44,9 +44,20 @@ The bridge streams typed SSE events:
 - `response.content_part.added`
 - `response.output_text.delta`
 - `response.output_text.done`
+- `response.reasoning.delta`
+- `response.reasoning.done`
+- `response.function_call_arguments.delta`
+- `response.function_call_arguments.done`
 - `response.content_part.done`
 - `response.output_item.done`
 - `response.completed`
+
+`response.output_text.delta` and `response.output_text.done` include
+`logprobs: []` for LibreChat v0.8.5/Open Responses validation compatibility.
+Visible reasoning is emitted as a real `type: "reasoning"` output item with
+`reasoning_text` content. Internal LangGraph tool activity can be represented
+as `function_call` and `function_call_output` output items; client-supplied
+Responses tools are still not executed by the bridge.
 
 For broad client compatibility the bridge can append `data: [DONE]` after the
 semantic lifecycle events via `BRIDGE_RESPONSES_DONE_SENTINEL=true`.
@@ -78,6 +89,10 @@ BRIDGE_RESPONSES_STORE=true
 BRIDGE_RESPONSES_STORE_MAX=200
 BRIDGE_RESPONSES_DONE_SENTINEL=true
 BRIDGE_RESPONSES_ALLOW_CLIENT_TOOLS=false
+BRIDGE_STREAM_REASONING_EVENTS=true
+BRIDGE_RESPONSES_STREAM_TOOL_EVENTS=true
+BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS=true
+BRIDGE_RESPONSES_TOOL_OUTPUT_MAX_CHARS=8000
 ```
 
 Keep `BRIDGE_RESPONSES_ALLOW_CLIENT_TOOLS=false` unless you intentionally want
@@ -139,9 +154,33 @@ There are three separate modes for DeepAgents Responses model calls:
 
 | Mode | Env | What happens |
 | --- | --- | --- |
-| Fully non-streaming | `STREAMING=false`, `DISABLE_STREAMING=true` | Every internal model call waits for a complete response before LangChain continues. Stable, but no internal token stream. |
-| Hybrid default | `STREAMING=true`, `DISABLE_STREAMING=tool_calling` | LangChain may stream calls without tools. Calls with tools are sent non-streaming so tool-call JSON is complete before execution. |
-| Full streaming | `STREAMING=true`, `DISABLE_STREAMING=false` | Tool-bound model calls are also streamed. This is still experimental with the local LiteLLM/llama.cpp stack. |
+| Fully non-streaming | `STREAMING=false`, `DISABLE_STREAMING=true`, `EXPERIMENTAL_BUFFER_TOOL_STREAMING=false` | Every internal model call waits for a complete response before LangChain continues. Stable, but no internal token stream. |
+| Hybrid default | `STREAMING=true`, `DISABLE_STREAMING=tool_calling`, `EXPERIMENTAL_BUFFER_TOOL_STREAMING=false` | LangChain may stream calls without tools. Calls with tools are sent non-streaming so tool-call JSON is complete before execution. |
+| Full streaming | `STREAMING=true`, `DISABLE_STREAMING=false`, `EXPERIMENTAL_BUFFER_TOOL_STREAMING=true` | Tool-bound model calls are also streamed. This passed the focused AlphaRavis LangChain/React-agent probe, but remains experimental as the default stack mode. |
+
+Use the Makefile to set the matching `.env` values:
+
+```bash
+make streaming STREAMING=hybrid
+make streaming STREAMING=full
+make streaming STREAMING=nonstreaming
+```
+
+The Makefile also exposes Chat Completions runtime profiles. These switch both
+direct calls and DeepAgents workers to ChatLiteLLM instead of LangChain
+Responses:
+
+| Profile | Env | What happens |
+| --- | --- | --- |
+| `chat-full` | `ALPHARAVIS_LLM_API_MODE=chat_completions`, `ALPHARAVIS_DEEPAGENTS_API_MODE=chat_completions`, `ALPHARAVIS_LLM_STREAMING=true` | Chat Completions path with LangGraph/LangChain message streaming enabled where the provider supports it. |
+| `chat-nonstreaming` | same API mode values, `ALPHARAVIS_LLM_STREAMING=false` | Chat Completions path with internal streaming disabled. |
+
+Use:
+
+```bash
+make streaming STREAMING=chat-full
+make up-chat-fullstreaming
+```
 
 The hybrid mode is not "stream only until a tool call appears." LangChain cannot
 know whether the next model response will contain a tool call before it asks the
@@ -157,7 +196,21 @@ This still improves the previous state:
 
 ## LibreChat Notes
 
-LibreChat may still call `/v1/chat/completions` depending on its provider
-adapter. That path remains available. If the active LibreChat provider supports
-Responses directly, point it at `/v1/responses`; otherwise AlphaRavis still uses
-the same LangGraph brain behind the Chat Completions compatibility endpoint.
+LibreChat has two intended AlphaRavis model specs:
+
+- `AlphaRavis Responses`: `useResponsesApi: true`, reasoning summaries enabled,
+  and the Open Responses event stream for reasoning/tool/activity UI.
+- `AlphaRavis Chat`: the legacy `/v1/chat/completions` fallback path.
+
+`librechat.yaml` uses config `version: 1.3.9`, keeps model selection and
+parameters visible, and disables the deprecated presets UI so `modelSpecs`
+remain the selected AlphaRavis entry points.
+
+Live smoke on 2026-05-11 confirmed that the bridge emits LibreChat-compatible
+Responses reasoning events, LangGraph node activity, and function-call/tool
+output items through `POST /v1/responses` with `stream=true`.
+
+OpenAI-hosted reasoning models do not expose raw chain-of-thought through the
+API; they expose reasoning summaries. Full visible thinking appears only when
+the selected local/OpenAI-compatible provider emits visible reasoning fields
+such as `reasoning_content`, `reasoning`, or `<think>` text.

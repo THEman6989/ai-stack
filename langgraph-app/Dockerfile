@@ -38,4 +38,4 @@ COPY local-deep-researcher-repo /app/local_deep_researcher
 COPY langgraph-app/ /app/
 
 # Remove old X11 locks, start the GUI helpers, then run the native LangGraph API.
-CMD ["sh", "-c", "python /workspace/langgraph-app/patches/patch_langchain_openai_disable_streaming.py && rm -f /tmp/.X0-lock && Xvfb :0 -screen 0 1280x720x24 & fluxbox & x11vnc -display :0 -forever -nopw -listen 0.0.0.0 & cd /workspace/langgraph-app && langgraph dev --config langgraph.json --host 0.0.0.0 --port 2024 --no-browser"]
+CMD ["sh", "-c", "python /workspace/langgraph-app/patches/patch_langchain_openai_disable_streaming.py && python /workspace/langgraph-app/patches/patch_langchain_openai_responses_tool_streaming.py && rm -f /tmp/.X0-lock && Xvfb :0 -screen 0 1280x720x24 & fluxbox & x11vnc -display :0 -forever -nopw -listen 0.0.0.0 & cd /workspace/langgraph-app && langgraph dev --config langgraph.json --host 0.0.0.0 --port 2024 --no-browser"]

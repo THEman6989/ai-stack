@@ -19,6 +19,11 @@ from context_references import preprocess_context_references
 from error_classifier import classify_api_error, format_user_error
 from internal_context import StreamingInternalContextScrubber, sanitize_internal_context
 
+
+def _env_bool(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).lower() in {"1", "true", "yes", "on"}
+
+
 try:
     from operational_logging import (
         log_dependency_status as _op_log_dependency_status,
@@ -48,55 +53,22 @@ OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "my-agent")
 BRIDGE_RUN_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_RUN_TIMEOUT_SECONDS", "180"))
 BRIDGE_STREAM_MODE = os.getenv("BRIDGE_STREAM_MODE", "events").lower()
 BRIDGE_MESSAGE_SYNC_MODE = os.getenv("BRIDGE_MESSAGE_SYNC_MODE", "delta").lower()
-BRIDGE_SHOW_ACTIVITY_EVENTS = os.getenv("BRIDGE_SHOW_ACTIVITY_EVENTS", "false").lower() in {
-    "1",
-    "true",
-    "yes",
-}
+BRIDGE_SHOW_ACTIVITY_EVENTS = _env_bool("BRIDGE_SHOW_ACTIVITY_EVENTS", "false")
 BRIDGE_ACTIVITY_DETAIL = os.getenv("BRIDGE_ACTIVITY_DETAIL", "summary").lower()
-BRIDGE_STREAM_REASONING_EVENTS = os.getenv("BRIDGE_STREAM_REASONING_EVENTS", "false").lower() in {
-    "1",
-    "true",
-    "yes",
-}
+BRIDGE_STREAM_REASONING_EVENTS = _env_bool("BRIDGE_STREAM_REASONING_EVENTS", "false")
 BRIDGE_REASONING_DELTA_FIELD = os.getenv("BRIDGE_REASONING_DELTA_FIELD", "reasoning_content")
-BRIDGE_ENABLE_RESPONSES_API = os.getenv("BRIDGE_ENABLE_RESPONSES_API", "true").lower() in {
-    "1",
-    "true",
-    "yes",
-}
+BRIDGE_ENABLE_RESPONSES_API = _env_bool("BRIDGE_ENABLE_RESPONSES_API", "true")
 BRIDGE_PREFERRED_API_MODE = os.getenv("BRIDGE_PREFERRED_API_MODE", "responses").lower()
-BRIDGE_RESPONSES_STORE = os.getenv("BRIDGE_RESPONSES_STORE", "true").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
+BRIDGE_RESPONSES_STORE = _env_bool("BRIDGE_RESPONSES_STORE", "true")
 BRIDGE_RESPONSES_STORE_MAX = int(os.getenv("BRIDGE_RESPONSES_STORE_MAX", "200"))
-BRIDGE_RESPONSES_DONE_SENTINEL = os.getenv("BRIDGE_RESPONSES_DONE_SENTINEL", "true").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-BRIDGE_RESPONSES_ALLOW_CLIENT_TOOLS = os.getenv("BRIDGE_RESPONSES_ALLOW_CLIENT_TOOLS", "false").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
+BRIDGE_RESPONSES_DONE_SENTINEL = _env_bool("BRIDGE_RESPONSES_DONE_SENTINEL", "true")
+BRIDGE_RESPONSES_ALLOW_CLIENT_TOOLS = _env_bool("BRIDGE_RESPONSES_ALLOW_CLIENT_TOOLS", "false")
+BRIDGE_RESPONSES_STREAM_TOOL_EVENTS = _env_bool("BRIDGE_RESPONSES_STREAM_TOOL_EVENTS", "true")
+BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS = _env_bool("BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS", "true")
+BRIDGE_RESPONSES_TOOL_OUTPUT_MAX_CHARS = int(os.getenv("BRIDGE_RESPONSES_TOOL_OUTPUT_MAX_CHARS", "8000"))
 BRIDGE_HARD_INPUT_TOKEN_LIMIT = int(os.getenv("BRIDGE_HARD_INPUT_TOKEN_LIMIT", "128000"))
-BRIDGE_HARD_INPUT_HTTP_ERROR = os.getenv("BRIDGE_HARD_INPUT_HTTP_ERROR", "false").lower() in {
-    "1",
-    "true",
-    "yes",
-}
-BRIDGE_ALLOW_RAW_MEDIA_CONTEXT = os.getenv("BRIDGE_ALLOW_RAW_MEDIA_CONTEXT", "false").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
+BRIDGE_HARD_INPUT_HTTP_ERROR = _env_bool("BRIDGE_HARD_INPUT_HTTP_ERROR", "false")
+BRIDGE_ALLOW_RAW_MEDIA_CONTEXT = _env_bool("BRIDGE_ALLOW_RAW_MEDIA_CONTEXT", "false")
 BRIDGE_MEDIA_CONTEXT_MODE = os.getenv("BRIDGE_MEDIA_CONTEXT_MODE", "metadata").lower()
 MEDIA_BLOCK_TYPES = {
     "image_url",
@@ -114,37 +86,13 @@ BRIDGE_LLM_HEALTH_MODEL = os.getenv("BRIDGE_LLM_HEALTH_MODEL", "big-boss")
 BRIDGE_LLM_HEALTH_FALLBACK_MODEL = os.getenv("BRIDGE_LLM_HEALTH_FALLBACK_MODEL", "edge-gemma")
 BRIDGE_LLM_HEALTH_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_LLM_HEALTH_TIMEOUT_SECONDS", "10"))
 BRIDGE_LLM_HEALTH_PROMPT = os.getenv("BRIDGE_LLM_HEALTH_PROMPT", "Antworte nur mit OK.")
-BRIDGE_ENABLE_LANGGRAPH_TOOL = os.getenv("BRIDGE_ENABLE_LANGGRAPH_TOOL", "false").lower() in {
-    "1",
-    "true",
-    "yes",
-}
+BRIDGE_ENABLE_LANGGRAPH_TOOL = _env_bool("BRIDGE_ENABLE_LANGGRAPH_TOOL", "false")
 BRIDGE_LANGGRAPH_TOOL_API_KEY = os.getenv("BRIDGE_LANGGRAPH_TOOL_API_KEY", "")
 BRIDGE_LANGGRAPH_TOOL_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_LANGGRAPH_TOOL_TIMEOUT_SECONDS", "120"))
-BRIDGE_SHOW_ERROR_CLASSIFICATION = os.getenv("BRIDGE_SHOW_ERROR_CLASSIFICATION", "true").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-BRIDGE_SCRUB_INTERNAL_CONTEXT = os.getenv("BRIDGE_SCRUB_INTERNAL_CONTEXT", "true").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-BRIDGE_ENABLE_CONTEXT_REFERENCES = os.getenv("BRIDGE_ENABLE_CONTEXT_REFERENCES", "true").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-BRIDGE_CONTEXT_REFERENCES_FETCH_URLS = os.getenv("BRIDGE_CONTEXT_REFERENCES_FETCH_URLS", "true").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
+BRIDGE_SHOW_ERROR_CLASSIFICATION = _env_bool("BRIDGE_SHOW_ERROR_CLASSIFICATION", "true")
+BRIDGE_SCRUB_INTERNAL_CONTEXT = _env_bool("BRIDGE_SCRUB_INTERNAL_CONTEXT", "true")
+BRIDGE_ENABLE_CONTEXT_REFERENCES = _env_bool("BRIDGE_ENABLE_CONTEXT_REFERENCES", "true")
+BRIDGE_CONTEXT_REFERENCES_FETCH_URLS = _env_bool("BRIDGE_CONTEXT_REFERENCES_FETCH_URLS", "true")
 BRIDGE_CONTEXT_REFERENCE_CONTEXT_LENGTH = int(
     os.getenv("BRIDGE_CONTEXT_REFERENCE_CONTEXT_LENGTH", str(BRIDGE_HARD_INPUT_TOKEN_LIMIT or 128000))
 )
@@ -443,6 +391,64 @@ def _is_ai_message(message: Any) -> bool:
 def _is_human_message(message: Any) -> bool:
     message_type = _message_type(message)
     return message_type in {"human", "user"} or "humanmessage" in message_type
+
+
+def _is_tool_message(message: Any) -> bool:
+    message_type = _message_type(message)
+    return message_type == "tool" or "toolmessage" in message_type
+
+
+def _get_value(obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _extract_tool_calls_from_message(message: Any) -> list[dict[str, Any]]:
+    raw = _get_value(message, "tool_calls", None)
+    if raw is None:
+        additional = _get_value(message, "additional_kwargs", {})
+        if isinstance(additional, dict):
+            raw = additional.get("tool_calls")
+    if not isinstance(raw, list):
+        return []
+
+    calls: list[dict[str, Any]] = []
+    for idx, item in enumerate(raw):
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function") if isinstance(item.get("function"), dict) else {}
+        name = item.get("name") or function.get("name") or item.get("title") or f"tool_{idx + 1}"
+        args = item.get("args")
+        if args is None:
+            args = function.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except Exception:
+                args = {"arguments": args}
+        calls.append(
+            {
+                "id": str(item.get("id") or item.get("tool_call_id") or f"call_{uuid.uuid4().hex[:12]}"),
+                "name": str(name),
+                "args": args if isinstance(args, dict) else {"value": args},
+            }
+        )
+    return calls
+
+
+def _extract_tool_result(message: Any) -> tuple[str, str, str] | None:
+    candidate = message.get("message") if isinstance(message, dict) and "message" in message else message
+    if not _is_tool_message(candidate) and not (
+        isinstance(candidate, dict) and ("tool_call_id" in candidate or candidate.get("type") == "tool")
+    ):
+        return None
+
+    tool_call_id = str(_get_value(candidate, "tool_call_id", "") or _get_value(candidate, "id", "") or "")
+    if not tool_call_id:
+        tool_call_id = f"call_{uuid.uuid4().hex[:12]}"
+    name = str(_get_value(candidate, "name", "") or _get_value(candidate, "tool", "") or "tool")
+    return tool_call_id, name, _message_content(candidate)
 
 
 def _last_ai_content(state: Any) -> str:
@@ -917,8 +923,8 @@ def _stream_event_data(part: Any) -> Any:
     return getattr(part, "data", None)
 
 
-def _extract_activity_text(part: Any) -> str:
-    if not BRIDGE_SHOW_ACTIVITY_EVENTS or BRIDGE_ACTIVITY_DETAIL == "off":
+def _extract_activity_text(part: Any, *, force: bool = False) -> str:
+    if not force and (not BRIDGE_SHOW_ACTIVITY_EVENTS or BRIDGE_ACTIVITY_DETAIL == "off"):
         return ""
 
     event = _stream_event_name(part)
@@ -1255,8 +1261,28 @@ def _response_message_item(content: str, *, item_id: str | None = None, status: 
         "type": "message",
         "status": status,
         "role": "assistant",
-        "content": [{"type": "output_text", "text": content, "annotations": []}],
+        "content": [{"type": "output_text", "text": content, "annotations": [], "logprobs": []}],
     }
+
+
+def _response_reasoning_item(
+    text: str,
+    *,
+    item_id: str | None = None,
+    status: str = "completed",
+    summary: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "id": item_id or f"reason_{uuid.uuid4().hex}",
+        "type": "reasoning",
+        "status": status,
+        "summary": summary or [],
+    }
+    if text:
+        item["content"] = [{"type": "reasoning_text", "text": text}]
+    else:
+        item["content"] = []
+    return item
 
 
 def _messages_to_input_items(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1379,6 +1405,7 @@ def _response_object(
     status: str = "completed",
     error: dict[str, Any] | None = None,
     incomplete_details: dict[str, Any] | None = None,
+    output_items: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     content = _visible_content(content)
     response_id = response_id or f"resp_{uuid.uuid4().hex}"
@@ -1392,7 +1419,9 @@ def _response_object(
         "status": status,
         "error": error,
         "incomplete_details": incomplete_details,
-        "output": [_response_message_item(content, item_id=item_id, status=status)] if status != "failed" else [],
+        "output": output_items
+        if output_items is not None
+        else ([_response_message_item(content, item_id=item_id, status=status)] if status != "failed" else []),
         "usage": _response_usage(messages, content) if status == "completed" else None,
         **_response_base_fields(body, model),
     }
@@ -1507,155 +1536,382 @@ def _response_created_payload(response_id: str, model: str, body: dict[str, Any]
     }
 
 
+def _output_text_part(text: str) -> dict[str, Any]:
+    return {"type": "output_text", "text": text, "annotations": [], "logprobs": []}
+
+
+def _json_tool_arguments(args: Any) -> str:
+    try:
+        return json.dumps(args if args is not None else {}, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return str(args or "")
+
+
+def _truncate_tool_output(text: str) -> str:
+    max_chars = max(0, BRIDGE_RESPONSES_TOOL_OUTPUT_MAX_CHARS)
+    if not max_chars or len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"\n\n[tool output truncated to {max_chars} chars]"
+
+
+def _stringify_tool_output(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if _is_tool_message(value) or _is_ai_message(value):
+        return _message_content(value)
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def _stream_messages_from_part(part: Any) -> list[Any]:
+    data = _stream_event_data(part)
+    if isinstance(data, tuple) and data:
+        return [data[0]]
+    if isinstance(data, list):
+        return list(data)
+    if isinstance(data, dict):
+        messages = data.get("messages")
+        if isinstance(messages, list):
+            return messages
+        if "chunk" in data:
+            return [data["chunk"]]
+        if "message" in data:
+            return [data["message"]]
+    return []
+
+
+def _tool_events_from_part(
+    part: Any,
+    seen_tool_calls: set[str],
+    seen_tool_updates: set[str],
+    tool_inputs: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not BRIDGE_RESPONSES_STREAM_TOOL_EVENTS:
+        return []
+
+    notifications: list[dict[str, Any]] = []
+    event = _stream_event_name(part)
+    data = _stream_event_data(part)
+
+    if event in {"on_tool_start", "tool_start"} and isinstance(data, dict):
+        raw_input = data.get("input") if isinstance(data.get("input"), dict) else {}
+        tool_name = str(data.get("name") or data.get("tool") or data.get("run_name") or "tool")
+        call_id = str(data.get("run_id") or data.get("tool_call_id") or f"call_{uuid.uuid4().hex[:12]}")
+        if call_id not in seen_tool_calls:
+            seen_tool_calls.add(call_id)
+            tool_inputs[call_id] = {"tool": tool_name, "args": raw_input}
+            notifications.append({"type": "call", "call_id": call_id, "name": tool_name, "args": raw_input})
+        return notifications
+
+    if event in {"on_tool_end", "tool_end", "on_tool_error", "tool_error"} and isinstance(data, dict):
+        call_id = str(data.get("run_id") or data.get("tool_call_id") or f"call_{uuid.uuid4().hex[:12]}")
+        raw = tool_inputs.get(call_id, {})
+        tool_name = str(raw.get("tool") or data.get("name") or data.get("tool") or "tool")
+        if call_id not in seen_tool_calls:
+            seen_tool_calls.add(call_id)
+            args = raw.get("args", {}) if isinstance(raw, dict) else {}
+            notifications.append({"type": "call", "call_id": call_id, "name": tool_name, "args": args})
+        if call_id not in seen_tool_updates:
+            seen_tool_updates.add(call_id)
+            output = data.get("output") if "output" in data else data.get("error", data.get("content", ""))
+            status = "failed" if "error" in event else "completed"
+            notifications.append(
+                {
+                    "type": "result",
+                    "call_id": call_id,
+                    "name": tool_name,
+                    "output": _stringify_tool_output(output),
+                    "status": status,
+                }
+            )
+        return notifications
+
+    for message in _stream_messages_from_part(part):
+        if _is_ai_message(message):
+            for call in _extract_tool_calls_from_message(message):
+                call_id = call["id"]
+                if call_id in seen_tool_calls:
+                    continue
+                seen_tool_calls.add(call_id)
+                tool_inputs[call_id] = {"tool": call["name"], "args": call.get("args", {})}
+                notifications.append(
+                    {
+                        "type": "call",
+                        "call_id": call_id,
+                        "name": call["name"],
+                        "args": call.get("args", {}),
+                    }
+                )
+        tool_result = _extract_tool_result(message)
+        if not tool_result:
+            continue
+        call_id, name, output = tool_result
+        if call_id not in seen_tool_calls:
+            seen_tool_calls.add(call_id)
+            raw = tool_inputs.get(call_id, {"args": {}})
+            notifications.append(
+                {
+                    "type": "call",
+                    "call_id": call_id,
+                    "name": str(raw.get("tool") or name),
+                    "args": raw.get("args", {}),
+                }
+            )
+        if call_id not in seen_tool_updates:
+            seen_tool_updates.add(call_id)
+            raw = tool_inputs.get(call_id, {})
+            notifications.append(
+                {
+                    "type": "result",
+                    "call_id": call_id,
+                    "name": str(raw.get("tool") or name),
+                    "output": output,
+                    "status": "completed",
+                }
+            )
+    return notifications
+
+
+class _ResponsesStreamBuilder:
+    def __init__(self, *, response_id: str, model: str, body: dict[str, Any], messages: list[dict[str, Any]]) -> None:
+        self.response_id = response_id
+        self.model = model
+        self.body = body
+        self.messages = messages
+        self.sequence_number = 0
+        self.output_items: list[dict[str, Any]] = []
+        self.full_content = ""
+        self.full_reasoning = ""
+        self.message_item: dict[str, Any] | None = None
+        self.message_content_index = 0
+        self.reasoning_item: dict[str, Any] | None = None
+        self.reasoning_content_index = 0
+
+    def event(self, event_type: str, **payload: Any) -> str:
+        data = {"type": event_type, "sequence_number": self.sequence_number, **payload}
+        self.sequence_number += 1
+        return _responses_event(event_type, data)
+
+    def start(self) -> list[str]:
+        created = _response_created_payload(self.response_id, self.model, self.body)
+        return [
+            self.event("response.created", response=created),
+            self.event("response.in_progress", response=created),
+        ]
+
+    def start_message(self, item_id: str) -> list[str]:
+        item = {
+            "id": item_id,
+            "type": "message",
+            "status": "in_progress",
+            "role": "assistant",
+            "content": [],
+        }
+        self.message_item = item
+        self.output_items.append(item)
+        output_index = self.output_items.index(item)
+        return [
+            self.event("response.output_item.added", output_index=output_index, item=item),
+            self.event(
+                "response.content_part.added",
+                item_id=item_id,
+                output_index=output_index,
+                content_index=self.message_content_index,
+                part=_output_text_part(""),
+            ),
+        ]
+
+    def text_delta(self, delta: str) -> str:
+        self.full_content += delta
+        output_index = self.output_items.index(self.message_item) if self.message_item in self.output_items else 0
+        return self.event(
+            "response.output_text.delta",
+            item_id=self.message_item["id"] if self.message_item else "",
+            output_index=output_index,
+            content_index=self.message_content_index,
+            delta=delta,
+            logprobs=[],
+        )
+
+    def finish_message(self) -> list[str]:
+        if self.message_item is None:
+            return []
+        output_index = self.output_items.index(self.message_item)
+        part = _output_text_part(self.full_content)
+        self.message_item["status"] = "completed"
+        self.message_item["content"] = [part]
+        return [
+            self.event(
+                "response.output_text.done",
+                item_id=self.message_item["id"],
+                output_index=output_index,
+                content_index=self.message_content_index,
+                text=self.full_content,
+                logprobs=[],
+            ),
+            self.event(
+                "response.content_part.done",
+                item_id=self.message_item["id"],
+                output_index=output_index,
+                content_index=self.message_content_index,
+                part=part,
+            ),
+            self.event("response.output_item.done", output_index=output_index, item=self.message_item),
+        ]
+
+    def _ensure_reasoning(self) -> list[str]:
+        if self.reasoning_item is not None:
+            return []
+        self.reasoning_item = _response_reasoning_item("", status="in_progress")
+        self.output_items.append(self.reasoning_item)
+        output_index = self.output_items.index(self.reasoning_item)
+        return [
+            self.event("response.output_item.added", output_index=output_index, item=self.reasoning_item),
+            self.event(
+                "response.content_part.added",
+                item_id=self.reasoning_item["id"],
+                output_index=output_index,
+                content_index=self.reasoning_content_index,
+                part={"type": "reasoning_text", "text": ""},
+            ),
+        ]
+
+    def reasoning_delta(self, delta: str) -> list[str]:
+        events = self._ensure_reasoning()
+        if self.reasoning_item is None:
+            return events
+        self.full_reasoning += delta
+        output_index = self.output_items.index(self.reasoning_item)
+        events.append(
+            self.event(
+                "response.reasoning.delta",
+                item_id=self.reasoning_item["id"],
+                output_index=output_index,
+                content_index=self.reasoning_content_index,
+                delta=delta,
+            )
+        )
+        return events
+
+    def finish_reasoning(self) -> list[str]:
+        if self.reasoning_item is None:
+            return []
+        output_index = self.output_items.index(self.reasoning_item)
+        part = {"type": "reasoning_text", "text": self.full_reasoning}
+        self.reasoning_item["status"] = "completed"
+        self.reasoning_item["content"] = [part]
+        return [
+            self.event(
+                "response.reasoning.done",
+                item_id=self.reasoning_item["id"],
+                output_index=output_index,
+                content_index=self.reasoning_content_index,
+                text=self.full_reasoning,
+            ),
+            self.event(
+                "response.content_part.done",
+                item_id=self.reasoning_item["id"],
+                output_index=output_index,
+                content_index=self.reasoning_content_index,
+                part=part,
+            ),
+            self.event("response.output_item.done", output_index=output_index, item=self.reasoning_item),
+        ]
+
+    def tool_call(self, call_id: str, name: str, args: Any) -> list[str]:
+        arguments = _json_tool_arguments(args)
+        item = {
+            "id": f"fc_{uuid.uuid4().hex}",
+            "type": "function_call",
+            "call_id": call_id,
+            "name": name,
+            "arguments": "",
+            "status": "in_progress",
+        }
+        self.output_items.append(item)
+        output_index = self.output_items.index(item)
+        events = [self.event("response.output_item.added", output_index=output_index, item=item)]
+        if arguments:
+            item["arguments"] = arguments
+            events.append(
+                self.event(
+                    "response.function_call_arguments.delta",
+                    item_id=item["id"],
+                    output_index=output_index,
+                    call_id=call_id,
+                    delta=arguments,
+                )
+            )
+        events.append(
+            self.event(
+                "response.function_call_arguments.done",
+                item_id=item["id"],
+                output_index=output_index,
+                call_id=call_id,
+                arguments=arguments,
+            )
+        )
+        item["status"] = "completed"
+        events.append(self.event("response.output_item.done", output_index=output_index, item=item))
+        return events
+
+    def tool_result(self, call_id: str, output: str, status: str = "completed") -> list[str]:
+        item = {
+            "id": f"fco_{uuid.uuid4().hex}",
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": _truncate_tool_output(_visible_content(output)),
+            "status": status,
+        }
+        self.output_items.append(item)
+        output_index = self.output_items.index(item)
+        return [
+            self.event("response.output_item.added", output_index=output_index, item=item),
+            self.event("response.output_item.done", output_index=output_index, item=item),
+        ]
+
+    def response_object(self, *, status: str = "completed") -> dict[str, Any]:
+        return _response_object(
+            self.full_content,
+            self.model,
+            self.response_id,
+            body=self.body,
+            messages=self.messages,
+            status=status,
+            output_items=self.output_items,
+        )
+
+
 async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIterator[str]:
     started = time.perf_counter()
     model = str(body.get("model") or OPENAI_MODEL_NAME)
     messages = _responses_messages_for_body(body)
     response_id = f"resp_{uuid.uuid4().hex}"
     item_id = f"msg_{uuid.uuid4().hex}"
+    builder = _ResponsesStreamBuilder(response_id=response_id, model=model, body=body, messages=messages)
     hard_error = _hard_input_error(messages)
+
+    for event in builder.start():
+        yield event
+    for event in builder.start_message(item_id):
+        yield event
+
     if hard_error:
-        yield _responses_event(
-            "response.created",
-            {
-                "type": "response.created",
-                "sequence_number": 0,
-                "response": _response_created_payload(response_id, model, body),
-            },
-        )
-        yield _responses_event(
-            "response.in_progress",
-            {
-                "type": "response.in_progress",
-                "sequence_number": 1,
-                "response": _response_created_payload(response_id, model, body),
-            },
-        )
-        yield _responses_event(
-            "response.output_item.added",
-            {
-                "type": "response.output_item.added",
-                "sequence_number": 2,
-                "output_index": 0,
-                "item": {
-                    "id": item_id,
-                    "type": "message",
-                    "status": "in_progress",
-                    "role": "assistant",
-                    "content": [],
-                },
-            },
-        )
-        yield _responses_event(
-            "response.content_part.added",
-            {
-                "type": "response.content_part.added",
-                "sequence_number": 3,
-                "item_id": item_id,
-                "output_index": 0,
-                "content_index": 0,
-                "part": {"type": "output_text", "text": "", "annotations": []},
-            },
-        )
-        yield _responses_event(
-            "response.output_text.delta",
-            {
-                "type": "response.output_text.delta",
-                "sequence_number": 4,
-                "item_id": item_id,
-                "output_index": 0,
-                "content_index": 0,
-                "delta": hard_error,
-            },
-        )
-        yield _responses_event(
-            "response.output_text.done",
-            {
-                "type": "response.output_text.done",
-                "sequence_number": 5,
-                "item_id": item_id,
-                "output_index": 0,
-                "content_index": 0,
-                "text": hard_error,
-            },
-        )
-        yield _responses_event(
-            "response.content_part.done",
-            {
-                "type": "response.content_part.done",
-                "sequence_number": 6,
-                "item_id": item_id,
-                "output_index": 0,
-                "content_index": 0,
-                "part": {"type": "output_text", "text": hard_error, "annotations": []},
-            },
-        )
-        response = _response_object(hard_error, model, response_id, item_id=item_id, body=body, messages=messages)
+        yield builder.text_delta(hard_error)
+        for event in builder.finish_message():
+            yield event
+        response = builder.response_object()
         _store_response_object(response, body)
-        yield _responses_event(
-            "response.output_item.done",
-            {
-                "type": "response.output_item.done",
-                "sequence_number": 7,
-                "output_index": 0,
-                "item": response["output"][0],
-            },
-        )
-        yield _responses_event(
-            "response.completed",
-            {"type": "response.completed", "sequence_number": 8, "response": response},
-        )
+        yield builder.event("response.completed", response=response)
         if done := _done_sentinel():
             yield done
         return
-
-    sequence_number = 0
-    yield _responses_event(
-        "response.created",
-        {
-            "type": "response.created",
-            "sequence_number": sequence_number,
-            "response": _response_created_payload(response_id, model, body),
-        },
-    )
-    sequence_number += 1
-    yield _responses_event(
-        "response.in_progress",
-        {
-            "type": "response.in_progress",
-            "sequence_number": sequence_number,
-            "response": _response_created_payload(response_id, model, body),
-        },
-    )
-    sequence_number += 1
-    yield _responses_event(
-        "response.output_item.added",
-        {
-            "type": "response.output_item.added",
-            "sequence_number": sequence_number,
-            "output_index": 0,
-            "item": {
-                "id": item_id,
-                "type": "message",
-                "status": "in_progress",
-                "role": "assistant",
-                "content": [],
-            },
-        },
-    )
-    sequence_number += 1
-    yield _responses_event(
-        "response.content_part.added",
-        {
-            "type": "response.content_part.added",
-            "sequence_number": sequence_number,
-            "item_id": item_id,
-            "output_index": 0,
-            "content_index": 0,
-            "part": {"type": "output_text", "text": "", "annotations": []},
-        },
-    )
-    sequence_number += 1
 
     chat_body = dict(body)
     chat_body["messages"] = messages
@@ -1675,59 +1931,14 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
     )
 
     if run_payload.get("direct_response"):
-        content = str(run_payload["direct_response"])
-        yield _responses_event(
-            "response.output_text.delta",
-            {
-                "type": "response.output_text.delta",
-                "sequence_number": sequence_number,
-                "item_id": item_id,
-                "output_index": 0,
-                "content_index": 0,
-                "delta": content,
-            },
-        )
-        sequence_number += 1
-        yield _responses_event(
-            "response.output_text.done",
-            {
-                "type": "response.output_text.done",
-                "sequence_number": sequence_number,
-                "item_id": item_id,
-                "output_index": 0,
-                "content_index": 0,
-                "text": content,
-            },
-        )
-        sequence_number += 1
-        yield _responses_event(
-            "response.content_part.done",
-            {
-                "type": "response.content_part.done",
-                "sequence_number": sequence_number,
-                "item_id": item_id,
-                "output_index": 0,
-                "content_index": 0,
-                "part": {"type": "output_text", "text": content, "annotations": []},
-            },
-        )
-        sequence_number += 1
-        response = _response_object(content, model, response_id, item_id=item_id, body=body, messages=messages)
-        yield _responses_event(
-            "response.output_item.done",
-            {
-                "type": "response.output_item.done",
-                "sequence_number": sequence_number,
-                "output_index": 0,
-                "item": response["output"][0],
-            },
-        )
-        sequence_number += 1
+        content = _visible_content(str(run_payload["direct_response"]))
+        if content:
+            yield builder.text_delta(content)
+        for event in builder.finish_message():
+            yield event
+        response = builder.response_object()
         _store_response_object(response, body)
-        yield _responses_event(
-            "response.completed",
-            {"type": "response.completed", "sequence_number": sequence_number, "response": response},
-        )
+        yield builder.event("response.completed", response=response)
         if done := _done_sentinel():
             yield done
         _log_event(
@@ -1742,103 +1953,130 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
         )
         return
 
-    full_content = ""
-    full_reasoning = ""
-    async for raw in _stream_chat_events(client, thread_id, run_payload, model, include_activity=False):
-        if raw.strip() == "data: [DONE]":
-            break
-        if not raw.startswith("data: "):
-            continue
-        try:
-            payload = json.loads(raw.removeprefix("data: ").strip())
-        except Exception:
-            continue
-        choice = payload.get("choices", [{}])[0]
-        delta = choice.get("delta", {}) if isinstance(choice, dict) else {}
-        text_delta = str(delta.get("content") or "")
-        reasoning_delta = str(delta.get(BRIDGE_REASONING_DELTA_FIELD) or "")
-        if reasoning_delta:
-            full_reasoning += reasoning_delta
-            yield _responses_event(
-                "response.reasoning_text.delta",
-                {
-                    "type": "response.reasoning_text.delta",
-                    "sequence_number": sequence_number,
-                    "item_id": item_id,
-                    "output_index": 0,
-                    "content_index": 0,
-                    "delta": reasoning_delta,
-                },
-            )
-            sequence_number += 1
-        if text_delta:
-            full_content += text_delta
-            yield _responses_event(
-                "response.output_text.delta",
-                {
-                    "type": "response.output_text.delta",
-                    "sequence_number": sequence_number,
-                    "item_id": item_id,
-                    "output_index": 0,
-                    "content_index": 0,
-                    "delta": text_delta,
-                },
-            )
-            sequence_number += 1
+    saw_token = False
+    emitted = ""
+    emitted_reasoning = ""
+    emitted_activity: set[str] = set()
+    seen_tool_calls: set[str] = set()
+    seen_tool_updates: set[str] = set()
+    tool_inputs: dict[str, dict[str, Any]] = {}
+    content_scrubber = StreamingInternalContextScrubber() if BRIDGE_SCRUB_INTERNAL_CONTEXT else None
+    reasoning_scrubber = StreamingInternalContextScrubber() if BRIDGE_SCRUB_INTERNAL_CONTEXT else None
 
-    if full_reasoning:
-        yield _responses_event(
-            "response.reasoning_text.done",
-            {
-                "type": "response.reasoning_text.done",
-                "sequence_number": sequence_number,
-                "item_id": item_id,
-                "output_index": 0,
-                "content_index": 0,
-                "text": full_reasoning,
-            },
+    stream_kwargs: dict[str, Any] = {
+        "stream_mode": ["messages", "updates"],
+        "multitask_strategy": "interrupt",
+    }
+    if "command" in run_payload:
+        stream_kwargs["command"] = run_payload["command"]
+    else:
+        stream_kwargs["input"] = run_payload["input"]
+
+    try:
+        async with asyncio.timeout(BRIDGE_RUN_TIMEOUT_SECONDS):
+            async for part in client.runs.stream(thread_id, LANGGRAPH_ASSISTANT_ID, **stream_kwargs):
+                activity = _extract_activity_text(part, force=BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS)
+                if BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS and activity and activity not in emitted_activity:
+                    emitted_activity.add(activity)
+                    for event in builder.reasoning_delta(f"Status: {activity}\n"):
+                        yield event
+
+                for notification in _tool_events_from_part(
+                    part,
+                    seen_tool_calls,
+                    seen_tool_updates,
+                    tool_inputs,
+                ):
+                    if notification["type"] == "call":
+                        for event in builder.tool_call(
+                            str(notification["call_id"]),
+                            str(notification["name"]),
+                            notification.get("args", {}),
+                        ):
+                            yield event
+                    elif notification["type"] == "result":
+                        for event in builder.tool_result(
+                            str(notification["call_id"]),
+                            str(notification.get("output", "")),
+                            status=str(notification.get("status") or "completed"),
+                        ):
+                            yield event
+
+                reasoning = _extract_stream_reasoning(part)
+                reasoning_delta = reasoning if _stream_part_is_delta(part) else _delta_text(reasoning, emitted_reasoning)
+                if reasoning_delta:
+                    emitted_reasoning += reasoning_delta
+                    visible_reasoning_delta = (
+                        reasoning_scrubber.feed(reasoning_delta) if reasoning_scrubber else reasoning_delta
+                    )
+                    if visible_reasoning_delta:
+                        for event in builder.reasoning_delta(visible_reasoning_delta):
+                            yield event
+
+                text = _extract_stream_text(part)
+                delta = text if _stream_part_is_delta(part) else _delta_text(text, emitted)
+                if delta:
+                    emitted += delta
+                    visible_delta = content_scrubber.feed(delta) if content_scrubber else delta
+                    if visible_delta:
+                        saw_token = True
+                        yield builder.text_delta(visible_delta)
+    except TimeoutError as exc:
+        _log_exception(
+            "bridge.responses_stream.timeout",
+            exc,
+            level=logging.ERROR,
+            dependency="langgraph-api",
+            response_id=response_id,
+            thread_id=thread_id,
+            timeout_seconds=BRIDGE_RUN_TIMEOUT_SECONDS,
+            emitted_chars=len(emitted),
+            emitted_reasoning_chars=len(emitted_reasoning),
         )
-        sequence_number += 1
-    yield _responses_event(
-        "response.output_text.done",
-        {
-            "type": "response.output_text.done",
-            "sequence_number": sequence_number,
-            "item_id": item_id,
-            "output_index": 0,
-            "content_index": 0,
-            "text": full_content,
-        },
-    )
-    sequence_number += 1
-    yield _responses_event(
-        "response.content_part.done",
-        {
-            "type": "response.content_part.done",
-            "sequence_number": sequence_number,
-            "item_id": item_id,
-            "output_index": 0,
-            "content_index": 0,
-            "part": {"type": "output_text", "text": full_content, "annotations": []},
-        },
-    )
-    sequence_number += 1
-    response = _response_object(full_content, model, response_id, item_id=item_id, body=body, messages=messages)
-    yield _responses_event(
-        "response.output_item.done",
-        {
-            "type": "response.output_item.done",
-            "sequence_number": sequence_number,
-            "output_index": 0,
-            "item": response["output"][0],
-        },
-    )
-    sequence_number += 1
+        yield builder.text_delta(_clean_error_message(exc))
+        saw_token = True
+    except Exception as exc:
+        _log_exception(
+            "bridge.responses_stream.failed",
+            exc,
+            level=logging.ERROR,
+            dependency="langgraph-api",
+            response_id=response_id,
+            thread_id=thread_id,
+            emitted_chars=len(emitted),
+            emitted_reasoning_chars=len(emitted_reasoning),
+        )
+        yield builder.text_delta(_clean_error_message(exc))
+        saw_token = True
+
+    if not saw_token:
+        try:
+            state = await client.threads.get_state(thread_id)
+            content = _last_ai_content(state.get("values", state))
+        except Exception as exc:
+            content = _clean_error_message(exc)
+        if content:
+            visible = _visible_content(content)
+            if visible:
+                yield builder.text_delta(visible)
+
+    if reasoning_scrubber:
+        reasoning_tail = reasoning_scrubber.flush()
+        if reasoning_tail:
+            for event in builder.reasoning_delta(reasoning_tail):
+                yield event
+    if content_scrubber:
+        content_tail = content_scrubber.flush()
+        if content_tail:
+            yield builder.text_delta(content_tail)
+
+    for event in builder.finish_reasoning():
+        yield event
+    for event in builder.finish_message():
+        yield event
+    response = builder.response_object()
     _store_response_object(response, body)
-    yield _responses_event(
-        "response.completed",
-        {"type": "response.completed", "sequence_number": sequence_number, "response": response},
-    )
+    yield builder.event("response.completed", response=response)
     if done := _done_sentinel():
         yield done
     _log_event(
@@ -1848,8 +2086,8 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
         thread_id=thread_id,
         model=model,
         direct_response=False,
-        output_chars=len(full_content),
-        reasoning_chars=len(full_reasoning),
+        output_chars=len(builder.full_content),
+        reasoning_chars=len(builder.full_reasoning),
         elapsed_seconds=round(time.perf_counter() - started, 3),
     )
 
