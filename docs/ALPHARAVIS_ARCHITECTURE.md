@@ -97,6 +97,15 @@ HERMES_MODEL=hermes-agent
 For containers to reach a host-running Hermes gateway on Linux, Hermes should
 bind to `API_SERVER_HOST=0.0.0.0` rather than only `127.0.0.1`.
 
+Docker builds do not modify the upstream `hermes-agent` submodule directly.
+Instead, the Hermes containers apply parent-repo patches from
+`patches/hermes-agent/` to `/opt/hermes` at startup via
+`scripts/hermes_patched_entrypoint.sh`, which calls
+`scripts/apply_hermes_agent_patches.sh` before delegating to the original Hermes
+entrypoint. If Hermes startup or kanban migration behavior differs from
+upstream, check `docs/ALPHARAVIS_CHANGES.md`, the Compose Hermes entrypoint, and
+those patch files first.
+
 LangGraph can call Hermes through the `hermes_coding_agent` swarm worker when:
 
 ```text

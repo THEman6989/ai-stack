@@ -101,6 +101,7 @@ services:
       dockerfile: Dockerfile
     image: alpharavis/hermes-agent:local
     container_name: hermes-agent
+    entrypoint: ["/usr/bin/tini", "-g", "--", "/workspace/scripts/hermes_patched_entrypoint.sh"]
     ports:
       - "8642:8642"
     volumes:
@@ -142,6 +143,7 @@ services:
       dockerfile: Dockerfile
     image: alpharavis/hermes-agent:local
     container_name: hermes-dashboard
+    entrypoint: ["/usr/bin/tini", "-g", "--", "/workspace/scripts/hermes_patched_entrypoint.sh"]
     profiles:
       - hermes-dashboard
     ports:

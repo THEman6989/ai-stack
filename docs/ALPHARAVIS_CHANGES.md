@@ -158,3 +158,64 @@ Detailed follow-up plan:
 ```text
 docs/ALPHARAVIS_RESPONSES_FULL_STREAMING_PLAN.md
 ```
+
+## 2026-05-11 - Hermes-Agent Local Patch Handling
+
+### Summary
+
+AlphaRavis keeps upstream `hermes-agent` as a submodule, but local fixes that
+are needed for this stack live in the parent repo under:
+
+```text
+patches/hermes-agent/
+```
+
+The Docker containers apply those patches automatically at startup through:
+
+```text
+scripts/apply_hermes_agent_patches.sh
+```
+
+`docker-compose.yml` builds Hermes from the upstream submodule, mounts the
+parent repo read-only at `/workspace`, and uses
+`scripts/hermes_patched_entrypoint.sh` as a wrapper around the original Hermes
+entrypoint. The wrapper runs the patch script against `/opt/hermes`, then hands
+control back to `/opt/hermes/docker/entrypoint.sh`.
+
+```text
+alpharavis/hermes-agent:local
+```
+
+### Why This Exists
+
+Submodule commits must exist in their own upstream repository. If the parent
+repo points at a local-only `hermes-agent` commit, other machines and GitHub
+cannot reproduce the checkout. Storing AlphaRavis-specific changes as parent
+repo patches keeps the submodule clean and makes local changes reproducible.
+
+### Current Hermes Patch
+
+```text
+patches/hermes-agent/kanban-db-duplicate-column-guard.patch
+```
+
+This patch makes Hermes kanban optional-column migrations tolerate SQLite
+`duplicate column name` races/errors for these columns:
+
+- `consecutive_failures`
+- `worker_pid`
+- `last_failure_error`
+
+If Hermes kanban/task startup fails around duplicate SQLite columns, check this
+patch and the Hermes startup patch command first.
+
+### Manual Development Helper
+
+For local debugging outside Docker, apply the same patch directly to the
+submodule with:
+
+```bash
+scripts/apply_hermes_agent_patches.sh
+```
+
+The normal Docker path does not require this manual step.

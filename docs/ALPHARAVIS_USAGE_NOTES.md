@@ -291,6 +291,18 @@ ALPHARAVIS_ENABLE_HERMES_AGENT=false
 
 Keep `ALPHARAVIS_ENABLE_HERMES_AGENT=false` until Hermes is actually reachable.
 
+The Hermes Docker services automatically apply local parent-repo patches from:
+
+```text
+patches/hermes-agent/
+```
+
+The upstream `hermes-agent` submodule should stay clean. The container startup
+entrypoint wrapper runs `scripts/apply_hermes_agent_patches.sh` against
+`/opt/hermes` before starting Hermes. For local non-Docker debugging, run the
+same script without `HERMES_PATCH_TARGET_DIR` to apply the patch set to the
+submodule.
+
 Reverse mode is disabled by default:
 
 ```text
