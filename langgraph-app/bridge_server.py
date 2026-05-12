@@ -734,6 +734,7 @@ def _extract_tool_result(message: Any) -> tuple[str, str, str] | None:
 
 
 def _last_ai_content(state: Any) -> str:
+    state = _state_values(state)
     messages = state.get("messages", []) if isinstance(state, dict) else []
     trailing_notices: list[str] = []
     for message in reversed(messages):

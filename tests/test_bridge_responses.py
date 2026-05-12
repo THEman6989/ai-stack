@@ -128,18 +128,28 @@ class _FakeThreads:
 
 
 class _FakeRuns:
-    def __init__(self, parts: list[dict]) -> None:
+    def __init__(self, parts: list[dict], *, wait_state: dict | None = None) -> None:
         self.parts = parts
+        self.wait_state = wait_state or {"values": {"messages": []}}
 
     async def stream(self, *args, **kwargs):
         for part in self.parts:
             yield part
 
+    async def wait(self, *args, **kwargs) -> dict:
+        return self.wait_state
+
 
 class _FakeClient:
-    def __init__(self, parts: list[dict], *, state: dict | None = None) -> None:
+    def __init__(
+        self,
+        parts: list[dict],
+        *,
+        state: dict | None = None,
+        wait_state: dict | None = None,
+    ) -> None:
         self.threads = _FakeThreads(state)
-        self.runs = _FakeRuns(parts)
+        self.runs = _FakeRuns(parts, wait_state=wait_state)
 
 
 def _parse_sse_events(chunks: list[str]) -> list[dict]:
@@ -359,6 +369,23 @@ def test_response_store_honors_store_flag() -> None:
 
     assert "resp_store" in bridge_server._RESPONSES_STORE
     assert "resp_skip" not in bridge_server._RESPONSES_STORE
+
+
+def test_run_wait_content_reads_nested_langgraph_values_state() -> None:
+    client = _FakeClient(
+        [],
+        wait_state={"values": {"messages": [_FakeMessage("ai", "RESPONSES_AGENT_OK")]}},
+    )
+
+    content = asyncio.run(
+        bridge_server._run_wait_content(
+            client,
+            "thread_nested_values",
+            {"input": {"messages": [{"role": "user", "content": "Hi"}]}},
+        )
+    )
+
+    assert content == "RESPONSES_AGENT_OK"
 
 
 def test_previous_response_id_adds_stored_output_context() -> None:

@@ -60,6 +60,19 @@ Still needed:
     text to the client
   - this requires orchestration changes because current DeepAgents workers keep
     tools bound on final answer turns too
+- Profile and reduce normal agent-path latency. Live Docker measurements on
+  2026-05-12 showed:
+  - direct LiteLLM chat call: about `1.8 s`
+  - Bridge fast path: about `2.3 s`
+  - Bridge `/v1/responses` agent path with `kein fast path`: about `54 s`
+  - the same run spent about `29.8 s` in the planner call, then continued into
+    the worker/model stage
+  - queued runs can add large apparent latency because the current local
+    LangGraph runtime reported only one active background worker
+  Follow-up: measure streaming first-token latency separately, then decide
+  whether to shorten/bypass planner work for trivial prompts, increase local
+  worker concurrency where safe, or route simple UI greetings through the fast
+  path earlier.
 
 ## Custom Model / Power Management
 
@@ -529,6 +542,24 @@ ALPHARAVIS_VIDEO_ANALYSIS_TRANSCRIBE_AUDIO=false
       before LangGraph sees it. Implemented for Bridge-facing HTTP(S) and
       inline `data:` video blocks; rewriting the visible LibreChat message card
       itself remains intentionally out of scope for this phase.
+  12. Run a real Docker/LibreChat upload smoke:
+      - send a chat video through LibreChat
+      - verify the Bridge registers it in `media-gallery`
+      - verify the stable gallery URL appears in AlphaRavis-facing context
+      - verify the gallery card is created and the stored bytes resolve through
+        the media service URL
+  13. Investigate an explicit LibreChat-visible rewrite phase:
+      - either rewrite the persisted LibreChat message/file metadata to the
+        Media Gallery URL
+      - or keep LibreChat's native attachment UI untouched and add a clearly
+        linked gallery reference beside it
+      - document the MongoDB/file-system mutation boundary before enabling this
+        path, because this changes what the operator sees in historical chats
+  14. Promote lightweight motion previews from "possible" to a measured UI
+      follow-up:
+      - poster first
+      - muted hover/focus preview or tiny generated preview clip
+      - no full autoplay grid until desktop/mobile performance is measured
 
   Acceptance:
 
@@ -544,6 +575,8 @@ ALPHARAVIS_VIDEO_ANALYSIS_TRANSCRIBE_AUDIO=false
     preparation tool and stays within FPS/frame/download caps.
   - The UI can show many videos without starting all full video streams at
     once.
+  - A single card can expose a deliberate moving preview without turning the
+    whole gallery into an autoplay wall.
   - `ALPHARAVIS_VIDEO_ANALYSIS_MAX_FRAMES=100` keeps a one-hour video bounded
     near 100 sampled frames, while a ten-second video samples up to ten frames
     at the default one frame per second.

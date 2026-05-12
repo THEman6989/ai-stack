@@ -4,6 +4,34 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-12 - Bridge Non-Streaming Agent Output Extraction
+
+### Summary
+
+The Bridge now unwraps LangGraph `{"values": ...}` state objects before reading
+the final AI message. This fixes successful non-streaming `/v1/responses`
+agent-path runs that previously completed with an empty `output_text` because
+the Bridge looked for `messages` on the wrapper object instead of inside
+`values`.
+
+### Verification
+
+```text
+pytest -q tests/test_bridge_responses.py
+```
+
+Live Docker retest after recreating `langgraph-api` and `api-bridge`:
+
+```text
+POST /v1/responses
+  input="kein fast path. Antworte exakt: RESP_AGENT_AFTER_FIX_OK"
+  -> 200, output_text="RESP_AGENT_AFTER_FIX_OK"
+
+POST /v1/chat/completions
+  user="Antworte exakt mit CHAT_AFTER_FIX_OK"
+  -> 200, content contains "CHAT_AFTER_FIX_OK"
+```
+
 ## 2026-05-12 - Bridge Mirrors Incoming Chat Videos Into Media Gallery
 
 ### Summary
