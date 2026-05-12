@@ -69,10 +69,17 @@ Still needed:
     the worker/model stage
   - queued runs can add large apparent latency because the current local
     LangGraph runtime reported only one active background worker
-  Follow-up: measure streaming first-token latency separately, then decide
-  whether to shorten/bypass planner work for trivial prompts, increase local
-  worker concurrency where safe, or route simple UI greetings through the fast
-  path earlier.
+  Implemented diagnostic aid: `bridge-test-ui` now includes a request
+  waterfall trace, and the Bridge propagates a `trace_id` into LangGraph input
+  for non-streaming Responses/Chat Completions runs. Follow-up tracing showed
+  the 50s agent-path case was dominated by planner output (~28s and 62k chars)
+  plus slow semantic memory prefetch (~20s). Planner calls are now capped and
+  memory prefetch has a default 4s per-step timeout; a Docker smoke then reduced
+  the same forced agent-path probe to about `11.2 s`.
+  Follow-up: measure streaming first-token latency separately, add equivalent
+  trace events for streaming SSE, then decide whether to shorten/bypass planner
+  work for trivial prompts, increase local worker concurrency where safe, or
+  route simple UI greetings through the fast path earlier.
 
 ## Custom Model / Power Management
 

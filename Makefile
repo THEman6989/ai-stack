@@ -14,7 +14,7 @@ UPDATE_BUILD ?= yes
 UPDATE_START ?= yes
 UPDATE_PROFILES ?= prompt
 
-.PHONY: help install install-fullstreaming install-hybrid install-nonstreaming install-chat install-chat-fullstreaming install-chat-nonstreaming configure profiles streaming fullstreaming full-streaming hybrid-streaming nonstreaming chat-completions chat-fullstreaming chat-nonstreaming model-management owner-model-management media-vision video-analysis openwebui update update-no-start status up up-fullstreaming up-chat-fullstreaming down logs submodules build bridge-smoke hermes-smoke media-smoke openwebui-smoke
+.PHONY: help install install-fullstreaming install-hybrid install-nonstreaming install-chat install-chat-fullstreaming install-chat-nonstreaming configure profiles streaming fullstreaming full-streaming hybrid-streaming nonstreaming chat-completions chat-fullstreaming chat-nonstreaming model-management owner-model-management media-vision video-analysis openwebui update update-no-start status up up-fullstreaming up-chat-fullstreaming test-ui down logs submodules build bridge-smoke hermes-smoke media-smoke openwebui-smoke
 
 help:
 	@printf '%s\n' \
@@ -33,6 +33,7 @@ help:
 		'  make up                      # docker compose up -d --build' \
 		'  make up-fullstreaming        # set full streaming, then recreate langgraph-api/api-bridge' \
 		'  make up-chat-fullstreaming   # set Chat Completions streaming, then recreate langgraph-api/api-bridge' \
+		'  make test-ui                 # start minimal Bridge test UI on port 8140' \
 		'  make down | make logs | make status' \
 		'' \
 		'Smoke checks:' \
@@ -122,6 +123,9 @@ up-fullstreaming:
 up-chat-fullstreaming:
 	$(PYTHON) scripts/alpharavis_setup.py streaming --streaming-mode chat-full
 	$(COMPOSE) up -d --build --force-recreate langgraph-api api-bridge
+
+test-ui:
+	$(COMPOSE) up -d --build bridge-test-ui
 
 down:
 	$(COMPOSE) down

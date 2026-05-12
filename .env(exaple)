@@ -130,6 +130,7 @@ ALPHARAVIS_DEEPAGENTS_RESPONSES_OUTPUT_VERSION=responses/v1
 #   false        = full Responses streaming; still experimental with tools
 ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
 ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
+ALPHARAVIS_FORCE_TEXT_ONLY_AGENT_MODEL_CONTENT=true
 # Optional experimental patch for full Responses tool streaming. Leave false
 # unless you are actively probing ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false.
 ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=false
@@ -778,6 +779,7 @@ ALPHARAVIS_CROSS_THREAD_ARCHIVE_SEARCH_LIMIT=3
 # turns for later search, and feeds durable hints into compression.
 # Allowed values: true, false
 ALPHARAVIS_ENABLE_MEMORY_KERNEL=true
+ALPHARAVIS_MEMORY_PREFETCH_STEP_TIMEOUT_SECONDS=4
 
 # Number of user turns between invisible memory nudges to the agents.
 # Set 0 to disable nudges.
@@ -1147,6 +1149,9 @@ ALPHARAVIS_ENABLE_PLANNER_NODE=true
 ALPHARAVIS_PLANNER_MIN_QUERY_CHARS=500
 ALPHARAVIS_PLANNER_MAX_CHARS=1800
 ALPHARAVIS_PLANNER_TIMEOUT_SECONDS=45
+ALPHARAVIS_PLANNER_MAX_TOKENS=768
+ALPHARAVIS_PLANNER_TEMPERATURE=0
+ALPHARAVIS_PLANNER_DISABLE_THINKING=true
 ALPHARAVIS_TASK_BRIEF_MAX_CHARS=2000
 
 # Agent handoff safety. Before the swarm starts, AlphaRavis can use the shared

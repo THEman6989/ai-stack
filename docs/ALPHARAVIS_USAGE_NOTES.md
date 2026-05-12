@@ -12,6 +12,25 @@ request into the LangGraph `alpha_ravis` brain.
 Use LangGraph Studio or DeepAgents UI when you want to inspect internal graph
 steps, state, checkpoints, run profiles, memory compression, or agent routing.
 
+For debugging LibreChat-specific issues, start the minimal Bridge test UI:
+
+```bash
+make test-ui
+```
+
+Then open:
+
+```text
+http://localhost:8140
+```
+
+This UI keeps only an in-browser RAM chat history, sends through
+`bridge-test-ui -> api-bridge`, and can switch between Responses and Chat
+Completions. It intentionally does not use LibreChat storage, presets, or UI
+state. The Trace panel shows a small waterfall for the current request so you
+can see whether time is spent in the browser/test UI, Bridge setup, LangGraph
+wait, fast-chat primary model call, fallback model call, or backend failure.
+
 ## Fast Path
 
 Short non-tool questions can take the fast path. This path:

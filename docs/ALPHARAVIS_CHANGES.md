@@ -4,6 +4,125 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-12 - Bridge Test UI Waterfall Trace
+
+### Summary
+
+`bridge-test-ui` now shows a per-request waterfall trace. Each request gets a
+`trace_id` in metadata and the Bridge carries it through to LangGraph input.
+The UI displays browser/server elapsed time plus Bridge and LangGraph timing
+steps such as thread setup, run payload preparation, LangGraph wait duration,
+fast-chat start, primary/fallback LLM call duration, and completion/failure.
+The browser code avoids hard dependencies on `crypto.randomUUID` and disables
+HTML caching so a reload picks up the current test UI script.
+
+This is intentionally local and lightweight. It complements LangSmith instead
+of replacing it: LangSmith can inspect LangGraph internals, while this trace is
+focused on the operator path from browser to Bridge to LangGraph/model backend.
+
+The trace was expanded to cover the normal agent path, including route
+decision, planner duration, memory prefetch, skill lookup, handoff guard, and
+swarm start/finish markers.
+
+Agent-path latency was reduced by bounding two previously unbounded or
+over-large steps:
+
+- Planner calls now default to `ALPHARAVIS_PLANNER_MAX_TOKENS=768`,
+  `ALPHARAVIS_PLANNER_TEMPERATURE=0`, and
+  `ALPHARAVIS_PLANNER_DISABLE_THINKING=true`.
+- Memory-kernel prefetch substeps now default to
+  `ALPHARAVIS_MEMORY_PREFETCH_STEP_TIMEOUT_SECONDS=4`, so slow
+  semantic/pgvector retrieval cannot block every agent-path reply for ~20s.
+- DeepAgents model calls are forced through text-only content normalization by
+  default (`ALPHARAVIS_FORCE_TEXT_ONLY_AGENT_MODEL_CONTENT=true`). This keeps
+  middleware-generated `content[].type` blocks from reaching local
+  OpenAI-compatible llama.cpp/LiteLLM backends that only accept string message
+  content.
+
+### Verification
+
+```text
+PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile \
+  langgraph-app/test_ui_server.py \
+  langgraph-app/bridge_server.py \
+  langgraph-app/agent_graph.py
+
+pytest -q \
+  tests/test_bridge_responses.py::test_run_wait_content_reads_nested_langgraph_values_state \
+  tests/test_bridge_responses.py::test_response_object_has_stable_ids_and_usage
+```
+
+Docker smoke after rebuilding `bridge-test-ui`, `api-bridge`, and
+`langgraph-api`:
+
+```text
+Responses: trace_codexsmoke returned TRACE_TEST_OK with Bridge and LangGraph steps.
+Chat Completions: trace_codexchat returned TRACE_CHAT_OK with Bridge and LangGraph steps.
+Browser compatibility fix smoke: page returned `Cache-Control: no-store`, no
+direct `crypto.randomUUID().replaceAll` dependency remained, and `/api/send`
+returned UI_FIX_OK through the Trace path.
+
+Latency follow-up smoke:
+
+Fast path:
+  total about 2.1s
+  route_decision about 0.14s
+  primary LLM about 1.17s
+
+Agent path before planner/memory caps:
+  total about 50.2s
+  planner about 28.1s
+  memory/skill/handoff pre-swarm gap about 19.8s
+
+Agent path after caps:
+  total about 11.2s
+  planner about 4.0s, plan_chars=765
+  curated memory about 0.0s
+  semantic memory timed out at 4.0s
+  swarm about 1.9s
+
+Tool-list regression:
+  prompt "welche tools hast du" no longer fails with
+  "unsupported content[].type"; it returned a tool overview through the Swarm.
+  Total about 19.9s, with planner about 3.0s, semantic memory capped at 4.0s,
+  and swarm about 11.8s.
+```
+
+## 2026-05-12 - Minimal Bridge Test UI
+
+### Summary
+
+Added `bridge-test-ui`, a small FastAPI/HTML test surface for isolating
+LibreChat from Bridge/LangGraph failures. It serves on:
+
+```text
+http://localhost:8140
+```
+
+The UI stores chat history only in browser memory and posts through its own
+proxy endpoint to `api-bridge`, with a protocol switch for Responses vs Chat
+Completions. It also shows the last raw Bridge response so UI/persistence
+problems can be separated from backend model errors.
+
+### Verification
+
+```text
+PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile langgraph-app/test_ui_server.py
+docker compose config --quiet
+docker compose up -d --build bridge-test-ui
+```
+
+Container health returned:
+
+```text
+{"ok":true,"bridge_base_url":"http://api-bridge:8123/v1","model":"my-agent"}
+```
+
+Live proxy calls reached `api-bridge`, but the current model backend returned
+`InternalServerError` from LiteLLM for both `big-boss` and the `edge-gemma`
+fallback. That confirms the new UI bypasses LibreChat and exposes the active
+backend failure directly.
+
 ## 2026-05-12 - Bridge Non-Streaming Agent Output Extraction
 
 ### Summary

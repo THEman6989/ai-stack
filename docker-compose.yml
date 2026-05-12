@@ -324,6 +324,27 @@ services:
       - .env
     restart: always
 
+  bridge-test-ui:
+    build:
+      context: .
+      dockerfile: ./langgraph-app/Dockerfile
+    container_name: bridge-test-ui
+    command: ["uvicorn", "test_ui_server:app", "--host", "0.0.0.0", "--port", "8140"]
+    ports:
+      - "${ALPHARAVIS_TEST_UI_PORT:-8140}:8140"
+    volumes:
+      - ./langgraph-app:/app
+    env_file:
+      - .env
+    environment:
+      - TEST_UI_BRIDGE_BASE_URL=${TEST_UI_BRIDGE_BASE_URL:-http://api-bridge:8123/v1}
+      - TEST_UI_MODEL=${TEST_UI_MODEL:-my-agent}
+      - TEST_UI_BRIDGE_TIMEOUT_SECONDS=${TEST_UI_BRIDGE_TIMEOUT_SECONDS:-240}
+    depends_on:
+      api-bridge:
+        condition: service_started
+    restart: unless-stopped
+
   # --- FRONTENDS ---
 
   # Das offizielle LangChain Deep Agents UI

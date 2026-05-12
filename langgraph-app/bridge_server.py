@@ -126,6 +126,75 @@ _RESPONSES_INPUT_ITEMS: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
 _APPROVAL_MEMORY: OrderedDict[str, float] = OrderedDict()
 
 
+def _new_trace(protocol: str, body: dict[str, Any], request: Request) -> dict[str, Any]:
+    metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+    trace_id = (
+        metadata.get("trace_id")
+        or metadata.get("alpha_trace_id")
+        or request.headers.get("x-alpha-trace-id")
+        or f"trace_{uuid.uuid4().hex[:12]}"
+    )
+    return {
+        "trace_id": str(trace_id),
+        "protocol": protocol,
+        "steps": [],
+    }
+
+
+def _trace_step(
+    trace: dict[str, Any] | None,
+    name: str,
+    request_started: float,
+    *,
+    duration_seconds: float | None = None,
+    **fields: Any,
+) -> None:
+    if not isinstance(trace, dict):
+        return
+    step = {
+        "name": name,
+        "elapsed_seconds": round(time.perf_counter() - request_started, 3),
+    }
+    if duration_seconds is not None:
+        step["duration_seconds"] = round(duration_seconds, 3)
+    for key, value in fields.items():
+        if value is not None:
+            step[key] = value
+    trace.setdefault("steps", []).append(step)
+
+
+def _attach_trace_metadata(body: dict[str, Any], trace: dict[str, Any] | None) -> None:
+    if not isinstance(trace, dict):
+        return
+    metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+    metadata = dict(metadata)
+    metadata["trace_id"] = trace.get("trace_id")
+    metadata["alpha_trace"] = trace
+    body["metadata"] = metadata
+
+
+def _merge_langgraph_trace(
+    trace: dict[str, Any] | None,
+    state: Any,
+    *,
+    request_started: float,
+    graph_offset_seconds: float,
+) -> None:
+    if not isinstance(trace, dict):
+        return
+    values = _state_values(state)
+    steps = values.get("alpha_trace_steps") if isinstance(values, dict) else None
+    if not isinstance(steps, list):
+        return
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        graph_elapsed = float(step.get("elapsed_seconds") or 0.0)
+        merged = dict(step)
+        merged["elapsed_seconds"] = round(graph_offset_seconds + graph_elapsed, 3)
+        trace.setdefault("steps", []).append(merged)
+
+
 def _log_event(level: int | str, event: str, *, message: str = "", **fields: Any) -> None:
     if _op_log_event is None:
         return
@@ -846,6 +915,7 @@ async def _build_input_payload(
     *,
     thread_id: str,
     thread_key: str,
+    trace: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     await _mirror_video_parts_in_messages(raw_messages, thread_id=thread_id, thread_key=thread_key)
     normalized = _normalize_messages(raw_messages)
@@ -865,6 +935,11 @@ async def _build_input_payload(
         "thread_key": thread_key,
         "bridge_context_references": reference_profiles,
     }
+    if isinstance(trace, dict):
+        payload["alpha_trace"] = {
+            "trace_id": trace.get("trace_id"),
+            "protocol": trace.get("protocol"),
+        }
     return payload
 
 
@@ -1182,6 +1257,7 @@ async def _prepare_run_payload(
     thread_id: str,
     thread_key: str,
     messages: list[dict[str, Any]],
+    trace: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
         state = await client.threads.get_state(thread_id)
@@ -1204,6 +1280,7 @@ async def _prepare_run_payload(
         state,
         thread_id=thread_id,
         thread_key=thread_key,
+        trace=trace,
     )
     return {"input": input_payload}
 
@@ -1539,20 +1616,53 @@ async def _stream_chat(body: dict[str, Any], request: Request) -> AsyncIterator[
     )
 
 
-async def _run_wait_content(client: Any, thread_id: str, run_payload: dict[str, Any]) -> str:
+async def _run_wait_content(
+    client: Any,
+    thread_id: str,
+    run_payload: dict[str, Any],
+    *,
+    trace: dict[str, Any] | None = None,
+    request_started: float | None = None,
+) -> str:
     wait_kwargs = {"multitask_strategy": "interrupt"}
     if "command" in run_payload:
         wait_kwargs["command"] = run_payload["command"]
     else:
         wait_kwargs["input"] = run_payload["input"]
 
+    trace_started = request_started if request_started is not None else time.perf_counter()
+    wait_started = time.perf_counter()
+    graph_offset_seconds = wait_started - trace_started
+    _trace_step(trace, "bridge.langgraph.wait.started", trace_started, thread_id=thread_id)
     try:
         state = await asyncio.wait_for(
             client.runs.wait(thread_id, LANGGRAPH_ASSISTANT_ID, **wait_kwargs),
             timeout=BRIDGE_RUN_TIMEOUT_SECONDS,
         )
+        wait_duration = time.perf_counter() - wait_started
+        _merge_langgraph_trace(
+            trace,
+            state,
+            request_started=trace_started,
+            graph_offset_seconds=graph_offset_seconds,
+        )
+        _trace_step(
+            trace,
+            "bridge.langgraph.wait.completed",
+            trace_started,
+            duration_seconds=wait_duration,
+            thread_id=thread_id,
+        )
         return _last_ai_content(state)
     except TimeoutError as exc:
+        _trace_step(
+            trace,
+            "bridge.langgraph.wait.timeout",
+            trace_started,
+            duration_seconds=time.perf_counter() - wait_started,
+            thread_id=thread_id,
+            timeout_seconds=BRIDGE_RUN_TIMEOUT_SECONDS,
+        )
         _log_exception(
             "bridge.langgraph_run.timeout",
             exc,
@@ -1563,6 +1673,14 @@ async def _run_wait_content(client: Any, thread_id: str, run_payload: dict[str, 
         )
         return _clean_error_message(exc)
     except Exception as exc:
+        _trace_step(
+            trace,
+            "bridge.langgraph.wait.failed",
+            trace_started,
+            duration_seconds=time.perf_counter() - wait_started,
+            thread_id=thread_id,
+            error_type=type(exc).__name__,
+        )
         _log_exception(
             "bridge.langgraph_run.failed",
             exc,
@@ -2660,6 +2778,8 @@ async def responses(request: Request):
         raise HTTPException(status_code=404, detail="Responses API bridge is disabled.")
 
     body = await request.json()
+    trace = _new_trace("responses", body, request)
+    _trace_step(trace, "bridge.responses.received", started)
     validation_error = _validate_responses_request(body)
     if validation_error is not None:
         return validation_error
@@ -2685,7 +2805,9 @@ async def responses(request: Request):
     client = _client()
     thread_key = _extract_thread_key(chat_body, request)
     thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
-    run_payload = await _prepare_run_payload(client, thread_id, thread_key, messages)
+    _trace_step(trace, "bridge.thread.ready", started, thread_id=thread_id, thread_key=thread_key)
+    run_payload = await _prepare_run_payload(client, thread_id, thread_key, messages, trace=trace)
+    _trace_step(trace, "bridge.run_payload.prepared", started)
     _log_event(
         logging.INFO,
         "bridge.responses.request.started",
@@ -2699,9 +2821,12 @@ async def responses(request: Request):
 
     if run_payload.get("direct_response"):
         content = str(run_payload["direct_response"])
+        _trace_step(trace, "bridge.direct_response.used", started)
     else:
-        content = await _run_wait_content(client, thread_id, run_payload)
+        content = await _run_wait_content(client, thread_id, run_payload, trace=trace, request_started=started)
 
+    _trace_step(trace, "bridge.response_object.created", started, output_chars=len(content))
+    _attach_trace_metadata(body, trace)
     response = _response_object(content, model, body=body, messages=messages)
     _store_response_object(response, body)
     _log_event(
@@ -2819,6 +2944,8 @@ async def delete_response(response_id: str):
 async def chat_completions(request: Request):
     started = time.perf_counter()
     body = await request.json()
+    trace = _new_trace("chat", body, request)
+    _trace_step(trace, "bridge.chat.received", started)
     if not body.get("messages"):
         raise HTTPException(status_code=400, detail="messages is required")
     preflight_thread_key = _extract_thread_key(body, request)
@@ -2840,7 +2967,9 @@ async def chat_completions(request: Request):
     client = _client()
     thread_key = _extract_thread_key(body, request)
     thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
-    run_payload = await _prepare_run_payload(client, thread_id, thread_key, body.get("messages", []))
+    _trace_step(trace, "bridge.thread.ready", started, thread_id=thread_id, thread_key=thread_key)
+    run_payload = await _prepare_run_payload(client, thread_id, thread_key, body.get("messages", []), trace=trace)
+    _trace_step(trace, "bridge.run_payload.prepared", started)
     _log_event(
         logging.INFO,
         "bridge.chat.request.started",
@@ -2854,9 +2983,11 @@ async def chat_completions(request: Request):
 
     if run_payload.get("direct_response"):
         content = str(run_payload["direct_response"])
+        _trace_step(trace, "bridge.direct_response.used", started)
     else:
-        content = await _run_wait_content(client, thread_id, run_payload)
+        content = await _run_wait_content(client, thread_id, run_payload, trace=trace, request_started=started)
 
+    _trace_step(trace, "bridge.chat.response.created", started, output_chars=len(content))
     _log_event(
         logging.INFO,
         "bridge.chat.request.completed",
@@ -2865,4 +2996,6 @@ async def chat_completions(request: Request):
         output_chars=len(content),
         elapsed_seconds=round(time.perf_counter() - started, 3),
     )
-    return JSONResponse(_chat_completion_response(content, model))
+    response = _chat_completion_response(content, model)
+    response["alpharavis_trace"] = trace
+    return JSONResponse(response)
