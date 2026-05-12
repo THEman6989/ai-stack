@@ -1367,9 +1367,16 @@ Media is safe-by-default:
 
 - LibreChat/OpenWebUI media blocks are reduced to URL/file-id/type metadata by
   the bridge unless `BRIDGE_ALLOW_RAW_MEDIA_CONTEXT=true`.
+- Incoming video media blocks are mirrored through `media-gallery` first when
+  `BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS=true`. The Bridge rewrites only
+  the AlphaRavis-facing media marker to the stable gallery URL; LibreChat's
+  visible attachment record and original upload storage stay unchanged.
 - Pixelle output URLs are registered with `media-gallery`.
 - The gallery downloads/stores returned assets under `media-data` and records
   metadata in MongoDB.
+- `media-gallery` accepts normal HTTP(S) video URLs and inline `data:` video
+  blocks. Inline payloads are written to disk but not copied back into MongoDB
+  asset metadata.
 - The media-gallery service stores optional original/processed derivation
   fields and exposes `/gallery?view=all|original|processed` for grouped
   operator inspection with copyable stable media URLs.

@@ -4,6 +4,45 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-12 - Bridge Mirrors Incoming Chat Videos Into Media Gallery
+
+### Summary
+
+Incoming LibreChat/Open Responses video blocks are now mirrored into
+`media-gallery` before AlphaRavis constructs metadata-only model context:
+
+```text
+BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS=true
+```
+
+After a successful mirror, the Bridge-held video part points at the stable
+media-gallery URL, so the resulting LangGraph context marker references
+`/media/...` instead of carrying the original inline video URL/blob. LibreChat's
+visible attachment card and original local upload record are not rewritten in
+this phase.
+
+`media-gallery` now accepts both HTTP(S) video sources and inline `data:` video
+blocks. Inline bytes are saved under `media-data`, while Mongo asset metadata
+stores an omitted placeholder rather than the full base64 payload.
+
+### Verification
+
+```text
+PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile \
+  langgraph-app/bridge_server.py \
+  langgraph-app/media_server.py \
+  tests/test_bridge_responses.py \
+  tests/test_media_server.py
+
+pytest -q \
+  tests/test_bridge_responses.py \
+  tests/test_media_server.py \
+  tests/test_media_analysis.py \
+  tests/test_alpharavis_toolsets.py
+
+docker compose config --quiet
+```
+
 ## 2026-05-12 - Explicit Video Analysis Preparation
 
 ### Summary

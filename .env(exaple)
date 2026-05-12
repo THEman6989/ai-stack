@@ -548,6 +548,11 @@ BRIDGE_RESPONSES_ALLOW_CLIENT_TOOLS=false
 # false until the target LangGraph/model path is explicitly vision-capable.
 BRIDGE_ALLOW_RAW_MEDIA_CONTEXT=false
 BRIDGE_MEDIA_CONTEXT_MODE=metadata
+# Incoming video parts are copied into media-gallery before metadata-only Bridge
+# context is built. LibreChat's own attachment record/file remains untouched;
+# AlphaRavis sees the stable media-gallery URL.
+BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS=true
+BRIDGE_MEDIA_GALLERY_TIMEOUT_SECONDS=45
 
 # Bridge-side internal context hygiene.
 # BRIDGE_SCRUB_INTERNAL_CONTEXT=true strips internal blocks such as

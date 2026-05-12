@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -70,6 +71,15 @@ BRIDGE_HARD_INPUT_TOKEN_LIMIT = int(os.getenv("BRIDGE_HARD_INPUT_TOKEN_LIMIT", "
 BRIDGE_HARD_INPUT_HTTP_ERROR = _env_bool("BRIDGE_HARD_INPUT_HTTP_ERROR", "false")
 BRIDGE_ALLOW_RAW_MEDIA_CONTEXT = _env_bool("BRIDGE_ALLOW_RAW_MEDIA_CONTEXT", "false")
 BRIDGE_MEDIA_CONTEXT_MODE = os.getenv("BRIDGE_MEDIA_CONTEXT_MODE", "metadata").lower()
+BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS = _env_bool(
+    "BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS",
+    "true",
+)
+BRIDGE_MEDIA_GALLERY_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_MEDIA_GALLERY_TIMEOUT_SECONDS", "45"))
+ALPHARAVIS_MEDIA_GALLERY_URL = os.getenv(
+    "ALPHARAVIS_MEDIA_GALLERY_URL",
+    "http://media-gallery:8130",
+).rstrip("/")
 MEDIA_BLOCK_TYPES = {
     "image_url",
     "input_image",
@@ -80,6 +90,7 @@ MEDIA_BLOCK_TYPES = {
     "file",
     "input_file",
 }
+VIDEO_MEDIA_BLOCK_TYPES = {"video_url", "input_video"}
 BRIDGE_LLM_HEALTH_URL = os.getenv("BRIDGE_LLM_HEALTH_URL", "http://litellm:4000/v1").rstrip("/")
 BRIDGE_LLM_HEALTH_API_KEY = os.getenv("BRIDGE_LLM_HEALTH_API_KEY", os.getenv("OPENAI_API_KEY", "sk-local-dev"))
 BRIDGE_LLM_HEALTH_MODEL = os.getenv("BRIDGE_LLM_HEALTH_MODEL", "big-boss")
@@ -246,6 +257,186 @@ def _media_block_summary(part: dict[str, Any]) -> str:
     if mime_type:
         fields.append(f"mime_type={mime_type}")
     return "[Media attachment withheld from raw LLM context: " + ", ".join(fields) + "]"
+
+
+def _media_part_source_url(part: dict[str, Any]) -> str:
+    for key in ("video_url", "image_url", "audio_url", "file_url", "url"):
+        value = part.get(key)
+        if isinstance(value, dict):
+            media_url = str(value.get("url") or "")
+        elif isinstance(value, str):
+            media_url = value
+        else:
+            media_url = ""
+        if media_url:
+            return media_url
+    file_data = part.get("file_data")
+    return str(file_data or "") if isinstance(file_data, str) else ""
+
+
+def _media_part_title(part: dict[str, Any]) -> str:
+    return str(part.get("filename") or part.get("name") or part.get("title") or "")
+
+
+def _media_part_mime_type(part: dict[str, Any]) -> str:
+    explicit = str(part.get("mime_type") or part.get("media_type") or "")
+    if explicit.startswith("video/"):
+        return explicit
+    source_url = _media_part_source_url(part)
+    if source_url.startswith("data:"):
+        header = source_url.partition(",")[0]
+        return header.removeprefix("data:").split(";", 1)[0]
+    return explicit
+
+
+def _is_video_media_part(part: dict[str, Any]) -> bool:
+    block_type = str(part.get("type") or "")
+    if block_type in VIDEO_MEDIA_BLOCK_TYPES:
+        return True
+    mime_type = _media_part_mime_type(part)
+    if mime_type.startswith("video/"):
+        return True
+    source_url = _media_part_source_url(part).lower().split("?", 1)[0].split("#", 1)[0]
+    return source_url.endswith((".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"))
+
+
+def _replace_media_part_source_url(part: dict[str, Any], public_url: str) -> None:
+    for key in ("video_url", "image_url", "audio_url", "file_url", "url"):
+        value = part.get(key)
+        if isinstance(value, dict):
+            updated = dict(value)
+            updated["url"] = public_url
+            part[key] = updated
+            return
+        if isinstance(value, str):
+            part[key] = public_url
+            return
+    if isinstance(part.get("file_data"), str):
+        part["url"] = public_url
+        return
+    part["video_url"] = {"url": public_url}
+
+
+def _bridge_media_source_key(part: dict[str, Any], source_url: str) -> str:
+    file_id = str(part.get("file_id") or part.get("id") or "").strip()
+    if file_id:
+        return f"librechat:{file_id}"
+    digest = hashlib.sha256(source_url.encode("utf-8")).hexdigest()[:24]
+    return f"librechat-video-url:{digest}"
+
+
+async def _mirror_video_part_to_media_gallery(
+    part: dict[str, Any],
+    *,
+    thread_id: str,
+    thread_key: str,
+) -> dict[str, Any] | None:
+    if (
+        not BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS
+        or part.get("alpharavis_media_gallery_url")
+        or not _is_video_media_part(part)
+    ):
+        return None
+    source_url = _media_part_source_url(part)
+    if not source_url:
+        return None
+    source_key = _bridge_media_source_key(part, source_url)
+    title = _media_part_title(part) or source_key
+    librechat_owned = bool(part.get("file_id") or part.get("id")) or source_url.startswith("data:") or any(
+        marker in source_url for marker in ("librechat", "/api/files/", "/uploads/")
+    )
+    payload = {
+        "source_url": source_url,
+        "file_id": str(part.get("file_id") or part.get("id") or ""),
+        "source_key": source_key,
+        "thread_id": thread_id,
+        "thread_key": thread_key,
+        "group_id": thread_key or thread_id,
+        "role": "input",
+        "asset_kind": "original",
+        "origin": "librechat_upload" if librechat_owned else "chat_url",
+        "media_type": "video",
+        "mime_type": _media_part_mime_type(part),
+        "title": title,
+        "download": True,
+        "metadata": {
+            "bridge_auto_registered": True,
+            "original_block_type": str(part.get("type") or ""),
+            "original_source_key": source_key,
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=BRIDGE_MEDIA_GALLERY_TIMEOUT_SECONDS) as client:
+            response = await client.post(f"{ALPHARAVIS_MEDIA_GALLERY_URL}/assets/register", json=payload)
+        if response.status_code >= 400:
+            _log_event(
+                logging.WARNING,
+                "bridge.media_gallery.register_failed",
+                status_code=response.status_code,
+                source_key=source_key,
+                thread_id=thread_id,
+            )
+            return None
+        record = response.json()
+    except Exception as exc:
+        _log_exception(
+            "bridge.media_gallery.register_failed",
+            exc,
+            level=logging.WARNING,
+            source_key=source_key,
+            thread_id=thread_id,
+        )
+        return None
+
+    public_url = str(record.get("public_url") or "")
+    if not public_url or str(record.get("download_error") or ""):
+        return record if isinstance(record, dict) else None
+    original_url = source_url
+    _replace_media_part_source_url(part, public_url)
+    part["alpharavis_media_gallery_url"] = public_url
+    part["alpharavis_original_media_url"] = original_url
+    part["alpharavis_media_asset_id"] = str(record.get("asset_id") or "")
+    return record if isinstance(record, dict) else None
+
+
+async def _mirror_video_parts_in_messages(
+    messages: list[dict[str, Any]],
+    *,
+    thread_id: str,
+    thread_key: str,
+) -> list[dict[str, Any]]:
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if isinstance(part, dict):
+                await _mirror_video_part_to_media_gallery(part, thread_id=thread_id, thread_key=thread_key)
+    return messages
+
+
+async def _mirror_video_parts_in_responses_body(
+    body: dict[str, Any],
+    request: Request,
+) -> dict[str, Any]:
+    raw_input = body.get("input")
+    if not isinstance(raw_input, list):
+        return body
+    thread_key = _extract_thread_key(body, request)
+    thread_id = _thread_id_for_key(thread_key)
+    pseudo_messages: list[dict[str, Any]] = []
+    for item in raw_input:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or "") == "message" or item.get("role"):
+            content = item.get("content")
+            if isinstance(content, list):
+                pseudo_messages.append({"content": content})
+            continue
+        if str(item.get("type") or "") in MEDIA_BLOCK_TYPES:
+            pseudo_messages.append({"content": [item]})
+    await _mirror_video_parts_in_messages(pseudo_messages, thread_id=thread_id, thread_key=thread_key)
+    return body
 
 
 def _sanitize_message_content(content: Any) -> str:
@@ -655,6 +846,7 @@ async def _build_input_payload(
     thread_id: str,
     thread_key: str,
 ) -> dict[str, Any]:
+    await _mirror_video_parts_in_messages(raw_messages, thread_id=thread_id, thread_key=thread_key)
     normalized = _normalize_messages(raw_messages)
     if BRIDGE_MESSAGE_SYNC_MODE in {"full", "all"}:
         selected = normalized
@@ -2470,6 +2662,7 @@ async def responses(request: Request):
     validation_error = _validate_responses_request(body)
     if validation_error is not None:
         return validation_error
+    await _mirror_video_parts_in_responses_body(body, request)
     messages = _responses_messages_for_body(body)
     if not messages:
         raise HTTPException(status_code=400, detail="input is required")
@@ -2627,6 +2820,12 @@ async def chat_completions(request: Request):
     body = await request.json()
     if not body.get("messages"):
         raise HTTPException(status_code=400, detail="messages is required")
+    preflight_thread_key = _extract_thread_key(body, request)
+    await _mirror_video_parts_in_messages(
+        body.get("messages", []),
+        thread_id=_thread_id_for_key(preflight_thread_key),
+        thread_key=preflight_thread_key,
+    )
     hard_error = _hard_input_error(body.get("messages", []))
     if hard_error:
         if BRIDGE_HARD_INPUT_HTTP_ERROR:

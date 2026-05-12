@@ -206,10 +206,15 @@ provider/pipeline work.
 
 Implemented:
 
-- Bridge strips raw media blocks from chat context by default and preserves
-  metadata markers.
+- Bridge strips raw media blocks from chat context by default, preserves
+  metadata markers, and automatically mirrors incoming video blocks into
+  `media-gallery` when `BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS=true`.
+- The AlphaRavis-facing marker is rewritten to the stable gallery URL after a
+  successful mirror. LibreChat's original visible attachment/file record stays
+  untouched in this phase.
 - `media-gallery` can register/download image, video, audio, or document URLs
-  and exposes `/gallery`.
+  and exposes `/gallery`. Video mirroring accepts HTTP(S) URLs and inline
+  `data:` video payloads while omitting the inline payload from Mongo metadata.
 - Pixelle job results are scanned for media URLs and registered when present.
 - `register_media_asset`, `semantic_media_search`, and `plan_media_analysis`
   tools exist.
@@ -273,6 +278,9 @@ ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true
     drains both kinds through the existing model-management embedding window.
   - `/assets/resolve` can map a copied gallery/source URL back to the Mongo
     asset and its recorded references.
+  - Incoming LibreChat/Responses video blocks are now copied into
+    `media-data` through the Bridge and media-gallery before LangGraph context
+    is built; the LLM marker points at the media-gallery URL.
   - `plan_media_analysis` remains explanatory. The real bounded preparation
     path is `prepare_media_for_model`.
 
@@ -517,6 +525,10 @@ ALPHARAVIS_VIDEO_ANALYSIS_TRANSCRIBE_AUDIO=false
   10. Add Makefile/setup/status controls and smoke tests. Partially
      implemented: `make video-analysis`, setup/status output, helper tests, and
      bridge media tests exist; live Docker/UI smoke remains needed.
+  11. Mirror LibreChat-origin video input into `media-data` automatically
+      before LangGraph sees it. Implemented for Bridge-facing HTTP(S) and
+      inline `data:` video blocks; rewriting the visible LibreChat message card
+      itself remains intentionally out of scope for this phase.
 
   Acceptance:
 

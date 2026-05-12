@@ -732,6 +732,7 @@ def print_status() -> None:
     print(f"- Media gallery: {env.get('ALPHARAVIS_ENABLE_MEDIA_GALLERY', 'true')}")
     print(f"- Vision vector memory: {env.get('ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY', 'false')}")
     print(f"- Raw media to bridge context: {env.get('BRIDGE_ALLOW_RAW_MEDIA_CONTEXT', 'false')}")
+    print(f"- Bridge auto-register incoming videos: {env.get('BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS', 'true')}")
     print(f"- Video analysis: {env.get('ALPHARAVIS_VIDEO_ANALYSIS_ENABLED', 'true')}")
     print(f"- Video analysis FPS/max frames: {env.get('ALPHARAVIS_VIDEO_ANALYSIS_FPS', '1')} / {env.get('ALPHARAVIS_VIDEO_ANALYSIS_MAX_FRAMES', '100')}")
     print(f"- Video analysis cache: {env.get('ALPHARAVIS_VIDEO_ANALYSIS_CACHE_ROOT', '/workspace/media-data/analysis-cache')}")

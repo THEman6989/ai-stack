@@ -1053,13 +1053,17 @@ By default the Bridge does not forward raw media blocks into LangGraph:
 ```text
 BRIDGE_ALLOW_RAW_MEDIA_CONTEXT=false
 BRIDGE_MEDIA_CONTEXT_MODE=metadata
+BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS=true
 ```
 
 That means uploads/links arrive as metadata markers containing fields such as
 type, file id, URL, mime type, or title. This prevents a video or image blob from
-filling the LLM context. Use `register_media_asset` to save a URL/file id in the
-media gallery. Registration is metadata-only by default; set the tool's
-`index=true` only when you explicitly want immediate vision indexing.
+filling the LLM context. Incoming video blocks are mirrored into `media-data`
+through `media-gallery` first, then the AlphaRavis-facing marker uses the stable
+gallery URL. LibreChat's visible attachment card and original upload file are
+not rewritten by this Bridge step. Use `register_media_asset` to save other
+URL/file-id media manually. Registration is metadata-only by default; set the
+tool's `index=true` only when you explicitly want immediate vision indexing.
 
 When the user explicitly asks to analyze, inspect, describe, summarize,
 transcribe, compare, or index a video, AlphaRavis can use

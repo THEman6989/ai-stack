@@ -302,6 +302,9 @@ services:
       - BRIDGE_RESPONSES_TOOL_OUTPUT_MAX_CHARS=${BRIDGE_RESPONSES_TOOL_OUTPUT_MAX_CHARS:-8000}
       - BRIDGE_ALLOW_RAW_MEDIA_CONTEXT=${BRIDGE_ALLOW_RAW_MEDIA_CONTEXT:-false}
       - BRIDGE_MEDIA_CONTEXT_MODE=${BRIDGE_MEDIA_CONTEXT_MODE:-metadata}
+      - BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS=${BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS:-true}
+      - BRIDGE_MEDIA_GALLERY_TIMEOUT_SECONDS=${BRIDGE_MEDIA_GALLERY_TIMEOUT_SECONDS:-45}
+      - ALPHARAVIS_MEDIA_GALLERY_URL=${ALPHARAVIS_MEDIA_GALLERY_URL:-http://media-gallery:8130}
       - BRIDGE_LLM_HEALTH_URL=${BRIDGE_LLM_HEALTH_URL:-http://litellm:4000/v1}
       - BRIDGE_LLM_HEALTH_API_KEY=${BRIDGE_LLM_HEALTH_API_KEY:-sk-local-dev}
       - BRIDGE_LLM_HEALTH_MODEL=${BRIDGE_LLM_HEALTH_MODEL:-big-boss}
@@ -315,6 +318,8 @@ services:
     depends_on:
       langgraph-api:
         condition: service_healthy
+      media-gallery:
+        condition: service_started
     env_file:
       - .env
     restart: always

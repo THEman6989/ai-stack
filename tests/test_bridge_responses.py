@@ -41,6 +41,9 @@ if importlib.util.find_spec("fastapi") is None:
         def middleware(self, *args, **kwargs):
             return lambda fn: fn
 
+        def mount(self, *args, **kwargs) -> None:
+            return None
+
     fastapi_stub.FastAPI = FastAPI
     fastapi_stub.HTTPException = HTTPException
     fastapi_stub.Request = Request
@@ -58,9 +61,23 @@ if importlib.util.find_spec("fastapi") is None:
             self.content = content
             self.media_type = media_type
 
+    class HTMLResponse(str):
+        def __new__(cls, content: str = "", *args, **kwargs):
+            return str.__new__(cls, content)
+
     responses_stub.JSONResponse = JSONResponse
     responses_stub.StreamingResponse = StreamingResponse
+    responses_stub.HTMLResponse = HTMLResponse
     sys.modules["fastapi.responses"] = responses_stub
+
+    staticfiles_stub = types.ModuleType("fastapi.staticfiles")
+
+    class StaticFiles:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    staticfiles_stub.StaticFiles = StaticFiles
+    sys.modules["fastapi.staticfiles"] = staticfiles_stub
 
 if importlib.util.find_spec("langgraph_sdk") is None:
     sdk_stub = types.ModuleType("langgraph_sdk")
@@ -200,6 +217,117 @@ def test_responses_input_supports_instructions_and_content_parts() -> None:
     assert "Analysiere das bitte." in messages[1]["content"]
     assert "Media attachment withheld" in messages[1]["content"]
     assert "https://example.test/v.mp4" in messages[1]["content"]
+
+
+def test_bridge_mirrors_chat_video_parts_to_media_gallery(monkeypatch) -> None:
+    requests: list[dict] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict:
+            return {
+                "asset_id": "asset_video",
+                "public_url": "http://localhost:8130/media/chat/clip.mp4",
+                "download_error": "",
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, url: str, json: dict) -> FakeResponse:
+            requests.append({"url": url, "json": json})
+            return FakeResponse()
+
+    monkeypatch.setattr(bridge_server.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(bridge_server, "BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS", True)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_video",
+                    "file_id": "file_clip",
+                    "filename": "clip.mp4",
+                    "video_url": {"url": "http://librechat:3080/api/files/download/user/file_clip"},
+                }
+            ],
+        }
+    ]
+
+    asyncio.run(
+        bridge_server._mirror_video_parts_in_messages(
+            messages,
+            thread_id="thread_video",
+            thread_key="conversation_video",
+        )
+    )
+
+    part = messages[0]["content"][0]
+    assert requests[0]["url"].endswith("/assets/register")
+    assert requests[0]["json"]["source_key"] == "librechat:file_clip"
+    assert requests[0]["json"]["origin"] == "librechat_upload"
+    assert part["video_url"]["url"] == "http://localhost:8130/media/chat/clip.mp4"
+    assert part["alpharavis_original_media_url"].startswith("http://librechat:3080/")
+
+
+def test_responses_body_uses_gallery_url_after_video_mirroring(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict:
+            return {
+                "asset_id": "asset_response_video",
+                "public_url": "http://localhost:8130/media/responses/clip.mp4",
+                "download_error": "",
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, url: str, json: dict) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(bridge_server.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(bridge_server, "BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS", True)
+    body = {
+        "conversationId": "conversation_response_video",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_video",
+                        "file_id": "file_response_clip",
+                        "video_url": {"url": "data:video/mp4;base64,QUJD"},
+                    }
+                ],
+            }
+        ],
+    }
+
+    asyncio.run(bridge_server._mirror_video_parts_in_responses_body(body, _StubRequest(body)))
+    messages = bridge_server._responses_input_to_messages(body)
+
+    assert "http://localhost:8130/media/responses/clip.mp4" in messages[0]["content"]
+    assert "data:video/mp4;base64,QUJD" not in messages[0]["content"]
 
 
 def test_response_object_has_stable_ids_and_usage() -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import html
 import os
@@ -7,7 +9,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote_to_bytes, urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -126,11 +128,38 @@ def _extension_from_url(url: str, media_type: str) -> str:
     return {"image": ".png", "video": ".mp4", "audio": ".wav", "document": ".bin"}.get(media_type, ".bin")
 
 
+def _stored_source_url(source_url: str) -> str:
+    if source_url.lower().startswith("data:"):
+        header = source_url.partition(",")[0]
+        return f"{header},[inline-data-omitted]"
+    return source_url
+
+
 async def _download_asset(source_url: str, target: Path) -> dict[str, Any]:
     size = 0
     ensure_write_allowed(target, allowed_root=MEDIA_ROOT)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".{target.name}.tmp")
+    if source_url.lower().startswith("data:"):
+        header, separator, payload = source_url.partition(",")
+        if not separator:
+            raise RuntimeError("invalid data URL")
+        try:
+            data = (
+                base64.b64decode(payload, validate=True)
+                if header.lower().endswith(";base64")
+                else unquote_to_bytes(payload)
+            )
+        except (ValueError, binascii.Error) as exc:
+            raise RuntimeError(f"invalid data URL payload: {exc}") from exc
+        size = len(data)
+        if size > MAX_DOWNLOAD_BYTES:
+            raise RuntimeError(f"download exceeds limit {MAX_DOWNLOAD_BYTES} bytes")
+        with tmp.open("wb") as fh:
+            fh.write(data)
+        os.replace(tmp, target)
+        return {"bytes": size, "path": str(target)}
+
     async with httpx.AsyncClient(timeout=float(os.getenv("ALPHARAVIS_MEDIA_DOWNLOAD_TIMEOUT_SECONDS", "120"))) as client:
         async with client.stream("GET", source_url) as response:
             if response.status_code >= 400:
@@ -216,7 +245,8 @@ async def register_asset(request: MediaRegisterRequest):
         filename = f"{asset_id}-{_safe_segment(request.title or request.source_key or request.media_type)}{_extension_from_url(request.source_url, request.media_type)}"
         target = MEDIA_ROOT / day / group_id / request.role / filename
         try:
-            await _download_asset(request.source_url, target)
+            if not target.exists():
+                await _download_asset(request.source_url, target)
             relative_path = str(target.relative_to(MEDIA_ROOT))
             local_path = str(target)
             public_url = _public_url(relative_path)
@@ -226,7 +256,7 @@ async def register_asset(request: MediaRegisterRequest):
     record = {
         "_id": asset_id,
         "asset_id": asset_id,
-        "source_url": request.source_url,
+        "source_url": _stored_source_url(request.source_url),
         "file_id": request.file_id,
         "source_key": request.source_key or asset_id,
         "thread_id": request.thread_id,
