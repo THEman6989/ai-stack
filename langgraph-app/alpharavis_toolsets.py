@@ -136,6 +136,8 @@ TOOLSETS: dict[str, Toolset] = {
             "list_skill_candidates",
             "activate_skill_candidate",
             "deactivate_skill",
+            "suggest_thread_title",
+            "extract_review_insights",
         ),
     ),
     "system/docker": Toolset(
@@ -201,12 +203,20 @@ TOOLSETS: dict[str, Toolset] = {
     "artifacts": Toolset(
         "artifacts",
         "Write/read bounded thread artifacts and handoff reports instead of dumping long material into chat.",
-        tools=("write_alpha_ravis_artifact", "read_alpha_ravis_artifact", "list_alpha_ravis_artifacts", "build_specialist_report"),
+        tools=(
+            "write_alpha_ravis_artifact",
+            "read_alpha_ravis_artifact",
+            "list_alpha_ravis_artifacts",
+            "build_specialist_report",
+            "suggest_thread_title",
+            "extract_review_insights",
+        ),
     ),
     "agent/research": Toolset(
         "agent/research",
         "Research agent bounded tool bundle.",
-        includes=("web/research", "rag/documents", "rag/memory", "coding/read", "skills/repo", "artifacts"),
+        tools=("describe_optional_tool_registry",),
+        includes=("web/research", "rag/documents", "rag/memory", "media/video", "coding/read", "skills/repo", "artifacts"),
     ),
     "agent/general": Toolset(
         "agent/general",
@@ -221,16 +231,29 @@ TOOLSETS: dict[str, Toolset] = {
             "system/power",
             "web/research",
         ),
-        tools=("create_manage_memory_tool", "create_search_memory_tool"),
+        tools=("describe_optional_tool_registry", "create_manage_memory_tool", "create_search_memory_tool"),
     ),
     "agent/hermes": Toolset(
         "agent/hermes",
         "Hermes bridge bundle for coding, repo, file, terminal-oriented tasks, and handoff reporting.",
-        includes=("coding/read", "coding/write", "coding/execute", "rag/memory", "skills/repo", "artifacts"),
+        tools=("describe_optional_tool_registry",),
+        includes=("coding/read", "coding/write", "rag/memory", "skills/repo", "artifacts"),
+    ),
+    "agent/debugger": Toolset(
+        "agent/debugger",
+        "Debugger bundle for approved local/SSH diagnostics, Docker/service status, old lessons, and reports.",
+        includes=("coding/execute", "system/docker", "system/ssh", "web/research", "rag/memory", "skills/repo", "artifacts"),
+        tools=("describe_optional_tool_registry", "search_debugging_lessons", "record_debugging_lesson"),
+    ),
+    "agent/ui": Toolset(
+        "agent/ui",
+        "UI fallback bundle; direct desktop control is provided by CUA when available, otherwise only handoffs are bound.",
+        tools=(),
     ),
     "agent/context": Toolset(
         "agent/context",
         "Context retrieval bundle for archives, collections, RAG, memory, media search, and repo skill context.",
+        tools=("describe_optional_tool_registry",),
         includes=("rag/memory", "rag/documents", "media/video", "skills/repo", "artifacts"),
     ),
     "agent/power": Toolset(

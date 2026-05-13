@@ -50,7 +50,13 @@ such as `http://127.0.0.1:3080`, and can configure Tailscale Serve HTTPS routes
 on matching Tailnet-reachable ports. It does not use Tailscale Funnel and does
 not expose services to the public internet. The redirector can prefer the
 generated `service-dashboard-data/tailscale_service_urls.json` URLs when
-present.
+present. The dashboard route itself is included by default on port `8090` for
+the Makefile Tailscale targets; operators can opt out with
+`TAILSCALE_DASHBOARD=false` or `--exclude-dashboard`. Normal install/update/up
+Makefile flows call `tailscale-auto`, which defaults to `tailscale-apply`; set
+`TAILSCALE_AUTO=off` to skip this automatic Tailnet HTTPS step for one run.
+The helper's sudo mode defaults to `auto`, so it requests sudo only after the
+non-sudo Tailscale CLI attempt fails with a permissions error.
 
 ## Install And Runtime Profiles
 
@@ -227,7 +233,10 @@ as `coding/read`, `media/image`, `rag/memory`, `system/docker`, and
 request and stores them in `run_profile.selected_toolsets`; the planner injects
 only a short category context on the agent path. MCP schemas are cached by
 category, and concrete MCP tools are bound only to matching specialist bundles
-instead of attaching every loaded MCP tool to the generalist.
+instead of attaching every loaded MCP tool to the generalist. Specialist
+workers now also bind their local tools from those materialized bundles at graph
+build time, with handoff tools added explicitly. The loaded per-agent bundle
+profiles are recorded in `run_profile.loaded_toolsets`.
 
 ## Core Request Flow
 
@@ -1358,10 +1367,10 @@ system/ssh
 system/power
 ```
 
-The model should start with category awareness and only call/load concrete
-tools when the active task needs them. This is the current safe approximation of
-hierarchical lazy tool loading; true per-turn unbinding/rebinding of internal
-LangGraph tools is planned later.
+The model starts with category awareness and only calls concrete tools when the
+active task needs them. Specialist workers bind bounded local/MCP bundles from
+`alpharavis_toolsets.py` at graph build time, and `run_profile.loaded_toolsets`
+records the loaded per-agent profiles.
 
 ## Media, Vision, And pgvector Dimensions
 

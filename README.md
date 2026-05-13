@@ -53,11 +53,18 @@ Tailscale HTTPS helper:
 ```bash
 make tailscale-plan TAILSCALE_HOST=<device>.<tailnet>.ts.net
 make tailscale-overrides TAILSCALE_HOST=<device>.<tailnet>.ts.net
+make tailscale-apply TAILSCALE_HOST=<device>.<tailnet>.ts.net
 ```
 
 The helper reads the Service Dashboard catalog and prepares Tailscale Serve
 HTTPS routes for the local HTTP services inside your Tailnet. It does not run
-Tailscale Funnel and does not publish services to the public internet.
+Tailscale Funnel and does not publish services to the public internet. The
+Service Dashboard itself is included by default on port `8090`; pass
+`TAILSCALE_DASHBOARD=false` to opt out. `make install`, `make update`, and
+`make up` run `tailscale-apply` automatically; set `TAILSCALE_AUTO=off` when
+you need to skip that step. Tailscale sudo handling defaults to `auto`: it tries
+without sudo first and prompts for sudo only if the CLI reports a permissions
+error.
 
 Runtime profiles accepted by `make install STREAMING=...`, `make update`, and
 `make streaming STREAMING=...`:

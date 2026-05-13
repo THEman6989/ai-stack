@@ -6966,37 +6966,10 @@ def _create_ui_assistant(llm: Any, handoff_tools: list[Any]):
     )
 
 
-def _create_debugger_subgraph(llm: Any, handoff_tools: list[Any]):
+def _create_debugger_subgraph(llm: Any, tools: list[Any], handoff_tools: list[Any]):
     debugger_worker = create_deep_agent(
         model=llm,
-        tools=[
-            execute_ssh_command,
-            execute_local_command,
-            fast_web_search,
-            check_external_service,
-            describe_optional_tool_registry,
-            search_agent_memory,
-            record_agent_memory,
-            search_curated_memory,
-            record_curated_memory,
-            search_session_history,
-            semantic_memory_search,
-            write_alpha_ravis_artifact,
-            read_alpha_ravis_artifact,
-            list_alpha_ravis_artifacts,
-            list_repo_ai_skills,
-            read_repo_ai_skill,
-            reload_repo_ai_skills,
-            suggest_thread_title,
-            extract_review_insights,
-            build_specialist_report,
-            search_skill_library,
-            list_skill_candidates,
-            search_debugging_lessons,
-            record_debugging_lesson,
-            record_skill_candidate,
-            *handoff_tools,
-        ],
+        tools=_dedupe_tools([*tools, *handoff_tools]),
         name="debugger_agent_worker",
         system_prompt=(
             "You are the Debugger Agent. Your only job is to investigate "
@@ -7195,24 +7168,11 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             inspect_embedding_queue_status,
             check_external_service,
             wake_on_lan,
-            inspect_model_management_status,
-            plan_embedding_maintenance,
-            run_embedding_memory_jobs,
-            prepare_comfy_for_pixelle,
-            request_power_management_action,
-            queue_vector_memory_backfill,
+            *model_management_tools,
+            *pixelle_management_tools,
+            *power_management_tools,
             *owner_safe_power_tools,
             *owner_protected_power_tools,
-            owner_check_llama_server,
-            owner_start_llama_server,
-            owner_restart_llama_server,
-            owner_get_llama_server_logs,
-            owner_check_comfyui_server,
-            owner_start_comfyui_server,
-            owner_start_all_model_services,
-            owner_get_pixelle_logs,
-            owner_shutdown_llama_server,
-            owner_shutdown_comfyui_server,
             execute_ssh_command,
             execute_local_command,
             fast_web_search,
@@ -7257,21 +7217,22 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     agent_toolset_names = {
         "research_expert": ["agent/research"],
         "general_assistant": ["agent/general"],
+        "debugger_agent": ["agent/debugger"],
+        "ui_assistant": ["agent/ui"],
         "hermes_coding_agent": ["agent/hermes"],
         "context_retrieval_agent": ["agent/context"],
         "power_management_agent": ["agent/power"],
         "crisis_manager_agent": ["agent/crisis"],
     }
     agent_toolset_profiles: dict[str, dict[str, Any]] = {}
-    agent_mcp_tools: dict[str, list[Any]] = {}
+    agent_toolset_tools: dict[str, list[Any]] = {}
+    true_lazy_toolsets_enabled = _env_bool("ALPHARAVIS_ENABLE_TRUE_LAZY_TOOLSETS", "true")
     for agent_name, toolsets in agent_toolset_names.items():
         materialized_tools, profile = _materialized_profile(toolsets, local_tool_map, mcp_tools, MCP_SCHEMA_CACHE)
         agent_toolset_profiles[agent_name] = profile
-        agent_mcp_tools[agent_name] = [
-            tool_obj for tool_obj in materialized_tools if _tool_name_for_profile(tool_obj) in mcp_tool_names
-        ]
+        agent_toolset_tools[agent_name] = materialized_tools
     GRAPH_TOOLSET_PROFILE = {
-        "enabled": _env_bool("ALPHARAVIS_ENABLE_TRUE_LAZY_TOOLSETS", "true"),
+        "enabled": true_lazy_toolsets_enabled,
         "mcp_schema_categories": sorted(MCP_SCHEMA_CACHE),
         "mcp_schema_fingerprint": _schema_cache_fingerprint(MCP_SCHEMA_CACHE)
         if _schema_cache_fingerprint and MCP_SCHEMA_CACHE
@@ -7279,9 +7240,23 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         "agents": agent_toolset_profiles,
     }
 
+    def _agent_tools(agent_name: str, fallback_tools: list[Any], extra_tools: list[Any] | None = None) -> list[Any]:
+        if true_lazy_toolsets_enabled:
+            base_tools = list(agent_toolset_tools.get(agent_name, []))
+        else:
+            base_tools = [
+                *fallback_tools,
+                *[
+                    tool_obj
+                    for tool_obj in mcp_tools
+                    if _tool_name_for_profile(tool_obj) in mcp_tool_names
+                ],
+            ]
+        return _dedupe_tools([*base_tools, *(extra_tools or [])])
+
     research_worker = create_deep_agent(
         model=llm,
-        tools=_dedupe_tools([
+        tools=_agent_tools("research_expert", [
             deep_web_research,
             ask_documents,
             check_external_service,
@@ -7305,13 +7280,13 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             extract_review_insights,
             normalize_research_sources,
             build_specialist_report,
+        ], [
             transfer_to_generalist,
             transfer_to_debugger,
             transfer_to_hermes,
             transfer_to_context,
             *power_handoff_tools,
             *crisis_handoff_tools,
-            *agent_mcp_tools.get("research_expert", []),
         ]),
         name="research_expert",
         system_prompt=(
@@ -7353,7 +7328,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
 
     general_worker = create_deep_agent(
         model=llm,
-        tools=_dedupe_tools([
+        tools=_agent_tools("general_assistant", [
             start_pixelle_remote,
             start_pixelle_async,
             check_pixelle_job,
@@ -7395,6 +7370,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             export_skill_candidate_to_repo_draft,
             activate_skill_candidate,
             deactivate_skill,
+        ], [
+            memory_manage_tool,
+            memory_search_tool,
             transfer_to_research,
             transfer_to_ui,
             transfer_to_debugger,
@@ -7402,7 +7380,6 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_context,
             *power_handoff_tools,
             *crisis_handoff_tools,
-            *agent_mcp_tools.get("general_assistant", []),
         ]),
         name="general_assistant",
         system_prompt=(
@@ -7468,6 +7445,33 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
 
     debugger_worker = _create_debugger_subgraph(
         llm,
+        _agent_tools("debugger_agent", [
+            execute_ssh_command,
+            execute_local_command,
+            fast_web_search,
+            check_external_service,
+            describe_optional_tool_registry,
+            search_agent_memory,
+            record_agent_memory,
+            search_curated_memory,
+            record_curated_memory,
+            search_session_history,
+            semantic_memory_search,
+            write_alpha_ravis_artifact,
+            read_alpha_ravis_artifact,
+            list_alpha_ravis_artifacts,
+            list_repo_ai_skills,
+            read_repo_ai_skill,
+            reload_repo_ai_skills,
+            suggest_thread_title,
+            extract_review_insights,
+            build_specialist_report,
+            search_skill_library,
+            list_skill_candidates,
+            search_debugging_lessons,
+            record_debugging_lesson,
+            record_skill_candidate,
+        ]),
         [
             transfer_to_research,
             transfer_to_generalist,
@@ -7480,7 +7484,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
 
     hermes_worker = create_deep_agent(
         model=llm,
-        tools=_dedupe_tools([
+        tools=_agent_tools("hermes_coding_agent", [
             check_hermes_agent,
             call_hermes_agent,
             check_external_service,
@@ -7502,13 +7506,13 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             reload_repo_ai_skills,
             suggest_thread_title,
             extract_review_insights,
+        ], [
             transfer_to_generalist,
             transfer_to_debugger,
             transfer_to_research,
             transfer_to_context,
             *power_handoff_tools,
             *crisis_handoff_tools,
-            *agent_mcp_tools.get("hermes_coding_agent", []),
         ]),
         name="hermes_coding_agent",
         system_prompt=(
@@ -7535,7 +7539,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
 
     context_worker = create_deep_agent(
         model=llm,
-        tools=_dedupe_tools([
+        tools=_agent_tools("context_retrieval_agent", [
             search_archived_context,
             read_archive_record,
             read_archive_collection,
@@ -7562,13 +7566,13 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             extract_review_insights,
             read_alpha_ravis_architecture,
             build_specialist_report,
+        ], [
             transfer_to_generalist,
             transfer_to_research,
             transfer_to_debugger,
             transfer_to_hermes,
             *power_handoff_tools,
             *crisis_handoff_tools,
-            *agent_mcp_tools.get("context_retrieval_agent", []),
         ]),
         name="context_retrieval_agent",
         system_prompt=(
@@ -7621,7 +7625,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         ))
         power_worker = create_deep_agent(
             model=power_llm,
-            tools=_dedupe_tools([
+            tools=_agent_tools("power_management_agent", [
                 inspect_model_management_status,
                 check_external_service,
                 plan_embedding_maintenance,
@@ -7638,13 +7642,13 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 search_curated_memory,
                 record_curated_memory,
                 semantic_memory_search,
+            ], [
                 transfer_to_generalist,
                 transfer_to_debugger,
                 transfer_to_hermes,
                 transfer_to_research,
                 transfer_to_context,
                 *crisis_handoff_tools,
-                *agent_mcp_tools.get("power_management_agent", []),
             ]),
             name="power_management_agent",
             system_prompt=(
@@ -7675,13 +7679,13 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         ))
         crisis_worker = create_deep_agent(
             model=crisis_llm,
-            tools=_dedupe_tools([
+            tools=_agent_tools("crisis_manager_agent", [
                 *owner_safe_power_tools,
                 build_specialist_report,
+            ], [
                 transfer_to_generalist,
                 transfer_to_debugger,
                 transfer_to_power,
-                *agent_mcp_tools.get("crisis_manager_agent", []),
             ]),
             name="crisis_manager_agent",
             system_prompt=(

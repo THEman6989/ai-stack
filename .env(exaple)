@@ -339,6 +339,15 @@ ALPHARAVIS_SERVICE_DASHBOARD_PORT=8090
 ALPHARAVIS_SERVICE_DASHBOARD_URL_MODE=auto
 ALPHARAVIS_TAILSCALE_URLS_FILE=service-dashboard-data/tailscale_service_urls.json
 ALPHARAVIS_TAILSCALE_HOST=
+# sudo mode for tailscale_https_routes.py:
+#   auto   = try without sudo, prompt and retry with sudo only on permission errors
+#   always = always prompt and run tailscale commands through sudo -S
+#   never  = never use sudo
+ALPHARAVIS_TAILSCALE_SUDO_MODE=auto
+# Include the service dashboard itself when planning/applying Tailscale Serve
+# routes. Makefile targets default to the same behavior and can opt out with
+# TAILSCALE_DASHBOARD=false.
+ALPHARAVIS_TAILSCALE_INCLUDE_DASHBOARD=true
 OPENWEBUI_URL=http://openwebui:8080
 OPENWEBUI_PORT=3090
 OPENWEBUI_OPENAI_API_KEY=sk-local-dev
@@ -617,10 +626,13 @@ BRIDGE_CONTEXT_REFERENCE_FOLDER_LIMIT=200
 # policy block into LangGraph state. It is stable runtime context, not a user
 # instruction.
 # ALPHARAVIS_ENABLE_TRUE_LAZY_TOOLSETS uses composable toolsets and category
-# MCP schema caches. Concrete MCP tools are attached only to matching agent
-# bundles instead of being dumped into the generalist.
+# MCP schema caches. Specialist workers bind bounded materialized local/MCP
+# bundles at graph build time instead of receiving one broad shared tool list.
+# Handoff tools are added explicitly so agents can still route work.
 ALPHARAVIS_ENABLE_STABLE_PROMPT_CONTEXT=true
 ALPHARAVIS_ENABLE_TRUE_LAZY_TOOLSETS=true
+# Adds a compact category context message to agent-path runs. Loaded per-agent
+# bundles are always recorded in run_profile.loaded_toolsets.
 ALPHARAVIS_SHOW_TOOLSET_CONTEXT=true
 ALPHARAVIS_TOOLSET_MANIFEST_INCLUDE_TOOLS=true
 ALPHARAVIS_TOOLSET_MANIFEST_MAX_TOOLS=16

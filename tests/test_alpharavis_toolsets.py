@@ -95,6 +95,16 @@ def test_infer_toolsets_from_text_prefers_bounded_categories():
     assert "system/docker" in inferred
 
 
+def test_agent_toolsets_are_bounded_by_role():
+    hermes = toolsets.resolve_toolset("agent/hermes")
+    debugger = toolsets.resolve_toolset("agent/debugger")
+
+    assert "call_hermes_agent" in hermes.tools
+    assert "execute_local_command" not in hermes.tools
+    assert "execute_local_command" in debugger.tools
+    assert "record_debugging_lesson" in debugger.tools
+
+
 def _run_all() -> None:
     tests = [
         test_resolve_toolset_includes_parents_and_dedupes_tools,
@@ -102,6 +112,7 @@ def _run_all() -> None:
         test_mcp_schema_cache_classifies_pixelle_tools,
         test_materialize_toolsets_filters_to_available_tools_and_mcp_category,
         test_infer_toolsets_from_text_prefers_bounded_categories,
+        test_agent_toolsets_are_bounded_by_role,
     ]
     for test in tests:
         test()

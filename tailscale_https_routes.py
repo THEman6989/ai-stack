@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -15,6 +16,14 @@ from urllib.parse import urlparse, urlunparse
 ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_PATH = ROOT / "service-dashboard-data" / "tailscale_service_urls.json"
 LOCAL_PROXY_HOST = "127.0.0.1"
+PERMISSION_ERROR_NEEDLES = (
+    "permission denied",
+    "operation not permitted",
+    "must be root",
+    "requires root",
+    "access denied",
+    "not authorized",
+)
 
 
 @dataclass(frozen=True)
@@ -50,6 +59,64 @@ def run(
     return subprocess.run(cmd, **kwargs)
 
 
+def command_output(result: subprocess.CompletedProcess[str]) -> str:
+    return "\n".join(part for part in (result.stdout, result.stderr) if part)
+
+
+def looks_like_permission_error(result: subprocess.CompletedProcess[str]) -> bool:
+    text = command_output(result).lower()
+    return any(needle in text for needle in PERMISSION_ERROR_NEEDLES)
+
+
+def raise_failed_command(cmd: list[str], result: subprocess.CompletedProcess[str]) -> None:
+    raise subprocess.CalledProcessError(
+        result.returncode,
+        cmd,
+        output=result.stdout,
+        stderr=result.stderr,
+    )
+
+
+class TailscaleRunner:
+    def __init__(self, sudo_mode: str) -> None:
+        self.sudo_mode = sudo_mode
+        self.sudo_password: str | None = None
+
+    def _sudo_password(self) -> str:
+        if self.sudo_password is None:
+            self.sudo_password = getpass.getpass("sudo password for tailscale commands: ")
+        return self.sudo_password
+
+    def run(self, cmd: list[str], *, capture: bool = True) -> subprocess.CompletedProcess[str]:
+        if self.sudo_mode == "always":
+            return run(cmd, capture=capture, sudo_password=self._sudo_password())
+        if self.sudo_mode == "never":
+            return run(cmd, capture=capture)
+
+        first = run(cmd, check=False, capture=True)
+        if first.returncode == 0:
+            if capture:
+                return first
+            if first.stdout:
+                print(first.stdout, end="")
+            if first.stderr:
+                print(first.stderr, end="", file=sys.stderr)
+            return first
+        if not looks_like_permission_error(first):
+            raise_failed_command(cmd, first)
+
+        print(
+            "Tailscale command needs elevated permissions; requesting sudo and retrying.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return run(cmd, capture=capture, sudo_password=self._sudo_password())
+
+
+def env_bool(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def load_redirector_services() -> list[dict[str, Any]]:
     try:
         import service_redirector_server
@@ -74,8 +141,8 @@ def normalize_local_target(host_url: str) -> tuple[str, int, str]:
     return target, parsed.port, path
 
 
-def discover_tailscale_dns_name(*, sudo_password: str | None = None) -> str:
-    result = run(["tailscale", "status", "--json"], sudo_password=sudo_password)
+def discover_tailscale_dns_name(runner: TailscaleRunner) -> str:
+    result = runner.run(["tailscale", "status", "--json"])
     data = json.loads(result.stdout)
     dns_name = str(data.get("Self", {}).get("DNSName", "")).rstrip(".")
     if not dns_name:
@@ -185,24 +252,18 @@ def print_plan(routes: list[ServiceRoute], *, tailscale_host: str) -> None:
         print("  " + " ".join(serve_command(route)))
 
 
-def apply_routes(routes: list[ServiceRoute], *, sudo_password: str | None) -> None:
+def apply_routes(routes: list[ServiceRoute], *, runner: TailscaleRunner) -> None:
     for route in routes:
         cmd = serve_command(route)
         print("+ " + " ".join(cmd))
-        run(cmd, capture=False, sudo_password=sudo_password)
+        runner.run(cmd, capture=False)
 
 
-def disable_routes(routes: list[ServiceRoute], *, sudo_password: str | None) -> None:
+def disable_routes(routes: list[ServiceRoute], *, runner: TailscaleRunner) -> None:
     for route in routes:
         cmd = disable_command(route)
         print("+ " + " ".join(cmd))
-        run(cmd, capture=False, sudo_password=sudo_password)
-
-
-def maybe_prompt_sudo_password(enabled: bool) -> str | None:
-    if not enabled:
-        return None
-    return getpass.getpass("sudo password for tailscale commands: ")
+        runner.run(cmd, capture=False)
 
 
 def main(argv: Iterable[str] | None = None) -> int:
@@ -224,11 +285,19 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
     parser.add_argument(
         "--include-dashboard",
+        dest="include_dashboard",
         action="store_true",
+        default=None,
         help=(
             "Also add a Tailscale Serve route for the service-dashboard itself. "
-            "Disabled by default to avoid a self-referential route."
+            "This is now the default; the flag remains for explicit scripts."
         ),
+    )
+    parser.add_argument(
+        "--exclude-dashboard",
+        dest="include_dashboard",
+        action="store_false",
+        help="Do not add a Tailscale Serve route for the service-dashboard itself.",
     )
     parser.add_argument(
         "--output",
@@ -238,7 +307,13 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument(
         "--sudo",
         action="store_true",
-        help="Run tailscale commands through sudo -S and prompt for the password interactively.",
+        help="Always run tailscale commands through sudo -S and prompt for the password interactively.",
+    )
+    parser.add_argument(
+        "--sudo-mode",
+        choices=["auto", "always", "never"],
+        default=os.getenv("ALPHARAVIS_TAILSCALE_SUDO_MODE", "auto"),
+        help="sudo behavior for tailscale commands. auto retries with sudo only after a permission error.",
     )
     parser.add_argument(
         "--no-write",
@@ -247,12 +322,18 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    sudo_password = maybe_prompt_sudo_password(args.sudo)
-    tailscale_host = args.tailscale_host.rstrip(".") or discover_tailscale_dns_name(sudo_password=sudo_password)
+    sudo_mode = "always" if args.sudo else args.sudo_mode
+    runner = TailscaleRunner(sudo_mode)
+    tailscale_host = args.tailscale_host.rstrip(".") or discover_tailscale_dns_name(runner)
+    include_dashboard = (
+        args.include_dashboard
+        if args.include_dashboard is not None
+        else env_bool("ALPHARAVIS_TAILSCALE_INCLUDE_DASHBOARD", "true")
+    )
     routes = build_routes(
         load_redirector_services(),
         tailscale_host=tailscale_host,
-        include_self=args.include_dashboard,
+        include_self=include_dashboard,
     )
     payload = route_payload(routes, tailscale_host=tailscale_host)
     output_path = Path(args.output)
@@ -261,13 +342,13 @@ def main(argv: Iterable[str] | None = None) -> int:
         print_plan(routes, tailscale_host=tailscale_host)
     elif args.command == "apply":
         print_plan(routes, tailscale_host=tailscale_host)
-        apply_routes(routes, sudo_password=sudo_password)
+        apply_routes(routes, runner=runner)
         if not args.no_write:
             write_payload(output_path, payload)
     elif args.command == "disable":
-        disable_routes(routes, sudo_password=sudo_password)
+        disable_routes(routes, runner=runner)
     elif args.command == "status":
-        result = run(["tailscale", "serve", "status"], sudo_password=sudo_password)
+        result = runner.run(["tailscale", "serve", "status"])
         print(result.stdout.rstrip())
     elif args.command == "write-overrides":
         write_payload(output_path, payload)

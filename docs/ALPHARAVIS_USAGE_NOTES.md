@@ -25,20 +25,35 @@ URLs:
 ```bash
 make tailscale-plan TAILSCALE_HOST=<device>.<tailnet>.ts.net
 make tailscale-overrides TAILSCALE_HOST=<device>.<tailnet>.ts.net
-make tailscale-apply TAILSCALE_HOST=<device>.<tailnet>.ts.net TAILSCALE_SUDO=true
+make tailscale-apply TAILSCALE_HOST=<device>.<tailnet>.ts.net
 ```
 
 The helper reads the redirector's service list, keeps only local HTTP services,
 and plans `tailscale serve --bg --https=<port>` routes such as
 `http://localhost:3080` -> `https://<device>.<tailnet>.ts.net:3080`.
+The dashboard itself is included by default as
+`https://<device>.<tailnet>.ts.net:8090`, so after `make tailscale-apply` you
+can open the same service cards from another allowed Tailnet device. To opt out
+of the dashboard route, pass `TAILSCALE_DASHBOARD=false` to the Make target or
+use `--exclude-dashboard` with `tailscale_https_routes.py`.
 It does not run Tailscale Funnel and does not publish services to the public
 internet; access stays limited to devices allowed in your Tailnet.
-`TAILSCALE_SUDO=true` prompts interactively if your local Tailscale CLI needs
-elevated permissions; the password is not stored. `make tailscale-overrides`
-only writes `service-dashboard-data/tailscale_service_urls.json`; it does not
-change Tailscale Serve state. In dashboard `auto` mode, that JSON file makes
-the cards prefer Tailscale HTTPS URLs while still showing the original local
-URL on each card.
+Sudo handling defaults to `TAILSCALE_SUDO=auto`: the helper tries the Tailscale
+command normally first, and only prompts for a sudo password if the CLI reports
+a permissions error. Use `TAILSCALE_SUDO=true` to force sudo from the start or
+`TAILSCALE_SUDO=never` to disable sudo retry. The password is not stored.
+`make tailscale-overrides` only writes
+`service-dashboard-data/tailscale_service_urls.json`; it does not change
+Tailscale Serve state. In dashboard `auto` mode, that JSON file makes the cards
+prefer Tailscale HTTPS URLs while still showing the original local URL on each
+card.
+
+`make install`, `make update`, `make update-no-start`, `make up`,
+`make up-fullstreaming`, and `make up-chat-fullstreaming` run
+`tailscale-apply` automatically after their normal stack work. That applies the
+Tailnet HTTPS routes and writes the dashboard override JSON in one step. Set
+`TAILSCALE_AUTO=off` on the Make command when you explicitly want to skip
+Tailscale for that run.
 
 Use LibreChat for normal chatting. It talks to `api-bridge`, which forwards the
 request into the LangGraph `alpha_ravis` brain.
@@ -149,7 +164,10 @@ The manifest now comes from composable AlphaRavis toolsets. Typical categories
 are `coding/read`, `coding/write`, `media/image`, `rag/memory`, `system/docker`,
 `system/ssh`, and `system/power`. The planner records likely categories in
 `run_profile.selected_toolsets`; each specialist gets only its bounded bundle
-and matching MCP category tools.
+and matching MCP category tools. Those bundles are materialized at graph build
+time from `alpharavis_toolsets.py`; handoff tools are added explicitly so agents
+can still transfer work without receiving unrelated concrete tools. The loaded
+per-agent bundles are visible in `run_profile.loaded_toolsets`.
 
 Default MCP config:
 
@@ -1149,7 +1167,8 @@ Already available:
 - media-gallery service for Pixelle MCP outputs and uploaded/linked media metadata
 - separate optional media/vision pgvector table to avoid text/vision dimension
   conflicts
-- lazy tool category registry for coding, media, RAG, and system tool families
+- lazy toolset binding for specialist coding, media, RAG, system, Hermes,
+  debugger, and context bundles
 - OpenWebUI optional frontend profile using the AlphaRavis Bridge
 - Hermes healthcheck/fallback before bounded coding-agent calls
 

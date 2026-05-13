@@ -4,6 +4,64 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-13 - Lazy Toolset Binding And Dashboard Tailscale Default
+
+### Summary
+
+AlphaRavis now uses the lazy toolset resolver for the specialist workers'
+actual local/MCP tool binding, not only for registry text and profiles. At graph
+build time, each specialist gets its materialized bounded bundle:
+
+- `research_expert` -> research/RAG/media/context tools
+- `general_assistant` -> general media/memory/skills/power categories
+- `debugger_agent` -> approved local/SSH diagnostics, Docker/service checks,
+  debugging lessons, and reports
+- `hermes_coding_agent` -> Hermes delegation, coding context, memory, skills,
+  and artifacts, but not raw local/SSH execute tools
+- `context_retrieval_agent` -> archives, memory, media index status, skills,
+  and artifacts
+- optional power/crisis agents -> their owner/model-management bundles
+
+Handoff tools are still added explicitly so routing remains available even when
+a specialist's own toolset is narrow. `run_profile.loaded_toolsets` records the
+per-agent materialized profiles, and `run_profile.selected_toolsets` continues
+to record categories inferred from the latest user message.
+
+The Tailscale helper now includes the service dashboard itself by default.
+`make tailscale-plan`, `make tailscale-overrides`, `make tailscale-apply`, and
+`make tailscale-disable` therefore include port `8090` unless the operator opts
+out with:
+
+```text
+TAILSCALE_DASHBOARD=false
+```
+
+or direct script flags:
+
+```text
+--exclude-dashboard
+ALPHARAVIS_TAILSCALE_INCLUDE_DASHBOARD=false
+```
+
+This keeps the operator flow simple: after Tailscale Serve is applied, the same
+dashboard card surface is reachable inside the Tailnet over HTTPS.
+
+### Verification
+
+```text
+PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile \
+  langgraph-app/alpharavis_toolsets.py \
+  langgraph-app/agent_graph.py \
+  tailscale_https_routes.py \
+  tests/test_tailscale_https_routes.py \
+  tests/test_alpharavis_toolsets.py
+
+pytest -q tests/test_alpharavis_toolsets.py tests/test_tailscale_https_routes.py
+
+python tailscale_https_routes.py plan --tailscale-host test-device.tailnet.ts.net
+python tailscale_https_routes.py plan --tailscale-host test-device.tailnet.ts.net --exclude-dashboard
+```
+
 ## 2026-05-13 - Vision Embedding Endpoint Configuration
 
 ### Summary
@@ -89,6 +147,19 @@ local HTTP service, writes
 dashboard. The dashboard reads that file automatically in `auto` mode and shows
 the generated HTTPS URLs instead of localhost URLs while preserving local URLs
 on each card.
+
+Follow-up: the normal operator flows now run that apply step automatically.
+`make install`, all install profile targets, `make update`,
+`make update-no-start`, `make up`, `make up-fullstreaming`, and
+`make up-chat-fullstreaming` call `tailscale-auto`, which defaults to
+`tailscale-apply`. Use `TAILSCALE_AUTO=off` to skip automatic Tailnet HTTPS
+setup for one run.
+
+Follow-up: Tailscale sudo handling now defaults to `auto`. The helper first
+tries the Tailscale CLI without sudo. If it gets a permissions-style failure,
+it asks for the sudo password and retries the command through `sudo -S`.
+Operators can force old behavior with `TAILSCALE_SUDO=true` or disable sudo
+retry with `TAILSCALE_SUDO=never`.
 
 ## 2026-05-13 - Hermes-Inspired Provider Error Handling Phase A-D
 

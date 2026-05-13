@@ -5,7 +5,8 @@ not fully wired yet.
 
 ## Service Dashboard And Tailscale HTTPS
 
-Status: dashboard implemented; Tailscale HTTPS helper wired for operator use.
+Status: dashboard implemented; Tailscale HTTPS helper wired for operator use;
+the dashboard route is included by default.
 
 Implemented:
 
@@ -27,16 +28,37 @@ Implemented:
   - `make tailscale-apply`
   - `make tailscale-disable`
   - `make tailscale-status`
+- Normal operator flows call Tailscale automatically:
+  - `make install` and install profile targets
+  - `make update`
+  - `make update-no-start`
+  - `make up`
+  - `make up-fullstreaming`
+  - `make up-chat-fullstreaming`
+  Use `TAILSCALE_AUTO=off` to skip the automatic apply step for one run.
+- Tailscale sudo mode defaults to `auto`: retry with sudo only after a
+  permissions-style Tailscale CLI failure. Use `TAILSCALE_SUDO=true` to force
+  sudo or `TAILSCALE_SUDO=never` to disable retry.
 - `service_redirector_server.py` automatically prefers generated Tailscale
   HTTPS URLs from `service-dashboard-data/tailscale_service_urls.json` when
   `ALPHARAVIS_SERVICE_DASHBOARD_URL_MODE=auto`.
+- `tailscale_https_routes.py` now includes the `service-dashboard` Tailnet HTTPS
+  route by default for `plan`, `write-overrides`, `apply`, and `disable`.
+  Operators can opt out with `--exclude-dashboard`,
+  `ALPHARAVIS_TAILSCALE_INCLUDE_DASHBOARD=false`, or
+  `make ... TAILSCALE_DASHBOARD=false`.
+- Focused local verification completed on 2026-05-13:
+  - `python tailscale_https_routes.py plan --tailscale-host test-device.tailnet.ts.net`
+    includes `https://test-device.tailnet.ts.net:8090` for the dashboard.
+  - `python tailscale_https_routes.py plan --tailscale-host test-device.tailnet.ts.net --exclude-dashboard`
+    omits the dashboard.
+  - `pytest -q tests/test_tailscale_https_routes.py` passes.
 
 Still needed:
 
-- Decide whether the dashboard itself should get a Tailnet HTTPS route by
-  default or only with the helper's `--include-dashboard` flag.
 - Live-test `tailscale serve --bg --https=<port>` from another allowed Tailnet
-  device after Tailscale HTTPS certificates are enabled for the tailnet.
+  device after Tailscale HTTPS certificates are enabled for the tailnet. This
+  is now an operator/live-network validation, not an implementation blocker.
 
 ## Responses Streaming Follow-up
 
@@ -677,14 +699,36 @@ OPENWEBUI_ENABLE_OPENAI_API_PASSTHROUGH=true
 
 ## Lazy Tool Loading
 
-Status: category registry exists and agents can inspect it with
-`describe_optional_tool_registry(category=...)`.
+Status: implemented for the current DeepAgents static graph-binding model.
+Agents can inspect categories with
+`describe_optional_tool_registry(category=...)`, MCP schemas are cached by
+category, and specialist workers bind bounded materialized toolsets instead of
+the old broad local tool lists.
 
-Still needed:
+Implemented:
 
-- True per-run dynamic internal tool binding/unbinding.
-- Cache concrete MCP tool schemas by category and only expose loaded subsets.
-- Store loaded tool-set metadata in `run_profile`.
+- `alpharavis_toolsets.py` defines composable toolsets for coding, media, RAG,
+  system/power, research, Hermes, debugger, context, and UI roles.
+- `agent_graph.py` materializes those toolsets at graph build and binds each
+  specialist to its own resolved local/MCP bundle; handoff tools are added
+  explicitly outside the category bundle.
+- MCP schemas are cached by category and only matching loaded MCP tools are
+  attached to the specialist bundle that selected that category.
+- `run_profile.selected_toolsets` records the likely categories inferred from
+  the latest user message, and `run_profile.loaded_toolsets` records the
+  materialized per-agent profiles, including tool names, missing tools,
+  missing toolsets, cycle warnings, MCP categories, and schema fingerprint.
+- The Hermes bridge agent no longer receives raw local/SSH execute tools from
+  the coding execute category; terminal-oriented work stays delegated through
+  Hermes or the debugger agent.
+- Focused verification completed on 2026-05-13:
+  - `pytest -q tests/test_alpharavis_toolsets.py` passes.
+
+Open items:
+
+- None for the current supported DeepAgents graph-binding model. Runtime
+  hot-swapping can be revisited only if LangGraph/DeepAgents exposes a safe
+  per-node rebinding API; it is not tracked as an active AlphaRavis open task.
 
 Clarification:
 
@@ -1284,9 +1328,8 @@ Goal:
 
 ### Chunk 5: True Lazy Toolsets
 
-Status: implemented for static graph compile-time bundles and MCP category
-filtering. Full per-node runtime rebinding remains future work if LangGraph
-tool binding becomes hot-swappable.
+Status: implemented for static graph compile-time specialist bundles, MCP
+category filtering, and run-profile toolset metadata.
 
 Goal:
 
@@ -1602,40 +1645,7 @@ Medium priority:
    - Add a reload/status command or tool that reports added/removed/unchanged
      skills without auto-promoting Store skill candidates.
 
-6. True lazy toolset resolver.
-
-   Reference:
-
-   ```text
-   C:\experi\ai\hermes-agent\toolsets.py
-   TOOLSETS
-   get_toolset
-   resolve_toolset
-   resolve_multiple_toolsets
-   get_all_toolsets
-   validate_toolset
-   ```
-
-   AlphaRavis target:
-
-   ```text
-   langgraph-app/agent_graph.py
-   OPTIONAL_TOOL_REGISTRY
-   describe_optional_tool_registry
-   ```
-
-   Needed behavior:
-
-   - Replace the current manifest-only approximation with composable toolsets
-     such as `coding/read`, `coding/write`, `coding/execute`, `media/video`,
-     `rag/memory`, `system/power`.
-   - Keep category descriptions visible to the model, but bind concrete tools
-     only after the planner or agent selects the category.
-   - Cache MCP tool schemas per category.
-   - Record selected and loaded toolsets in `run_profile`.
-   - Prevent recursive/cyclic toolset includes.
-
-7. Usage, cost, and rate-limit telemetry.
+6. Usage, cost, and rate-limit telemetry.
 
    Reference:
 
@@ -1669,7 +1679,7 @@ Medium priority:
      bridge/debug output.
    - Use real usage values for compression decisions whenever available.
 
-8. Prompt assembly and context-file cache hygiene.
+7. Prompt assembly and context-file cache hygiene.
 
    Reference:
 
@@ -1702,7 +1712,7 @@ Medium priority:
 
 Lower priority / future:
 
-9. Offline trajectory/archive compression evaluator.
+8. Offline trajectory/archive compression evaluator.
 
    Reference:
 
@@ -1724,7 +1734,7 @@ Lower priority / future:
    - Track success/failure metrics for collection summaries.
    - Use it for maintenance/backfill, not the live chat path.
 
-10. Shell hooks and approval allowlists.
+9. Shell hooks and approval allowlists.
 
     Reference:
 
@@ -1745,7 +1755,7 @@ Lower priority / future:
     - Strict allowlist and audit trail.
     - No automatic destructive hook execution without HITL.
 
-11. Provider adapter hardening.
+10. Provider adapter hardening.
 
     Status: staged AlphaRavis-local hardening. Phase A/B is implemented for
     direct Responses compatibility retries, retry failure diagnostics,
@@ -1850,7 +1860,7 @@ Lower priority / future:
     - `docs/ALPHARAVIS_CHANGES.md` and `docs/ALPHARAVIS_USAGE_NOTES.md`
       describe the runtime knobs and remaining limits.
 
-12. Thread title and insight helpers.
+11. Thread title and insight helpers.
 
     Reference:
 
@@ -1884,7 +1894,14 @@ Lower priority / future:
 2.  **Model & Power Management:** Anbindung des realen Action-Endpoints für Hardware-Aktionen und Vervollständigung der administrativen Tools (Ollama/Embedding Management).
 3.  **Crisis Manager:** Aktivierung der automatischen Recovery-Trigger bei Inferenz-Fehlern (Timeouts, 502s).
 4.  **Media & Vision:** Ausbau der Media-Gallery zur zentralen Video-Verwaltung (Meet-Integration), inklusive Vision-Embeddings und Frame-Analyse.
-5.  **Lazy Tool Loading:** Umstellung auf echte dynamische Tool-Bindung basierend auf Kategorien (Coding, System, Media etc.).
-6.  **OpenWebUI:** Verifizierung der Integration und Konfiguration der Web-Suche (SearXNG).
+5.  **OpenWebUI:** Verifizierung der Integration und Konfiguration der Web-Suche (SearXNG).
+
+### Kürzlich erledigt:
+- **Lazy Tool Loading:** Spezialisten binden jetzt materialisierte, bounded
+  Toolset-Bundles inklusive MCP-Kategoriecache; die Profile stehen in
+  `run_profile`.
+- **Service Dashboard / Tailscale:** Das Dashboard wird von den
+  Tailscale-Helper-Zielen standardmäßig auf Port `8090` eingeplant; Opt-out ist
+  weiterhin möglich.
 
 *Hinweis: Diese Zusammenfassung sollte regelmäßig aktualisiert und verfeinert werden, um den Projektfortschritt präzise abzubilden.*
