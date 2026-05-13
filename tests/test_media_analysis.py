@@ -70,3 +70,19 @@ def test_media_chunking_hash_changes_with_frame_cap(monkeypatch) -> None:
 def test_media_model_card_prefers_media_specific_env(monkeypatch) -> None:
     monkeypatch.setenv("ALPHARAVIS_MEDIA_VISION_EMBEDDING_MODEL_CARD", "qwen3vl-video-embed-v1")
     assert vector_memory._media_model_card_id("") == "qwen3vl-video-embed-v1"
+
+
+def test_vision_embedding_model_url_overrides_litellm_base(monkeypatch) -> None:
+    monkeypatch.setenv("ALPHARAVIS_VISION_EMBEDDING_MODEL_URL", "http://vision-box:8080/v1/")
+    monkeypatch.setenv("ALPHARAVIS_VISION_EMBEDDING_BASE_URL", "http://litellm:4000/v1")
+    monkeypatch.setenv("VISION_EMBEDDING_API_BASE", "http://backend:11434/v1")
+
+    assert vector_memory._vision_embedding_base_url() == "http://vision-box:8080/v1"
+
+
+def test_vision_embedding_base_url_falls_back_to_litellm_backend_env(monkeypatch) -> None:
+    monkeypatch.delenv("ALPHARAVIS_VISION_EMBEDDING_MODEL_URL", raising=False)
+    monkeypatch.delenv("ALPHARAVIS_VISION_EMBEDDING_BASE_URL", raising=False)
+    monkeypatch.setenv("VISION_EMBEDDING_API_BASE", "http://vision-backend:11434/v1")
+
+    assert vector_memory._vision_embedding_base_url() == "http://vision-backend:11434/v1"

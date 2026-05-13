@@ -4,6 +4,182 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-13 - Vision Embedding Endpoint Configuration
+
+### Summary
+
+Media/vector indexing can now target a dedicated external vision embedding
+server without changing the normal LiteLLM route. The vision embedding client
+prefers:
+
+```text
+ALPHARAVIS_VISION_EMBEDDING_MODEL_URL
+ALPHARAVIS_VISION_EMBEDDING_BASE_URL
+VISION_EMBEDDING_API_BASE
+ALPHARAVIS_PGVECTOR_EMBEDDING_BASE_URL
+OPENAI_API_BASE
+```
+
+This lets the operator run a small OpenAI-compatible llama.cpp server on
+another machine and point AlphaRavis directly at it:
+
+```text
+ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true
+ALPHARAVIS_VISION_EMBEDDING_MODEL_URL=http://<vision-embedding-host>:<port>/v1
+ALPHARAVIS_VISION_EMBEDDING_MODEL=<model-name>
+```
+
+Docker, setup prompts, and the Makefile now expose the direct URL. `make
+media-vision`, `make install`, `make update`, `make up`, `make
+up-fullstreaming`, and `make up-chat-fullstreaming` accept:
+
+```text
+VISION_ENABLED=true
+VISION_URL=http://<vision-embedding-host>:<port>/v1
+VISION_MODEL=<model-name>
+VISION_FALLBACK=<fallback-model>
+```
+
+When `VISION_URL` is passed to `make up`, the Makefile writes the `.env` values
+before Docker Compose starts. Captioning, OCR, and transcription remain
+separate future work.
+
+Vision/video indexing uses the existing durable `alpharavis_embedding_jobs`
+queue with `job_type=media_analysis`; there is no separate vision queue table.
+
+### Verification
+
+```text
+pytest -q tests/test_media_analysis.py
+pytest -q tests/test_alpharavis_setup.py
+
+PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile \
+  langgraph-app/vector_memory.py \
+  scripts/alpharavis_setup.py \
+  tests/test_media_analysis.py \
+  tests/test_alpharavis_setup.py
+```
+
+## 2026-05-13 - Service Dashboard Redirector
+
+AlphaRavis now has a lightweight `service-dashboard` Compose service on
+`http://localhost:8090`. It serves `service_redirector_server.py`, a standalone
+Python stdlib dashboard that lists the stack's main UI/API/database endpoints
+as dark clickable service cards plus `/services.json` and `/health`.
+
+`make up`, `make install`, and `make update` start it with the base Compose
+stack. `make service-dashboard` or `make dashboard` starts only this redirector.
+The existing Bridge Test UI remains part of the normal base stack and keeps its
+dedicated `make test-ui` target.
+
+`tailscale_https_routes.py` can generate and apply Tailscale Serve HTTPS routes
+for the redirector's local HTTP services inside the Tailnet. It deliberately
+uses `tailscale serve`, not Tailscale Funnel, so it does not publish services to
+the public internet. The Makefile exposes safe planning and override-generation
+targets:
+
+```text
+make tailscale-plan TAILSCALE_HOST=<device>.<tailnet>.ts.net
+make tailscale-overrides TAILSCALE_HOST=<device>.<tailnet>.ts.net
+```
+
+`make tailscale-apply` runs `tailscale serve --bg --https=<port>` for each
+local HTTP service, writes
+`service-dashboard-data/tailscale_service_urls.json`, and restarts the
+dashboard. The dashboard reads that file automatically in `auto` mode and shows
+the generated HTTPS URLs instead of localhost URLs while preserving local URLs
+on each card.
+
+## 2026-05-13 - Hermes-Inspired Provider Error Handling Phase A-D
+
+### Summary
+
+The provider-hardening follow-up now has a staged plan in
+`docs/ALPHARAVIS_OPEN_TASKS.md`, focused on Hermes-style error handling without
+copying Hermes's full provider adapter stack into AlphaRavis.
+
+Phase A/B adds a central compatibility layer in
+`langgraph-app/provider_hardening.py` and applies it to direct internal
+Responses calls plus ChatLiteLLM fallback kwargs:
+
+- Direct `/v1/responses` calls still retry once after safe unsupported-parameter
+  errors.
+- If the compatibility retry also fails, the raised/classified error now keeps
+  both the original provider error and the retry error.
+- Successful direct Responses calls attach `responses_compatibility_retry` to
+  the returned AI message when a retry happened; planner and fast-path nodes
+  copy that into `run_profile.provider_hardening_last_retry`.
+- ChatLiteLLM fallback calls omit server-managed `temperature` for
+  Kimi/Moonshot-style endpoints and can map `max_tokens` to
+  `max_completion_tokens` for direct OpenAI/GitHub GPT-4o/o-series/GPT-5-style
+  endpoints.
+- Local LiteLLM/llama.cpp defaults stay conservative: `max_tokens` is not
+  remapped unless the endpoint/model profile calls for it.
+- A reviewed repo skill, `provider-error-hardening`, now captures the reusable
+  Hermes-style workflow for provider failures.
+- Chunk 8 maintenance helpers now include deterministic thread/archive title
+  suggestions and review-only insight extraction; they do not auto-promote
+  memory.
+
+Phase C/D completes the staged provider-hardening plan without importing the
+Hermes provider stack:
+
+- Provider profiles are narrow request-shape profiles, not transports.
+  `ALPHARAVIS_PROVIDER_PROFILE=auto` preserves local LiteLLM/llama.cpp behavior,
+  detects Kimi/Moonshot server-managed sampling, and maps direct OpenAI/GitHub
+  reasoning-style Chat token limits to `max_completion_tokens`.
+- `ALPHARAVIS_PROVIDER_PROFILE=responses_required` or
+  `ALPHARAVIS_CHAT_FALLBACK_MODE=responses_required` blocks silent fallback from
+  direct Responses calls to ChatLiteLLM when runtime evidence shows that Chat
+  Completions is broken for a provider.
+- Direct Responses and ChatLiteLLM operational logs include provider-profile
+  metadata. Planner and fast-path messages can copy the active profile into
+  `run_profile.provider_hardening_profile`.
+- Direct non-OpenAI adapters remain disabled by policy. AlphaRavis keeps
+  LiteLLM/LangChain as the provider route unless a future, documented feature
+  gap proves a direct adapter is required.
+
+### Hermes Operational Fix
+
+The Hermes Compose entrypoint now synchronizes persisted
+`$HERMES_HOME/config.yaml` model fields from AlphaRavis env values before
+starting Hermes. This fixes a stale-volume failure where Hermes still routed to
+OpenRouter/Claude and returned `HTTP 502` because OpenRouter auth was missing,
+even though `.env` configured `custom`, `big-boss`, and local LiteLLM.
+
+After recreating `hermes-agent`, the log showed:
+
+```text
+Synced Hermes model config from AlphaRavis env: default=big-boss, provider=custom, base_url=http://litellm:4000/v1
+```
+
+`make hermes-smoke` then returned assistant content `OK`.
+
+### Verification
+
+```text
+pytest -q tests/test_provider_hardening.py \
+  tests/test_responses_client_error_handling.py \
+  tests/test_error_classifier.py \
+  tests/test_maintenance_helpers.py \
+  tests/test_alpharavis_setup.py \
+  tests/test_repo_skills.py
+
+PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile \
+  langgraph-app/provider_hardening.py \
+  langgraph-app/responses_client.py \
+  langgraph-app/agent_graph.py \
+  langgraph-app/maintenance_helpers.py \
+  scripts/alpharavis_setup.py \
+  tests/test_provider_hardening.py \
+  tests/test_responses_client_error_handling.py \
+  tests/test_maintenance_helpers.py
+
+bash -n scripts/hermes_patched_entrypoint.sh scripts/apply_hermes_agent_patches.sh
+docker compose up -d --force-recreate hermes-agent
+make hermes-smoke
+```
+
 ## 2026-05-13 - Bridge Test UI Streaming Proxy
 
 ### Summary

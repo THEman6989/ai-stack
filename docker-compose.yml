@@ -199,6 +199,14 @@ services:
       - ALPHARAVIS_PGVECTOR_DATABASE_URL=${ALPHARAVIS_PGVECTOR_DATABASE_URL:-postgresql://postgres:${POSTGRES_PASSWORD}@vectordb:5432/rag_api}
       - ALPHARAVIS_PGVECTOR_EMBEDDING_BASE_URL=${ALPHARAVIS_PGVECTOR_EMBEDDING_BASE_URL:-http://litellm:4000/v1}
       - ALPHARAVIS_PGVECTOR_EMBEDDING_API_KEY=${ALPHARAVIS_PGVECTOR_EMBEDDING_API_KEY:-sk-local-dev}
+      - ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=${ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY:-false}
+      - ALPHARAVIS_VISION_EMBEDDING_MODEL_URL=${ALPHARAVIS_VISION_EMBEDDING_MODEL_URL:-}
+      - ALPHARAVIS_VISION_EMBEDDING_BASE_URL=${ALPHARAVIS_VISION_EMBEDDING_BASE_URL:-http://litellm:4000/v1}
+      - ALPHARAVIS_VISION_EMBEDDING_API_KEY=${ALPHARAVIS_VISION_EMBEDDING_API_KEY:-sk-local-dev}
+      - ALPHARAVIS_VISION_EMBEDDING_MODEL=${ALPHARAVIS_VISION_EMBEDDING_MODEL:-vision-embed}
+      - ALPHARAVIS_VISION_EMBEDDING_FALLBACK_MODEL=${ALPHARAVIS_VISION_EMBEDDING_FALLBACK_MODEL:-vision-embed-fallback}
+      - ALPHARAVIS_VISION_EMBEDDING_TIMEOUT_SECONDS=${ALPHARAVIS_VISION_EMBEDDING_TIMEOUT_SECONDS:-60}
+      - VISION_EMBEDDING_API_BASE=${VISION_EMBEDDING_API_BASE:-http://192.168.178.140:11434/v1}
       - ALPHARAVIS_RAG_API_URL=${ALPHARAVIS_RAG_API_URL:-http://rag_api:8000}
       - ALPHARAVIS_MEDIA_GALLERY_URL=${ALPHARAVIS_MEDIA_GALLERY_URL:-http://media-gallery:8130}
       - OPENWEBUI_URL=${OPENWEBUI_URL:-http://openwebui:8080}
@@ -346,6 +354,33 @@ services:
     restart: unless-stopped
 
   # --- FRONTENDS ---
+
+  # AlphaRavis Service Dashboard / Redirector
+  service-dashboard:
+    image: python:3.12-slim
+    container_name: service-dashboard
+    working_dir: /app
+    command: ["python", "/app/service_redirector_server.py"]
+    ports:
+      - "${ALPHARAVIS_SERVICE_DASHBOARD_PORT:-8090}:8090"
+    volumes:
+      - ./service_redirector_server.py:/app/service_redirector_server.py:ro
+      - ./service-dashboard-data:/app/service-dashboard-data:ro
+    env_file:
+      - .env
+    environment:
+      - ALPHARAVIS_SERVICE_DASHBOARD_HOST=0.0.0.0
+      - ALPHARAVIS_SERVICE_DASHBOARD_PORT=8090
+      - ALPHARAVIS_SERVICE_DASHBOARD_PUBLIC_PORT=${ALPHARAVIS_SERVICE_DASHBOARD_PORT:-8090}
+      - ALPHARAVIS_SERVICE_DASHBOARD_URL_MODE=${ALPHARAVIS_SERVICE_DASHBOARD_URL_MODE:-auto}
+      - ALPHARAVIS_TAILSCALE_URLS_FILE=/app/service-dashboard-data/tailscale_service_urls.json
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=5).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
 
   # Das offizielle LangChain Deep Agents UI
   deep-agents-ui:

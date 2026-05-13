@@ -102,6 +102,23 @@ ALPHARAVIS_RESPONSES_REASONING_FORMAT=
 ALPHARAVIS_RESPONSES_UNSUPPORTED_PARAM_RETRY=true
 ALPHARAVIS_RESPONSES_OMIT_TEMPERATURE_MODE=auto
 ALPHARAVIS_RESPONSES_DROP_NONE_VALUES=true
+# Provider profile controls stay conservative by default:
+#   auto               = infer local LiteLLM, Kimi/Moonshot, or direct OpenAI/GitHub-style quirks
+#   local_litellm      = keep local OpenAI-compatible behavior unchanged
+#   kimi_moonshot      = omit client sampling knobs
+#   openai_reasoning   = omit sampling knobs and map Chat max_tokens to max_completion_tokens
+#   responses_required = do not fall back from direct Responses calls to ChatLiteLLM
+ALPHARAVIS_PROVIDER_PROFILE=auto
+ALPHARAVIS_PROVIDER_REQUIRE_RESPONSES_MODE=auto
+ALPHARAVIS_CHAT_FALLBACK_MODE=auto
+ALPHARAVIS_RESPONSES_TOKEN_LIMIT_PARAM_MODE=auto
+# Applies the same conservative sampling cleanup to ChatLiteLLM fallback calls.
+# Defaults to the Responses temperature mode when unset.
+ALPHARAVIS_CHAT_OMIT_TEMPERATURE_MODE=auto
+# auto maps max_tokens to max_completion_tokens only for direct OpenAI/GitHub
+# GPT-4o/o-series/GPT-5-style endpoints; local LiteLLM/llama.cpp stays unchanged.
+# Allowed values: auto, max_completion_tokens, max_tokens, none
+ALPHARAVIS_CHAT_TOKEN_LIMIT_PARAM_MODE=auto
 
 # DeepAgents tool workers can use LangChain ChatOpenAI with the Responses API.
 # Allowed values:
@@ -314,6 +331,14 @@ HERMES_TEMPERATURE=0.2
 
 # Optional OpenWebUI frontend. It connects to the AlphaRavis Bridge, not directly
 # to the LLM, so AlphaRavis remains router/memory/RAG/tool orchestrator.
+ALPHARAVIS_SERVICE_DASHBOARD_PORT=8090
+# URL mode for service-dashboard:
+#   auto      = use generated Tailscale HTTPS URLs when present, otherwise localhost
+#   local     = always show localhost URLs
+#   tailscale = prefer generated Tailscale HTTPS URLs
+ALPHARAVIS_SERVICE_DASHBOARD_URL_MODE=auto
+ALPHARAVIS_TAILSCALE_URLS_FILE=service-dashboard-data/tailscale_service_urls.json
+ALPHARAVIS_TAILSCALE_HOST=
 OPENWEBUI_URL=http://openwebui:8080
 OPENWEBUI_PORT=3090
 OPENWEBUI_OPENAI_API_KEY=sk-local-dev
@@ -986,6 +1011,12 @@ ALPHARAVIS_VIDEO_ANALYSIS_TRANSCRIBE_AUDIO=false
 # Allowed values: true, false
 ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=false
 ALPHARAVIS_VISION_PGVECTOR_TABLE=alpharavis_media_vectors
+# Direct OpenAI-compatible /v1 URL for a dedicated external vision embedding
+# server, for example a small llama.cpp server on another machine. If this is
+# set, AlphaRavis uses it before the LiteLLM route below.
+ALPHARAVIS_VISION_EMBEDDING_MODEL_URL=
+# LiteLLM/OpenAI-compatible vision embedding route used when the direct model
+# URL is empty. Inside Docker this usually stays on LiteLLM.
 ALPHARAVIS_VISION_EMBEDDING_BASE_URL=http://litellm:4000/v1
 ALPHARAVIS_VISION_EMBEDDING_API_KEY=sk-local-dev
 ALPHARAVIS_VISION_EMBEDDING_MODEL=vision-embed

@@ -3,6 +3,41 @@
 This is the running backlog for features that are intentionally prepared but
 not fully wired yet.
 
+## Service Dashboard And Tailscale HTTPS
+
+Status: dashboard implemented; Tailscale HTTPS helper wired for operator use.
+
+Implemented:
+
+- `service-dashboard` runs on `http://localhost:8090` as part of the base
+  Docker Compose stack.
+- `service_redirector_server.py` serves the dark service-card redirector plus
+  `/services.json` and `/health`.
+- `make up`, `make install`, and `make update` include the dashboard through
+  the base Compose stack; `make service-dashboard` starts only the dashboard.
+- `bridge-test-ui` remains included in base stack startup and has
+  `make test-ui` for targeted startup.
+- `tailscale_https_routes.py` can plan/apply Tailscale Serve HTTPS routes for
+  local HTTP services inside the Tailnet and can write
+  `tailscale_service_urls.json` redirector override data. It does not use
+  Tailscale Funnel or public-internet exposure.
+- Makefile targets exist:
+  - `make tailscale-plan`
+  - `make tailscale-overrides`
+  - `make tailscale-apply`
+  - `make tailscale-disable`
+  - `make tailscale-status`
+- `service_redirector_server.py` automatically prefers generated Tailscale
+  HTTPS URLs from `service-dashboard-data/tailscale_service_urls.json` when
+  `ALPHARAVIS_SERVICE_DASHBOARD_URL_MODE=auto`.
+
+Still needed:
+
+- Decide whether the dashboard itself should get a Tailnet HTTPS route by
+  default or only with the helper's `--include-dashboard` flag.
+- Live-test `tailscale serve --bg --https=<port>` from another allowed Tailnet
+  device after Tailscale HTTPS certificates are enabled for the tailnet.
+
 ## Responses Streaming Follow-up
 
 Status: local PR #35457-style patch applied; hybrid streaming mode passes.
@@ -276,6 +311,11 @@ ALPHARAVIS_MEDIA_AUTO_INDEX_LINK_REFERENCES=false
   model-card defaults in `langgraph-app/model_cards.json`.
 - `make video-analysis ENABLED=true FPS=1 MAX_FRAMES=100` can write the core
   analysis switches into `.env`.
+- `make media-vision`, `make install`, `make update`, `make up`,
+  `make up-fullstreaming`, and `make up-chat-fullstreaming` accept
+  `VISION_ENABLED`, `VISION_URL`, `VISION_BASE_URL`, `VISION_MODEL`, and
+  `VISION_FALLBACK` so a dedicated external vision embedding server can be
+  written into `.env` before the stack starts.
 
 Still needed:
 
@@ -283,7 +323,15 @@ Still needed:
 
 ```text
 ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true
+ALPHARAVIS_VISION_EMBEDDING_MODEL_URL=http://<vision-embedding-host>:<port>/v1
+ALPHARAVIS_VISION_EMBEDDING_MODEL=<model-name-served-by-that-endpoint>
 ```
+
+  Prepared: `.env(exaple)`, Docker env wiring, setup prompts, Makefile install
+  and up/update arguments, and the `vector_memory` client now prefer
+  `ALPHARAVIS_VISION_EMBEDDING_MODEL_URL` for a dedicated external
+  llama.cpp/OpenAI-compatible vision embedding server.
+  Captioning/OCR/transcription remain future work.
 
 - Build the Meet/media-gallery integration as the operator-facing video rack.
   The current `media-gallery` already has its own port and Mongo-backed asset
@@ -898,12 +946,24 @@ Still needed:
 
 ## DeepAgents / Hermes Skills
 
-Status: skill cards exist.
+Status: skill cards exist and the provider-error-hardening workflow has been
+promoted into a reviewed repo skill card.
+
+Implemented:
+
+- Added `ai-skills/provider-error-hardening/SKILL.md` for Hermes-style provider
+  failure work:
+  - classify first
+  - retry only safe unsupported-parameter failures
+  - preserve original and retry errors
+  - document smoke/runtime evidence
+  - keep LiteLLM/LangChain as the main AlphaRavis routing layer
 
 Still needed:
 
 - Use the DeepAgents and Hermes skill cards as templates when adding new agents.
-- Extract more stable reusable skills from completed workflows.
+- Continue extracting stable reusable skills from completed workflows when they
+  repeat across sessions.
 - Keep promotion manual through the existing skill-library review flow.
 
 ## Hermes Deep-Code Followups
@@ -1340,6 +1400,8 @@ Acceptance:
 
 ### Chunk 8: Maintenance And Metadata Helpers
 
+Status: partially implemented for deterministic title/insight helpers.
+
 Goal:
 
 - Improve long-term quality after the main runtime path is stable.
@@ -1356,6 +1418,13 @@ Acceptance:
 
 - These are maintenance/admin helpers, not mandatory runtime features.
 - Nothing here should affect normal LibreChat use unless enabled.
+- Done: `langgraph-app/maintenance_helpers.py` can suggest short deterministic
+  thread/archive titles and extract review-only insight candidates without
+  auto-promoting them into memory.
+- Done: `suggest_thread_title` and `extract_review_insights` tools expose those
+  helpers to agents.
+- Still future: offline archive/trajectory compression evaluator and optional
+  shell hooks/approval allowlists.
 
 High priority:
 
@@ -1678,10 +1747,19 @@ Lower priority / future:
 
 11. Provider adapter hardening.
 
+    Status: staged AlphaRavis-local hardening. Phase A/B is implemented for
+    direct Responses compatibility retries, retry failure diagnostics,
+    ChatLiteLLM fallback kwarg cleanup, and run-profile/log visibility for
+    compatibility retries. Do not copy the full Hermes provider stack into
+    AlphaRavis; keep LiteLLM and LangChain as the main routing layer, then add
+    small compatibility guards where local OpenAI-compatible endpoints are
+    known to reject harmless parameters.
+
     Reference:
 
     ```text
     C:\experi\ai\hermes-agent\agent\auxiliary_client.py
+    C:\experi\ai\hermes-agent\run_agent.py
     C:\experi\ai\hermes-agent\agent\codex_responses_adapter.py
     C:\experi\ai\hermes-agent\agent\anthropic_adapter.py
     C:\experi\ai\hermes-agent\agent\gemini_native_adapter.py
@@ -1700,6 +1778,77 @@ Lower priority / future:
     - Map model-specific max-output-token and temperature behavior.
     - Keep Chat Completions fallback for providers with broken Responses tools.
     - Add direct non-OpenAI providers only if LiteLLM is not enough.
+
+    Implementation plan:
+
+    - Phase A: centralize small request-shape hardening in
+      `langgraph-app/provider_hardening.py` and use it from direct Responses
+      calls and ChatLiteLLM construction/binds. Adopt only the Hermes patterns
+      that are low-risk for AlphaRavis:
+      - omit `temperature` for providers/models that manage sampling
+        server-side, such as Kimi/Moonshot-style endpoints
+      - drop `None` values before sending request payloads
+      - retry direct `/v1/responses` once when a local endpoint rejects
+        harmless parameters such as `parallel_tool_calls`, `truncation`,
+        `store`, `metadata`, `temperature`, or token-limit spellings
+      - map token-limit spellings between `max_output_tokens`, `max_tokens`,
+        and `max_completion_tokens` instead of failing planner/summary calls
+      - apply the same pre-send cleanup to ChatLiteLLM `model_kwargs` so
+        fallback Chat Completions does not reintroduce parameters that the
+        selected local endpoint is known to reject
+      - implemented: failed compatibility retries now preserve the original
+        provider error and include the retry failure in the classified error
+    - Phase B: add structured telemetry from the compatibility layer into
+      `run_profile` / operational logs:
+      - request mode
+      - provider/model/base-url family
+      - stripped parameters
+      - retry reason
+      - fallback mode when direct Responses falls back to ChatLiteLLM
+      - implemented for compatibility retries: direct Responses completion logs
+        include retry metadata, returned AI messages carry
+        `responses_compatibility_retry`, and planner/fast-path run profiles set
+        `provider_hardening_last_retry`
+    - Phase C: expand provider profiles only when needed by real runtime
+      evidence:
+      - GPT-5/OpenAI-compatible endpoints that require `max_completion_tokens`
+      - providers that require Responses instead of Chat Completions
+      - endpoints that reject sampling knobs on reasoning models
+      - local llama.cpp/LiteLLM quirks discovered by smoke tests
+      - implemented: `provider_hardening.py` now has a small provider-profile
+        layer. `auto` keeps the local LiteLLM/llama.cpp path conservative,
+        detects Kimi/Moonshot sampling behavior, maps direct OpenAI/GitHub
+        Chat token limits to `max_completion_tokens`, and exposes explicit
+        profile overrides for evidence-backed cases such as
+        `responses_required`.
+    - Phase D: keep direct non-OpenAI adapters out of AlphaRavis unless
+      LiteLLM cannot represent a required feature. If added, make them optional
+      and documented, not a replacement for the current gateway.
+      - implemented: no direct provider adapter was added. The compatibility
+        layer records a disabled direct-adapter policy and keeps LiteLLM /
+        LangChain as the route; future direct adapters must have focused
+        evidence, docs, and tests.
+
+    Acceptance:
+
+    - Direct Responses planner/summary calls retry once after safe unsupported
+      parameter errors and preserve the original error if the safer retry also
+      fails.
+    - ChatLiteLLM fallback calls receive the same conservative cleanup for
+      known server-managed sampling parameters.
+    - Provider profile metadata is attached to direct Responses AI messages and
+      operational logs, and planner/fast-path run profiles can record the
+      active provider hardening profile.
+    - `responses_required` / `ALPHARAVIS_CHAT_FALLBACK_MODE=responses_required`
+      blocks silent ChatLiteLLM fallback when runtime evidence says the
+      provider requires Responses.
+    - Direct non-OpenAI adapters remain out of AlphaRavis; the documented path
+      is still the OpenAI-compatible LiteLLM/LangChain gateway.
+    - The behavior is ENV-controlled and default-safe.
+    - Focused unit tests cover both pre-send hardening and retry payload
+      rewriting.
+    - `docs/ALPHARAVIS_CHANGES.md` and `docs/ALPHARAVIS_USAGE_NOTES.md`
+      describe the runtime knobs and remaining limits.
 
 12. Thread title and insight helpers.
 

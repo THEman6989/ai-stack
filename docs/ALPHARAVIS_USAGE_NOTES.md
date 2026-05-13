@@ -6,6 +6,40 @@ when asked how the system behaves.
 
 ## Daily Interface
 
+Open the local service dashboard when you want a clickable overview of the
+running stack:
+
+```text
+http://localhost:8090
+```
+
+It lists LibreChat, LangGraph, the AlphaRavis Bridge, Bridge Test UI, Hermes,
+LiteLLM, media/RAG services, optional UIs, and database endpoints. `make up`,
+`make install`, and `make update` include it in the base Docker Compose stack;
+`make service-dashboard` starts only that redirector.
+
+A Tailscale HTTPS helper can make the local HTTP services reachable through
+Tailscale Serve inside your Tailnet and make the dashboard show those HTTPS
+URLs:
+
+```bash
+make tailscale-plan TAILSCALE_HOST=<device>.<tailnet>.ts.net
+make tailscale-overrides TAILSCALE_HOST=<device>.<tailnet>.ts.net
+make tailscale-apply TAILSCALE_HOST=<device>.<tailnet>.ts.net TAILSCALE_SUDO=true
+```
+
+The helper reads the redirector's service list, keeps only local HTTP services,
+and plans `tailscale serve --bg --https=<port>` routes such as
+`http://localhost:3080` -> `https://<device>.<tailnet>.ts.net:3080`.
+It does not run Tailscale Funnel and does not publish services to the public
+internet; access stays limited to devices allowed in your Tailnet.
+`TAILSCALE_SUDO=true` prompts interactively if your local Tailscale CLI needs
+elevated permissions; the password is not stored. `make tailscale-overrides`
+only writes `service-dashboard-data/tailscale_service_urls.json`; it does not
+change Tailscale Serve state. In dashboard `auto` mode, that JSON file makes
+the cards prefer Tailscale HTTPS URLs while still showing the original local
+URL on each card.
+
 Use LibreChat for normal chatting. It talks to `api-bridge`, which forwards the
 request into the LangGraph `alpha_ravis` brain.
 
@@ -251,11 +285,48 @@ Direct Responses calls have a small compatibility retry layer:
 ```text
 ALPHARAVIS_RESPONSES_UNSUPPORTED_PARAM_RETRY=true
 ALPHARAVIS_RESPONSES_OMIT_TEMPERATURE_MODE=auto
+ALPHARAVIS_PROVIDER_PROFILE=auto
+ALPHARAVIS_PROVIDER_REQUIRE_RESPONSES_MODE=auto
+ALPHARAVIS_CHAT_FALLBACK_MODE=auto
+ALPHARAVIS_RESPONSES_TOKEN_LIMIT_PARAM_MODE=auto
+ALPHARAVIS_CHAT_OMIT_TEMPERATURE_MODE=auto
+ALPHARAVIS_CHAT_TOKEN_LIMIT_PARAM_MODE=auto
 ```
 
 If a local endpoint rejects a harmless parameter such as `parallel_tool_calls`,
 `truncation`, `temperature`, or a token-limit spelling, AlphaRavis retries once
 with the safer payload instead of failing the whole planner/summary call.
+When that safer retry also fails, the raised provider error includes both the
+original failure and the compatibility-retry failure so operators can diagnose
+the real backend behavior.
+
+The same conservative cleanup is applied to ChatLiteLLM fallback kwargs. Local
+LiteLLM/llama.cpp calls keep `max_tokens` by default; direct OpenAI/GitHub
+GPT-4o/o-series/GPT-5-style endpoints can be auto-mapped to
+`max_completion_tokens`.
+
+When a direct Responses compatibility retry succeeds, agents can see retry
+metadata in `run_profile.provider_hardening_last_retry` for planner/fast-path
+runs. This is diagnostic metadata only; it does not change routing by itself.
+
+Provider profiles are deliberately small request-shape profiles, not new
+provider adapters. `auto` keeps the local LiteLLM/llama.cpp route conservative,
+detects Kimi/Moonshot-style server-managed sampling, and maps direct
+OpenAI/GitHub reasoning-style Chat calls to `max_completion_tokens` when that
+family is detected. Use `ALPHARAVIS_PROVIDER_PROFILE=responses_required` or
+`ALPHARAVIS_CHAT_FALLBACK_MODE=responses_required` only after runtime evidence
+shows that Chat Completions fallback is broken for a provider.
+
+Direct non-OpenAI adapters stay out of AlphaRavis by policy. Prefer routing
+through LiteLLM/LangChain; add a direct adapter only when the gateway cannot
+represent a required feature and the change has focused docs and tests.
+
+Hermes-inspired maintenance helpers are available as review tools:
+
+- `suggest_thread_title` creates a short deterministic title for a thread,
+  archive, or collection.
+- `extract_review_insights` returns candidate user/system insights with
+  `review_required=true`; it never promotes them into always-memory.
 
 ## Model And Power Management
 
@@ -1186,6 +1257,39 @@ ALPHARAVIS_MEDIA_AUTO_INDEX_LINK_REFERENCES=false
 ALPHARAVIS_MEDIA_INDEX_VERSION=2026-05-12-v1
 ALPHARAVIS_MEDIA_VISION_EMBEDDING_MODEL_CARD=vision-embed
 ```
+
+Vision embeddings can use either the normal LiteLLM route or a dedicated
+external OpenAI-compatible server. For a separate llama.cpp vision embedding
+server, set the direct model URL:
+
+```bash
+make media-vision VISION_ENABLED=true \
+  VISION_URL=http://<vision-embedding-host>:<port>/v1 \
+  VISION_MODEL=<model-name-served-by-that-endpoint>
+
+make up VISION_URL=http://<vision-embedding-host>:<port>/v1 \
+  VISION_MODEL=<model-name-served-by-that-endpoint>
+```
+
+The same `VISION_*` variables are accepted by `make install`, `make update`,
+`make up-fullstreaming`, and `make up-chat-fullstreaming`. They write:
+
+```text
+ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true
+ALPHARAVIS_VISION_EMBEDDING_MODEL_URL=http://<vision-embedding-host>:<port>/v1
+ALPHARAVIS_VISION_EMBEDDING_MODEL=<model-name-served-by-that-endpoint>
+ALPHARAVIS_VISION_EMBEDDING_API_KEY=sk-local-dev
+```
+
+If `ALPHARAVIS_VISION_EMBEDDING_MODEL_URL` is empty, AlphaRavis uses
+`ALPHARAVIS_VISION_EMBEDDING_BASE_URL`, then `VISION_EMBEDDING_API_BASE`, then
+the text pgvector/OpenAI base fallback. Captioning/OCR/transcription are still
+separate future work; this only configures the vector embedding route.
+
+There is no second queue table for vision. Vision/video indexing jobs use the
+shared durable `alpharavis_embedding_jobs` queue with `job_type=media_analysis`;
+`run_embedding_memory_jobs` drains those jobs during the normal embedding
+maintenance window.
 
 The dedupe key is based on media source key, model-card id, index version, and
 chunking config. If the same video is referenced five times, AlphaRavis should

@@ -23,6 +23,7 @@ class ResponsesResult:
     model: str = ""
     raw: dict[str, Any] | None = None
     elapsed_seconds: float = 0.0
+    compatibility_retry: dict[str, Any] | None = None
 
 
 def _env_bool(name: str, default: str = "false") -> bool:
@@ -217,24 +218,41 @@ async def invoke_responses(
 
     timeout = timeout_seconds or float(os.getenv("ALPHARAVIS_LLM_TIMEOUT_SECONDS", "120"))
     started = time.perf_counter()
+    compatibility_retry: dict[str, Any] | None = None
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             url = f"{_responses_base_url()}/responses"
             response = await client.post(url, headers=headers, json=payload)
             if response.status_code >= 400 and retry_responses_payload_for_error is not None:
-                retry_payload, _retry_reason = retry_responses_payload_for_error(payload, response.text)
+                retry_payload, retry_reason = retry_responses_payload_for_error(payload, response.text)
                 if retry_payload is not None:
                     retry_response = await client.post(url, headers=headers, json=retry_payload)
+                    compatibility_retry = {
+                        "reason": retry_reason,
+                        "first_status_code": response.status_code,
+                        "retry_status_code": retry_response.status_code,
+                        "succeeded": retry_response.status_code < 400,
+                    }
                     if retry_response.status_code < 400:
                         response = retry_response
                         payload = retry_payload
+                    else:
+                        compatibility_retry["retry_error"] = retry_response.text[:800]
     except Exception as exc:
         raise AlphaRavisAPIError(
             classify_api_error(exc, provider="responses", model=str(payload["model"])),
             original=exc,
         ) from exc
     if response.status_code >= 400:
-        exc = RuntimeError(f"Responses API HTTP {response.status_code}: {response.text[:800]}")
+        retry_note = ""
+        if compatibility_retry:
+            retry_note = (
+                " Compatibility retry "
+                f"({compatibility_retry.get('reason')}) returned HTTP "
+                f"{compatibility_retry.get('retry_status_code')}: "
+                f"{compatibility_retry.get('retry_error', '')}"
+            )
+        exc = RuntimeError(f"Responses API HTTP {response.status_code}: {response.text[:800]}{retry_note}")
         raise AlphaRavisAPIError(
             classify_api_error(exc, provider="responses", model=str(payload["model"])),
             original=exc,
@@ -253,4 +271,5 @@ async def invoke_responses(
         model=str(data.get("model") or payload["model"]),
         raw=data,
         elapsed_seconds=round(time.perf_counter() - started, 3),
+        compatibility_retry=compatibility_retry,
     )

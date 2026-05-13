@@ -3,12 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Iterable
-from urllib import request
+from urllib import error, request
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +34,7 @@ IMPORTANT_KEYS = [
     ("ALPHARAVIS_ENABLE_MEDIA_GALLERY", "enable Pixelle/upload media gallery registration"),
     ("ALPHARAVIS_MEDIA_PUBLIC_BASE_URL", "host URL for the AlphaRavis media gallery"),
     ("ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY", "enable separate pgvector table for image/video embeddings"),
+    ("ALPHARAVIS_VISION_EMBEDDING_MODEL_URL", "direct OpenAI-compatible /v1 URL for an external vision embedding server"),
     ("ALPHARAVIS_VISION_EMBEDDING_MODEL", "LiteLLM model id for vision embeddings"),
     ("LIBRECHAT_OPENAI_API_KEY", "optional generic LibreChat OpenAI bucket key"),
     ("LIBRECHAT_OPENAI_REVERSE_PROXY", "optional generic LibreChat OpenAI reverse proxy"),
@@ -91,23 +93,28 @@ MODEL_MANAGEMENT_KEYS = [
     ("ALPHARAVIS_OLLAMA_EMBED_FALLBACK_MODEL", "fallback embedding model"),
     ("ALPHARAVIS_ENABLE_MEDIA_GALLERY", "enable media gallery service"),
     ("ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY", "enable separate media pgvector table"),
+    ("ALPHARAVIS_VISION_EMBEDDING_MODEL_URL", "direct OpenAI-compatible /v1 URL for external vision embeddings"),
     ("ALPHARAVIS_VISION_EMBEDDING_BASE_URL", "OpenAI-compatible vision embedding base URL"),
     ("ALPHARAVIS_VISION_EMBEDDING_MODEL", "primary vision embedding model"),
     ("OPENWEBUI_ENABLE_OPENAI_API_PASSTHROUGH", "OpenWebUI passthrough switch"),
 ]
 
 
+ENV_INTERPOLATION_RE = re.compile(r"\$\{([A-Z0-9_]+)(?::-([^}]*))?\}")
+
+
 SERVICE_URLS = [
+    ("Service Dashboard", "http://localhost:${ALPHARAVIS_SERVICE_DASHBOARD_PORT:-8090}"),
     ("LibreChat", "http://localhost:3080"),
     ("LangGraph API", "http://localhost:2024"),
     ("LangGraph Studio", "https://smith.langchain.com/studio/?baseUrl=http://localhost:2024"),
     ("OpenAI Bridge", "http://localhost:8123/v1"),
-    ("Bridge Test UI", "http://localhost:8140"),
+    ("Bridge Test UI", "http://localhost:${ALPHARAVIS_TEST_UI_PORT:-8140}"),
     ("Hermes API", "HERMES_EXTERNAL_API_BASE"),
     ("LiteLLM", "http://localhost:4000/v1"),
     ("RAG API", "http://localhost:8000"),
-    ("Media Gallery", "http://localhost:8130/gallery"),
-    ("OpenWebUI", "http://localhost:3090"),
+    ("Media Gallery", "http://localhost:${ALPHARAVIS_MEDIA_PORT:-8130}/gallery"),
+    ("OpenWebUI", "http://localhost:${OPENWEBUI_PORT:-3090}"),
     ("DeepAgents UI", "http://localhost:3000"),
     ("Agent Custom UI", "http://localhost:3001"),
     ("Pixelle MCP", "http://localhost:9004"),
@@ -455,9 +462,49 @@ def configure_model_management() -> None:
     print("Model-management .env settings updated")
 
 
-def configure_media_vision() -> None:
+def _bool_env_value(value: str) -> str:
+    return "true" if value.strip().lower() in {"1", "true", "yes", "on"} else "false"
+
+
+def _media_vision_args_present(
+    *,
+    vision_enabled: str = "",
+    vision_url: str = "",
+    vision_base_url: str = "",
+    vision_model: str = "",
+    vision_fallback: str = "",
+) -> bool:
+    return any(
+        str(value or "").strip()
+        for value in (vision_enabled, vision_url, vision_base_url, vision_model, vision_fallback)
+    )
+
+
+def configure_media_vision(
+    *,
+    vision_enabled: str = "",
+    vision_url: str = "",
+    vision_base_url: str = "",
+    vision_model: str = "",
+    vision_fallback: str = "",
+    interactive: bool = True,
+) -> None:
     ensure_env()
     values = read_env(ENV_PATH)
+    if vision_enabled and vision_enabled.strip().lower() != "keep":
+        update_env_value("ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY", _bool_env_value(vision_enabled))
+    if vision_url:
+        update_env_value("ALPHARAVIS_VISION_EMBEDDING_MODEL_URL", vision_url.strip())
+    if vision_base_url:
+        update_env_value("ALPHARAVIS_VISION_EMBEDDING_BASE_URL", vision_base_url.strip())
+    if vision_model:
+        update_env_value("ALPHARAVIS_VISION_EMBEDDING_MODEL", vision_model.strip())
+    if vision_fallback:
+        update_env_value("ALPHARAVIS_VISION_EMBEDDING_FALLBACK_MODEL", vision_fallback.strip())
+    if not interactive:
+        print("Media/vision .env settings updated")
+        return
+
     media_enabled = ask_yes_no(
         "Enable AlphaRavis media gallery registration",
         default=values.get("ALPHARAVIS_ENABLE_MEDIA_GALLERY", "true").lower() in {"1", "true", "yes"},
@@ -484,6 +531,7 @@ def configure_media_vision() -> None:
         ("ALPHARAVIS_MEDIA_AUTO_INDEX_LINK_REFERENCES", "auto-index pasted gallery/link references"),
         ("ALPHARAVIS_MEDIA_INDEX_VERSION", "media index version used for dedupe"),
         ("ALPHARAVIS_MEDIA_VISION_EMBEDDING_MODEL_CARD", "vision embedding model-card id"),
+        ("ALPHARAVIS_VISION_EMBEDDING_MODEL_URL", "direct external OpenAI-compatible /v1 URL for vision embeddings"),
         ("ALPHARAVIS_VISION_EMBEDDING_BASE_URL", "OpenAI-compatible /v1 base for vision embeddings"),
         ("ALPHARAVIS_VISION_EMBEDDING_MODEL", "primary vision embedding LiteLLM model"),
         ("ALPHARAVIS_VISION_EMBEDDING_FALLBACK_MODEL", "fallback vision embedding LiteLLM model"),
@@ -618,6 +666,11 @@ def install(
     build: str = "prompt",
     start: str = "prompt",
     profiles: str = "prompt",
+    vision_enabled: str = "",
+    vision_url: str = "",
+    vision_base_url: str = "",
+    vision_model: str = "",
+    vision_fallback: str = "",
 ) -> None:
     ensure_env()
     configure_streaming(streaming_mode)
@@ -625,7 +678,23 @@ def install(
         configure()
     if ask_yes_no("Configure custom model/power management now", default=False):
         configure_model_management()
-    if ask_yes_no("Configure media gallery / vision embeddings now", default=False):
+    has_media_args = _media_vision_args_present(
+        vision_enabled=vision_enabled,
+        vision_url=vision_url,
+        vision_base_url=vision_base_url,
+        vision_model=vision_model,
+        vision_fallback=vision_fallback,
+    )
+    if has_media_args:
+        configure_media_vision(
+            vision_enabled=vision_enabled,
+            vision_url=vision_url,
+            vision_base_url=vision_base_url,
+            vision_model=vision_model,
+            vision_fallback=vision_fallback,
+            interactive=False,
+        )
+    elif ask_yes_no("Configure media gallery / vision embeddings now", default=False):
         configure_media_vision()
     if ask_yes_no("Configure OpenWebUI frontend now", default=False):
         configure_openwebui()
@@ -652,6 +721,11 @@ def update(
     build: str = "yes",
     start: str = "yes",
     profiles: str = "prompt",
+    vision_enabled: str = "",
+    vision_url: str = "",
+    vision_base_url: str = "",
+    vision_model: str = "",
+    vision_fallback: str = "",
 ) -> None:
     ensure_env()
     run(["git", "pull", "--ff-only"])
@@ -663,7 +737,23 @@ def update(
         configure()
     if ask_yes_no("Configure custom model/power management after update", default=False):
         configure_model_management()
-    if ask_yes_no("Configure media gallery / vision embeddings after update", default=False):
+    has_media_args = _media_vision_args_present(
+        vision_enabled=vision_enabled,
+        vision_url=vision_url,
+        vision_base_url=vision_base_url,
+        vision_model=vision_model,
+        vision_fallback=vision_fallback,
+    )
+    if has_media_args:
+        configure_media_vision(
+            vision_enabled=vision_enabled,
+            vision_url=vision_url,
+            vision_base_url=vision_base_url,
+            vision_model=vision_model,
+            vision_fallback=vision_fallback,
+            interactive=False,
+        )
+    elif ask_yes_no("Configure media gallery / vision embeddings after update", default=False):
         configure_media_vision()
     if ask_yes_no("Configure OpenWebUI after update", default=False):
         configure_openwebui()
@@ -698,7 +788,7 @@ def docker_ps() -> None:
 def resolve_url(value: str, env: dict[str, str]) -> str:
     if value.isupper():
         return env.get(value, "")
-    return value
+    return ENV_INTERPOLATION_RE.sub(lambda match: env.get(match.group(1), match.group(2) or ""), value)
 
 
 def print_status() -> None:
@@ -755,8 +845,32 @@ def http_json(url: str, *, api_key: str = "", payload: dict | None = None, timeo
         data = json.dumps(payload).encode("utf-8")
         method = "POST"
     req = request.Request(url, data=data, headers=headers, method=method)
-    with request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+    try:
+        with request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+    except error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        return json.dumps(
+            {
+                "ok": False,
+                "url": url,
+                "status": exc.code,
+                "reason": exc.reason,
+                "body": body[:2000],
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    except error.URLError as exc:
+        return json.dumps(
+            {
+                "ok": False,
+                "url": url,
+                "error": str(exc.reason),
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
 
 
 def bridge_smoke() -> None:
@@ -846,6 +960,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--enabled", default=os.getenv("ENABLED", "keep"), help="For video-analysis: true, false, or keep.")
     parser.add_argument("--fps", default=os.getenv("FPS", ""), help="For video-analysis: sample FPS and max FPS.")
     parser.add_argument("--max-frames", default=os.getenv("MAX_FRAMES", ""), help="For video-analysis: maximum sampled frames.")
+    parser.add_argument("--vision-enabled", default=os.getenv("VISION_ENABLED", ""), help="For media-vision/install/update: true, false, or keep.")
+    parser.add_argument("--vision-url", default=os.getenv("VISION_URL", ""), help="Direct external OpenAI-compatible /v1 URL for vision embeddings.")
+    parser.add_argument("--vision-base-url", default=os.getenv("VISION_BASE_URL", ""), help="LiteLLM/OpenAI-compatible fallback /v1 URL for vision embeddings.")
+    parser.add_argument("--vision-model", default=os.getenv("VISION_MODEL", ""), help="Primary vision embedding model id.")
+    parser.add_argument("--vision-fallback", default=os.getenv("VISION_FALLBACK", ""), help="Fallback vision embedding model id.")
     args = parser.parse_args(argv)
     if args.command == "install":
         install(
@@ -854,6 +973,11 @@ def main(argv: Iterable[str] | None = None) -> int:
             build=args.build,
             start=args.start,
             profiles=args.profiles,
+            vision_enabled=args.vision_enabled,
+            vision_url=args.vision_url,
+            vision_base_url=args.vision_base_url,
+            vision_model=args.vision_model,
+            vision_fallback=args.vision_fallback,
         )
     elif args.command == "configure":
         configure()
@@ -864,7 +988,20 @@ def main(argv: Iterable[str] | None = None) -> int:
     elif args.command == "profiles":
         print_streaming_profiles()
     elif args.command == "media-vision":
-        configure_media_vision()
+        configure_media_vision(
+            vision_enabled=args.vision_enabled,
+            vision_url=args.vision_url,
+            vision_base_url=args.vision_base_url,
+            vision_model=args.vision_model,
+            vision_fallback=args.vision_fallback,
+            interactive=not _media_vision_args_present(
+                vision_enabled=args.vision_enabled,
+                vision_url=args.vision_url,
+                vision_base_url=args.vision_base_url,
+                vision_model=args.vision_model,
+                vision_fallback=args.vision_fallback,
+            ),
+        )
     elif args.command == "video-analysis":
         configure_video_analysis(enabled=args.enabled, fps=args.fps, max_frames=args.max_frames)
     elif args.command == "openwebui":
@@ -876,6 +1013,11 @@ def main(argv: Iterable[str] | None = None) -> int:
             build=args.build,
             start=args.start,
             profiles=args.profiles,
+            vision_enabled=args.vision_enabled,
+            vision_url=args.vision_url,
+            vision_base_url=args.vision_base_url,
+            vision_model=args.vision_model,
+            vision_fallback=args.vision_fallback,
         )
     elif args.command == "status":
         print_status()

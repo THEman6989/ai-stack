@@ -152,6 +152,17 @@ def _vision_embedding_models() -> list[str]:
     return [model for model in models if model]
 
 
+def _vision_embedding_base_url() -> str:
+    return (
+        os.getenv("ALPHARAVIS_VISION_EMBEDDING_MODEL_URL")
+        or os.getenv("ALPHARAVIS_VISION_EMBEDDING_BASE_URL")
+        or os.getenv("VISION_EMBEDDING_API_BASE")
+        or os.getenv("ALPHARAVIS_PGVECTOR_EMBEDDING_BASE_URL")
+        or os.getenv("OPENAI_API_BASE")
+        or "http://litellm:4000/v1"
+    ).rstrip("/")
+
+
 def _vector_literal(embedding: list[float]) -> str:
     return "[" + ",".join(f"{float(value):.9g}" for value in embedding) + "]"
 
@@ -412,10 +423,7 @@ async def _embed_media_with_model(
     media_type: str,
     model: str,
 ) -> EmbeddingResult:
-    base_url = os.getenv(
-        "ALPHARAVIS_VISION_EMBEDDING_BASE_URL",
-        os.getenv("ALPHARAVIS_PGVECTOR_EMBEDDING_BASE_URL", os.getenv("OPENAI_API_BASE", "http://litellm:4000/v1")),
-    ).rstrip("/")
+    base_url = _vision_embedding_base_url()
     api_key = os.getenv(
         "ALPHARAVIS_VISION_EMBEDDING_API_KEY",
         os.getenv("ALPHARAVIS_PGVECTOR_EMBEDDING_API_KEY", os.getenv("OPENAI_API_KEY", os.getenv("LITELLM_MASTER_KEY", "sk-local-dev"))),

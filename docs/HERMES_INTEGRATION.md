@@ -32,6 +32,12 @@ HERMES_OPENAI_API_KEY=sk-local-dev
 `HERMES_MODEL` is the model id advertised to LibreChat and AlphaRavis.
 `HERMES_INFERENCE_MODEL` is the real model Hermes uses behind the scenes.
 
+The Compose entrypoint now synchronizes the persisted Hermes
+`$HERMES_HOME/config.yaml` model fields from these environment values at
+startup. This prevents an old Hermes volume from silently keeping upstream
+defaults such as OpenRouter/Claude when AlphaRavis is configured for local
+LiteLLM.
+
 ## Modes
 
 ### Mode A: LibreChat To Hermes
@@ -155,3 +161,21 @@ HERMES_API_BASE=http://host.docker.internal:8642/v1
 and start Hermes with `API_SERVER_HOST=0.0.0.0`. On Windows, if a host-run
 Hermes is still unreachable from containers, check Windows Firewall rules for
 the Hermes Python process and port `8642`.
+
+## Operational Verification
+
+Use:
+
+```bash
+make hermes-smoke
+```
+
+Expected healthy result: a non-streaming chat completion from model
+`hermes-agent` whose assistant content is `OK`.
+
+Verification checkpoint on 2026-05-13:
+
+- `hermes-agent` container was healthy and reachable on port `8642`.
+- The startup log showed:
+  `Synced Hermes model config from AlphaRavis env: default=big-boss, provider=custom, base_url=http://litellm:4000/v1`.
+- `make hermes-smoke` returned `content: "OK"`.

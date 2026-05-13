@@ -218,6 +218,35 @@ else:
     RESPONSES_CLIENT_IMPORT_ERROR = None
 
 try:
+    from provider_hardening import chat_fallback_allowed as _chat_fallback_allowed
+    from provider_hardening import harden_chat_model_kwargs as _harden_chat_model_kwargs
+    from provider_hardening import provider_profile_metadata as _provider_profile_metadata
+except Exception:  # pragma: no cover - optional local helper during isolated imports
+
+    def _chat_fallback_allowed(model: str | None, base_url: str | None = None) -> bool:
+        return True
+
+    def _harden_chat_model_kwargs(
+        model_kwargs: dict[str, Any] | None,
+        *,
+        model: str = "",
+        base_url: str = "",
+    ) -> dict[str, Any]:
+        return dict(model_kwargs or {})
+
+    def _provider_profile_metadata(model: str | None, base_url: str | None = None) -> dict[str, Any]:
+        return {}
+
+try:
+    from maintenance_helpers import (
+        extract_review_insight_candidates as _extract_review_insight_candidates,
+        generate_thread_title as _generate_thread_title,
+    )
+except Exception:  # pragma: no cover - optional local helper during isolated imports
+    _extract_review_insight_candidates = None
+    _generate_thread_title = None
+
+try:
     from error_classifier import classify_api_error as _classify_api_error
 except Exception as exc:  # pragma: no cover - optional local helper
     _classify_api_error = None
@@ -662,14 +691,16 @@ def _model(
     timeout_seconds: float | None = None,
     model_kwargs: dict[str, Any] | None = None,
 ) -> ChatLiteLLM:
+    model = model_name or os.getenv("ALPHARAVIS_MODEL", "openai/big-boss")
+    api_base = os.getenv("OPENAI_API_BASE", "http://litellm:4000/v1")
     return ChatLiteLLM(
-        model=model_name or os.getenv("ALPHARAVIS_MODEL", "openai/big-boss"),
-        api_base=os.getenv("OPENAI_API_BASE", "http://litellm:4000/v1"),
+        model=model,
+        api_base=api_base,
         api_key=os.getenv("OPENAI_API_KEY", "sk-local-dev"),
         request_timeout=timeout_seconds or float(os.getenv("ALPHARAVIS_LLM_TIMEOUT_SECONDS", "120")),
         max_retries=int(os.getenv("ALPHARAVIS_LLM_MAX_RETRIES", "0")),
         streaming=_env_bool("ALPHARAVIS_LLM_STREAMING", "true"),
-        model_kwargs=model_kwargs or {},
+        model_kwargs=_harden_chat_model_kwargs(model_kwargs, model=model, base_url=api_base),
     )
 
 
@@ -959,11 +990,18 @@ async def _ainvoke_direct_model(
 ) -> AIMessage:
     if _responses_direct_calls_enabled():
         started = time.perf_counter()
+        responses_model = model_name or os.getenv("ALPHARAVIS_RESPONSES_MODEL", "")
+        responses_base_url = os.getenv(
+            "ALPHARAVIS_RESPONSES_API_BASE",
+            os.getenv("OPENAI_API_BASE", "http://litellm:4000/v1"),
+        )
+        provider_profile = _provider_profile_metadata(responses_model, responses_base_url)
         _log_event(
             logging.INFO,
             "llm.responses_call.started",
             purpose=purpose,
-            model=model_name or os.getenv("ALPHARAVIS_RESPONSES_MODEL", ""),
+            model=responses_model,
+            provider_profile=provider_profile,
             message_count=len(messages),
             approx_tokens=_estimate_tokens(messages),
             trace_id=trace_id,
@@ -984,6 +1022,8 @@ async def _ainvoke_direct_model(
                 elapsed_seconds=result.elapsed_seconds or round(time.perf_counter() - started, 3),
                 message_count=len(messages),
                 approx_tokens=_estimate_tokens(messages),
+                compatibility_retry=result.compatibility_retry,
+                provider_profile=provider_profile,
                 trace_id=trace_id,
             )
             return AIMessage(
@@ -993,15 +1033,20 @@ async def _ainvoke_direct_model(
                     "responses_api": True,
                     "responses_model": result.model,
                     "responses_elapsed_seconds": result.elapsed_seconds,
+                    "responses_compatibility_retry": result.compatibility_retry,
+                    "provider_hardening_profile": provider_profile,
                 },
             )
         except Exception as exc:
-            if _env_bool("ALPHARAVIS_RESPONSES_REQUIRE_NATIVE", "false"):
+            if _env_bool("ALPHARAVIS_RESPONSES_REQUIRE_NATIVE", "false") or not _chat_fallback_allowed(
+                responses_model,
+                responses_base_url,
+            ):
                 raise
             classified = _classified_error_profile(
                 exc,
                 provider="responses",
-                model=model_name or os.getenv("ALPHARAVIS_RESPONSES_MODEL", ""),
+                model=responses_model,
                 approx_tokens=_estimate_tokens(messages),
                 context_length=_hard_context_token_limit(),
                 num_messages=len(messages),
@@ -1012,9 +1057,10 @@ async def _ainvoke_direct_model(
                 level=logging.WARNING,
                 provider="responses",
                 purpose=purpose,
-                model=model_name or os.getenv("ALPHARAVIS_RESPONSES_MODEL", ""),
+                model=responses_model,
                 elapsed_seconds=round(time.perf_counter() - started, 3),
                 classification=classified,
+                provider_profile=provider_profile,
                 approx_tokens=_estimate_tokens(messages),
                 num_messages=len(messages),
                 trace_id=trace_id,
@@ -1027,9 +1073,12 @@ async def _ainvoke_direct_model(
     elif RESPONSES_CLIENT_IMPORT_ERROR and os.getenv("ALPHARAVIS_LLM_API_MODE", "").lower() in {"responses", "response"}:
         print(f"WARNING: Responses client unavailable: {RESPONSES_CLIENT_IMPORT_ERROR}")
 
+    chat_model = model_name or os.getenv("ALPHARAVIS_MODEL", "openai/big-boss")
+    chat_base_url = os.getenv("OPENAI_API_BASE", "http://litellm:4000/v1")
+    provider_profile = _provider_profile_metadata(chat_model, chat_base_url)
     llm = _model(model_name=model_name, timeout_seconds=timeout_seconds)
     if model_kwargs:
-        llm = llm.bind(**model_kwargs)
+        llm = llm.bind(**_harden_chat_model_kwargs(model_kwargs, model=chat_model, base_url=chat_base_url))
     started = time.perf_counter()
     _log_event(
         logging.INFO,
@@ -1037,6 +1086,7 @@ async def _ainvoke_direct_model(
         provider="chat_litellm",
         purpose=purpose,
         model=model_name or os.getenv("ALPHARAVIS_MODEL", ""),
+        provider_profile=provider_profile,
         approx_tokens=_estimate_tokens(messages),
         num_messages=len(messages),
         trace_id=trace_id,
@@ -1051,6 +1101,7 @@ async def _ainvoke_direct_model(
             purpose=purpose,
             model=model_name or os.getenv("ALPHARAVIS_MODEL", ""),
             elapsed_seconds=round(time.perf_counter() - started, 3),
+            provider_profile=provider_profile,
             approx_tokens=_estimate_tokens(messages),
             num_messages=len(messages),
             trace_id=trace_id,
@@ -1063,6 +1114,7 @@ async def _ainvoke_direct_model(
         purpose=purpose,
         model=model_name or os.getenv("ALPHARAVIS_MODEL", ""),
         elapsed_seconds=round(time.perf_counter() - started, 3),
+        provider_profile=provider_profile,
         approx_tokens=_estimate_tokens(messages),
         num_messages=len(messages),
         trace_id=trace_id,
@@ -1091,6 +1143,22 @@ async def _ainvoke_direct_text(
     if isinstance(content, list):
         return " ".join(str(block) for block in content)
     return str(content)
+
+
+def _direct_model_compatibility_retry(message: Any) -> dict[str, Any] | None:
+    additional = getattr(message, "additional_kwargs", None)
+    if not isinstance(additional, dict):
+        return None
+    retry = additional.get("responses_compatibility_retry")
+    return retry if isinstance(retry, dict) else None
+
+
+def _direct_model_provider_profile(message: Any) -> dict[str, Any] | None:
+    additional = getattr(message, "additional_kwargs", None)
+    if not isinstance(additional, dict):
+        return None
+    profile = additional.get("provider_hardening_profile")
+    return profile if isinstance(profile, dict) else None
 
 
 def _workspace_root() -> str:
@@ -2556,6 +2624,30 @@ def list_repo_ai_skills(max_chars: int = 4000):
         list(snapshot.get("skills") or []),
         max_chars=max_chars,
         cache_status=str(snapshot.get("cache_status") or ""),
+    )
+
+
+@tool
+def suggest_thread_title(text: str, max_words: int = 8):
+    """Suggest a short deterministic title for a thread, archive, or collection."""
+
+    if _generate_thread_title is None:
+        return "Maintenance helper unavailable."
+    return _generate_thread_title(text, max_words=max_words)
+
+
+@tool
+def extract_review_insights(text: str, max_candidates: int = 8):
+    """Extract review-only candidate insights without promoting them to memory."""
+
+    if _extract_review_insight_candidates is None:
+        return "Maintenance helper unavailable."
+    return _json_tool_result(
+        {
+            "review_required": True,
+            "auto_promoted": False,
+            "candidates": _extract_review_insight_candidates(text, max_candidates=max_candidates),
+        }
     )
 
 
@@ -5430,15 +5522,19 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
     try:
         planner_kwargs = _planner_bind_kwargs()
         llm_started = time.perf_counter()
-        plan = (
-            await _ainvoke_direct_text(
-                [SystemMessage(content=prompt)],
-                timeout_seconds=float(os.getenv("ALPHARAVIS_PLANNER_TIMEOUT_SECONDS", "45")),
-                model_kwargs=planner_kwargs,
-                purpose="planner",
-                trace_id=trace_id,
-            )
-        ).strip()
+        planner_response = await _ainvoke_direct_model(
+            [SystemMessage(content=prompt)],
+            timeout_seconds=float(os.getenv("ALPHARAVIS_PLANNER_TIMEOUT_SECONDS", "45")),
+            model_kwargs=planner_kwargs,
+            purpose="planner",
+            trace_id=trace_id,
+        )
+        planner_content = getattr(planner_response, "content", "")
+        if isinstance(planner_content, list):
+            planner_content = " ".join(str(block) for block in planner_content)
+        plan = str(planner_content).strip()
+        planner_compatibility_retry = _direct_model_compatibility_retry(planner_response)
+        planner_provider_profile = _direct_model_provider_profile(planner_response)
     except Exception as exc:
         classified = _classified_error_profile(
             exc,
@@ -5527,6 +5623,8 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
             planner_used=True,
             hermes_route_hint=bool(hermes_hint),
             selected_toolsets=selected_toolsets,
+            **({"provider_hardening_last_retry": planner_compatibility_retry} if planner_compatibility_retry else {}),
+            **({"provider_hardening_profile": planner_provider_profile} if planner_provider_profile else {}),
         ),
     }
 
@@ -5671,6 +5769,13 @@ async def fast_chat_node(state: AlphaRavisState) -> dict[str, Any]:
     if fallback_error:
         profile_updates["fast_path_primary_error"] = fallback_error[:300]
         profile_updates["fast_path_primary_error_classification"] = fallback_error_classification
+    compatibility_retry = _direct_model_compatibility_retry(response)
+    if compatibility_retry:
+        profile_updates["provider_hardening_last_retry"] = compatibility_retry
+        profile_updates["fast_path_compatibility_retry"] = compatibility_retry
+    provider_profile = _direct_model_provider_profile(response)
+    if provider_profile:
+        profile_updates["provider_hardening_profile"] = provider_profile
 
     trace_steps.append(
         _trace_step(
@@ -6882,6 +6987,8 @@ def _create_debugger_subgraph(llm: Any, handoff_tools: list[Any]):
             list_repo_ai_skills,
             read_repo_ai_skill,
             reload_repo_ai_skills,
+            suggest_thread_title,
+            extract_review_insights,
             build_specialist_report,
             search_skill_library,
             list_skill_candidates,
@@ -7115,6 +7222,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             list_repo_ai_skills,
             read_repo_ai_skill,
             reload_repo_ai_skills,
+            suggest_thread_title,
+            extract_review_insights,
             export_skill_candidate_to_repo_draft,
             normalize_research_sources,
             build_specialist_report,
@@ -7192,6 +7301,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             list_repo_ai_skills,
             read_repo_ai_skill,
             reload_repo_ai_skills,
+            suggest_thread_title,
+            extract_review_insights,
             normalize_research_sources,
             build_specialist_report,
             transfer_to_generalist,
@@ -7263,6 +7374,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             list_repo_ai_skills,
             read_repo_ai_skill,
             reload_repo_ai_skills,
+            suggest_thread_title,
+            extract_review_insights,
             build_specialist_report,
             search_agent_memory,
             record_agent_memory,
@@ -7387,6 +7500,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             list_repo_ai_skills,
             read_repo_ai_skill,
             reload_repo_ai_skills,
+            suggest_thread_title,
+            extract_review_insights,
             transfer_to_generalist,
             transfer_to_debugger,
             transfer_to_research,
@@ -7443,6 +7558,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             list_repo_ai_skills,
             read_repo_ai_skill,
             reload_repo_ai_skills,
+            suggest_thread_title,
+            extract_review_insights,
             read_alpha_ravis_architecture,
             build_specialist_report,
             transfer_to_generalist,

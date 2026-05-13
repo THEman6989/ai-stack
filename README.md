@@ -38,6 +38,7 @@ make install-fullstreaming        # set full Responses tool streaming, init subm
 make install-chat-fullstreaming   # set Chat Completions streaming, init submodules, build, start
 make profiles                     # show runtime profiles and the .env values they write
 make streaming STREAMING=full     # only update .env streaming settings
+make media-vision VISION_ENABLED=true VISION_URL=http://host:port/v1 VISION_MODEL=model-name
 make up-fullstreaming             # set full streaming and recreate langgraph-api/api-bridge/test UI
 make update                       # git pull, optional submodule update, optional env edit
 make status                       # show URLs, streaming mode, profiles, and docker compose ps
@@ -46,6 +47,17 @@ make down                         # docker compose down
 make bridge-smoke                 # one small OpenAI-compatible request against api-bridge
 make hermes-smoke                 # one small OpenAI-compatible request against Hermes
 ```
+
+Tailscale HTTPS helper:
+
+```bash
+make tailscale-plan TAILSCALE_HOST=<device>.<tailnet>.ts.net
+make tailscale-overrides TAILSCALE_HOST=<device>.<tailnet>.ts.net
+```
+
+The helper reads the Service Dashboard catalog and prepares Tailscale Serve
+HTTPS routes for the local HTTP services inside your Tailnet. It does not run
+Tailscale Funnel and does not publish services to the public internet.
 
 Runtime profiles accepted by `make install STREAMING=...`, `make update`, and
 `make streaming STREAMING=...`:
@@ -67,10 +79,19 @@ Useful install examples:
 make install STREAMING=full PROFILES=openwebui
 make install STREAMING=chat-full PROFILES=none
 make install STREAMING=hybrid START=no BUILD=no SUBMODULES=yes PROFILES=none
+make install VISION_ENABLED=true VISION_URL=http://192.168.178.50:8080/v1 VISION_MODEL=vision-embed
+make update VISION_URL=http://192.168.178.50:8080/v1 VISION_MODEL=vision-embed
+make up VISION_URL=http://192.168.178.50:8080/v1 VISION_MODEL=vision-embed
 ```
+
+`VISION_URL` writes `ALPHARAVIS_VISION_EMBEDDING_MODEL_URL` for a dedicated
+OpenAI-compatible vision embedding server, for example a small llama.cpp server
+on another machine. When it is set on `make up`, the Makefile updates `.env`
+before starting Docker Compose.
 
 Important endpoints:
 
+- Service Dashboard: `http://localhost:8090`
 - LibreChat: `http://localhost:3080`
 - LangGraph API: `http://localhost:2024`
 - OpenAI-compatible AlphaRavis bridge: `http://localhost:8123/v1`

@@ -105,10 +105,34 @@ LangGraph-internal model calls have separate Responses flags:
 ALPHARAVIS_LLM_API_MODE=responses
 ALPHARAVIS_RESPONSES_API_BASE=http://litellm:4000/v1
 ALPHARAVIS_RESPONSES_MODEL=big-boss
+ALPHARAVIS_RESPONSES_UNSUPPORTED_PARAM_RETRY=true
+ALPHARAVIS_RESPONSES_OMIT_TEMPERATURE_MODE=auto
+ALPHARAVIS_PROVIDER_PROFILE=auto
+ALPHARAVIS_PROVIDER_REQUIRE_RESPONSES_MODE=auto
+ALPHARAVIS_CHAT_FALLBACK_MODE=auto
+ALPHARAVIS_RESPONSES_TOKEN_LIMIT_PARAM_MODE=auto
+ALPHARAVIS_CHAT_OMIT_TEMPERATURE_MODE=auto
+ALPHARAVIS_CHAT_TOKEN_LIMIT_PARAM_MODE=auto
 ALPHARAVIS_DEEPAGENTS_API_MODE=responses
 ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
 ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
 ```
+
+Direct internal Responses calls have a narrow Hermes-inspired compatibility
+retry: when a provider rejects a harmless request parameter, AlphaRavis retries
+once with that parameter removed or with a different token-limit spelling. If
+the retry also fails, the final classified error keeps the original failure and
+the retry failure for diagnosis. ChatLiteLLM fallback kwargs receive the same
+conservative temperature/token-limit cleanup before the fallback call.
+
+Provider-profile hardening is intentionally limited to OpenAI-compatible request
+shape. The `auto` profile preserves local LiteLLM/llama.cpp behavior, handles
+Kimi/Moonshot server-managed sampling by omitting sampling knobs, and maps
+direct OpenAI/GitHub reasoning-style Chat token limits to
+`max_completion_tokens`. `responses_required` blocks silent ChatLiteLLM fallback
+for providers where runtime evidence shows Chat Completions is not viable.
+AlphaRavis does not add direct Anthropic/Gemini/Kimi adapters here; those remain
+outside the stack unless LiteLLM cannot represent a required feature.
 
 AlphaRavis applies a startup patch equivalent to the important part of
 langchain-ai/langchain PR #35457, so LangChain's documented

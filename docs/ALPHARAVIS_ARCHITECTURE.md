@@ -36,11 +36,21 @@ The current Docker architecture is split into these main roles:
   search sidecar for AlphaRavis memory; it does not replace MongoDB.
 - `redis`: optional LLM cache, not the primary checkpointer in this phase.
 - `deep-agents-ui`: visual UI for DeepAgents/LangGraph-style inspection.
+- `service-dashboard`: lightweight local redirector UI on port `8090` that
+  lists host and Docker URLs for the stack services.
 - `librechat`: the normal chat UI for the user.
 - `rag_api`: local document search backend when available.
 - Pixelle/MCP services: image generation and Pixelle tool integration when available.
 - `hermes-agent`: optional external coding/system agent reached through its
   OpenAI-compatible API on the host.
+
+`tailscale_https_routes.py` is a prepared operator helper, not a running
+container. It imports the service-dashboard catalog, derives local HTTP targets
+such as `http://127.0.0.1:3080`, and can configure Tailscale Serve HTTPS routes
+on matching Tailnet-reachable ports. It does not use Tailscale Funnel and does
+not expose services to the public internet. The redirector can prefer the
+generated `service-dashboard-data/tailscale_service_urls.json` URLs when
+present.
 
 ## Install And Runtime Profiles
 
@@ -374,6 +384,12 @@ summary calls. `langgraph-app/provider_hardening.py` hardens that path with
 Hermes-style compatibility retries: unsupported parameters can be removed or
 mapped once, Kimi/Moonshot-style models can omit server-managed temperature, and
 LiteLLM remains the default gateway abstraction.
+
+The provider hardening layer also exposes small provider profiles. These
+profiles only adjust OpenAI-compatible request shape and fallback policy; they
+do not introduce native Anthropic/Gemini/Kimi transports. The default `auto`
+profile keeps local LiteLLM conservative and records profile metadata in
+operational logs/run profiles for diagnosis.
 
 Tool-heavy DeepAgents workers can use Responses-native tool binding through
 LangChain `ChatOpenAI`:
@@ -1408,6 +1424,19 @@ ALPHARAVIS_MEDIA_VISION_EMBEDDING_MODEL_CARD=vision-embed
   multiple reference records, not repeated full video embeddings.
 - Optional vision embeddings are written only when
   `ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true`.
+- The vision embedding client prefers a direct external model URL when
+  configured:
+
+```text
+ALPHARAVIS_VISION_EMBEDDING_MODEL_URL=http://<vision-embedding-host>:<port>/v1
+ALPHARAVIS_VISION_EMBEDDING_MODEL=<model-name>
+```
+
+  If that is empty, it falls back to `ALPHARAVIS_VISION_EMBEDDING_BASE_URL`,
+  then `VISION_EMBEDDING_API_BASE`, then the text pgvector/OpenAI-compatible
+  base URL. This supports either a dedicated llama.cpp vision embedding server
+  or the existing LiteLLM `vision-embed` route. The Makefile can write the
+  direct route during install/update/start via `VISION_URL` and `VISION_MODEL`.
 - `prepare_media_for_model` is the explicit video preparation tool. Its default
   fallback is `register_only`; it downloads and extracts frames only for
   `analyze` or `index` decisions and only when
