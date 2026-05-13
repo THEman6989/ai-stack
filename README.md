@@ -38,10 +38,10 @@ make install-fullstreaming        # set full Responses tool streaming, init subm
 make install-chat-fullstreaming   # set Chat Completions streaming, init submodules, build, start
 make profiles                     # show runtime profiles and the .env values they write
 make streaming STREAMING=full     # only update .env streaming settings
-make up-fullstreaming             # set full streaming and recreate langgraph-api/api-bridge
+make up-fullstreaming             # set full streaming and recreate langgraph-api/api-bridge/test UI
 make update                       # git pull, optional submodule update, optional env edit
 make status                       # show URLs, streaming mode, profiles, and docker compose ps
-make up                           # docker compose up -d --build
+make up                           # docker compose up -d --build, including bridge-test-ui
 make down                         # docker compose down
 make bridge-smoke                 # one small OpenAI-compatible request against api-bridge
 make hermes-smoke                 # one small OpenAI-compatible request against Hermes
@@ -74,6 +74,7 @@ Important endpoints:
 - LibreChat: `http://localhost:3080`
 - LangGraph API: `http://localhost:2024`
 - OpenAI-compatible AlphaRavis bridge: `http://localhost:8123/v1`
+- Bridge Test UI: `http://localhost:8140`
 - Hermes OpenAI-compatible API: `http://localhost:8642/v1`
 
 LibreChat has named custom endpoints for `LangGraph Agent` and `Hermes Agent`.

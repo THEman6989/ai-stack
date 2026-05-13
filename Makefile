@@ -30,10 +30,10 @@ help:
 		'  make video-analysis ENABLED=true FPS=1 MAX_FRAMES=100' \
 		'' \
 		'Runtime:' \
-		'  make up                      # docker compose up -d --build' \
-		'  make up-fullstreaming        # set full streaming, then recreate langgraph-api/api-bridge' \
-		'  make up-chat-fullstreaming   # set Chat Completions streaming, then recreate langgraph-api/api-bridge' \
-		'  make test-ui                 # start minimal Bridge test UI on port 8140' \
+		'  make up                      # docker compose up -d --build, including bridge-test-ui' \
+		'  make up-fullstreaming        # set full streaming, then recreate langgraph-api/api-bridge/test UI' \
+		'  make up-chat-fullstreaming   # set Chat Completions streaming, then recreate langgraph-api/api-bridge/test UI' \
+		'  make test-ui                 # start/rebuild only the Bridge test UI on port 8140' \
 		'  make down | make logs | make status' \
 		'' \
 		'Smoke checks:' \
@@ -118,11 +118,11 @@ up:
 
 up-fullstreaming:
 	$(PYTHON) scripts/alpharavis_setup.py streaming --streaming-mode full
-	$(COMPOSE) up -d --build --force-recreate langgraph-api api-bridge
+	$(COMPOSE) up -d --build --force-recreate langgraph-api api-bridge bridge-test-ui
 
 up-chat-fullstreaming:
 	$(PYTHON) scripts/alpharavis_setup.py streaming --streaming-mode chat-full
-	$(COMPOSE) up -d --build --force-recreate langgraph-api api-bridge
+	$(COMPOSE) up -d --build --force-recreate langgraph-api api-bridge bridge-test-ui
 
 test-ui:
 	$(COMPOSE) up -d --build bridge-test-ui
@@ -137,7 +137,7 @@ submodules:
 	git submodule update --init --recursive --remote
 
 build:
-	$(COMPOSE) build langgraph-api api-bridge hermes-agent media-gallery
+	$(COMPOSE) build langgraph-api api-bridge bridge-test-ui hermes-agent media-gallery
 
 bridge-smoke:
 	$(PYTHON) scripts/alpharavis_setup.py bridge-smoke

@@ -12,7 +12,9 @@ request into the LangGraph `alpha_ravis` brain.
 Use LangGraph Studio or DeepAgents UI when you want to inspect internal graph
 steps, state, checkpoints, run profiles, memory compression, or agent routing.
 
-For debugging LibreChat-specific issues, start the minimal Bridge test UI:
+For debugging LibreChat-specific issues, use the minimal Bridge test UI. It is
+part of the normal base stack, so `make up`, `make install`, and `make update`
+build/start it through Docker Compose. To rebuild or start only that UI:
 
 ```bash
 make test-ui
@@ -30,6 +32,38 @@ Completions. It intentionally does not use LibreChat storage, presets, or UI
 state. The Trace panel shows a small waterfall for the current request so you
 can see whether time is spent in the browser/test UI, Bridge setup, LangGraph
 wait, fast-chat primary model call, fallback model call, or backend failure.
+Normal sends use streaming: the UI forwards `stream=true`, reads SSE events as
+they arrive, and renders Responses `response.output_text.delta` or Chat
+Completions `delta.content` live. When reasoning is present, each assistant
+message gets a collapsed `Reasoning` panel fed by Responses
+`response.reasoning.delta` or Chat Completions reasoning delta fields. If the
+agent path only emits a complete final AI message, the UI still streams
+lifecycle/activity events first, but visible answer text can arrive as one
+final delta.
+Inside the `Reasoning` panel, LangGraph lifecycle statuses are shown in a
+separate `Status` block. Model-provided reasoning text, when the Bridge emits
+it, is shown below that as `Modell-Reasoning`. In the default local stack,
+`BRIDGE_STREAM_REASONING_EVENTS=false`, so the panel may show statuses only
+unless explicit reasoning forwarding is enabled for debugging.
+Planner output from the Agent Path is internal. The Bridge routes streamed text
+from the LangGraph `planner` node into the reasoning channel for both Responses
+and Chat Completions, marked as `internal_plan`, so it can be inspected without
+being appended to the visible assistant answer. The Test UI shows it as an
+`Interner Plan` block.
+Use `Verlauf leeren` before an isolated test. It clears the visible messages and
+starts a new backend session, so the next prompt does not resume an older
+LangGraph thread from a previous browser reload.
+Responses-mode history is sent as structured message items with roles, not as a
+synthetic `Chat history:` prompt. Internal task/planner blocks are scrubbed from
+Bridge-visible output.
+Assistant messages show a route badge: `Fast Path` for the simple direct route,
+`Agent Path` for planner/swarm/tool routing, and `Hard Stop` when context limits
+block the run. The status line mirrors the same route while the stream is
+active.
+The Trace table compacts consecutive answer-text deltas by default, so token or
+character streaming does not flood the waterfall. Enable `Delta-Details` in the
+Trace header when you need the raw per-delta timing rows for a stuck or jittery
+stream.
 
 ## Fast Path
 

@@ -102,6 +102,7 @@ SERVICE_URLS = [
     ("LangGraph API", "http://localhost:2024"),
     ("LangGraph Studio", "https://smith.langchain.com/studio/?baseUrl=http://localhost:2024"),
     ("OpenAI Bridge", "http://localhost:8123/v1"),
+    ("Bridge Test UI", "http://localhost:8140"),
     ("Hermes API", "HERMES_EXTERNAL_API_BASE"),
     ("LiteLLM", "http://localhost:4000/v1"),
     ("RAG API", "http://localhost:8000"),

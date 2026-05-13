@@ -809,6 +809,9 @@ def _last_ai_content(state: Any) -> str:
     for message in reversed(messages):
         if _is_ai_message(message):
             content = _message_content(message)
+            visible_content = _visible_content(content).strip()
+            if not visible_content:
+                continue
             stripped = content.lstrip()
             if stripped.startswith(("Memory-Notice:", "Run-Profile:", "Fast-Path-Notice:")):
                 trailing_notices.append(content)
@@ -816,8 +819,29 @@ def _last_ai_content(state: Any) -> str:
             if trailing_notices:
                 return f"{content}\n\n" + "\n".join(reversed(trailing_notices))
             return content
-    if messages:
-        return _message_content(messages[-1])
+    return ""
+
+
+def _state_failure_message(state: Any) -> str:
+    state = _state_values(state)
+    if not isinstance(state, dict):
+        return ""
+    steps = state.get("alpha_trace_steps")
+    if not isinstance(steps, list):
+        return ""
+    for step in reversed(steps):
+        if not isinstance(step, dict):
+            continue
+        name = str(step.get("name") or "")
+        if not name.endswith(".failed") and ".failed." not in name:
+            continue
+        error_type = str(step.get("error_type") or "unknown_error")
+        classification = str(step.get("classification") or "").strip()
+        suffix = f" ({classification})" if classification else ""
+        return (
+            "AlphaRavis hat keine sichtbare finale Antwort erzeugt, weil ein "
+            f"interner Schritt fehlgeschlagen ist: {name}: {error_type}{suffix}."
+        )
     return ""
 
 
@@ -967,6 +991,8 @@ def _chunk(
     role: str | None = None,
     finish_reason: str | None = None,
     reasoning_content: str | None = None,
+    alpha_reasoning_kind: str | None = None,
+    alpha_reasoning_label: str | None = None,
 ) -> dict[str, Any]:
     delta: dict[str, Any] = {}
     if role:
@@ -975,6 +1001,10 @@ def _chunk(
         delta["content"] = content
     if reasoning_content:
         delta[BRIDGE_REASONING_DELTA_FIELD] = reasoning_content
+        if alpha_reasoning_kind:
+            delta["alpha_reasoning_kind"] = alpha_reasoning_kind
+        if alpha_reasoning_label:
+            delta["alpha_reasoning_label"] = alpha_reasoning_label
 
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
@@ -1366,6 +1396,27 @@ def _stream_event_data(part: Any) -> Any:
     return getattr(part, "data", None)
 
 
+def _stream_langgraph_node(part: Any) -> str:
+    data = _stream_event_data(part)
+    metadata: Any = None
+    if isinstance(data, tuple) and len(data) > 1:
+        metadata = data[1]
+    elif isinstance(data, dict):
+        metadata = data.get("metadata") or data.get("config") or data.get("run_metadata")
+        if metadata is None and isinstance(data.get("chunk"), dict):
+            metadata = data["chunk"].get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("langgraph_node", "node", "name"):
+            value = metadata.get(key)
+            if value:
+                return str(value)
+    return ""
+
+
+def _stream_text_is_internal_reasoning(part: Any) -> bool:
+    return _stream_langgraph_node(part) in {"planner"}
+
+
 def _extract_activity_text(part: Any, *, force: bool = False) -> str:
     if not force and (not BRIDGE_SHOW_ACTIVITY_EVENTS or BRIDGE_ACTIVITY_DETAIL == "off"):
         return ""
@@ -1421,6 +1472,7 @@ async def _stream_chat_events(
     emitted_reasoning = ""
     emitted_activity: set[str] = set()
     explicit_reasoning_seen = False
+    internal_reasoning_sections: set[str] = set()
     thinking_splitter = _VisibleThinkingSplitter()
     used_state_fallback = False
     content_scrubber = StreamingInternalContextScrubber() if BRIDGE_SCRUB_INTERNAL_CONTEXT else None
@@ -1458,6 +1510,26 @@ async def _stream_chat_events(
                 delta = text if _stream_part_is_delta(part) else _delta_text(text, emitted)
                 if delta:
                     emitted += delta
+                    if _stream_text_is_internal_reasoning(part):
+                        node = _stream_langgraph_node(part) or "internal"
+                        prefix = ""
+                        if node not in internal_reasoning_sections:
+                            internal_reasoning_sections.add(node)
+                            prefix = f"Interner Plan ({node}):\n"
+                        visible_internal_delta = (
+                            reasoning_scrubber.feed(prefix + delta) if reasoning_scrubber else prefix + delta
+                        )
+                        if visible_internal_delta:
+                            yield _stream_data(
+                                _chunk(
+                                    "",
+                                    model,
+                                    reasoning_content=visible_internal_delta,
+                                    alpha_reasoning_kind="internal_plan",
+                                    alpha_reasoning_label=node,
+                                )
+                            )
+                        continue
                     answer_delta, thinking_delta = thinking_splitter.feed(
                         delta,
                         emit_reasoning=BRIDGE_STREAM_REASONING_EVENTS and not explicit_reasoning_seen,
@@ -1508,11 +1580,15 @@ async def _stream_chat_events(
 
     if not saw_token:
         used_state_fallback = True
+        state_values: Any = {}
         try:
             state = await client.threads.get_state(thread_id)
-            content = _last_ai_content(state.get("values", state))
+            state_values = state.get("values", state)
+            content = _last_ai_content(state_values)
         except Exception as exc:
             content = _clean_error_message(exc)
+        if not content:
+            content = _state_failure_message(state_values)
         if content:
             visible, thinking = _split_visible_thinking_once(
                 content,
@@ -2304,12 +2380,15 @@ class _ResponsesStreamBuilder:
             ),
         ]
 
-    def reasoning_delta(self, delta: str) -> list[str]:
+    def reasoning_delta(self, delta: str, *, alpha_kind: str = "model", alpha_label: str = "") -> list[str]:
         events = self._ensure_reasoning()
         if self.reasoning_item is None:
             return events
         self.full_reasoning += delta
         output_index = self.output_items.index(self.reasoning_item)
+        metadata = {"alpha_reasoning_kind": alpha_kind}
+        if alpha_label:
+            metadata["alpha_reasoning_label"] = alpha_label
         events.append(
             self.event(
                 "response.reasoning.delta",
@@ -2317,6 +2396,7 @@ class _ResponsesStreamBuilder:
                 output_index=output_index,
                 content_index=self.reasoning_content_index,
                 delta=delta,
+                **metadata,
             )
         )
         return events
@@ -2483,6 +2563,7 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
     seen_tool_updates: set[str] = set()
     tool_inputs: dict[str, dict[str, Any]] = {}
     explicit_reasoning_seen = False
+    internal_reasoning_sections: set[str] = set()
     thinking_splitter = _VisibleThinkingSplitter()
     used_state_fallback = False
     content_scrubber = StreamingInternalContextScrubber() if BRIDGE_SCRUB_INTERNAL_CONTEXT else None
@@ -2503,7 +2584,7 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
                 activity = _extract_activity_text(part, force=BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS)
                 if BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS and activity and activity not in emitted_activity:
                     emitted_activity.add(activity)
-                    for event in builder.reasoning_delta(f"Status: {activity}\n"):
+                    for event in builder.reasoning_delta(f"Status: {activity}\n", alpha_kind="status"):
                         yield event
 
                 for notification in _tool_events_from_part(
@@ -2543,6 +2624,23 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
                 delta = text if _stream_part_is_delta(part) else _delta_text(text, emitted)
                 if delta:
                     emitted += delta
+                    if _stream_text_is_internal_reasoning(part):
+                        node = _stream_langgraph_node(part) or "internal"
+                        prefix = ""
+                        if node not in internal_reasoning_sections:
+                            internal_reasoning_sections.add(node)
+                            prefix = f"Interner Plan ({node}):\n"
+                        visible_internal_delta = (
+                            reasoning_scrubber.feed(prefix + delta) if reasoning_scrubber else prefix + delta
+                        )
+                        if visible_internal_delta:
+                            for event in builder.reasoning_delta(
+                                visible_internal_delta,
+                                alpha_kind="internal_plan",
+                                alpha_label=node,
+                            ):
+                                yield event
+                        continue
                     answer_delta, thinking_delta = thinking_splitter.feed(
                         delta,
                         emit_reasoning=BRIDGE_STREAM_REASONING_EVENTS and not explicit_reasoning_seen,
@@ -2588,11 +2686,15 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
 
     if not saw_token:
         used_state_fallback = True
+        state_values: Any = {}
         try:
             state = await client.threads.get_state(thread_id)
-            content = _last_ai_content(state.get("values", state))
+            state_values = state.get("values", state)
+            content = _last_ai_content(state_values)
         except Exception as exc:
             content = _clean_error_message(exc)
+        if not content:
+            content = _state_failure_message(state_values)
         if content:
             visible, thinking = _split_visible_thinking_once(
                 content,

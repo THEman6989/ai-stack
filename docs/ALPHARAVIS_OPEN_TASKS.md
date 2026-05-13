@@ -76,10 +76,16 @@ Still needed:
   plus slow semantic memory prefetch (~20s). Planner calls are now capped and
   memory prefetch has a default 4s per-step timeout; a Docker smoke then reduced
   the same forced agent-path probe to about `11.2 s`.
-  Follow-up: measure streaming first-token latency separately, add equivalent
-  trace events for streaming SSE, then decide whether to shorten/bypass planner
-  work for trivial prompts, increase local worker concurrency where safe, or
-  route simple UI greetings through the fast path earlier.
+  The Bridge Test UI now uses a streaming proxy and browser-side SSE parsing by
+  default, so it no longer buffers streamed Bridge responses into one JSON
+  result. It is also part of the normal `make up`, `make install`, and
+  `make update` stack flow; explicit `make build` and streaming recreate targets
+  include `bridge-test-ui` too. Follow-up: measure true visible text first-token
+  latency separately from lifecycle/activity SSE latency, add equivalent
+  Bridge/LangGraph trace metadata for streaming SSE, then decide whether to
+  shorten/bypass planner work for trivial prompts, increase local worker
+  concurrency where safe, or route simple UI greetings through the fast path
+  earlier.
 
 ## Custom Model / Power Management
 
@@ -1719,3 +1725,17 @@ Lower priority / future:
     - Extract candidate user/system insights for review without auto-promoting
       them into always-memory.
     - Keep this separate from raw archives and pgvector source-of-truth rules.
+
+## Aktuelle Zusammenfassung der offenen Aufgaben (Stand: 12. Mai 2026)
+
+*Diese Zusammenfassung dient dem schnellen Überblick für den Anwender. Die KI sollte bei der Bearbeitung stets die detaillierten Sektionen oben sowie die verlinkten Architektur-Dokumente prüfen, um keine technischen Details oder Abhängigkeiten zu übersehen.*
+
+### Prioritäre Baustellen:
+1.  **Responses & Streaming Stabilität:** Finalisierung des Full-Streaming-Modus (derzeit experimentell) und Entfernung lokaler Patches, sobald Upstream-Fixes für LangChain verfügbar sind. Optimierung der Latenz im Agenten-Pfad.
+2.  **Model & Power Management:** Anbindung des realen Action-Endpoints für Hardware-Aktionen und Vervollständigung der administrativen Tools (Ollama/Embedding Management).
+3.  **Crisis Manager:** Aktivierung der automatischen Recovery-Trigger bei Inferenz-Fehlern (Timeouts, 502s).
+4.  **Media & Vision:** Ausbau der Media-Gallery zur zentralen Video-Verwaltung (Meet-Integration), inklusive Vision-Embeddings und Frame-Analyse.
+5.  **Lazy Tool Loading:** Umstellung auf echte dynamische Tool-Bindung basierend auf Kategorien (Coding, System, Media etc.).
+6.  **OpenWebUI:** Verifizierung der Integration und Konfiguration der Web-Suche (SearXNG).
+
+*Hinweis: Diese Zusammenfassung sollte regelmäßig aktualisiert und verfeinert werden, um den Projektfortschritt präzise abzubilden.*

@@ -18,6 +18,20 @@ def test_sanitize_internal_context_full_buffer() -> None:
     assert sanitize_internal_context(text) == "visible  done"
 
 
+def test_sanitize_internal_context_removes_task_brief_and_plan() -> None:
+    text = (
+        "visible "
+        "<current-task-brief>User request: hidden</current-task-brief>"
+        "<execution-plan>hidden plan</execution-plan>"
+        " done"
+    )
+
+    clean = sanitize_internal_context(text)
+
+    assert clean == "visible  done"
+    assert "hidden" not in clean
+
+
 def test_streaming_scrubber_handles_split_tags() -> None:
     scrubber = StreamingInternalContextScrubber()
     chunks = [

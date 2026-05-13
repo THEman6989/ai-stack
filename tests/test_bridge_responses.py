@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import importlib.util
+from importlib.machinery import ModuleSpec
 import sys
 import types
 from pathlib import Path
@@ -13,6 +14,7 @@ sys.path.insert(0, str(ROOT / "langgraph-app"))
 
 if importlib.util.find_spec("fastapi") is None:
     fastapi_stub = types.ModuleType("fastapi")
+    fastapi_stub.__spec__ = ModuleSpec("fastapi", loader=None)
 
     class HTTPException(Exception):
         def __init__(self, status_code: int, detail: str = "") -> None:
@@ -50,6 +52,7 @@ if importlib.util.find_spec("fastapi") is None:
     sys.modules["fastapi"] = fastapi_stub
 
     responses_stub = types.ModuleType("fastapi.responses")
+    responses_stub.__spec__ = ModuleSpec("fastapi.responses", loader=None)
 
     class JSONResponse(dict):
         def __init__(self, content=None, status_code: int = 200, *args, **kwargs) -> None:
@@ -71,6 +74,7 @@ if importlib.util.find_spec("fastapi") is None:
     sys.modules["fastapi.responses"] = responses_stub
 
     staticfiles_stub = types.ModuleType("fastapi.staticfiles")
+    staticfiles_stub.__spec__ = ModuleSpec("fastapi.staticfiles", loader=None)
 
     class StaticFiles:
         def __init__(self, *args, **kwargs) -> None:
@@ -81,6 +85,7 @@ if importlib.util.find_spec("fastapi") is None:
 
 if importlib.util.find_spec("langgraph_sdk") is None:
     sdk_stub = types.ModuleType("langgraph_sdk")
+    sdk_stub.__spec__ = ModuleSpec("langgraph_sdk", loader=None)
     sdk_stub.get_client = lambda *args, **kwargs: None
     sys.modules["langgraph_sdk"] = sdk_stub
 
@@ -618,6 +623,28 @@ def test_stream_responses_splits_visible_think_blocks(monkeypatch) -> None:
     assert "</think>" not in output_done
 
 
+def test_stream_responses_routes_planner_text_to_reasoning(monkeypatch) -> None:
+    parts = [
+        {"event": "messages", "data": (_FakeMessage("AIMessageChunk", "Plan intern."), {"langgraph_node": "planner"})},
+        {"event": "messages", "data": (_FakeMessage("ai", "Finale Antwort."), {"langgraph_node": "alpha_ravis_swarm"})},
+    ]
+    monkeypatch.setattr(bridge_server, "_client", lambda: _FakeClient(parts))
+    monkeypatch.setattr(bridge_server, "BRIDGE_STREAM_REASONING_EVENTS", False)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS", False)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_DONE_SENTINEL", False)
+
+    events = asyncio.run(_collect_response_stream({"model": "my-agent", "input": "Hi", "stream": True}, parts))
+    reasoning_events = [event["data"] for event in events if event["event"] == "response.reasoning.delta"]
+    output_text = "".join(
+        event["data"].get("delta", "") for event in events if event["event"] == "response.output_text.delta"
+    )
+
+    assert output_text == "Finale Antwort."
+    assert any("Plan intern." in event.get("delta", "") for event in reasoning_events)
+    assert all(event.get("alpha_reasoning_kind") == "internal_plan" for event in reasoning_events)
+    assert all(event.get("alpha_reasoning_label") == "planner" for event in reasoning_events)
+
+
 def test_stream_responses_splits_think_markers_across_chunks(monkeypatch) -> None:
     parts = [
         {"event": "messages", "data": (_FakeMessage("AIMessageChunk", "<thi"), {})},
@@ -638,6 +665,56 @@ def test_stream_responses_splits_think_markers_across_chunks(monkeypatch) -> Non
     assert "</think>" not in output_done
 
 
+def test_stream_responses_scrubs_current_task_brief(monkeypatch) -> None:
+    parts = [
+        {
+            "event": "messages",
+            "data": (
+                _FakeMessage(
+                    "ai",
+                    "<current-task-brief>\nUser request:\nhuman: welche Tools hast du\n</current-task-brief>Visible",
+                ),
+                {},
+            ),
+        },
+    ]
+    _patch_stream_env(monkeypatch, parts)
+
+    events = asyncio.run(_collect_response_stream({"model": "my-agent", "input": "Hi", "stream": True}, parts))
+    output_done = next(event["data"]["text"] for event in events if event["event"] == "response.output_text.done")
+
+    assert output_done == "Visible"
+    assert "current-task-brief" not in output_done
+    assert "User request" not in output_done
+
+
+def test_last_ai_content_does_not_fallback_to_user_prompt() -> None:
+    state = {"values": {"messages": [_FakeMessage("human", "Chat history:\nuser: hi")]}}
+
+    assert bridge_server._last_ai_content(state) == ""
+
+
+def test_state_failure_message_uses_failed_trace_step() -> None:
+    state = {
+        "values": {
+            "alpha_trace_steps": [
+                {"name": "langgraph.memory_kernel.semantic.timeout", "error_type": "TimeoutError"},
+                {
+                    "name": "langgraph.planner.failed",
+                    "error_type": "InternalServerError",
+                    "classification": "server_error",
+                },
+            ]
+        }
+    }
+
+    message = bridge_server._state_failure_message(state)
+
+    assert "langgraph.planner.failed" in message
+    assert "InternalServerError" in message
+    assert "server_error" in message
+
+
 def test_stream_chat_splits_visible_think_blocks(monkeypatch) -> None:
     parts = [
         {"event": "messages", "data": (_FakeMessage("AIMessageChunk", "<think>plan</think>Answer"), {})},
@@ -653,6 +730,24 @@ def test_stream_chat_splits_visible_think_blocks(monkeypatch) -> None:
     assert output_text == "Answer"
     assert "<think>" not in output_text
     assert "</think>" not in output_text
+
+
+def test_stream_chat_routes_planner_text_to_reasoning(monkeypatch) -> None:
+    parts = [
+        {"event": "messages", "data": (_FakeMessage("AIMessageChunk", "Plan intern."), {"langgraph_node": "planner"})},
+        {"event": "messages", "data": (_FakeMessage("ai", "Finale Antwort."), {"langgraph_node": "alpha_ravis_swarm"})},
+    ]
+    monkeypatch.setattr(bridge_server, "BRIDGE_STREAM_REASONING_EVENTS", False)
+
+    chunks = asyncio.run(_collect_chat_event_stream(parts))
+    deltas = [chunk["choices"][0]["delta"] for chunk in chunks]
+    reasoning_deltas = [delta for delta in deltas if delta.get("reasoning_content")]
+    output_text = "".join(delta.get("content", "") for delta in deltas)
+
+    assert output_text == "Finale Antwort."
+    assert any("Plan intern." in delta.get("reasoning_content", "") for delta in reasoning_deltas)
+    assert all(delta.get("alpha_reasoning_kind") == "internal_plan" for delta in reasoning_deltas)
+    assert all(delta.get("alpha_reasoning_label") == "planner" for delta in reasoning_deltas)
 
 
 def test_stream_responses_splits_think_blocks_from_state_fallback(monkeypatch) -> None:

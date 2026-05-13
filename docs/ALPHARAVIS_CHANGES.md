@@ -4,6 +4,108 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-13 - Bridge Test UI Streaming Proxy
+
+### Summary
+
+`bridge-test-ui` now sends through a streaming proxy by default. The browser
+posts to `/api/send_stream`; the test UI server forwards to either
+`/v1/responses` or `/v1/chat/completions` with `stream=true`, then proxies the
+Bridge SSE stream back to the browser. The browser reads the response body as a
+stream, renders `response.output_text.delta` or Chat Completions
+`delta.content` as it arrives, and records the raw SSE events plus a browser-side
+stream trace.
+
+Assistant messages now also get a collapsed `Reasoning` panel when reasoning is
+present. Responses `response.reasoning.delta` events and Chat Completions
+`delta.reasoning_content` / `delta.reasoning` fields are appended live while
+the normal answer text continues to render separately.
+
+Follow-up fix: the browser SSE parser escapes newline regexes inside the Python
+HTML string (`\\r?\\n`) so the delivered JavaScript remains valid and the Send
+button handler can attach normally.
+
+Follow-up session fix: `Verlauf leeren` now creates a new backend session id in
+addition to clearing browser messages. Previously the UI kept a persistent
+`session_id` in `localStorage`, so a visually empty test UI could still resume
+an old LangGraph thread and make prompts look like stale hidden context was
+being injected.
+
+Follow-up context leak fix: Bridge output scrubbing now treats
+`<current-task-brief>` and `<execution-plan>` as internal-only blocks, and the
+state fallback no longer returns the last non-AI message as assistant text. The
+Bridge Test UI also sends Responses history as structured message items instead
+of flattening it into a synthetic `Chat history: ...` user prompt. This prevents
+internal task briefs or synthetic prompt wrappers from appearing as assistant
+answers when an agent turn emits no visible final AI text.
+
+If a streamed run produces no visible final AI message but LangGraph state has a
+failed trace step, the Bridge now emits a concise failure message instead of an
+empty assistant response. This surfaced the actual local failure during testing:
+the agent swarm model call failed through LiteLLM with `InternalServerError` /
+provider connection error for model group `big-boss`.
+
+The Bridge Test UI now shows a per-message route badge. It marks streamed
+responses as `Fast Path`, `Agent Path`, or `Hard Stop` based on LangGraph
+stream activity such as `fast_chat`, `planner`, `memory_kernel`, `skill_library`,
+and `swarm`, and mirrors that route in the top status line.
+
+Trace readability follow-up: the Test UI now compacts consecutive answer-text
+delta trace rows by default. The raw per-delta rows are still available with
+the `Delta-Details` checkbox in the Trace header. This keeps normal traces
+readable while preserving precise timing diagnostics for streaming stalls.
+
+Reasoning panel follow-up: the Test UI separates streamed LangGraph lifecycle
+statuses from model-provided reasoning. `Status: ...` deltas are displayed in a
+dedicated `Status` block, while non-status reasoning deltas stream into a
+`Modell-Reasoning` block below it. This is a UI-only split; the Bridge event
+streaming protocol is unchanged.
+
+Planner-stream follow-up: streamed text emitted by the LangGraph `planner` node
+is now treated as internal reasoning instead of visible assistant output in both
+Responses and Chat Completions streaming. Responses events include
+`alpha_reasoning_kind=internal_plan`; Chat Completions deltas include the same
+AlphaRavis marker next to `reasoning_content`. The Test UI renders those deltas
+in an `Interner Plan` block, while the final swarm answer remains normal
+`output_text` / `delta.content`.
+
+Operational follow-up: `bridge-test-ui` is treated as a normal base-stack
+service for operator workflows. `make up`, `make install`, and `make update`
+already run Docker Compose without a service filter, so they build/start it with
+the rest of the stack. The explicit `make build`, `make up-fullstreaming`, and
+`make up-chat-fullstreaming` targets now include `bridge-test-ui`, and
+`make status` lists `http://localhost:8140`.
+
+The old `/api/send` JSON route remains available as a non-streaming fallback and
+diagnostic path.
+
+### Current Limitation
+
+This fixes the Test UI buffering problem. It does not force LangGraph or
+DeepAgents to produce token-level final-answer chunks when an internal agent
+turn only emits a complete AI message. In that case the UI still shows early
+SSE lifecycle, activity, and reasoning/status events, but visible answer text
+arrives when the Bridge receives it from LangGraph.
+
+### Verification
+
+```text
+PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile \
+  langgraph-app/test_ui_server.py tests/test_bridge_test_ui.py
+
+PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile \
+  scripts/alpharavis_setup.py
+
+make -n build
+make -n up-fullstreaming
+make -n up-chat-fullstreaming
+
+python scripts/alpharavis_setup.py status
+
+pytest -q tests/test_bridge_test_ui.py tests/test_bridge_responses.py \
+  tests/test_context_hygiene.py
+```
+
 ## 2026-05-12 - Bridge Test UI Waterfall Trace
 
 ### Summary

@@ -11,6 +11,8 @@ DEFAULT_INTERNAL_CONTEXT_TAGS = (
     "archive-context",
     "archived-context",
     "handoff-packet",
+    "current-task-brief",
+    "execution-plan",
 )
 
 _INTERNAL_NOTE_RE = re.compile(
