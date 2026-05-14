@@ -856,6 +856,8 @@ def _plain_text_content(content: Any) -> str:
             parts.append(str(item))
             continue
         block_type = str(item.get("type") or "")
+        if block_type in {"thinking", "reasoning"}:
+            continue
         text = item.get("text")
         if isinstance(text, str):
             parts.append(text)

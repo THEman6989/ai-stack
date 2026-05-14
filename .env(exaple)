@@ -219,6 +219,11 @@ COMPOSE_PROFILES=
 # CORE DOCKER URLS - USUALLY DO NOT CHANGE
 # =====================================================================
 
+# Host/IP used for Docker-published service ports. Keep 0.0.0.0 for normal LAN
+# exposure. Set 127.0.0.1 when Tailscale Serve owns the tailnet IP/port and
+# should proxy to local services without blocking Docker startup.
+ALPHARAVIS_DOCKER_HOST_BIND=0.0.0.0
+
 # Native LangGraph API ("brain") called by the FastAPI bridge.
 LANGGRAPH_API_URL=http://langgraph-api:2024
 
@@ -510,6 +515,11 @@ BRIDGE_RUN_TIMEOUT_SECONDS=180
 #   final, messages = wait for final content and stream one OpenAI SSE reply
 BRIDGE_STREAM_MODE=events
 
+# Stream nested LangGraph subgraphs such as the AlphaRavis Swarm workers.
+# Keep true for token-level worker output in Bridge/Test-UI and LibreChat.
+# Allowed values: true, false
+BRIDGE_STREAM_SUBGRAPHS=true
+
 # How the bridge syncs LibreChat messages into LangGraph.
 # Allowed values:
 #   delta = after the first thread sync, send only new user messages
@@ -543,6 +553,12 @@ BRIDGE_STREAM_REASONING_EVENTS=false
 #   reasoning         = some experimental clients
 BRIDGE_REASONING_DELTA_FIELD=reasoning_content
 
+# Responses has a separate reasoning switch so LibreChat's Responses path can
+# receive planner, explicit model reasoning, and visible local-model thinking
+# without requiring the Chat Completions reasoning field.
+# Allowed values: true, false
+BRIDGE_RESPONSES_STREAM_REASONING_EVENTS=true
+
 # Adds POST /v1/responses over the same LangGraph run path used by
 # /v1/chat/completions. The bridge also exposes bridge-local compatibility
 # routes for GET/DELETE /v1/responses/{id}, GET /v1/responses/{id}/input_items,
@@ -567,6 +583,12 @@ BRIDGE_RESPONSES_STORE_MAX=200
 # compatibility. The semantic events still carry the real Responses lifecycle.
 # Allowed values: true, false
 BRIDGE_RESPONSES_DONE_SENTINEL=true
+
+# Split Responses visible output and model/plan reasoning into character-level
+# SSE deltas for smoother Bridge/Test-UI and LibreChat rendering. Status events
+# remain whole status lines. Set 0 to disable splitting.
+BRIDGE_RESPONSES_OUTPUT_DELTA_MAX_CHARS=1
+BRIDGE_RESPONSES_REASONING_DELTA_MAX_CHARS=1
 
 # Client-supplied OpenAI-hosted Responses tools (web_search/file_search/code
 # interpreter/computer/shell/etc.) are not executed by the bridge. Keep this

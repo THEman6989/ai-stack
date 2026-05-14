@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from collections import OrderedDict
@@ -53,6 +54,7 @@ LANGGRAPH_ASSISTANT_ID = os.getenv("LANGGRAPH_ASSISTANT_ID", "alpha_ravis")
 OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "my-agent")
 BRIDGE_RUN_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_RUN_TIMEOUT_SECONDS", "180"))
 BRIDGE_STREAM_MODE = os.getenv("BRIDGE_STREAM_MODE", "events").lower()
+BRIDGE_STREAM_SUBGRAPHS = _env_bool("BRIDGE_STREAM_SUBGRAPHS", "true")
 BRIDGE_MESSAGE_SYNC_MODE = os.getenv("BRIDGE_MESSAGE_SYNC_MODE", "delta").lower()
 BRIDGE_SHOW_ACTIVITY_EVENTS = _env_bool("BRIDGE_SHOW_ACTIVITY_EVENTS", "false")
 BRIDGE_ACTIVITY_DETAIL = os.getenv("BRIDGE_ACTIVITY_DETAIL", "summary").lower()
@@ -66,7 +68,10 @@ BRIDGE_RESPONSES_DONE_SENTINEL = _env_bool("BRIDGE_RESPONSES_DONE_SENTINEL", "tr
 BRIDGE_RESPONSES_ALLOW_CLIENT_TOOLS = _env_bool("BRIDGE_RESPONSES_ALLOW_CLIENT_TOOLS", "false")
 BRIDGE_RESPONSES_STREAM_TOOL_EVENTS = _env_bool("BRIDGE_RESPONSES_STREAM_TOOL_EVENTS", "true")
 BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS = _env_bool("BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS", "true")
+BRIDGE_RESPONSES_STREAM_REASONING_EVENTS = _env_bool("BRIDGE_RESPONSES_STREAM_REASONING_EVENTS", "true")
 BRIDGE_RESPONSES_TOOL_OUTPUT_MAX_CHARS = int(os.getenv("BRIDGE_RESPONSES_TOOL_OUTPUT_MAX_CHARS", "8000"))
+BRIDGE_RESPONSES_OUTPUT_DELTA_MAX_CHARS = int(os.getenv("BRIDGE_RESPONSES_OUTPUT_DELTA_MAX_CHARS", "1"))
+BRIDGE_RESPONSES_REASONING_DELTA_MAX_CHARS = int(os.getenv("BRIDGE_RESPONSES_REASONING_DELTA_MAX_CHARS", "1"))
 BRIDGE_HARD_INPUT_TOKEN_LIMIT = int(os.getenv("BRIDGE_HARD_INPUT_TOKEN_LIMIT", "128000"))
 BRIDGE_HARD_INPUT_HTTP_ERROR = _env_bool("BRIDGE_HARD_INPUT_HTTP_ERROR", "false")
 BRIDGE_ALLOW_RAW_MEDIA_CONTEXT = _env_bool("BRIDGE_ALLOW_RAW_MEDIA_CONTEXT", "false")
@@ -1340,8 +1345,8 @@ def _extract_stream_text(part: Any) -> str:
     return ""
 
 
-def _extract_stream_reasoning(part: Any) -> str:
-    if not BRIDGE_STREAM_REASONING_EVENTS:
+def _extract_stream_reasoning(part: Any, *, force: bool = False) -> str:
+    if not force and not BRIDGE_STREAM_REASONING_EVENTS:
         return ""
 
     data = getattr(part, "data", None)
@@ -1396,25 +1401,132 @@ def _stream_event_data(part: Any) -> Any:
     return getattr(part, "data", None)
 
 
-def _stream_langgraph_node(part: Any) -> str:
-    data = _stream_event_data(part)
-    metadata: Any = None
-    if isinstance(data, tuple) and len(data) > 1:
-        metadata = data[1]
-    elif isinstance(data, dict):
-        metadata = data.get("metadata") or data.get("config") or data.get("run_metadata")
-        if metadata is None and isinstance(data.get("chunk"), dict):
-            metadata = data["chunk"].get("metadata")
-    if isinstance(metadata, dict):
-        for key in ("langgraph_node", "node", "name"):
-            value = metadata.get(key)
-            if value:
-                return str(value)
+def _find_langgraph_node_value(value: Any, *, depth: int = 0) -> str:
+    if depth > 6:
+        return ""
+    if isinstance(value, dict):
+        for key in ("langgraph_node", "langgraph_node_name", "node"):
+            node = value.get(key)
+            if isinstance(node, str) and node:
+                return node
+        for key in ("langgraph_path", "langgraph_triggers", "tags"):
+            nested = value.get(key)
+            if isinstance(nested, (list, tuple)):
+                for item in nested:
+                    text = str(item)
+                    if text in {"planner", "alpha_ravis_swarm", "fast_chat"}:
+                        return text
+        for nested in value.values():
+            node = _find_langgraph_node_value(nested, depth=depth + 1)
+            if node:
+                return node
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            node = _find_langgraph_node_value(nested, depth=depth + 1)
+            if node:
+                return node
     return ""
 
 
-def _stream_text_is_internal_reasoning(part: Any) -> bool:
-    return _stream_langgraph_node(part) in {"planner"}
+def _message_id(message: Any) -> str:
+    return str(_get_value(message, "id", "") or "")
+
+
+def _stream_message_metadata_nodes(part: Any) -> dict[str, str]:
+    if _stream_event_name(part) != "messages/metadata":
+        return {}
+    data = _stream_event_data(part)
+    if not isinstance(data, dict):
+        return {}
+    nodes: dict[str, str] = {}
+    for message_id, metadata in data.items():
+        node = _find_langgraph_node_value(metadata)
+        if node:
+            nodes[str(message_id)] = node
+    return nodes
+
+
+def _stream_message_node_from_metadata(part: Any, message_nodes: dict[str, str] | None) -> str:
+    if not message_nodes:
+        return ""
+    for message in _stream_messages_from_part(part):
+        node = message_nodes.get(_message_id(message))
+        if node:
+            return node
+    return ""
+
+
+def _stream_message_delta_key(part: Any) -> str:
+    for message in _stream_messages_from_part(part):
+        message_id = _message_id(message)
+        if message_id:
+            return message_id
+    return "__default__"
+
+
+def _stream_langgraph_node(part: Any, *, message_nodes: dict[str, str] | None = None) -> str:
+    node = _stream_message_node_from_metadata(part, message_nodes)
+    if node:
+        return node
+    data = _stream_event_data(part)
+    metadata_candidates: list[Any] = []
+    if not isinstance(part, dict):
+        metadata_candidates.append(getattr(part, "metadata", None))
+        metadata_candidates.append(getattr(part, "run_metadata", None))
+    if isinstance(data, tuple) and len(data) > 1:
+        metadata_candidates.append(data[1])
+    elif isinstance(data, dict):
+        metadata_candidates.extend(
+            [
+                data.get("metadata"),
+                data.get("config"),
+                data.get("run_metadata"),
+                data.get("checkpoint"),
+            ]
+        )
+        chunk = data.get("chunk")
+        if isinstance(chunk, dict):
+            metadata_candidates.extend([chunk.get("metadata"), chunk.get("response_metadata")])
+    for candidate in metadata_candidates:
+        node = _find_langgraph_node_value(candidate)
+        if node:
+            return node
+    return ""
+
+
+def _stream_text_is_internal_reasoning(part: Any, *, message_nodes: dict[str, str] | None = None) -> bool:
+    return _stream_langgraph_node(part, message_nodes=message_nodes) in {"planner"}
+
+
+def _clean_internal_plan_text(text: str) -> str:
+    text = str(text or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"</?execution-plan>\s*", "", text).strip()
+    text = re.sub(
+        r"^\[System note: compact plan for the current agent run\.[^\]]*\]\s*",
+        "",
+        text,
+        flags=re.DOTALL,
+    ).strip()
+    return text
+
+
+def _extract_internal_plan_update(part: Any) -> str:
+    if _stream_event_name(part) != "updates":
+        return ""
+    data = _stream_event_data(part)
+    if not isinstance(data, dict):
+        return ""
+
+    planner_data = data.get("planner")
+    if not isinstance(planner_data, dict):
+        return ""
+    for key in ("planner_context", "plan", "planner_output", "content"):
+        value = planner_data.get(key)
+        if isinstance(value, str) and value.strip():
+            return _clean_internal_plan_text(value)
+    return ""
 
 
 def _extract_activity_text(part: Any, *, force: bool = False) -> str:
@@ -1469,10 +1581,13 @@ async def _stream_chat_events(
 
     saw_token = False
     emitted = ""
+    emitted_text_by_message: dict[str, str] = {}
     emitted_reasoning = ""
     emitted_activity: set[str] = set()
     explicit_reasoning_seen = False
     internal_reasoning_sections: set[str] = set()
+    emitted_internal_updates: set[str] = set()
+    message_nodes: dict[str, str] = {}
     thinking_splitter = _VisibleThinkingSplitter()
     used_state_fallback = False
     content_scrubber = StreamingInternalContextScrubber() if BRIDGE_SCRUB_INTERNAL_CONTEXT else None
@@ -1480,6 +1595,7 @@ async def _stream_chat_events(
 
     stream_kwargs = {
         "stream_mode": ["messages", "updates"] if include_activity and BRIDGE_SHOW_ACTIVITY_EVENTS else "messages",
+        "stream_subgraphs": BRIDGE_STREAM_SUBGRAPHS,
         "multitask_strategy": "interrupt",
     }
     if "command" in run_payload:
@@ -1490,10 +1606,31 @@ async def _stream_chat_events(
     try:
         async with asyncio.timeout(BRIDGE_RUN_TIMEOUT_SECONDS):
             async for part in client.runs.stream(thread_id, LANGGRAPH_ASSISTANT_ID, **stream_kwargs):
+                message_nodes.update(_stream_message_metadata_nodes(part))
                 activity = _extract_activity_text(part)
                 if include_activity and activity and activity not in emitted_activity:
                     emitted_activity.add(activity)
                     yield _activity_chunk(activity, model)
+
+                internal_update = _extract_internal_plan_update(part)
+                if internal_update and internal_update not in emitted_internal_updates:
+                    emitted_internal_updates.add(internal_update)
+                    prefix = "Interner Plan (planner):\n"
+                    visible_internal_update = (
+                        reasoning_scrubber.feed(prefix + internal_update)
+                        if reasoning_scrubber
+                        else prefix + internal_update
+                    )
+                    if visible_internal_update:
+                        yield _stream_data(
+                            _chunk(
+                                "",
+                                model,
+                                reasoning_content=visible_internal_update,
+                                alpha_reasoning_kind="internal_plan",
+                                alpha_reasoning_label="planner",
+                            )
+                        )
 
                 reasoning = _extract_stream_reasoning(part)
                 reasoning_delta = reasoning if _stream_part_is_delta(part) else _delta_text(reasoning, emitted_reasoning)
@@ -1507,11 +1644,16 @@ async def _stream_chat_events(
                         yield _stream_data(_chunk("", model, reasoning_content=visible_reasoning_delta))
 
                 text = _extract_stream_text(part)
-                delta = text if _stream_part_is_delta(part) else _delta_text(text, emitted)
+                message_delta_key = _stream_message_delta_key(part)
+                previous_text_for_message = emitted_text_by_message.get(message_delta_key, "")
+                delta = text if _stream_part_is_delta(part) else _delta_text(text, previous_text_for_message)
                 if delta:
                     emitted += delta
-                    if _stream_text_is_internal_reasoning(part):
-                        node = _stream_langgraph_node(part) or "internal"
+                    emitted_text_by_message[message_delta_key] = (
+                        previous_text_for_message + delta if _stream_part_is_delta(part) else text
+                    )
+                    if _stream_text_is_internal_reasoning(part, message_nodes=message_nodes):
+                        node = _stream_langgraph_node(part, message_nodes=message_nodes) or "internal"
                         prefix = ""
                         if node not in internal_reasoning_sections:
                             internal_reasoning_sections.add(node)
@@ -1797,6 +1939,11 @@ def _responses_content_to_text(content: Any) -> str:
 def _visible_content(content: str) -> str:
     if not BRIDGE_SCRUB_INTERNAL_CONTEXT:
         return content
+    content = re.sub(
+        r"(?im)^\s*\[(?:thinking|reasoning) content block omitted\]\s*\n?",
+        "",
+        content,
+    )
     return sanitize_internal_context(content)
 
 
@@ -2389,16 +2536,22 @@ class _ResponsesStreamBuilder:
         metadata = {"alpha_reasoning_kind": alpha_kind}
         if alpha_label:
             metadata["alpha_reasoning_label"] = alpha_label
-        events.append(
-            self.event(
-                "response.reasoning.delta",
-                item_id=self.reasoning_item["id"],
-                output_index=output_index,
-                content_index=self.reasoning_content_index,
-                delta=delta,
-                **metadata,
-            )
+        chunks = (
+            [delta]
+            if alpha_kind == "status"
+            else _split_response_delta(delta, BRIDGE_RESPONSES_REASONING_DELTA_MAX_CHARS)
         )
+        for chunk in chunks:
+            events.append(
+                self.event(
+                    "response.reasoning.delta",
+                    item_id=self.reasoning_item["id"],
+                    output_index=output_index,
+                    content_index=self.reasoning_content_index,
+                    delta=chunk,
+                    **metadata,
+                )
+            )
         return events
 
     def finish_reasoning(self) -> list[str]:
@@ -2490,6 +2643,47 @@ class _ResponsesStreamBuilder:
         )
 
 
+def _split_response_delta(delta: str, max_chars: int) -> list[str]:
+    max_chars = max(0, max_chars)
+    if not delta or max_chars <= 0 or len(delta) <= max_chars:
+        return [delta] if delta else []
+
+    chunks: list[str] = []
+    rest = delta
+    while len(rest) > max_chars:
+        if max_chars <= 1:
+            cut = 1
+        else:
+            space_cut = rest.rfind(" ", 0, max_chars + 1)
+            newline_cut = rest.rfind("\n", 0, max_chars + 1)
+            cut = max(space_cut, newline_cut)
+            if cut < max_chars // 2:
+                cut = max_chars
+            else:
+                cut += 1
+        chunks.append(rest[:cut])
+        rest = rest[cut:]
+    if rest:
+        chunks.append(rest)
+    return chunks
+
+
+def _split_response_output_delta(delta: str) -> list[str]:
+    return _split_response_delta(delta, BRIDGE_RESPONSES_OUTPUT_DELTA_MAX_CHARS)
+
+
+async def _response_output_delta_events(
+    builder: _ResponsesStreamBuilder,
+    delta: str,
+) -> AsyncIterator[str]:
+    chunks = _split_response_output_delta(delta)
+    split = len(chunks) > 1
+    for chunk in chunks:
+        yield builder.text_delta(chunk)
+        if split:
+            await asyncio.sleep(0)
+
+
 async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIterator[str]:
     started = time.perf_counter()
     model = str(body.get("model") or OPENAI_MODEL_NAME)
@@ -2505,7 +2699,8 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
         yield event
 
     if hard_error:
-        yield builder.text_delta(hard_error)
+        async for event in _response_output_delta_events(builder, hard_error):
+            yield event
         for event in builder.finish_message():
             yield event
         response = builder.response_object()
@@ -2535,7 +2730,8 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
     if run_payload.get("direct_response"):
         content = _visible_content(str(run_payload["direct_response"]))
         if content:
-            yield builder.text_delta(content)
+            async for event in _response_output_delta_events(builder, content):
+                yield event
         for event in builder.finish_message():
             yield event
         response = builder.response_object()
@@ -2557,6 +2753,7 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
 
     saw_token = False
     emitted = ""
+    emitted_text_by_message: dict[str, str] = {}
     emitted_reasoning = ""
     emitted_activity: set[str] = set()
     seen_tool_calls: set[str] = set()
@@ -2564,6 +2761,8 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
     tool_inputs: dict[str, dict[str, Any]] = {}
     explicit_reasoning_seen = False
     internal_reasoning_sections: set[str] = set()
+    emitted_internal_updates: set[str] = set()
+    message_nodes: dict[str, str] = {}
     thinking_splitter = _VisibleThinkingSplitter()
     used_state_fallback = False
     content_scrubber = StreamingInternalContextScrubber() if BRIDGE_SCRUB_INTERNAL_CONTEXT else None
@@ -2571,6 +2770,7 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
 
     stream_kwargs: dict[str, Any] = {
         "stream_mode": ["messages", "updates"],
+        "stream_subgraphs": BRIDGE_STREAM_SUBGRAPHS,
         "multitask_strategy": "interrupt",
     }
     if "command" in run_payload:
@@ -2581,11 +2781,29 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
     try:
         async with asyncio.timeout(BRIDGE_RUN_TIMEOUT_SECONDS):
             async for part in client.runs.stream(thread_id, LANGGRAPH_ASSISTANT_ID, **stream_kwargs):
+                message_nodes.update(_stream_message_metadata_nodes(part))
                 activity = _extract_activity_text(part, force=BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS)
                 if BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS and activity and activity not in emitted_activity:
                     emitted_activity.add(activity)
                     for event in builder.reasoning_delta(f"Status: {activity}\n", alpha_kind="status"):
                         yield event
+
+                internal_update = _extract_internal_plan_update(part)
+                if internal_update and internal_update not in emitted_internal_updates:
+                    emitted_internal_updates.add(internal_update)
+                    prefix = "Interner Plan (planner):\n"
+                    visible_internal_update = (
+                        reasoning_scrubber.feed(prefix + internal_update)
+                        if reasoning_scrubber
+                        else prefix + internal_update
+                    )
+                    if visible_internal_update:
+                        for event in builder.reasoning_delta(
+                            visible_internal_update,
+                            alpha_kind="internal_plan",
+                            alpha_label="planner",
+                        ):
+                            yield event
 
                 for notification in _tool_events_from_part(
                     part,
@@ -2608,7 +2826,7 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
                         ):
                             yield event
 
-                reasoning = _extract_stream_reasoning(part)
+                reasoning = _extract_stream_reasoning(part, force=BRIDGE_RESPONSES_STREAM_REASONING_EVENTS)
                 reasoning_delta = reasoning if _stream_part_is_delta(part) else _delta_text(reasoning, emitted_reasoning)
                 if reasoning_delta:
                     explicit_reasoning_seen = True
@@ -2621,11 +2839,16 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
                             yield event
 
                 text = _extract_stream_text(part)
-                delta = text if _stream_part_is_delta(part) else _delta_text(text, emitted)
+                message_delta_key = _stream_message_delta_key(part)
+                previous_text_for_message = emitted_text_by_message.get(message_delta_key, "")
+                delta = text if _stream_part_is_delta(part) else _delta_text(text, previous_text_for_message)
                 if delta:
                     emitted += delta
-                    if _stream_text_is_internal_reasoning(part):
-                        node = _stream_langgraph_node(part) or "internal"
+                    emitted_text_by_message[message_delta_key] = (
+                        previous_text_for_message + delta if _stream_part_is_delta(part) else text
+                    )
+                    if _stream_text_is_internal_reasoning(part, message_nodes=message_nodes):
+                        node = _stream_langgraph_node(part, message_nodes=message_nodes) or "internal"
                         prefix = ""
                         if node not in internal_reasoning_sections:
                             internal_reasoning_sections.add(node)
@@ -2643,7 +2866,7 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
                         continue
                     answer_delta, thinking_delta = thinking_splitter.feed(
                         delta,
-                        emit_reasoning=BRIDGE_STREAM_REASONING_EVENTS and not explicit_reasoning_seen,
+                        emit_reasoning=BRIDGE_RESPONSES_STREAM_REASONING_EVENTS and not explicit_reasoning_seen,
                     )
                     if thinking_delta:
                         visible_thinking_delta = (
@@ -2655,7 +2878,8 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
                     visible_delta = content_scrubber.feed(answer_delta) if content_scrubber else answer_delta
                     if visible_delta:
                         saw_token = True
-                        yield builder.text_delta(visible_delta)
+                        async for event in _response_output_delta_events(builder, visible_delta):
+                            yield event
     except TimeoutError as exc:
         _log_exception(
             "bridge.responses_stream.timeout",
@@ -2668,7 +2892,8 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
             emitted_chars=len(emitted),
             emitted_reasoning_chars=len(emitted_reasoning),
         )
-        yield builder.text_delta(_clean_error_message(exc))
+        async for event in _response_output_delta_events(builder, _clean_error_message(exc)):
+            yield event
         saw_token = True
     except Exception as exc:
         _log_exception(
@@ -2681,7 +2906,8 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
             emitted_chars=len(emitted),
             emitted_reasoning_chars=len(emitted_reasoning),
         )
-        yield builder.text_delta(_clean_error_message(exc))
+        async for event in _response_output_delta_events(builder, _clean_error_message(exc)):
+            yield event
         saw_token = True
 
     if not saw_token:
@@ -2698,7 +2924,7 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
         if content:
             visible, thinking = _split_visible_thinking_once(
                 content,
-                emit_reasoning=BRIDGE_STREAM_REASONING_EVENTS and not explicit_reasoning_seen,
+                emit_reasoning=BRIDGE_RESPONSES_STREAM_REASONING_EVENTS and not explicit_reasoning_seen,
             )
             visible_thinking = reasoning_scrubber.feed(thinking) if reasoning_scrubber else thinking
             if visible_thinking:
@@ -2706,13 +2932,14 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
                     yield event
             visible = content_scrubber.feed(visible) if content_scrubber else visible
             if visible:
-                yield builder.text_delta(visible)
+                async for event in _response_output_delta_events(builder, visible):
+                    yield event
 
     answer_tail, thinking_tail = (
         ("", "")
         if used_state_fallback
         else thinking_splitter.flush(
-            emit_reasoning=BRIDGE_STREAM_REASONING_EVENTS and not explicit_reasoning_seen,
+            emit_reasoning=BRIDGE_RESPONSES_STREAM_REASONING_EVENTS and not explicit_reasoning_seen,
         )
     )
     if thinking_tail:
@@ -2723,7 +2950,8 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
     if answer_tail:
         visible_answer_tail = content_scrubber.feed(answer_tail) if content_scrubber else answer_tail
         if visible_answer_tail:
-            yield builder.text_delta(visible_answer_tail)
+            async for event in _response_output_delta_events(builder, visible_answer_tail):
+                yield event
 
     if reasoning_scrubber:
         reasoning_tail = reasoning_scrubber.flush()
@@ -2733,7 +2961,8 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
     if content_scrubber:
         content_tail = content_scrubber.flush()
         if content_tail:
-            yield builder.text_delta(content_tail)
+            async for event in _response_output_delta_events(builder, content_tail):
+                yield event
 
     for event in builder.finish_reasoning():
         yield event

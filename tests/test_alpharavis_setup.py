@@ -115,6 +115,28 @@ def test_resolve_url_interpolates_env_defaults() -> None:
     assert alpharavis_setup.resolve_url("http://localhost:${MISSING_PORT:-8140}", {}) == "http://localhost:8140"
 
 
+def test_network_mode_aliases_select_expected_bindings() -> None:
+    assert alpharavis_setup.normalize_network_mode("tailscale") == "tailscale"
+    assert alpharavis_setup.normalize_network_mode("off") == "lan"
+    assert alpharavis_setup.NETWORK_MODE_VALUES["tailscale"]["ALPHARAVIS_DOCKER_HOST_BIND"] == "127.0.0.1"
+    assert alpharavis_setup.NETWORK_MODE_VALUES["lan"]["ALPHARAVIS_DOCKER_HOST_BIND"] == "0.0.0.0"
+
+
+def test_apply_network_mode_updates_env(tmp_path: Path, monkeypatch) -> None:
+    env_path = tmp_path / ".env"
+    example_path = tmp_path / ".env(exaple)"
+    example_path.write_text("ALPHARAVIS_DOCKER_HOST_BIND=0.0.0.0\n", encoding="utf-8")
+    env_path.write_text("ALPHARAVIS_DOCKER_HOST_BIND=0.0.0.0\n", encoding="utf-8")
+    monkeypatch.setattr(alpharavis_setup, "ENV_PATH", env_path)
+    monkeypatch.setattr(alpharavis_setup, "EXAMPLE_PATH", example_path)
+
+    assert alpharavis_setup.apply_network_mode("tailscale") == "tailscale"
+    assert alpharavis_setup.read_env(env_path)["ALPHARAVIS_DOCKER_HOST_BIND"] == "127.0.0.1"
+
+    assert alpharavis_setup.apply_network_mode("lan") == "lan"
+    assert alpharavis_setup.read_env(env_path)["ALPHARAVIS_DOCKER_HOST_BIND"] == "0.0.0.0"
+
+
 def test_configure_media_vision_noninteractive_writes_direct_endpoint(tmp_path: Path, monkeypatch) -> None:
     env_path = tmp_path / ".env"
     example_path = tmp_path / ".env(exaple)"

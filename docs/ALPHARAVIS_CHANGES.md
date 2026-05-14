@@ -4,6 +4,97 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-14 - Makefile Operator Reference
+
+### Summary
+
+Added `docs/MAKEFILE_README.md` as the canonical operator README for Makefile
+targets and variables. It documents install/update/up flows, runtime
+streaming profiles, Tailscale HTTPS versus LAN HTTP network modes, config UI
+settings, media/vision and video-analysis variables, service targets, smoke
+checks, important URLs, and troubleshooting commands.
+
+The root `README.md` now keeps a short Makefile quickstart and links to the
+Makefile README instead of duplicating the full target list. Usage notes also
+link to the same Makefile README from the Daily Interface section.
+
+### Verification
+
+```text
+make -n help
+python -m py_compile scripts/alpharavis_setup.py tailscale_https_routes.py
+pytest -q tests/test_alpharavis_setup.py tests/test_tailscale_https_routes.py
+```
+
+## 2026-05-14 - Tailscale/LAN Network Mode Switching
+
+### Summary
+
+The Makefile now treats Tailscale HTTPS and plain LAN HTTP as explicit network
+exposure modes instead of only applying Tailscale routes after Docker starts.
+Default `make install`, `make update`, and `make up` runs prepare Tailscale mode
+first by writing `ALPHARAVIS_DOCKER_HOST_BIND=127.0.0.1`, then start/recreate
+Docker services, then apply Tailscale Serve HTTPS routes. This avoids Docker
+trying to bind Tailnet ports already owned by Tailscale Serve.
+
+`TAILSCALE_AUTO=off` is now the LAN HTTP mode. It disables the managed
+Tailscale Serve routes, removes the dashboard HTTPS override JSON, writes
+`ALPHARAVIS_DOCKER_HOST_BIND=0.0.0.0`, and lets the normal Docker start step
+publish application ports on all host interfaces. `TAILSCALE_AUTO=keep` is the
+new no-op mode for runs that should leave the current exposure mode untouched.
+
+Direct operator commands:
+
+```text
+make tailscale-apply
+make tailscale-disable
+make install TAILSCALE_AUTO=off
+make update TAILSCALE_AUTO=off
+```
+
+### Verification
+
+```text
+python -m py_compile scripts/alpharavis_setup.py tailscale_https_routes.py
+make -n install START=no SUBMODULES=no TAILSCALE_AUTO=off
+make -n up TAILSCALE_AUTO=apply
+pytest -q tests/test_alpharavis_setup.py tests/test_tailscale_https_routes.py
+```
+
+## 2026-05-13 - Make Config Browser UI
+
+### Summary
+
+`make config` now starts a local dependency-free browser UI for editing the
+root `.env` file. The UI reads `.env(exaple)` as the canonical default/template
+source, groups settings by its documented sections, pre-fills current `.env`
+values, and saves changes back to `.env`.
+
+Operator behavior:
+
+```text
+make config
+CONFIG_HOST=127.0.0.1 CONFIG_PORT=8765 make config
+```
+
+The config server opens the browser automatically when possible and prints the
+local URL for headless shells. Boolean values are shown as True/False controls,
+URL-like values get normal text inputs, secret-looking keys use password
+inputs, and every row has a per-key Reset button. The bottom-right Reset all
+button asks for confirmation before restoring all shown values to
+`.env(exaple)` defaults; Save writes the resulting values to `.env`.
+
+`make install` and `make update` keep their existing terminal prompts for
+fallback/non-browser use, but the intended central place to edit large config
+sets is now `make config`.
+
+### Verification
+
+```text
+pytest -q tests/test_alpharavis_config_server.py tests/test_alpharavis_setup.py
+python -m py_compile scripts/alpharavis_config_server.py scripts/alpharavis_setup.py
+```
+
 ## 2026-05-13 - Lazy Toolset Binding And Dashboard Tailscale Default
 
 ### Summary
@@ -152,8 +243,9 @@ Follow-up: the normal operator flows now run that apply step automatically.
 `make install`, all install profile targets, `make update`,
 `make update-no-start`, `make up`, `make up-fullstreaming`, and
 `make up-chat-fullstreaming` call `tailscale-auto`, which defaults to
-`tailscale-apply`. Use `TAILSCALE_AUTO=off` to skip automatic Tailnet HTTPS
-setup for one run.
+`tailscale-apply`. This older note originally treated `TAILSCALE_AUTO=off` as a
+skip flag; as of 2026-05-14 it is the explicit LAN HTTP mode, documented above
+in "Tailscale/LAN Network Mode Switching".
 
 Follow-up: Tailscale sudo handling now defaults to `auto`. The helper first
 tries the Tailscale CLI without sudo. If it gets a permissions-style failure,
@@ -315,6 +407,55 @@ Responses and Chat Completions streaming. Responses events include
 AlphaRavis marker next to `reasoning_content`. The Test UI renders those deltas
 in an `Interner Plan` block, while the final swarm answer remains normal
 `output_text` / `delta.content`.
+
+Bridge Test UI streaming follow-up: LangGraph `updates` payloads from the
+`planner` node are now converted into `response.reasoning.delta` events with
+`alpha_reasoning_kind=internal_plan`, so the plan is visible as soon as the
+planner update arrives instead of waiting for the final swarm message. Responses
+reasoning extraction is enabled by default through
+`BRIDGE_RESPONSES_STREAM_REASONING_EVENTS=true`; the older
+`BRIDGE_STREAM_REASONING_EVENTS` flag still controls the Chat Completions
+reasoning field. The Test UI also has fixed live panes for Status, Reasoning,
+and Planer while keeping the per-message collapsed reasoning details.
+
+Planner visibility fix: LangGraph can stream planner tokens as
+`messages/partial` while sending their node metadata separately in a preceding
+`messages/metadata` event. The Bridge now tracks message IDs to their
+LangGraph node and keeps per-message delta buffers, so planner partials route
+only to internal reasoning and do not appear in the visible assistant message.
+The Test UI live panes can be expanded with a `Gross` / `Klein` toggle for
+longer plans.
+
+Reasoning hygiene follow-up: text-only conversion and visible bridge output now
+suppress `[thinking content block omitted]` / `[reasoning content block
+omitted]` placeholders. Real provider reasoning still goes to the reasoning
+stream when it is exposed as `reasoning_content`, `reasoning`, or visible
+`<think>` text.
+
+Responses delta-smoothing follow-up: visible assistant text and model/plan
+reasoning are split into character-level SSE deltas through
+`BRIDGE_RESPONSES_OUTPUT_DELTA_MAX_CHARS=1` and
+`BRIDGE_RESPONSES_REASONING_DELTA_MAX_CHARS=1`. Status events remain whole
+status lines. This keeps Bridge Test UI and LibreChat Responses rendering from
+receiving visibly jumpy multi-token chunks when the provider or LangGraph emits
+larger partials.
+
+Swarm streaming fix: Bridge LangGraph run streaming now sets
+`stream_subgraphs=true` through `BRIDGE_STREAM_SUBGRAPHS=true`. The
+AlphaRavis Swarm is a nested compiled graph under the top-level
+`alpha_ravis_swarm` node; without subgraph streaming, the Bridge only saw the
+completed Swarm result and could not forward worker `messages/partial` token
+deltas. Direct LangGraph probing with subgraphs enabled produced hundreds of
+worker partials with the first text-like event around 2-3 seconds instead of
+waiting for the full Swarm run to finish.
+
+Docker/Tailscale operational follow-up: published ports for Hermes,
+LangGraph, the bridge, media gallery, Bridge Test UI, LiteLLM, RAG API,
+DeepAgents UI, custom agent UI, LibreChat, OpenWebUI, service dashboard,
+Hermes dashboard, and Pixelle can now be bound to a specific host address
+through `ALPHARAVIS_DOCKER_HOST_BIND`. The default remains `0.0.0.0`; this
+local run used `127.0.0.1` because Tailscale Serve was already listening on the
+tailnet IP ports and proxying to localhost.
 
 Operational follow-up: `bridge-test-ui` is treated as a normal base-stack
 service for operator workflows. `make up`, `make install`, and `make update`

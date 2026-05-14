@@ -159,6 +159,13 @@ def test_test_ui_event_is_valid_sse_json() -> None:
 def test_html_renders_collapsed_reasoning_panel_from_stream() -> None:
     assert "response.reasoning.delta" in test_ui_server.HTML
     assert "reasoning-details" in test_ui_server.HTML
+    assert "live-panels" in test_ui_server.HTML
+    assert "live-status" in test_ui_server.HTML
+    assert "live-reasoning" in test_ui_server.HTML
+    assert "live-plan" in test_ui_server.HTML
+    assert "data-panel-toggle" in test_ui_server.HTML
+    assert "panel.classList.toggle('expanded')" in test_ui_server.HTML
+    assert "function renderLivePanels(msg)" in test_ui_server.HTML
     assert "summary.textContent = 'Reasoning'" in test_ui_server.HTML
     assert "reasoningStatus" in test_ui_server.HTML
     assert "internalPlan" in test_ui_server.HTML

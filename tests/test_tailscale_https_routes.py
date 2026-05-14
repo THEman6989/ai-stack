@@ -27,6 +27,16 @@ def test_plan_can_exclude_service_dashboard(capsys):
     assert "AlphaRavis Dashboard" not in output
 
 
+def test_disable_without_tailscale_binary_removes_overrides(tmp_path: Path, monkeypatch):
+    output = tmp_path / "tailscale_service_urls.json"
+    output.write_text('{"routes":[]}\n', encoding="utf-8")
+    monkeypatch.setattr(routes.shutil, "which", lambda name: None)
+
+    assert routes.main(["disable", "--output", str(output)]) == 0
+
+    assert not output.exists()
+
+
 def test_auto_sudo_retries_after_permission_error(monkeypatch):
     calls = []
 

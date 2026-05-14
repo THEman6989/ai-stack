@@ -85,6 +85,7 @@ OpenAI-hosted Responses tools.
 ```env
 BRIDGE_ENABLE_RESPONSES_API=true
 BRIDGE_PREFERRED_API_MODE=responses
+BRIDGE_STREAM_SUBGRAPHS=true
 BRIDGE_RESPONSES_STORE=true
 BRIDGE_RESPONSES_STORE_MAX=200
 BRIDGE_RESPONSES_DONE_SENTINEL=true
@@ -93,6 +94,8 @@ BRIDGE_STREAM_REASONING_EVENTS=true
 BRIDGE_RESPONSES_STREAM_TOOL_EVENTS=true
 BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS=true
 BRIDGE_RESPONSES_TOOL_OUTPUT_MAX_CHARS=8000
+BRIDGE_RESPONSES_OUTPUT_DELTA_MAX_CHARS=1
+BRIDGE_RESPONSES_REASONING_DELTA_MAX_CHARS=1
 ```
 
 Keep `BRIDGE_RESPONSES_ALLOW_CLIENT_TOOLS=false` unless you intentionally want
@@ -264,3 +267,25 @@ string content, the bridge splits `<think>...</think>` and
 sent as Responses reasoning or Chat Completions `reasoning_content`; the final
 assistant text does not include the raw markers. Explicit provider reasoning
 fields still take precedence so the same thinking is not emitted twice.
+
+Responses reasoning has its own bridge switch,
+`BRIDGE_RESPONSES_STREAM_REASONING_EVENTS=true`, defaulting on. This lets
+LibreChat's Responses mode receive explicit provider reasoning and visible
+thinking even if the legacy Chat Completions reasoning flag is disabled.
+LangGraph planner `updates` are also surfaced as
+`response.reasoning.delta` with `alpha_reasoning_kind=internal_plan`; the
+Bridge Test UI displays those in a separate Planer pane, while LibreChat sees
+the same data in its single reasoning channel.
+
+Responses visible output and model/plan reasoning are split into
+character-level SSE deltas by `BRIDGE_RESPONSES_OUTPUT_DELTA_MAX_CHARS=1` and
+`BRIDGE_RESPONSES_REASONING_DELTA_MAX_CHARS=1`. Status events remain whole
+status lines. This improves Bridge/Test-UI and LibreChat rendering smoothness,
+but it does not reduce upstream model latency; true first-token timing still
+depends on the active LangGraph/DeepAgents node emitting partial message events.
+
+The Bridge requests LangGraph run streaming with
+`BRIDGE_STREAM_SUBGRAPHS=true`. This is required because the AlphaRavis Swarm is
+compiled as a nested LangGraph subgraph under the top-level
+`alpha_ravis_swarm` node. Without subgraph streaming, the Bridge only receives
+the completed Swarm result and cannot forward worker token deltas.

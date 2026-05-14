@@ -219,6 +219,37 @@ STREAMING_MODE_VALUES = {
 }
 
 
+NETWORK_MODE_ALIASES = {
+    "": "tailscale",
+    "auto": "tailscale",
+    "apply": "tailscale",
+    "tailscale": "tailscale",
+    "tailnet": "tailscale",
+    "https": "tailscale",
+    "on": "tailscale",
+    "true": "tailscale",
+    "yes": "tailscale",
+    "1": "tailscale",
+    "lan": "lan",
+    "local-lan": "lan",
+    "disable": "lan",
+    "disabled": "lan",
+    "off": "lan",
+    "false": "lan",
+    "no": "lan",
+    "0": "lan",
+}
+
+NETWORK_MODE_VALUES = {
+    "tailscale": {
+        "ALPHARAVIS_DOCKER_HOST_BIND": "127.0.0.1",
+    },
+    "lan": {
+        "ALPHARAVIS_DOCKER_HOST_BIND": "0.0.0.0",
+    },
+}
+
+
 def run(cmd: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     print("+ " + " ".join(cmd))
     return subprocess.run(cmd, cwd=ROOT, text=True, check=check)
@@ -290,6 +321,27 @@ def configure() -> None:
 def set_many(values: dict[str, str]) -> None:
     for key, value in values.items():
         update_env_value(key, value)
+
+
+def normalize_network_mode(mode: str) -> str:
+    normalized = (mode or "tailscale").strip().lower().replace("_", "-")
+    normalized = NETWORK_MODE_ALIASES.get(normalized, normalized)
+    if normalized in NETWORK_MODE_VALUES:
+        return normalized
+    valid = ", ".join(NETWORK_MODE_VALUES)
+    raise ValueError(f"Unsupported network mode {mode!r}. Use one of: {valid}")
+
+
+def apply_network_mode(mode: str) -> str:
+    ensure_env()
+    resolved = normalize_network_mode(mode)
+    set_many(NETWORK_MODE_VALUES[resolved])
+    bind = NETWORK_MODE_VALUES[resolved]["ALPHARAVIS_DOCKER_HOST_BIND"]
+    if resolved == "tailscale":
+        print(f"Network mode: tailscale HTTPS via Tailscale Serve; Docker host bind set to {bind}")
+    else:
+        print(f"Network mode: LAN HTTP; Docker host bind set to {bind}")
+    return resolved
 
 
 def normalize_streaming_mode(mode: str) -> str:
@@ -819,6 +871,11 @@ def print_status() -> None:
     print(f"- Experimental tool-stream patch: {env.get('ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING', 'false')}")
     print(f"- Bridge preferred API: {env.get('BRIDGE_PREFERRED_API_MODE', 'responses')}")
     print(f"- Compose profiles: {env.get('COMPOSE_PROFILES', '') or 'none'}")
+    bind = env.get("ALPHARAVIS_DOCKER_HOST_BIND", "0.0.0.0")
+    mode = "Tailscale Serve HTTPS" if bind == "127.0.0.1" else "LAN HTTP"
+    print("\nNetwork exposure")
+    print(f"- Mode: {mode}")
+    print(f"- Docker host bind: {bind}")
     print("\nMedia / vision")
     print(f"- Media gallery: {env.get('ALPHARAVIS_ENABLE_MEDIA_GALLERY', 'true')}")
     print(f"- Vision vector memory: {env.get('ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY', 'false')}")
@@ -920,6 +977,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             "media-vision",
             "video-analysis",
             "openwebui",
+            "network-mode",
             "update",
             "status",
             "bridge-smoke",
@@ -965,6 +1023,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--vision-base-url", default=os.getenv("VISION_BASE_URL", ""), help="LiteLLM/OpenAI-compatible fallback /v1 URL for vision embeddings.")
     parser.add_argument("--vision-model", default=os.getenv("VISION_MODEL", ""), help="Primary vision embedding model id.")
     parser.add_argument("--vision-fallback", default=os.getenv("VISION_FALLBACK", ""), help="Fallback vision embedding model id.")
+    parser.add_argument(
+        "--mode",
+        default=os.getenv("NETWORK_MODE", os.getenv("ALPHARAVIS_NETWORK_MODE", "tailscale")),
+        help="For network-mode: tailscale for localhost Docker binds, or lan for 0.0.0.0 LAN HTTP binds.",
+    )
     args = parser.parse_args(argv)
     if args.command == "install":
         install(
@@ -1006,6 +1069,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         configure_video_analysis(enabled=args.enabled, fps=args.fps, max_frames=args.max_frames)
     elif args.command == "openwebui":
         configure_openwebui()
+    elif args.command == "network-mode":
+        apply_network_mode(args.mode)
     elif args.command == "update":
         update(
             streaming_mode=args.streaming_mode,

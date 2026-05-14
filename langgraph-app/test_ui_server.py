@@ -294,6 +294,14 @@ HTML = """<!doctype html>
     header { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #2d3340; padding-bottom: 12px; }
     h1 { font-size: 20px; margin: 0; font-weight: 650; }
     .status { color: #9aa4b2; font-size: 13px; }
+    .live-panels { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .live-panel { border: 1px solid #2d3340; border-radius: 8px; background: #0d1016; min-height: 112px; display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
+    .live-panel.expanded { grid-column: 1 / -1; min-height: 280px; }
+    .live-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid #202633; padding: 6px 8px 6px 10px; }
+    .live-panel h2 { margin: 0; color: #9aa4b2; font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: 0; }
+    .panel-toggle { border-radius: 6px; padding: 4px 7px; font-size: 11px; line-height: 1; }
+    .live-panel pre { margin: 0; padding: 10px; max-height: 180px; overflow: auto; color: #cbd5e1; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .live-panel.expanded pre { max-height: 440px; }
     #chat { min-height: 48vh; max-height: 68vh; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; }
     .msg { border: 1px solid #2d3340; background: #181c24; border-radius: 8px; padding: 10px 12px; white-space: pre-wrap; line-height: 1.45; }
     .user { align-self: flex-end; max-width: 78%; background: #16324a; border-color: #24557e; }
@@ -327,6 +335,7 @@ HTML = """<!doctype html>
     .bar-wrap { height: 8px; background: #161b24; border-radius: 999px; overflow: hidden; min-width: 120px; }
     .bar { height: 100%; background: #2d6cdf; width: 0; }
     pre { overflow: auto; font-size: 12px; color: #cbd5e1; }
+    @media (max-width: 760px) { .live-panels { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -335,6 +344,20 @@ HTML = """<!doctype html>
       <h1>AlphaRavis Bridge Test UI</h1>
       <div id="status" class="status">bereit</div>
     </header>
+    <section class="live-panels" aria-label="Stream-Details">
+      <div class="live-panel">
+        <div class="live-panel-head"><h2>Status</h2><button class="panel-toggle" type="button" data-panel-toggle>Gross</button></div>
+        <pre id="live-status">(leer)</pre>
+      </div>
+      <div class="live-panel">
+        <div class="live-panel-head"><h2>Reasoning</h2><button class="panel-toggle" type="button" data-panel-toggle>Gross</button></div>
+        <pre id="live-reasoning">(leer)</pre>
+      </div>
+      <div class="live-panel">
+        <div class="live-panel-head"><h2>Planer</h2><button class="panel-toggle" type="button" data-panel-toggle>Gross</button></div>
+        <pre id="live-plan">(leer)</pre>
+      </div>
+    </section>
     <section id="chat" aria-live="polite"></section>
     <form id="form">
       <textarea id="input" placeholder="Nachricht eingeben..." autofocus></textarea>
@@ -368,6 +391,9 @@ HTML = """<!doctype html>
     const form = document.getElementById('form');
     const input = document.getElementById('input');
     const statusEl = document.getElementById('status');
+    const liveStatusEl = document.getElementById('live-status');
+    const liveReasoningEl = document.getElementById('live-reasoning');
+    const livePlanEl = document.getElementById('live-plan');
     const rawEl = document.getElementById('raw');
     const traceSummary = document.getElementById('trace-summary');
     const traceBody = document.getElementById('trace-body');
@@ -581,6 +607,20 @@ HTML = """<!doctype html>
         chat.appendChild(el);
       }
       chat.scrollTop = chat.scrollHeight;
+      const currentAssistant = [...messages].reverse().find((msg) => msg.role === 'assistant');
+      renderLivePanels(currentAssistant || null);
+    }
+
+    function renderLivePanels(msg) {
+      const statusText = msg && msg.reasoningStatus ? msg.reasoningStatus.trim() : '';
+      const reasoningText = msg && msg.reasoning ? msg.reasoning.trim() : '';
+      const planText = msg && msg.internalPlan ? msg.internalPlan.trim() : '';
+      liveStatusEl.textContent = statusText || '(leer)';
+      liveReasoningEl.textContent = reasoningText || '(leer)';
+      livePlanEl.textContent = planText || '(leer)';
+      liveStatusEl.scrollTop = liveStatusEl.scrollHeight;
+      liveReasoningEl.scrollTop = liveReasoningEl.scrollHeight;
+      livePlanEl.scrollTop = livePlanEl.scrollHeight;
     }
 
     function parseSseBlock(block) {
@@ -821,7 +861,7 @@ HTML = """<!doctype html>
               protocol.value,
               parsed.event,
               data,
-              `${assistantMsg.reasoningStatus}${assistantMsg.reasoning}`
+              `${assistantMsg.reasoningStatus}${assistantMsg.internalPlan}${assistantMsg.reasoning}`
             );
             if (reasoning) {
               const kind = reasoningKind(data, reasoning, assistantMsg);
@@ -879,6 +919,15 @@ HTML = """<!doctype html>
       statusEl.textContent = 'neue Session bereit';
       render();
       input.focus();
+    });
+
+    document.querySelectorAll('[data-panel-toggle]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const panel = button.closest('.live-panel');
+        if (!panel) return;
+        const expanded = panel.classList.toggle('expanded');
+        button.textContent = expanded ? 'Klein' : 'Gross';
+      });
     });
 
     traceDeltaDetails.addEventListener('change', () => {

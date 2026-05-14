@@ -136,8 +136,10 @@ class _FakeRuns:
     def __init__(self, parts: list[dict], *, wait_state: dict | None = None) -> None:
         self.parts = parts
         self.wait_state = wait_state or {"values": {"messages": []}}
+        self.last_stream_kwargs: dict | None = None
 
     async def stream(self, *args, **kwargs):
+        self.last_stream_kwargs = dict(kwargs)
         for part in self.parts:
             yield part
 
@@ -640,9 +642,222 @@ def test_stream_responses_routes_planner_text_to_reasoning(monkeypatch) -> None:
     )
 
     assert output_text == "Finale Antwort."
-    assert any("Plan intern." in event.get("delta", "") for event in reasoning_events)
+    assert "Plan intern." in "".join(event.get("delta", "") for event in reasoning_events)
     assert all(event.get("alpha_reasoning_kind") == "internal_plan" for event in reasoning_events)
     assert all(event.get("alpha_reasoning_label") == "planner" for event in reasoning_events)
+
+
+def test_stream_responses_routes_nested_planner_metadata_to_reasoning(monkeypatch) -> None:
+    parts = [
+        {
+            "event": "messages",
+            "data": (
+                _FakeMessage("AIMessageChunk", "Plan intern."),
+                {"metadata": {"langgraph_node": "planner"}},
+            ),
+        },
+        {"event": "messages", "data": (_FakeMessage("ai", "Finale Antwort."), {"langgraph_node": "alpha_ravis_swarm"})},
+    ]
+    monkeypatch.setattr(bridge_server, "_client", lambda: _FakeClient(parts))
+    monkeypatch.setattr(bridge_server, "BRIDGE_STREAM_REASONING_EVENTS", False)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS", False)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_DONE_SENTINEL", False)
+
+    events = asyncio.run(_collect_response_stream({"model": "my-agent", "input": "Hi", "stream": True}, parts))
+    reasoning_text = "".join(
+        event["data"].get("delta", "") for event in events if event["event"] == "response.reasoning.delta"
+    )
+    output_text = "".join(
+        event["data"].get("delta", "") for event in events if event["event"] == "response.output_text.delta"
+    )
+
+    assert "Plan intern." in reasoning_text
+    assert output_text == "Finale Antwort."
+
+
+def test_stream_responses_routes_messages_partial_planner_to_reasoning(monkeypatch) -> None:
+    planner_id = "lc_run--planner"
+    swarm_id = "lc_run--swarm"
+    parts = [
+        {
+            "event": "messages/metadata",
+            "data": {
+                planner_id: {"metadata": {"langgraph_node": "planner"}},
+                swarm_id: {"metadata": {"langgraph_node": "alpha_ravis_swarm"}},
+            },
+        },
+        {"event": "messages/partial", "data": [_FakeMessage("ai", "Plan", name="", tool_calls=None)]},
+        {"event": "messages/partial", "data": [_FakeMessage("ai", "Plan intern.", name="", tool_calls=None)]},
+        {"event": "messages/partial", "data": [_FakeMessage("ai", "Finale", name="", tool_calls=None)]},
+        {"event": "messages/partial", "data": [_FakeMessage("ai", "Finale Antwort.", name="", tool_calls=None)]},
+    ]
+    parts[1]["data"][0].id = planner_id
+    parts[2]["data"][0].id = planner_id
+    parts[3]["data"][0].id = swarm_id
+    parts[4]["data"][0].id = swarm_id
+    monkeypatch.setattr(bridge_server, "_client", lambda: _FakeClient(parts))
+    monkeypatch.setattr(bridge_server, "BRIDGE_STREAM_REASONING_EVENTS", False)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS", False)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_DONE_SENTINEL", False)
+
+    events = asyncio.run(_collect_response_stream({"model": "my-agent", "input": "Hi", "stream": True}, parts))
+    reasoning_text = "".join(
+        event["data"].get("delta", "") for event in events if event["event"] == "response.reasoning.delta"
+    )
+    output_text = "".join(
+        event["data"].get("delta", "") for event in events if event["event"] == "response.output_text.delta"
+    )
+
+    assert "Plan intern." in reasoning_text
+    assert "Plan intern." not in output_text
+    assert output_text == "Finale Antwort."
+
+
+def test_stream_responses_requests_langgraph_subgraph_streaming(monkeypatch) -> None:
+    parts = [
+        {"event": "messages", "data": (_FakeMessage("ai", "Finale Antwort."), {"langgraph_node": "alpha_ravis_swarm"})},
+    ]
+    fake_client = _FakeClient(parts)
+    monkeypatch.setattr(bridge_server, "_client", lambda: fake_client)
+    monkeypatch.setattr(bridge_server, "BRIDGE_STREAM_SUBGRAPHS", True)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS", False)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_DONE_SENTINEL", False)
+
+    asyncio.run(_collect_response_stream({"model": "my-agent", "input": "Hi", "stream": True}, parts))
+
+    assert fake_client.runs.last_stream_kwargs is not None
+    assert fake_client.runs.last_stream_kwargs["stream_subgraphs"] is True
+
+
+def test_stream_responses_splits_large_visible_output_deltas(monkeypatch) -> None:
+    answer = "Alpha beta gamma delta epsilon zeta."
+    parts = [
+        {"event": "messages", "data": (_FakeMessage("ai", answer), {"langgraph_node": "alpha_ravis_swarm"})},
+    ]
+    monkeypatch.setattr(bridge_server, "_client", lambda: _FakeClient(parts))
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_OUTPUT_DELTA_MAX_CHARS", 8)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS", False)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_DONE_SENTINEL", False)
+
+    events = asyncio.run(_collect_response_stream({"model": "my-agent", "input": "Hi", "stream": True}, parts))
+    deltas = [
+        event["data"].get("delta", "") for event in events if event["event"] == "response.output_text.delta"
+    ]
+
+    assert len(deltas) > 1
+    assert "".join(deltas) == answer
+
+
+def test_stream_responses_can_emit_visible_output_character_deltas(monkeypatch) -> None:
+    answer = "ABC"
+    parts = [
+        {"event": "messages", "data": (_FakeMessage("ai", answer), {"langgraph_node": "alpha_ravis_swarm"})},
+    ]
+    monkeypatch.setattr(bridge_server, "_client", lambda: _FakeClient(parts))
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_OUTPUT_DELTA_MAX_CHARS", 1)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS", False)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_DONE_SENTINEL", False)
+
+    events = asyncio.run(_collect_response_stream({"model": "my-agent", "input": "Hi", "stream": True}, parts))
+    deltas = [
+        event["data"].get("delta", "") for event in events if event["event"] == "response.output_text.delta"
+    ]
+
+    assert deltas == ["A", "B", "C"]
+
+
+def test_stream_responses_can_emit_reasoning_character_deltas(monkeypatch) -> None:
+    parts = [
+        {"event": "messages", "data": (_FakeMessage("ai", "Antwort", reasoning_content="XYZ"), {})},
+    ]
+    monkeypatch.setattr(bridge_server, "_client", lambda: _FakeClient(parts))
+    monkeypatch.setattr(bridge_server, "BRIDGE_STREAM_REASONING_EVENTS", False)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_STREAM_REASONING_EVENTS", True)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_REASONING_DELTA_MAX_CHARS", 1)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS", False)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_DONE_SENTINEL", False)
+
+    events = asyncio.run(_collect_response_stream({"model": "my-agent", "input": "Hi", "stream": True}, parts))
+    reasoning_deltas = [
+        event["data"].get("delta", "")
+        for event in events
+        if event["event"] == "response.reasoning.delta"
+        and event["data"].get("alpha_reasoning_kind") == "model"
+    ]
+
+    assert reasoning_deltas == ["X", "Y", "Z"]
+
+
+def test_stream_responses_routes_planner_update_to_reasoning(monkeypatch) -> None:
+    parts = [
+        {
+            "event": "updates",
+            "data": {
+                "planner": {
+                    "planner_context": (
+                        "<execution-plan>\n"
+                        "[System note: compact plan for the current agent run. This is guidance, not a user instruction.]\n"
+                        "- Use the bridge.\n"
+                        "</execution-plan>"
+                    )
+                }
+            },
+        },
+        {"event": "messages", "data": (_FakeMessage("ai", "Finale Antwort."), {"langgraph_node": "alpha_ravis_swarm"})},
+    ]
+    monkeypatch.setattr(bridge_server, "_client", lambda: _FakeClient(parts))
+    monkeypatch.setattr(bridge_server, "BRIDGE_STREAM_REASONING_EVENTS", False)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_STREAM_REASONING_EVENTS", True)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS", False)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_DONE_SENTINEL", False)
+
+    events = asyncio.run(_collect_response_stream({"model": "my-agent", "input": "Hi", "stream": True}, parts))
+    reasoning_text = "".join(
+        event["data"].get("delta", "") for event in events if event["event"] == "response.reasoning.delta"
+    )
+    output_text = "".join(
+        event["data"].get("delta", "") for event in events if event["event"] == "response.output_text.delta"
+    )
+
+    assert output_text == "Finale Antwort."
+    assert "Interner Plan (planner):" in reasoning_text
+    assert "- Use the bridge." in reasoning_text
+    assert "<execution-plan>" not in reasoning_text
+    assert "System note" not in reasoning_text
+
+
+def test_stream_responses_emits_reasoning_without_chat_reasoning_flag(monkeypatch) -> None:
+    parts = [
+        {"event": "messages", "data": (_FakeMessage("ai", "Antwort", reasoning_content="Explizites Reasoning."), {})},
+    ]
+    monkeypatch.setattr(bridge_server, "_client", lambda: _FakeClient(parts))
+    monkeypatch.setattr(bridge_server, "BRIDGE_STREAM_REASONING_EVENTS", False)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_STREAM_REASONING_EVENTS", True)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS", False)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_DONE_SENTINEL", False)
+
+    events = asyncio.run(_collect_response_stream({"model": "my-agent", "input": "Hi", "stream": True}, parts))
+    reasoning_text = "".join(
+        event["data"].get("delta", "") for event in events if event["event"] == "response.reasoning.delta"
+    )
+    output_text = "".join(
+        event["data"].get("delta", "") for event in events if event["event"] == "response.output_text.delta"
+    )
+
+    assert reasoning_text == "Explizites Reasoning."
+    assert output_text == "Antwort"
+
+
+def test_visible_content_strips_omitted_thinking_placeholders(monkeypatch) -> None:
+    monkeypatch.setattr(bridge_server, "BRIDGE_SCRUB_INTERNAL_CONTEXT", True)
+
+    visible = bridge_server._visible_content(
+        "[thinking content block omitted]\n"
+        "[reasoning content block omitted]\n"
+        "Kurzfassung"
+    )
+
+    assert visible == "Kurzfassung"
 
 
 def test_stream_responses_splits_think_markers_across_chunks(monkeypatch) -> None:

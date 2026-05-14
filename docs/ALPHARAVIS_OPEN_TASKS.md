@@ -3,6 +3,30 @@
 This is the running backlog for features that are intentionally prepared but
 not fully wired yet.
 
+## Operator Config UI
+
+Status: implemented for root `.env` editing.
+
+Implemented:
+
+- `make config` starts a local browser UI backed by
+  `scripts/alpharavis_config_server.py`.
+- The UI uses `.env(exaple)` as the canonical default/template source, groups
+  settings by its documented sections, and saves current values into `.env`.
+- Boolean settings use True/False controls, secret-looking keys use password
+  inputs, and URL-like values are directly editable.
+- Each setting can reset to its documented default. Reset all is available in
+  the bottom-right action bar and asks for confirmation before changing the
+  in-browser values; Save persists the result to `.env`.
+- `make install` and `make update` keep the existing terminal prompts as a
+  fallback path, while `make config` is the intended central place for broader
+  configuration changes.
+
+Still needed:
+
+- Live browser polish pass on the owner machine after the next normal
+  `make config` run, especially for very narrow mobile-sized windows.
+
 ## Service Dashboard And Tailscale HTTPS
 
 Status: dashboard implemented; Tailscale HTTPS helper wired for operator use;
@@ -871,6 +895,35 @@ Still needed:
       `power_management_agent`
     - LangChain `on_tool_start`, `on_tool_end`, and `on_tool_error` events
     - DeepAgents tool call messages and tool result messages
+  - Bridge Test UI follow-up implemented:
+    - LangGraph `updates` from the `planner` node are emitted as
+      `response.reasoning.delta` with `alpha_reasoning_kind=internal_plan`.
+    - `BRIDGE_RESPONSES_STREAM_REASONING_EVENTS=true` is the Responses default,
+      so explicit provider reasoning and visible `<think>` blocks can reach
+      LibreChat's reasoning path even when the legacy Chat Completions reasoning
+      flag is disabled.
+    - The Test UI renders live Status, Reasoning, and Planer panes above the
+      chat transcript, while LibreChat still receives the combined reasoning
+      stream.
+    - LangGraph `messages/metadata` now maps `messages/partial` IDs to their
+      source node, so streamed planner tokens are removed from visible answer
+      text and routed only to internal-plan reasoning.
+    - The Test UI live Status, Reasoning, and Planer panes can be expanded for
+      longer diagnostics.
+    - Text-only model conversion and bridge visible-output cleanup suppress
+      `[thinking content block omitted]` placeholders.
+    - `BRIDGE_RESPONSES_OUTPUT_DELTA_MAX_CHARS=1` and
+      `BRIDGE_RESPONSES_REASONING_DELTA_MAX_CHARS=1` split visible answer text
+      and model/plan reasoning into character-level SSE deltas for smoother
+      rendering. Status events remain whole status lines.
+    - `BRIDGE_STREAM_SUBGRAPHS=true` enables LangGraph subgraph streaming so
+      the nested `alpha_ravis_swarm` workers can forward `messages/partial`
+      token deltas instead of only returning the completed Swarm result.
+  - Remaining streaming gap:
+    - Responses hybrid mode still disables true model streaming for
+      tool-bound LangChain calls. Use the Chat Completions `chat-full` profile
+      or the experimental Responses full-streaming profile when investigating
+      provider-level tool-call token streaming.
   - Added focused tests in `tests/test_bridge_responses.py`:
     - no `response.reasoning_text.*` events in Responses streams
     - `response.reasoning.delta/done` events contain `sequence_number`,

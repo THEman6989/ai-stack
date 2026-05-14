@@ -67,7 +67,7 @@ services:
     volumes:
       - ./litellm-config/config.yaml:/app/config.yaml
     ports:
-      - "4000:4000"
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:4000:4000"
     command: [ "--config", "/app/config.yaml", "--port", "4000" ]
     restart: always
 
@@ -89,7 +89,7 @@ services:
       - vectordb
       - litellm
     ports:
-      - "8000:8000"
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:8000:8000"
     env_file:
       - .env
     restart: always
@@ -103,7 +103,7 @@ services:
     container_name: hermes-agent
     entrypoint: ["/usr/bin/tini", "-g", "--", "/workspace/scripts/hermes_patched_entrypoint.sh"]
     ports:
-      - "8642:8642"
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:8642:8642"
     volumes:
       - ${HERMES_HOME_DIR:-./hermes-data}:/opt/data
       - ./:/workspace:ro
@@ -147,7 +147,7 @@ services:
     profiles:
       - hermes-dashboard
     ports:
-      - "9119:9119"
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:9119:9119"
     volumes:
       - ${HERMES_HOME_DIR:-./hermes-data}:/opt/data
     env_file:
@@ -169,14 +169,14 @@ services:
     container_name: langgraph-api
     command: ["sh", "-c", "python /workspace/langgraph-app/patches/patch_langchain_openai_disable_streaming.py && python /workspace/langgraph-app/patches/patch_langchain_openai_responses_tool_streaming.py && rm -f /tmp/.X0-lock && Xvfb :0 -screen 0 1280x720x24 & fluxbox & x11vnc -display :0 -forever -nopw -listen 0.0.0.0 & cd /workspace/langgraph-app && langgraph dev --config langgraph.json --host 0.0.0.0 --port 2024 --no-browser"]
     ports:
-      - "2024:2024"
-      - "5900:5900" # VNC Port für die Sandbox
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:2024:2024"
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:5900:5900" # VNC Port für die Sandbox
       # --- NEU: LangGraphics Ports freigeben ---
-      - "8760:8760" # Research UI
-      - "8762:8762" # General UI
-      - "8764:8764" # Computer/CUA UI
-      - "8766:8766" # Debugger UI
-      - "8768:8768" # Main Supervisor UI
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:8760:8760" # Research UI
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:8762:8762" # General UI
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:8764:8764" # Computer/CUA UI
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:8766:8766" # Debugger UI
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:8768:8768" # Main Supervisor UI
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -263,7 +263,7 @@ services:
     container_name: media-gallery
     command: ["uvicorn", "media_server:app", "--host", "0.0.0.0", "--port", "8130"]
     ports:
-      - "${ALPHARAVIS_MEDIA_PORT:-8130}:8130"
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:${ALPHARAVIS_MEDIA_PORT:-8130}:8130"
     volumes:
       - ./langgraph-app:/app
       - ./media-data:/media-data
@@ -285,7 +285,7 @@ services:
     container_name: api-bridge
     command: ["uvicorn", "bridge_server:app", "--host", "0.0.0.0", "--port", "8123"]
     ports:
-      - "8123:8123"
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:8123:8123"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -305,6 +305,7 @@ services:
       - BRIDGE_REASONING_DELTA_FIELD=${BRIDGE_REASONING_DELTA_FIELD:-reasoning_content}
       - BRIDGE_ENABLE_RESPONSES_API=${BRIDGE_ENABLE_RESPONSES_API:-true}
       - BRIDGE_PREFERRED_API_MODE=${BRIDGE_PREFERRED_API_MODE:-responses}
+      - BRIDGE_RESPONSES_STREAM_REASONING_EVENTS=${BRIDGE_RESPONSES_STREAM_REASONING_EVENTS:-true}
       - BRIDGE_RESPONSES_STREAM_TOOL_EVENTS=${BRIDGE_RESPONSES_STREAM_TOOL_EVENTS:-true}
       - BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS=${BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS:-true}
       - BRIDGE_RESPONSES_TOOL_OUTPUT_MAX_CHARS=${BRIDGE_RESPONSES_TOOL_OUTPUT_MAX_CHARS:-8000}
@@ -339,7 +340,7 @@ services:
     container_name: bridge-test-ui
     command: ["uvicorn", "test_ui_server:app", "--host", "0.0.0.0", "--port", "8140"]
     ports:
-      - "${ALPHARAVIS_TEST_UI_PORT:-8140}:8140"
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:${ALPHARAVIS_TEST_UI_PORT:-8140}:8140"
     volumes:
       - ./langgraph-app:/app
     env_file:
@@ -362,7 +363,7 @@ services:
     working_dir: /app
     command: ["python", "/app/service_redirector_server.py"]
     ports:
-      - "${ALPHARAVIS_SERVICE_DASHBOARD_PORT:-8090}:8090"
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:${ALPHARAVIS_SERVICE_DASHBOARD_PORT:-8090}:8090"
     volumes:
       - ./service_redirector_server.py:/app/service_redirector_server.py:ro
       - ./service-dashboard-data:/app/service-dashboard-data:ro
@@ -389,7 +390,7 @@ services:
       dockerfile: ../docker/deep-agents-ui/Dockerfile
     container_name: deep-agents-ui
     ports:
-      - "3000:3000"
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:3000:3000"
     environment:
       - NEXT_PUBLIC_LANGGRAPH_API_URL=http://localhost:2024
       - LANGGRAPH_API_URL=http://langgraph-api:2024
@@ -403,7 +404,7 @@ services:
       dockerfile: Dockerfile
     container_name: agent-custom-ui
     ports:
-      - "3001:3000"
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:3001:3000"
     environment:
       - NEXT_PUBLIC_ASSISTANT_ID=alpha_ravis
       - LANGGRAPH_API_URL=http://langgraph-api:2024
@@ -417,7 +418,7 @@ services:
     image: ghcr.io/danny-avila/librechat:latest
     container_name: librechat
     ports:
-      - "3080:3080"
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:3080:3080"
     depends_on:
       - mongodb
       - redis
@@ -456,7 +457,7 @@ services:
     profiles:
       - openwebui
     ports:
-      - "${OPENWEBUI_PORT:-3090}:8080"
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:${OPENWEBUI_PORT:-3090}:8080"
     volumes:
       - ./openwebui-data:/app/backend/data
     env_file:
@@ -486,7 +487,7 @@ services:
       dockerfile: Dockerfile
     container_name: pixelle
     ports:
-      - "9004:9004"
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:9004:9004"
     volumes:
       - ./pixelle-data:/app/data
       - ./pixelle-mcp-custom/.env:/app/.env

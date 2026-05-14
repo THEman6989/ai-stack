@@ -18,6 +18,10 @@ LiteLLM, media/RAG services, optional UIs, and database endpoints. `make up`,
 `make install`, and `make update` include it in the base Docker Compose stack;
 `make service-dashboard` starts only that redirector.
 
+For the complete Makefile target and argument reference, including install,
+update, streaming profiles, Tailscale/LAN network modes, media/vision settings,
+and smoke checks, see [`MAKEFILE_README.md`](MAKEFILE_README.md).
+
 A Tailscale HTTPS helper can make the local HTTP services reachable through
 Tailscale Serve inside your Tailnet and make the dashboard show those HTTPS
 URLs:
@@ -50,10 +54,25 @@ card.
 
 `make install`, `make update`, `make update-no-start`, `make up`,
 `make up-fullstreaming`, and `make up-chat-fullstreaming` run
-`tailscale-apply` automatically after their normal stack work. That applies the
-Tailnet HTTPS routes and writes the dashboard override JSON in one step. Set
-`TAILSCALE_AUTO=off` on the Make command when you explicitly want to skip
-Tailscale for that run.
+`tailscale-apply` automatically around their normal stack work. Before Docker
+starts, the Makefile writes `ALPHARAVIS_DOCKER_HOST_BIND=127.0.0.1` so Docker
+does not try to bind the Tailnet IP ports already owned by Tailscale Serve.
+After Docker starts, it applies the Tailnet HTTPS routes and writes the
+dashboard override JSON in one step.
+
+Set `TAILSCALE_AUTO=off` when you explicitly want LAN HTTP mode instead:
+
+```bash
+make install TAILSCALE_AUTO=off
+make update TAILSCALE_AUTO=off
+make up TAILSCALE_AUTO=off
+```
+
+That disables the managed Tailscale Serve routes, removes the dashboard HTTPS
+override JSON, writes `ALPHARAVIS_DOCKER_HOST_BIND=0.0.0.0`, and then Docker
+recreates affected containers during the normal start step so the app ports are
+reachable through the host's LAN IP again. Use `TAILSCALE_AUTO=keep` only when
+you want a run to leave the current Tailscale/Docker bind mode untouched.
 
 Use LibreChat for normal chatting. It talks to `api-bridge`, which forwards the
 request into the LangGraph `alpha_ravis` brain.
@@ -291,11 +310,43 @@ ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=false
 The Makefile can write those combinations for you:
 
 ```bash
+make config
 make install STREAMING=full
 make install STREAMING=chat-full
 make streaming STREAMING=hybrid
 make streaming STREAMING=chat-nonstreaming
 make up-fullstreaming
+```
+
+Use `make config` when you want to edit the stack settings visually instead of
+answering repeated terminal prompts during install/update. It opens a local
+browser page backed by `.env`: current values are already filled in from `.env`,
+defaults come from `.env(exaple)`, booleans use True/False buttons, and Save
+writes all shown values back to `.env`. Each row has Reset for that one key, and
+Reset all asks for confirmation before restoring all documented defaults.
+
+If Tailscale Serve is already listening on the Tailnet IP for the same service
+ports, Docker's published-port host bind must be localhost before recreating
+containers:
+
+```text
+ALPHARAVIS_DOCKER_HOST_BIND=127.0.0.1
+```
+
+The default template is `0.0.0.0` for normal LAN exposure, while the default
+Makefile runtime mode changes it to `127.0.0.1` when Tailscale HTTPS is active.
+This applies to the user-facing UI/API ports, including Pixelle on `9004`; the
+database debug ports are still published directly for local development.
+To switch a running stack back to LAN HTTP mode:
+
+```bash
+make tailscale-disable
+```
+
+To switch it back to Tailscale HTTPS mode:
+
+```bash
+make tailscale-apply
 ```
 
 Direct Responses calls have a small compatibility retry layer:
@@ -648,6 +699,28 @@ BRIDGE_REASONING_DELTA_FIELD=reasoning_content
 ```
 
 If LibreChat shows that reasoning as normal text, turn it back off.
+
+For `/v1/responses`, the bridge now has a separate default-on switch:
+
+```text
+BRIDGE_STREAM_SUBGRAPHS=true
+BRIDGE_RESPONSES_STREAM_REASONING_EVENTS=true
+BRIDGE_RESPONSES_OUTPUT_DELTA_MAX_CHARS=1
+BRIDGE_RESPONSES_REASONING_DELTA_MAX_CHARS=1
+```
+
+This keeps LibreChat's Responses path receiving planner output, explicit model
+reasoning, and visible local-model thinking in the Responses reasoning stream.
+The Bridge Test UI additionally splits those same events into live Status,
+Reasoning, and Planer panes for debugging; LibreChat receives them together in
+its reasoning channel.
+`BRIDGE_STREAM_SUBGRAPHS=true` is required for the nested AlphaRavis Swarm
+workers to stream token-level partials through the top-level LangGraph run.
+Visible assistant text and model/plan reasoning are split into character-level
+Responses deltas for smoother rendering. Status lines remain whole status
+events. That split is only at the Bridge boundary; if the upstream
+Swarm/DeepAgents node does not emit partial message events, the first visible
+answer delta still waits for that node to finish.
 
 ## Error Classification
 

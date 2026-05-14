@@ -53,10 +53,16 @@ generated `service-dashboard-data/tailscale_service_urls.json` URLs when
 present. The dashboard route itself is included by default on port `8090` for
 the Makefile Tailscale targets; operators can opt out with
 `TAILSCALE_DASHBOARD=false` or `--exclude-dashboard`. Normal install/update/up
-Makefile flows call `tailscale-auto`, which defaults to `tailscale-apply`; set
-`TAILSCALE_AUTO=off` to skip this automatic Tailnet HTTPS step for one run.
-The helper's sudo mode defaults to `auto`, so it requests sudo only after the
-non-sudo Tailscale CLI attempt fails with a permissions error.
+Makefile flows call `tailscale-auto`, which defaults to `tailscale-apply`.
+Before Docker starts, those flows set `ALPHARAVIS_DOCKER_HOST_BIND=127.0.0.1`
+so Docker-published application ports do not conflict with Tailscale Serve on
+the Tailnet IP. Set `TAILSCALE_AUTO=off` to switch the stack to LAN HTTP mode:
+the Makefile disables managed Tailscale Serve routes, removes dashboard HTTPS
+overrides, writes `ALPHARAVIS_DOCKER_HOST_BIND=0.0.0.0`, and then the normal
+Docker start/recreate step publishes application ports on all host interfaces.
+Use `TAILSCALE_AUTO=keep` when a run should leave the current network exposure
+mode untouched. The helper's sudo mode defaults to `auto`, so it requests sudo
+only after the non-sudo Tailscale CLI attempt fails with a permissions error.
 
 ## Install And Runtime Profiles
 
@@ -70,6 +76,7 @@ Common flows:
 ```bash
 make install
 make update
+make config
 make install-fullstreaming
 make install-chat-fullstreaming
 make profiles
@@ -78,6 +85,14 @@ make up-fullstreaming
 make up-chat-fullstreaming
 make status
 ```
+
+`make config` is the central human-editable configuration surface. It starts a
+local dependency-free web UI, opens it in the browser, groups settings using the
+sections in `.env(exaple)`, pre-fills current `.env` values, exposes boolean
+values as True/False controls, and saves through the same root `.env` file that
+Docker Compose and setup commands read. Per-field reset restores the documented
+default for that key; reset-all asks for confirmation before restoring every
+shown setting to `.env(exaple)`.
 
 `make install` now does more than copy `.env`: it syncs missing defaults from
 `.env(exaple)`, lets the operator choose a runtime API/streaming profile,
@@ -279,6 +294,14 @@ Important behavior:
 - It can optionally forward reasoning/thinking deltas as a separate SSE delta
   field when `BRIDGE_STREAM_REASONING_EVENTS=true`. Normal visible content
   still strips reasoning blocks.
+- Responses streaming has a separate default-on reasoning switch,
+  `BRIDGE_RESPONSES_STREAM_REASONING_EVENTS=true`, so LibreChat's Responses
+  reasoning pane can receive explicit provider reasoning and visible local-model
+  thinking without enabling the legacy Chat Completions reasoning field.
+- LangGraph `planner` updates are translated to reasoning deltas with
+  `alpha_reasoning_kind=internal_plan`; the Bridge Test UI renders them in a
+  dedicated Planer pane, while LibreChat receives them in its single reasoning
+  channel.
 - It can optionally emit short visible status/activity messages.
 - It handles LangGraph human approval interrupts and lets the user reply with:
   - `approve`
@@ -1502,6 +1525,12 @@ complete tool call, LangGraph executes the tool, the tool result is added back
 to state, and the next model step continues. What is disabled is live token
 deltas from the internal DeepAgents model call. The bridge can still expose
 Responses-style SSE events to clients.
+
+The `alpha_ravis_swarm` node is itself a compiled nested LangGraph. The Bridge
+therefore requests LangGraph streams with `BRIDGE_STREAM_SUBGRAPHS=true` so
+worker `messages/partial` events from that nested Swarm graph are forwarded to
+LibreChat and the Bridge Test UI. If this is disabled, the Bridge only sees the
+completed top-level Swarm result and cannot stream worker tokens in real time.
 
 The normal agent path remains:
 

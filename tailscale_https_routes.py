@@ -5,6 +5,7 @@ import getpass
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -244,6 +245,12 @@ def write_payload(path: Path, payload: dict[str, Any]) -> None:
     print(f"Wrote {path}")
 
 
+def remove_payload(path: Path) -> None:
+    if path.exists():
+        path.unlink()
+        print(f"Removed {path}")
+
+
 def print_plan(routes: list[ServiceRoute], *, tailscale_host: str) -> None:
     print(f"Tailscale host: {tailscale_host}")
     print(f"HTTPS routes: {len(routes)}")
@@ -324,7 +331,9 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     sudo_mode = "always" if args.sudo else args.sudo_mode
     runner = TailscaleRunner(sudo_mode)
-    tailscale_host = args.tailscale_host.rstrip(".") or discover_tailscale_dns_name(runner)
+    tailscale_host = args.tailscale_host.rstrip(".")
+    if not tailscale_host:
+        tailscale_host = "disabled.local" if args.command == "disable" else discover_tailscale_dns_name(runner)
     include_dashboard = (
         args.include_dashboard
         if args.include_dashboard is not None
@@ -338,6 +347,12 @@ def main(argv: Iterable[str] | None = None) -> int:
     payload = route_payload(routes, tailscale_host=tailscale_host)
     output_path = Path(args.output)
 
+    if args.command == "disable" and shutil.which("tailscale") is None:
+        print("tailscale command not found; removing local dashboard HTTPS overrides only.")
+        if not args.no_write:
+            remove_payload(output_path)
+        return 0
+
     if args.command == "plan":
         print_plan(routes, tailscale_host=tailscale_host)
     elif args.command == "apply":
@@ -347,6 +362,8 @@ def main(argv: Iterable[str] | None = None) -> int:
             write_payload(output_path, payload)
     elif args.command == "disable":
         disable_routes(routes, runner=runner)
+        if not args.no_write:
+            remove_payload(output_path)
     elif args.command == "status":
         result = runner.run(["tailscale", "serve", "status"])
         print(result.stdout.rstrip())
