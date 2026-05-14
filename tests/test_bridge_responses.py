@@ -366,6 +366,29 @@ def test_response_object_has_stable_ids_and_usage() -> None:
     assert response["metadata"] == {"thread": "x"}
 
 
+def test_user_field_does_not_become_thread_key_by_default(monkeypatch) -> None:
+    monkeypatch.setattr(bridge_server, "BRIDGE_ALLOW_USER_THREAD_KEY", False)
+    body = {"user": "same_librechat_user", "messages": [{"role": "user", "content": "Hi"}]}
+
+    first = bridge_server._extract_thread_key(body, _StubRequest(body))
+    second = bridge_server._extract_thread_key(body, _StubRequest(body))
+
+    assert first.startswith("ephemeral:same_librechat_user:")
+    assert second.startswith("ephemeral:same_librechat_user:")
+    assert first != second
+
+
+def test_explicit_conversation_id_stays_thread_key(monkeypatch) -> None:
+    monkeypatch.setattr(bridge_server, "BRIDGE_ALLOW_USER_THREAD_KEY", False)
+    body = {
+        "user": "same_librechat_user",
+        "conversationId": "chat_123",
+        "messages": [{"role": "user", "content": "Hi"}],
+    }
+
+    assert bridge_server._extract_thread_key(body, _StubRequest(body)) == "chat_123"
+
+
 def test_response_store_honors_store_flag() -> None:
     bridge_server._RESPONSES_STORE.clear()
     stored = bridge_server._response_object("stored", "my-agent", "resp_store", body={"store": True})
@@ -479,8 +502,10 @@ def test_prepare_run_payload_remembers_exact_command_approval() -> None:
         )
     )
 
-    assert first == {"command": {"resume": {"action": "approve", "remember": "thread_command"}}}
-    assert second == {"command": {"resume": {"action": "approve", "remembered": "thread_command"}}}
+    assert first["command"] == {"resume": {"action": "approve", "remember": "thread_command"}}
+    assert second["command"] == {"resume": {"action": "approve", "remembered": "thread_command"}}
+    assert first["state_profile"]["message_count"] == 0
+    assert second["state_profile"]["message_count"] == 0
     assert "direct_response" in changed
     assert "docker compose down" in changed["direct_response"]
 
@@ -495,6 +520,48 @@ def test_input_tokens_endpoint_returns_count_object() -> None:
     assert result["object"] == "response.input_tokens"
     assert result["input_tokens"] > 0
     assert "input_tokens_details" not in result
+
+
+def test_bridge_observer_records_raw_and_model_context() -> None:
+    bridge_server._BRIDGE_OBSERVATIONS.clear()
+
+    class _Request:
+        method = "POST"
+        headers = {"x-conversation-id": "conv_test", "x-alpha-trace-id": "trace_test"}
+
+        class _Url:
+            path = "/v1/responses"
+
+        class _Client:
+            host = "127.0.0.1"
+
+        url = _Url()
+        client = _Client()
+
+    messages = [{"role": "user", "content": "Hi"}]
+    observation_id = bridge_server._observer_start(
+        protocol="responses",
+        request=_Request(),
+        body={"model": "my-agent", "stream": True, "metadata": {"conversation_id": "conv_test"}},
+        messages=messages,
+    )
+    bridge_server._observer_prepared(
+        observation_id,
+        thread_key="conv_test",
+        thread_id="thread_test",
+        run_payload={
+            "input": {"messages": [{"role": "human", "content": "Hi"}]},
+            "state_profile": {"message_count": 7},
+        },
+    )
+    bridge_server._observer_complete(observation_id, output_text="Hallo")
+
+    record = bridge_server._BRIDGE_OBSERVATIONS[0]
+    assert record["thread_key"] == "conv_test"
+    assert record["send"]["raw_messages"] == messages
+    assert record["send"]["model_context_messages"] == [{"role": "human", "content": "Hi"}]
+    assert record["send"]["langgraph_state_profile"]["message_count"] == 7
+    assert record["receive"]["output_text"] == "Hallo"
 
 
 def test_input_items_and_delete_routes_use_stored_response() -> None:

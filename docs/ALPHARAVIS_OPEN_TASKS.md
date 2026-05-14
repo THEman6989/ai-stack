@@ -167,6 +167,38 @@ Still needed:
   shorten/bypass planner work for trivial prompts, increase local worker
   concurrency where safe, or route simple UI greetings through the fast path
   earlier.
+- Bridge Observer implemented:
+  - `api-bridge` keeps an in-memory ring buffer of recent Bridge observations
+    for real LibreChat and Test UI traffic.
+  - `bridge-test-ui` exposes `/observer` as a full-page table view with
+    `Senden` and `Empfang` tabs plus `Nur Kontext` / `Vollansicht` modes.
+  - The send-side context view shows the raw incoming messages, derived
+    `thread_key` / `thread_id`, and the exact `model_context_messages` payload
+    prepared for LangGraph.
+  - The receive-side view shows output/reasoning/status data captured by the
+    Bridge.
+- Critical context/threading follow-up:
+  - Investigated: LibreChat's observed chat-completions payload did not include
+    `conversationId` / `conversation_id`; it sent `user` as
+    `69ee2b264b635fe48c9913b5`. The Bridge was using `body.user` as the
+    LangGraph `thread_key`, so separate visible LibreChat chats could share the
+    same persistent LangGraph thread. The failing request's prepared model
+    context was only one `hi` message, but the reused LangGraph thread already
+    contained dozens of old messages plus stored reasoning/thinking blocks. The
+    Bridge now defaults to ephemeral threads unless an explicit conversation
+    id/header is present, and Observer records the existing LangGraph state
+    profile beside the prepared model context.
+  - The hard context cutoff should not block the user's newest message. Replace
+    the current hard refusal with context trimming/compression: preserve the
+    latest user turn, drop/truncate oldest carried context from the tail/head
+    as appropriate, and record what was removed in run metadata. Keep refusal
+    only for a single newest user message or explicit attachment that alone
+    exceeds the hard limit.
+  - Partially mitigated: active-context token estimates now ignore UI
+    reasoning/thinking blocks and provider usage metadata, because those are
+    not model input context. Remaining work is to add hard-limit trimming or
+    compression before the route decision so a genuinely old explicit thread
+    still degrades by dropping/archiving old context rather than refusing `Hi`.
 
 ## Custom Model / Power Management
 

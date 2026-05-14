@@ -175,6 +175,12 @@ def test_html_renders_collapsed_reasoning_panel_from_stream() -> None:
     assert "reasoningOpen: false" in test_ui_server.HTML
 
 
+def test_test_ui_has_observer_navigation_button() -> None:
+    assert 'href="/observer"' in test_ui_server.HTML
+    assert "Observer" in test_ui_server.HTML
+    assert "nav-button" in test_ui_server.HTML
+
+
 def test_html_sse_parser_escapes_regex_newlines() -> None:
     assert "block.split(/\\r?\\n/)" in test_ui_server.HTML
     assert "dataLines.join('\\n')" in test_ui_server.HTML
@@ -206,3 +212,16 @@ def test_html_compacts_text_delta_trace_rows_by_default() -> None:
     assert "${group.name || 'Delta empfangen'} (${group.count} Deltas" in test_ui_server.HTML
     assert "Delta-Zeilen zusammengefasst" in test_ui_server.HTML
     assert "traceDeltaDetails.checked ? rawSteps : summarizeTraceSteps(rawSteps)" in test_ui_server.HTML
+
+
+def test_observer_page_is_full_table_view() -> None:
+    assert "AlphaRavis Bridge Observer" in test_ui_server.OBSERVER_HTML
+    assert "<table>" in test_ui_server.OBSERVER_HTML
+    assert "Senden" in test_ui_server.OBSERVER_HTML
+    assert "Empfang" in test_ui_server.OBSERVER_HTML
+    assert "Nur Kontext" in test_ui_server.OBSERVER_HTML
+    assert "Vollansicht" in test_ui_server.OBSERVER_HTML
+    assert "model_context_messages" in test_ui_server.OBSERVER_HTML
+    assert "State Msg" in test_ui_server.OBSERVER_HTML
+    assert "langgraph_state_profile" in test_ui_server.OBSERVER_HTML
+    assert "window.setInterval" in test_ui_server.OBSERVER_HTML

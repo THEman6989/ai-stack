@@ -590,6 +590,16 @@ BRIDGE_RESPONSES_DONE_SENTINEL=true
 BRIDGE_RESPONSES_OUTPUT_DELTA_MAX_CHARS=1
 BRIDGE_RESPONSES_REASONING_DELTA_MAX_CHARS=1
 
+# Bridge Observer keeps recent request/response diagnostics in process memory
+# for the full-page Bridge Test UI observer at /observer.
+BRIDGE_OBSERVER_MAX_RECORDS=80
+BRIDGE_OBSERVER_MAX_STRING_CHARS=240000
+BRIDGE_OBSERVER_RECEIVE_PREVIEW_MAX_CHARS=240000
+# LibreChat usually sends `user` as the account/user id, not as a chat id.
+# Keep false so requests without conversationId/x-conversation-id use isolated
+# ephemeral LangGraph threads instead of sharing one thread across all chats.
+BRIDGE_ALLOW_USER_THREAD_KEY=false
+
 # Client-supplied OpenAI-hosted Responses tools (web_search/file_search/code
 # interpreter/computer/shell/etc.) are not executed by the bridge. Keep this
 # false so clients receive an explicit error instead of a fake tool run.

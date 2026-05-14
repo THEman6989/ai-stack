@@ -133,6 +133,11 @@ async def index() -> HTMLResponse:
     return HTMLResponse(HTML, headers={"Cache-Control": "no-store"})
 
 
+@app.get("/observer", response_class=HTMLResponse)
+async def observer() -> HTMLResponse:
+    return HTMLResponse(OBSERVER_HTML, headers={"Cache-Control": "no-store"})
+
+
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return {
@@ -140,6 +145,22 @@ async def health() -> dict[str, Any]:
         "bridge_base_url": BRIDGE_BASE_URL,
         "model": BRIDGE_MODEL,
     }
+
+
+@app.get("/api/observer")
+async def observer_records(limit: int = 80) -> JSONResponse:
+    async with httpx.AsyncClient(timeout=BRIDGE_TIMEOUT_SECONDS) as client:
+        response = await client.get(f"{BRIDGE_BASE_URL.removesuffix('/v1')}/_alpharavis/bridge-observer", params={"limit": limit})
+        response.raise_for_status()
+        return JSONResponse(response.json())
+
+
+@app.delete("/api/observer")
+async def clear_observer_records() -> JSONResponse:
+    async with httpx.AsyncClient(timeout=BRIDGE_TIMEOUT_SECONDS) as client:
+        response = await client.delete(f"{BRIDGE_BASE_URL.removesuffix('/v1')}/_alpharavis/bridge-observer")
+        response.raise_for_status()
+        return JSONResponse(response.json())
 
 
 @app.post("/api/send")
@@ -280,6 +301,248 @@ async def send_chat_stream(request: ChatRequest) -> StreamingResponse:
     )
 
 
+OBSERVER_HTML = """<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AlphaRavis Bridge Observer</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #0f1117; color: #eef1f5; }
+    main { width: 100%; min-height: 100vh; padding: 16px; display: grid; grid-template-rows: auto minmax(320px, 1fr) minmax(260px, 42vh); gap: 12px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #2b3240; padding-bottom: 10px; }
+    h1 { margin: 0; font-size: 20px; font-weight: 700; }
+    .tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    button, select, input { border: 1px solid #3a4252; border-radius: 7px; background: #171b23; color: #eef1f5; padding: 8px 10px; font: inherit; }
+    button.active { background: #2d6cdf; border-color: #2d6cdf; }
+    .status { color: #9aa4b2; font-size: 12px; }
+    .table-wrap { border: 1px solid #2b3240; border-radius: 8px; overflow: auto; background: #11151d; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 1180px; }
+    th, td { border-bottom: 1px solid #222938; padding: 7px 8px; text-align: left; vertical-align: top; }
+    th { position: sticky; top: 0; z-index: 1; background: #151a24; color: #9aa4b2; font-weight: 650; }
+    tr { cursor: pointer; }
+    tr:hover, tr.selected { background: #1a2230; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .pill { display: inline-block; border: 1px solid #3a4252; border-radius: 999px; padding: 1px 7px; color: #cbd5e1; }
+    .hard { border-color: #8f3b3b; color: #f59b9b; }
+    .done { border-color: #2f8f5b; color: #7dd3a8; }
+    .detail { border: 1px solid #2b3240; border-radius: 8px; background: #0c1017; display: grid; grid-template-rows: auto 1fr; min-height: 0; }
+    .detail-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; border-bottom: 1px solid #222938; padding: 8px; }
+    .tabs, .mode { display: flex; gap: 6px; align-items: center; }
+    pre { margin: 0; padding: 12px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.45; color: #d6deeb; }
+    .empty { color: #9aa4b2; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>AlphaRavis Bridge Observer</h1>
+        <div id="status" class="status">lädt...</div>
+      </div>
+      <div class="tools">
+        <label class="status">Limit <input id="limit" type="number" min="1" max="200" value="80" style="width:72px"></label>
+        <button id="refresh" type="button">Aktualisieren</button>
+        <button id="clear" type="button">Leeren</button>
+        <a class="status" href="/">Test UI</a>
+      </div>
+    </header>
+    <section class="table-wrap" aria-label="Bridge Requests">
+      <table>
+        <thead>
+          <tr>
+            <th>Zeit</th>
+            <th>Protokoll</th>
+            <th>Status</th>
+            <th>Stream</th>
+            <th>Model</th>
+            <th>Thread-Key</th>
+            <th>Thread-ID</th>
+            <th>Raw Msg</th>
+            <th>Raw Tokens</th>
+            <th>Model Msg</th>
+            <th>Model Tokens</th>
+            <th>State Msg</th>
+            <th>Output</th>
+            <th>Reasoning</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </section>
+    <section class="detail">
+      <div class="detail-head">
+        <div class="tabs">
+          <button id="sendTab" class="active" type="button">Senden</button>
+          <button id="receiveTab" type="button">Empfang</button>
+        </div>
+        <div class="mode">
+          <button id="contextMode" class="active" type="button">Nur Kontext</button>
+          <button id="fullMode" type="button">Vollansicht</button>
+        </div>
+      </div>
+      <pre id="detail" class="empty">Keine Anfrage ausgewählt.</pre>
+    </section>
+  </main>
+  <script>
+    const rowsEl = document.getElementById('rows');
+    const detailEl = document.getElementById('detail');
+    const statusEl = document.getElementById('status');
+    const limitEl = document.getElementById('limit');
+    const refreshBtn = document.getElementById('refresh');
+    const clearBtn = document.getElementById('clear');
+    const sendTab = document.getElementById('sendTab');
+    const receiveTab = document.getElementById('receiveTab');
+    const contextMode = document.getElementById('contextMode');
+    const fullMode = document.getElementById('fullMode');
+    let records = [];
+    let selectedId = '';
+    let activeTab = 'send';
+    let activeMode = 'context';
+
+    function fmtTime(value) {
+      if (!value) return '';
+      return new Date(value * 1000).toLocaleTimeString();
+    }
+    function short(value, length = 42) {
+      const text = String(value || '');
+      return text.length > length ? `${text.slice(0, length)}…` : text;
+    }
+    function pretty(value) {
+      return JSON.stringify(value ?? {}, null, 2);
+    }
+    function selectedRecord() {
+      return records.find((record) => record.id === selectedId) || records[0] || null;
+    }
+    function statusClass(status) {
+      if (status === 'hard_cutoff') return 'pill hard';
+      if (status === 'completed') return 'pill done';
+      return 'pill';
+    }
+    function renderRows() {
+      rowsEl.innerHTML = '';
+      for (const record of records) {
+        const tr = document.createElement('tr');
+        if (record.id === selectedId) tr.className = 'selected';
+        const send = record.send || {};
+        const receive = record.receive || {};
+        const stateProfile = send.langgraph_state_profile || {};
+        const cells = [
+          fmtTime(record.created_at),
+          record.protocol,
+          record.status,
+          record.stream ? 'ja' : 'nein',
+          record.model,
+          short(record.thread_key, 48),
+          short(record.thread_id, 36),
+          send.raw_message_count,
+          send.raw_token_estimate,
+          send.model_context_message_count,
+          send.model_context_token_estimate,
+          stateProfile.message_count,
+          receive.output_chars,
+          receive.reasoning_chars,
+        ];
+        cells.forEach((value, index) => {
+          const td = document.createElement('td');
+          if (index === 2) {
+            const span = document.createElement('span');
+            span.className = statusClass(record.status);
+            span.textContent = value || 'received';
+            td.appendChild(span);
+          } else {
+            td.textContent = value ?? '';
+            if ([5, 6].includes(index)) td.className = 'mono';
+          }
+          tr.appendChild(td);
+        });
+        tr.addEventListener('click', () => {
+          selectedId = record.id;
+          renderRows();
+          renderDetail();
+        });
+        rowsEl.appendChild(tr);
+      }
+    }
+    function renderDetail() {
+      const record = selectedRecord();
+      if (!record) {
+        detailEl.className = 'empty';
+        detailEl.textContent = 'Keine Anfrage ausgewählt.';
+        return;
+      }
+      detailEl.className = '';
+      if (activeTab === 'send') {
+        const send = record.send || {};
+        detailEl.textContent = activeMode === 'context'
+          ? pretty({
+              thread_key: record.thread_key,
+              thread_id: record.thread_id,
+              model_context_token_estimate: send.model_context_token_estimate,
+              langgraph_state_profile: send.langgraph_state_profile || {},
+              model_context_messages: send.model_context_messages || [],
+              model_context: send.model_context || {},
+            })
+          : pretty(send);
+      } else {
+        const receive = record.receive || {};
+        detailEl.textContent = activeMode === 'context'
+          ? pretty({
+              status: receive.status,
+              output_text: receive.output_text || '',
+              reasoning_text: receive.reasoning_text || '',
+              event_counts: receive.event_counts || {},
+            })
+          : pretty(receive);
+      }
+    }
+    async function loadRecords() {
+      const limit = Math.max(1, Math.min(200, Number(limitEl.value || 80)));
+      const response = await fetch(`/api/observer?limit=${limit}`, { cache: 'no-store' });
+      if (!response.ok) throw new Error(await response.text());
+      const payload = await response.json();
+      records = Array.isArray(payload.records) ? payload.records : [];
+      if (!selectedId && records[0]) selectedId = records[0].id;
+      if (selectedId && !records.some((record) => record.id === selectedId) && records[0]) selectedId = records[0].id;
+      renderRows();
+      renderDetail();
+      statusEl.textContent = `${records.length} Requests`;
+    }
+    function setTab(tab) {
+      activeTab = tab;
+      sendTab.classList.toggle('active', tab === 'send');
+      receiveTab.classList.toggle('active', tab === 'receive');
+      renderDetail();
+    }
+    function setMode(mode) {
+      activeMode = mode;
+      contextMode.classList.toggle('active', mode === 'context');
+      fullMode.classList.toggle('active', mode === 'full');
+      renderDetail();
+    }
+    refreshBtn.addEventListener('click', () => loadRecords().catch((error) => { statusEl.textContent = error.message; }));
+    clearBtn.addEventListener('click', async () => {
+      await fetch('/api/observer', { method: 'DELETE' });
+      records = [];
+      selectedId = '';
+      renderRows();
+      renderDetail();
+      statusEl.textContent = 'geleert';
+    });
+    sendTab.addEventListener('click', () => setTab('send'));
+    receiveTab.addEventListener('click', () => setTab('receive'));
+    contextMode.addEventListener('click', () => setMode('context'));
+    fullMode.addEventListener('click', () => setMode('full'));
+    loadRecords().catch((error) => { statusEl.textContent = error.message; });
+    window.setInterval(() => loadRecords().catch(() => {}), 2500);
+  </script>
+</body>
+</html>
+"""
+
+
 HTML = """<!doctype html>
 <html lang="de">
 <head>
@@ -293,6 +556,9 @@ HTML = """<!doctype html>
     main { max-width: 960px; margin: 0 auto; padding: 24px; display: grid; gap: 16px; }
     header { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #2d3340; padding-bottom: 12px; }
     h1 { font-size: 20px; margin: 0; font-weight: 650; }
+    .header-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .nav-button { display: inline-flex; align-items: center; justify-content: center; border: 1px solid #3a4252; border-radius: 8px; background: #171b23; color: #eef1f5; padding: 8px 11px; font-size: 13px; text-decoration: none; }
+    .nav-button:hover { background: #202633; }
     .status { color: #9aa4b2; font-size: 13px; }
     .live-panels { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
     .live-panel { border: 1px solid #2d3340; border-radius: 8px; background: #0d1016; min-height: 112px; display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
@@ -341,7 +607,10 @@ HTML = """<!doctype html>
 <body>
   <main>
     <header>
-      <h1>AlphaRavis Bridge Test UI</h1>
+      <div class="header-left">
+        <a class="nav-button" href="/observer">Observer</a>
+        <h1>AlphaRavis Bridge Test UI</h1>
+      </div>
       <div id="status" class="status">bereit</div>
     </header>
     <section class="live-panels" aria-label="Stream-Details">

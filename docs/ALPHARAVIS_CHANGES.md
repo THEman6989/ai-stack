@@ -449,6 +449,24 @@ deltas. Direct LangGraph probing with subgraphs enabled produced hundreds of
 worker partials with the first text-like event around 2-3 seconds instead of
 waiting for the full Swarm run to finish.
 
+Bridge Observer follow-up: `api-bridge` now stores a bounded in-memory request
+observer buffer, exposed at `/_alpharavis/bridge-observer`. `bridge-test-ui`
+adds a full-page `/observer` view with a wide request table, `Senden` /
+`Empfang` tabs, and `Nur Kontext` / `Vollansicht` modes. The context view shows
+the raw incoming messages, derived thread key/id, and the exact
+`model_context_messages` payload prepared for LangGraph, which is intended to
+debug LibreChat thread-id and hard-context-cutoff issues.
+
+LibreChat thread isolation follow-up: the Bridge no longer treats `body.user`
+as a conversation/thread key by default. LibreChat sends that field as the user
+identity on the observed chat-completions path, so using it as a thread key made
+separate visible chats share the same persistent LangGraph state. The Bridge now
+requires an explicit conversation id/header for stable threads and otherwise
+uses an ephemeral LangGraph thread for that request. The Observer also records a
+LangGraph state profile so old-state reuse is visible alongside the exact model
+context. Active-context token estimates now strip UI reasoning/thinking blocks
+and provider usage metadata before enforcing the hard context limit.
+
 Docker/Tailscale operational follow-up: published ports for Hermes,
 LangGraph, the bridge, media gallery, Bridge Test UI, LiteLLM, RAG API,
 DeepAgents UI, custom agent UI, LibreChat, OpenWebUI, service dashboard,

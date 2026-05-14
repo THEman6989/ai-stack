@@ -722,6 +722,24 @@ events. That split is only at the Bridge boundary; if the upstream
 Swarm/DeepAgents node does not emit partial message events, the first visible
 answer delta still waits for that node to finish.
 
+For request/context debugging, open the Bridge Test UI observer:
+
+```text
+http://127.0.0.1:8140/observer
+```
+
+It is a full-page table of recent Bridge requests. Select a row, then switch
+between `Senden` and `Empfang`; `Nur Kontext` shows the exact context prepared
+for LangGraph plus the existing LangGraph state profile, while `Vollansicht`
+shows the full captured Bridge payload.
+
+LibreChat's OpenAI-compatible chat-completions calls commonly send `user` as
+the account id rather than a conversation id. The Bridge therefore does not use
+`body.user` as the LangGraph thread key by default; requests without
+`conversationId`, `conversation_id`, `x-conversation-id`, or `x-thread-id` use
+isolated ephemeral LangGraph threads. Set `BRIDGE_ALLOW_USER_THREAD_KEY=true`
+only for clients where `user` is known to be a stable per-chat identifier.
+
 ## Error Classification
 
 AlphaRavis classifies backend/API failures before showing them to LibreChat or

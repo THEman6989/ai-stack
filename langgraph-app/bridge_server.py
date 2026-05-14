@@ -8,7 +8,7 @@ import os
 import re
 import time
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -118,6 +118,15 @@ BRIDGE_CONTEXT_REFERENCE_SOFT_RATIO = float(os.getenv("BRIDGE_CONTEXT_REFERENCE_
 BRIDGE_CONTEXT_REFERENCE_HARD_RATIO = float(os.getenv("BRIDGE_CONTEXT_REFERENCE_HARD_RATIO", "0.50"))
 BRIDGE_CONTEXT_REFERENCE_MAX_URL_CHARS = int(os.getenv("BRIDGE_CONTEXT_REFERENCE_MAX_URL_CHARS", "12000"))
 BRIDGE_CONTEXT_REFERENCE_FOLDER_LIMIT = int(os.getenv("BRIDGE_CONTEXT_REFERENCE_FOLDER_LIMIT", "200"))
+BRIDGE_OBSERVER_MAX_RECORDS = int(os.getenv("BRIDGE_OBSERVER_MAX_RECORDS", "80"))
+BRIDGE_OBSERVER_MAX_STRING_CHARS = int(os.getenv("BRIDGE_OBSERVER_MAX_STRING_CHARS", "240000"))
+BRIDGE_OBSERVER_RECEIVE_PREVIEW_MAX_CHARS = int(os.getenv("BRIDGE_OBSERVER_RECEIVE_PREVIEW_MAX_CHARS", "240000"))
+BRIDGE_ALLOW_USER_THREAD_KEY = os.getenv("BRIDGE_ALLOW_USER_THREAD_KEY", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 BRIDGE_WORKSPACE_ROOT = Path(
     os.getenv("BRIDGE_CONTEXT_REFERENCE_WORKSPACE_ROOT") or Path(__file__).resolve().parents[1]
 ).expanduser().resolve()
@@ -129,6 +138,7 @@ app = FastAPI(title="AlphaRavis OpenAI Bridge", openapi_version="3.1.0")
 _RESPONSES_STORE: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _RESPONSES_INPUT_ITEMS: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
 _APPROVAL_MEMORY: OrderedDict[str, float] = OrderedDict()
+_BRIDGE_OBSERVATIONS: deque[dict[str, Any]] = deque(maxlen=max(1, BRIDGE_OBSERVER_MAX_RECORDS))
 
 
 def _new_trace(protocol: str, body: dict[str, Any], request: Request) -> dict[str, Any]:
@@ -275,18 +285,16 @@ def _extract_thread_key(body: dict[str, Any], request: Request) -> str:
         body.get("conversation_id"),
         metadata.get("conversationId"),
         metadata.get("conversation_id"),
-        body.get("user"),
         request.headers.get("x-conversation-id"),
         request.headers.get("x-thread-id"),
     ]
     for candidate in candidates:
         if candidate:
             return str(candidate)
-    first_user = next(
-        (message.get("content") for message in body.get("messages", []) if message.get("role") == "user"),
-        "default",
-    )
-    return first_user[:120]
+    if BRIDGE_ALLOW_USER_THREAD_KEY and body.get("user"):
+        return str(body["user"])
+    user_fragment = str(body.get("user") or "anonymous")[:32]
+    return f"ephemeral:{user_fragment}:{uuid.uuid4().hex}"
 
 
 def _thread_id_for_key(thread_key: str) -> str:
@@ -583,6 +591,182 @@ def _hard_input_error(messages: list[dict[str, Any]]) -> str:
         f"{BRIDGE_HARD_INPUT_TOKEN_LIMIT} ist. Bitte kuerze die Eingabe oder "
         "nutze Archiv-/RAG-Suche statt den ganzen Kontext direkt zu senden."
     )
+
+
+def _observer_safe(value: Any, *, max_string_chars: int | None = None) -> Any:
+    max_chars = max(0, max_string_chars if max_string_chars is not None else BRIDGE_OBSERVER_MAX_STRING_CHARS)
+    if isinstance(value, str):
+        if max_chars and len(value) > max_chars:
+            return value[:max_chars] + f"\n...[truncated {len(value) - max_chars} chars]"
+        return value
+    if isinstance(value, dict):
+        return {str(key): _observer_safe(item, max_string_chars=max_chars) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_observer_safe(item, max_string_chars=max_chars) for item in value]
+    try:
+        json.dumps(value)
+        return value
+    except TypeError:
+        return str(value)
+
+
+def _observer_headers(request: Request) -> dict[str, str]:
+    names = [
+        "x-conversation-id",
+        "x-thread-id",
+        "x-alpha-trace-id",
+        "referer",
+        "user-agent",
+    ]
+    return {name: request.headers.get(name, "") for name in names if request.headers.get(name)}
+
+
+def _observer_start(
+    *,
+    protocol: str,
+    request: Request,
+    body: dict[str, Any],
+    messages: list[dict[str, Any]],
+) -> str:
+    observation_id = f"obs_{uuid.uuid4().hex[:12]}"
+    record = {
+        "id": observation_id,
+        "created_at": time.time(),
+        "protocol": protocol,
+        "path": getattr(getattr(request, "url", None), "path", ""),
+        "method": getattr(request, "method", ""),
+        "client_host": getattr(getattr(request, "client", None), "host", ""),
+        "headers": _observer_headers(request),
+        "stream": bool(body.get("stream")),
+        "model": str(body.get("model") or OPENAI_MODEL_NAME),
+        "status": "received",
+        "send": {
+            "raw_body": _observer_safe(body),
+            "raw_messages": _observer_safe(messages),
+            "raw_message_count": len(messages),
+            "raw_token_estimate": _request_token_estimate(messages),
+            "metadata": _observer_safe(body.get("metadata") if isinstance(body.get("metadata"), dict) else {}),
+        },
+        "receive": {
+            "event_counts": {},
+            "preview": "",
+        },
+    }
+    _BRIDGE_OBSERVATIONS.appendleft(record)
+    return observation_id
+
+
+def _observer_record(observation_id: str, **updates: Any) -> None:
+    for record in _BRIDGE_OBSERVATIONS:
+        if record.get("id") == observation_id:
+            record.update(_observer_safe(updates))
+            return
+
+
+def _observer_send_update(observation_id: str, **updates: Any) -> None:
+    for record in _BRIDGE_OBSERVATIONS:
+        if record.get("id") == observation_id:
+            send = record.setdefault("send", {})
+            if isinstance(send, dict):
+                send.update(_observer_safe(updates))
+            return
+
+
+def _observer_receive_update(observation_id: str, **updates: Any) -> None:
+    for record in _BRIDGE_OBSERVATIONS:
+        if record.get("id") == observation_id:
+            receive = record.setdefault("receive", {})
+            if isinstance(receive, dict):
+                receive.update(_observer_safe(updates))
+            return
+
+
+def _state_values(state: Any) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        return {}
+    values = state.get("values")
+    return values if isinstance(values, dict) else {}
+
+
+def _state_message_profile(state: Any) -> dict[str, Any]:
+    messages = _state_values(state).get("messages") or []
+    if not isinstance(messages, list):
+        messages = []
+    latest = _message_content(messages[-1]) if messages else ""
+    reasoning_chars = sum(len(_message_reasoning_content(message)) for message in messages)
+    return {
+        "message_count": len(messages),
+        "visible_content_chars": sum(len(_message_content(message)) for message in messages),
+        "reasoning_chars": reasoning_chars,
+        "latest_message_preview": latest[:600],
+    }
+
+
+def _observer_prepared(observation_id: str, *, thread_key: str, thread_id: str, run_payload: dict[str, Any]) -> None:
+    input_payload = run_payload.get("input") if isinstance(run_payload, dict) else None
+    context_messages = []
+    if isinstance(input_payload, dict) and isinstance(input_payload.get("messages"), list):
+        context_messages = input_payload["messages"]
+    _observer_record(
+        observation_id,
+        thread_key=thread_key,
+        thread_id=thread_id,
+        status="prepared",
+    )
+    _observer_send_update(
+        observation_id,
+        model_context=input_payload if isinstance(input_payload, dict) else {},
+        model_context_messages=context_messages,
+        model_context_message_count=len(context_messages),
+        model_context_token_estimate=_request_token_estimate(context_messages),
+        langgraph_state_profile=run_payload.get("state_profile", {}),
+        direct_response=bool(run_payload.get("direct_response")),
+        command=run_payload.get("command", {}),
+    )
+
+
+def _observer_hard_cutoff(observation_id: str, hard_error: str) -> None:
+    _observer_record(observation_id, status="hard_cutoff")
+    _observer_receive_update(
+        observation_id,
+        status="hard_cutoff",
+        output_text=hard_error,
+        preview=hard_error,
+    )
+
+
+def _observer_complete(
+    observation_id: str,
+    *,
+    status: str = "completed",
+    output_text: str = "",
+    reasoning_text: str = "",
+    elapsed_seconds: float | None = None,
+) -> None:
+    updates: dict[str, Any] = {"status": status}
+    if elapsed_seconds is not None:
+        updates["elapsed_seconds"] = round(elapsed_seconds, 3)
+    _observer_record(observation_id, **updates)
+    _observer_receive_update(
+        observation_id,
+        status=status,
+        output_text=output_text,
+        reasoning_text=reasoning_text,
+        output_chars=len(output_text),
+        reasoning_chars=len(reasoning_text),
+        preview=(output_text or reasoning_text)[:BRIDGE_OBSERVER_RECEIVE_PREVIEW_MAX_CHARS],
+    )
+
+
+def _observer_note_event(observation_id: str, event_name: str) -> None:
+    for record in _BRIDGE_OBSERVATIONS:
+        if record.get("id") == observation_id:
+            receive = record.setdefault("receive", {})
+            if isinstance(receive, dict):
+                counts = receive.setdefault("event_counts", {})
+                if isinstance(counts, dict):
+                    counts[event_name] = int(counts.get(event_name, 0)) + 1
+            return
 
 
 def _message_content(message: Any) -> str:
@@ -1298,17 +1482,18 @@ async def _prepare_run_payload(
         state = await client.threads.get_state(thread_id)
     except Exception:
         state = None
+    state_profile = _state_message_profile(state)
 
     interrupt_value = _find_command_approval_interrupt(state)
     if interrupt_value:
         auto_resume = _approval_auto_resume(thread_id, interrupt_value)
         if auto_resume is not None:
-            return {"command": {"resume": auto_resume}}
+            return {"command": {"resume": auto_resume}, "state_profile": state_profile}
         resume = _approval_resume_from_messages(messages)
         if resume is None:
-            return {"direct_response": _approval_prompt(interrupt_value)}
+            return {"direct_response": _approval_prompt(interrupt_value), "state_profile": state_profile}
         _remember_approval(thread_id, interrupt_value, resume)
-        return {"command": {"resume": resume}}
+        return {"command": {"resume": resume}, "state_profile": state_profile}
 
     input_payload = await _build_input_payload(
         messages,
@@ -1317,7 +1502,7 @@ async def _prepare_run_payload(
         thread_key=thread_key,
         trace=trace,
     )
-    return {"input": input_payload}
+    return {"input": input_payload, "state_profile": state_profile}
 
 
 def _extract_stream_text(part: Any) -> str:
@@ -1772,11 +1957,40 @@ async def _stream_chat_events(
     yield "data: [DONE]\n\n"
 
 
+def _observer_accumulate_chat_chunk(accumulator: dict[str, list[str]], chunk: str) -> None:
+    for block in chunk.split("\n\n"):
+        data_lines = [line.removeprefix("data: ").strip() for line in block.splitlines() if line.startswith("data: ")]
+        if not data_lines:
+            continue
+        data_text = "\n".join(data_lines)
+        if data_text == "[DONE]":
+            continue
+        try:
+            payload = json.loads(data_text)
+        except json.JSONDecodeError:
+            continue
+        choices = payload.get("choices") if isinstance(payload, dict) else None
+        if not isinstance(choices, list) or not choices:
+            continue
+        delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+        if not isinstance(delta, dict):
+            continue
+        content = delta.get("content")
+        if isinstance(content, str):
+            accumulator.setdefault("output", []).append(content)
+        reasoning = delta.get(BRIDGE_REASONING_DELTA_FIELD) or delta.get("reasoning_content") or delta.get("reasoning")
+        if isinstance(reasoning, str):
+            accumulator.setdefault("reasoning", []).append(reasoning)
+
+
 async def _stream_chat(body: dict[str, Any], request: Request) -> AsyncIterator[str]:
     started = time.perf_counter()
     model = str(body.get("model") or OPENAI_MODEL_NAME)
-    hard_error = _hard_input_error(body.get("messages", []))
+    messages = body.get("messages", [])
+    observation_id = _observer_start(protocol="chat", request=request, body=body, messages=messages)
+    hard_error = _hard_input_error(messages)
     if hard_error:
+        _observer_hard_cutoff(observation_id, hard_error)
         for chunk in _openai_stream_response(hard_error, model):
             yield chunk
         return
@@ -1784,7 +1998,8 @@ async def _stream_chat(body: dict[str, Any], request: Request) -> AsyncIterator[
     client = _client()
     thread_key = _extract_thread_key(body, request)
     thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
-    run_payload = await _prepare_run_payload(client, thread_id, thread_key, body.get("messages", []))
+    run_payload = await _prepare_run_payload(client, thread_id, thread_key, messages)
+    _observer_prepared(observation_id, thread_key=thread_key, thread_id=thread_id, run_payload=run_payload)
     _log_event(
         logging.INFO,
         "bridge.chat.stream.started",
@@ -1797,7 +2012,8 @@ async def _stream_chat(body: dict[str, Any], request: Request) -> AsyncIterator[
     )
 
     if run_payload.get("direct_response"):
-        for chunk in _openai_stream_response(str(run_payload["direct_response"]), model):
+        content = str(run_payload["direct_response"])
+        for chunk in _openai_stream_response(content, model):
             yield chunk
         _log_event(
             logging.INFO,
@@ -1807,10 +2023,17 @@ async def _stream_chat(body: dict[str, Any], request: Request) -> AsyncIterator[
             direct_response=True,
             elapsed_seconds=round(time.perf_counter() - started, 3),
         )
+        _observer_complete(
+            observation_id,
+            output_text=content,
+            elapsed_seconds=time.perf_counter() - started,
+        )
         return
 
+    observed_chunks: dict[str, list[str]] = {"output": [], "reasoning": []}
     if BRIDGE_STREAM_MODE in {"final", "message", "messages"}:
         async for chunk in _stream_chat_final(client, thread_id, run_payload, model):
+            _observer_accumulate_chat_chunk(observed_chunks, chunk)
             yield chunk
         _log_event(
             logging.INFO,
@@ -1820,9 +2043,16 @@ async def _stream_chat(body: dict[str, Any], request: Request) -> AsyncIterator[
             stream_mode=BRIDGE_STREAM_MODE,
             elapsed_seconds=round(time.perf_counter() - started, 3),
         )
+        _observer_complete(
+            observation_id,
+            output_text="".join(observed_chunks.get("output", [])),
+            reasoning_text="".join(observed_chunks.get("reasoning", [])),
+            elapsed_seconds=time.perf_counter() - started,
+        )
         return
 
     async for chunk in _stream_chat_events(client, thread_id, run_payload, model):
+        _observer_accumulate_chat_chunk(observed_chunks, chunk)
         yield chunk
     _log_event(
         logging.INFO,
@@ -1831,6 +2061,12 @@ async def _stream_chat(body: dict[str, Any], request: Request) -> AsyncIterator[
         model=model,
         stream_mode=BRIDGE_STREAM_MODE,
         elapsed_seconds=round(time.perf_counter() - started, 3),
+    )
+    _observer_complete(
+        observation_id,
+        output_text="".join(observed_chunks.get("output", [])),
+        reasoning_text="".join(observed_chunks.get("reasoning", [])),
+        elapsed_seconds=time.perf_counter() - started,
     )
 
 
@@ -2223,7 +2459,7 @@ def _validate_responses_request(body: dict[str, Any]) -> JSONResponse | None:
     if body.get("conversation") is not None:
         return _responses_error(
             "AlphaRavis Bridge uses LangGraph thread IDs instead of OpenAI Conversations. "
-            "Pass conversationId, conversation_id, user, x-conversation-id, or x-thread-id.",
+            "Pass conversationId, conversation_id, x-conversation-id, or x-thread-id.",
             code="conversation_not_supported",
         )
     if body.get("prompt") is not None:
@@ -2692,6 +2928,7 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
     item_id = f"msg_{uuid.uuid4().hex}"
     builder = _ResponsesStreamBuilder(response_id=response_id, model=model, body=body, messages=messages)
     hard_error = _hard_input_error(messages)
+    observation_id = _observer_start(protocol="responses", request=request, body=body, messages=messages)
 
     for event in builder.start():
         yield event
@@ -2699,6 +2936,7 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
         yield event
 
     if hard_error:
+        _observer_hard_cutoff(observation_id, hard_error)
         async for event in _response_output_delta_events(builder, hard_error):
             yield event
         for event in builder.finish_message():
@@ -2716,6 +2954,7 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
     thread_key = _extract_thread_key(chat_body, request)
     thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
     run_payload = await _prepare_run_payload(client, thread_id, thread_key, chat_body.get("messages", []))
+    _observer_prepared(observation_id, thread_key=thread_key, thread_id=thread_id, run_payload=run_payload)
     _log_event(
         logging.INFO,
         "bridge.responses.stream.started",
@@ -2748,6 +2987,11 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
             direct_response=True,
             output_chars=len(content),
             elapsed_seconds=round(time.perf_counter() - started, 3),
+        )
+        _observer_complete(
+            observation_id,
+            output_text=content,
+            elapsed_seconds=time.perf_counter() - started,
         )
         return
 
@@ -2881,6 +3125,7 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
                         async for event in _response_output_delta_events(builder, visible_delta):
                             yield event
     except TimeoutError as exc:
+        error_message = _clean_error_message(exc)
         _log_exception(
             "bridge.responses_stream.timeout",
             exc,
@@ -2892,10 +3137,11 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
             emitted_chars=len(emitted),
             emitted_reasoning_chars=len(emitted_reasoning),
         )
-        async for event in _response_output_delta_events(builder, _clean_error_message(exc)):
+        async for event in _response_output_delta_events(builder, error_message):
             yield event
         saw_token = True
     except Exception as exc:
+        error_message = _clean_error_message(exc)
         _log_exception(
             "bridge.responses_stream.failed",
             exc,
@@ -2906,7 +3152,7 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
             emitted_chars=len(emitted),
             emitted_reasoning_chars=len(emitted_reasoning),
         )
-        async for event in _response_output_delta_events(builder, _clean_error_message(exc)):
+        async for event in _response_output_delta_events(builder, error_message):
             yield event
         saw_token = True
 
@@ -2973,6 +3219,12 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
     yield builder.event("response.completed", response=response)
     if done := _done_sentinel():
         yield done
+    _observer_complete(
+        observation_id,
+        output_text=builder.full_content,
+        reasoning_text=builder.full_reasoning,
+        elapsed_seconds=time.perf_counter() - started,
+    )
     _log_event(
         logging.INFO,
         "bridge.responses.stream.completed",
@@ -3028,6 +3280,24 @@ async def llm_generation_health():
         },
         status_code=http_status,
     )
+
+
+@app.get("/_alpharavis/bridge-observer")
+async def bridge_observer(limit: int = 80):
+    safe_limit = max(1, min(int(limit), BRIDGE_OBSERVER_MAX_RECORDS))
+    return JSONResponse(
+        {
+            "records": list(_BRIDGE_OBSERVATIONS)[:safe_limit],
+            "count": min(len(_BRIDGE_OBSERVATIONS), safe_limit),
+            "max_records": BRIDGE_OBSERVER_MAX_RECORDS,
+        }
+    )
+
+
+@app.delete("/_alpharavis/bridge-observer")
+async def clear_bridge_observer():
+    _BRIDGE_OBSERVATIONS.clear()
+    return JSONResponse({"ok": True, "records": []})
 
 
 @app.post("/tools/langgraph/run")
@@ -3120,6 +3390,8 @@ async def responses(request: Request):
         raise HTTPException(status_code=400, detail="input is required")
     hard_error = _hard_input_error(messages)
     if hard_error:
+        observation_id = _observer_start(protocol="responses", request=request, body=body, messages=messages)
+        _observer_hard_cutoff(observation_id, hard_error)
         if BRIDGE_HARD_INPUT_HTTP_ERROR:
             raise HTTPException(status_code=413, detail=hard_error)
         model = str(body.get("model") or OPENAI_MODEL_NAME)
@@ -3130,6 +3402,7 @@ async def responses(request: Request):
     if body.get("stream") is True:
         return StreamingResponse(_stream_responses(body, request), media_type="text/event-stream")
 
+    observation_id = _observer_start(protocol="responses", request=request, body=body, messages=messages)
     model = str(body.get("model") or OPENAI_MODEL_NAME)
     chat_body = dict(body)
     chat_body["messages"] = messages
@@ -3138,6 +3411,7 @@ async def responses(request: Request):
     thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
     _trace_step(trace, "bridge.thread.ready", started, thread_id=thread_id, thread_key=thread_key)
     run_payload = await _prepare_run_payload(client, thread_id, thread_key, messages, trace=trace)
+    _observer_prepared(observation_id, thread_key=thread_key, thread_id=thread_id, run_payload=run_payload)
     _trace_step(trace, "bridge.run_payload.prepared", started)
     _log_event(
         logging.INFO,
@@ -3160,6 +3434,11 @@ async def responses(request: Request):
     _attach_trace_metadata(body, trace)
     response = _response_object(content, model, body=body, messages=messages)
     _store_response_object(response, body)
+    _observer_complete(
+        observation_id,
+        output_text=content,
+        elapsed_seconds=time.perf_counter() - started,
+    )
     _log_event(
         logging.INFO,
         "bridge.responses.request.completed",
@@ -3287,6 +3566,8 @@ async def chat_completions(request: Request):
     )
     hard_error = _hard_input_error(body.get("messages", []))
     if hard_error:
+        observation_id = _observer_start(protocol="chat", request=request, body=body, messages=body.get("messages", []))
+        _observer_hard_cutoff(observation_id, hard_error)
         if BRIDGE_HARD_INPUT_HTTP_ERROR:
             raise HTTPException(status_code=413, detail=hard_error)
         return JSONResponse(_chat_completion_response(hard_error, str(body.get("model") or OPENAI_MODEL_NAME)))
@@ -3294,12 +3575,14 @@ async def chat_completions(request: Request):
     if body.get("stream") is True:
         return StreamingResponse(_stream_chat(body, request), media_type="text/event-stream")
 
+    observation_id = _observer_start(protocol="chat", request=request, body=body, messages=body.get("messages", []))
     model = str(body.get("model") or OPENAI_MODEL_NAME)
     client = _client()
     thread_key = _extract_thread_key(body, request)
     thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
     _trace_step(trace, "bridge.thread.ready", started, thread_id=thread_id, thread_key=thread_key)
     run_payload = await _prepare_run_payload(client, thread_id, thread_key, body.get("messages", []), trace=trace)
+    _observer_prepared(observation_id, thread_key=thread_key, thread_id=thread_id, run_payload=run_payload)
     _trace_step(trace, "bridge.run_payload.prepared", started)
     _log_event(
         logging.INFO,
@@ -3329,4 +3612,9 @@ async def chat_completions(request: Request):
     )
     response = _chat_completion_response(content, model)
     response["alpharavis_trace"] = trace
+    _observer_complete(
+        observation_id,
+        output_text=content,
+        elapsed_seconds=time.perf_counter() - started,
+    )
     return JSONResponse(response)

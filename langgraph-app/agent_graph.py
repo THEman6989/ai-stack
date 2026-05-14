@@ -4409,8 +4409,21 @@ def _message_to_json(message: Any) -> dict[str, Any]:
     }
 
 
+def _message_for_context_estimate(message: Any) -> dict[str, Any]:
+    data = _message_to_json(_message_with_plain_text_content(message))
+    for key in ("usage", "token_usage", "usage_metadata", "response_metadata"):
+        data.pop(key, None)
+    additional = data.get("additional_kwargs")
+    if isinstance(additional, dict):
+        additional = dict(additional)
+        for key in ("reasoning", "reasoning_content", "usage", "token_usage", "usage_metadata", "response_metadata"):
+            additional.pop(key, None)
+        data["additional_kwargs"] = additional
+    return data
+
+
 def _estimate_tokens(messages: list[Any]) -> int:
-    return _compressor_estimate_tokens(messages)
+    return _compressor_estimate_tokens([_message_for_context_estimate(message) for message in messages])
 
 
 def _context_discovery_model() -> str:
