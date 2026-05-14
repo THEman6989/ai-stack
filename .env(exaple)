@@ -1203,6 +1203,8 @@ ALPHARAVIS_FAST_PATH_DISABLE_THINKING=true
 # If true, fast-path replies visibly say that Fast Path was used.
 # Allowed values: true, false
 ALPHARAVIS_SHOW_FAST_PATH_NOTICE=true
+# Marker appended to visible fast-path replies when the notice is enabled.
+ALPHARAVIS_FAST_PATH_NOTICE_TEXT=Fastpath
 
 # If true, once a thread uses the normal swarm/agent path, future turns in that
 # same thread cannot return to Fast Path. This prevents mixed simple/complex

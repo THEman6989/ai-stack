@@ -467,6 +467,11 @@ LangGraph state profile so old-state reuse is visible alongside the exact model
 context. Active-context token estimates now strip UI reasoning/thinking blocks
 and provider usage metadata before enforcing the hard context limit.
 
+Fast-path reply marker follow-up: visible fast-path replies now append only the
+short `ALPHARAVIS_FAST_PATH_NOTICE_TEXT` marker, defaulting to `Fastpath`, after
+the model answer. The previous explanatory prefix about the fast-path route and
+thread lock is no longer included in the assistant text.
+
 Docker/Tailscale operational follow-up: published ports for Hermes,
 LangGraph, the bridge, media gallery, Bridge Test UI, LiteLLM, RAG API,
 DeepAgents UI, custom agent UI, LibreChat, OpenWebUI, service dashboard,

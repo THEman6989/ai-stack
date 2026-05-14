@@ -147,7 +147,11 @@ Fast-path replies are visibly marked by default:
 
 ```text
 ALPHARAVIS_SHOW_FAST_PATH_NOTICE=true
+ALPHARAVIS_FAST_PATH_NOTICE_TEXT=Fastpath
 ```
+
+When enabled, the marker is appended after the model answer as a short label;
+the response does not include execution-mode explanatory text.
 
 Once one turn in a chat thread uses the normal agent/swarm path, that thread is
 locked out of fast path by default:

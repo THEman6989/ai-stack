@@ -5761,17 +5761,12 @@ async def fast_chat_node(state: AlphaRavisState) -> dict[str, Any]:
         response_content = response.content
 
     if _env_bool("ALPHARAVIS_SHOW_FAST_PATH_NOTICE", "true"):
-        model_label = f"{used_model} fallback" if fallback_used else f"{used_model} direct"
-        lock_text = (
-            "Dieser Thread bleibt im Fast Path, bis er einmal den Agentenpfad benutzt."
-            if _env_bool("ALPHARAVIS_FAST_PATH_LOCK_AFTER_SWARM", "true")
-            else "Thread-Lock nach Agentenpfad ist deaktiviert."
-        )
+        answer_text = str(response_content).strip()
+        marker = os.getenv("ALPHARAVIS_FAST_PATH_NOTICE_TEXT", "Fastpath").strip() or "Fastpath"
         response = AIMessage(
-            content=(
-                f"Fast-Path aktiv ({model_label}). {lock_text}\n\n"
-                f"{str(response_content).strip()}"
-            )
+            content=f"{answer_text}\n\n{marker}",
+            additional_kwargs=getattr(response, "additional_kwargs", {}) or {},
+            response_metadata=getattr(response, "response_metadata", {}) or {},
         )
 
     profile_updates: dict[str, Any] = {
