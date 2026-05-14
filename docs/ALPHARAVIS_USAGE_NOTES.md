@@ -718,6 +718,9 @@ reasoning, and visible local-model thinking in the Responses reasoning stream.
 The Bridge Test UI additionally splits those same events into live Status,
 Reasoning, and Planer panes for debugging; LibreChat receives them together in
 its reasoning channel.
+The Test UI also has a live `Kontext` terminal. It shows compaction events in
+yellow and hard-cutoff / hard-trim events in red when the Bridge receives
+semantic context activity from LangGraph.
 `BRIDGE_STREAM_SUBGRAPHS=true` is required for the nested AlphaRavis Swarm
 workers to stream token-level partials through the top-level LangGraph run.
 Visible assistant text and model/plan reasoning are split into character-level

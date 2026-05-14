@@ -163,9 +163,15 @@ def test_html_renders_collapsed_reasoning_panel_from_stream() -> None:
     assert "live-status" in test_ui_server.HTML
     assert "live-reasoning" in test_ui_server.HTML
     assert "live-plan" in test_ui_server.HTML
+    assert "live-context" in test_ui_server.HTML
+    assert "Kontext" in test_ui_server.HTML
     assert "data-panel-toggle" in test_ui_server.HTML
     assert "panel.classList.toggle('expanded')" in test_ui_server.HTML
     assert "function renderLivePanels(msg)" in test_ui_server.HTML
+    assert "context_compaction" in test_ui_server.HTML
+    assert "context_hard" in test_ui_server.HTML
+    assert "[COMPACT]" in test_ui_server.HTML
+    assert "[HARD]" in test_ui_server.HTML
     assert "summary.textContent = 'Reasoning'" in test_ui_server.HTML
     assert "reasoningStatus" in test_ui_server.HTML
     assert "internalPlan" in test_ui_server.HTML

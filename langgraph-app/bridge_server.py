@@ -1733,6 +1733,74 @@ def _extract_activity_text(part: Any, *, force: bool = False) -> str:
     return ""
 
 
+def _extract_context_activity(part: Any) -> tuple[str, str, str]:
+    if _stream_event_name(part) != "updates":
+        return "", "", ""
+    data = _stream_event_data(part)
+    if not isinstance(data, dict):
+        return "", "", ""
+
+    for node, update in data.items():
+        if str(node).startswith("__") or not isinstance(update, dict):
+            continue
+        profile = update.get("run_profile") if isinstance(update.get("run_profile"), dict) else {}
+        notice = str(update.get("memory_notice") or "")
+        node_name = str(node)
+        lower_notice = notice.lower()
+
+        if (
+            node_name == "hard_context_stop"
+            or profile.get("hard_context_stopped")
+            or profile.get("hard_context_trim_used")
+            or profile.get("hard_context_rescued")
+            or "hard context cutoff" in lower_notice
+            or "hart getrimmt" in lower_notice
+        ):
+            before = profile.get("hard_context_trim_tokens_before") or profile.get("token_estimate") or ""
+            after = profile.get("hard_context_trim_tokens_after") or ""
+            removed = profile.get("hard_context_trim_removed_messages")
+            details = []
+            if before:
+                details.append(f"vorher~{before}")
+            if after:
+                details.append(f"nachher~{after}")
+            if removed is not None:
+                details.append(f"entfernt={removed}")
+            suffix = f" ({', '.join(details)})" if details else ""
+            label = "Hard-Trim aktiv" if profile.get("hard_context_trim_used") else "Hard-Cutoff aktiv"
+            return "context_hard", node_name, f"{label}: {node_name}{suffix}"
+
+        if (
+            profile.get("pre_run_compression_used")
+            or profile.get("post_run_compression_used")
+            or profile.get("handoff_context_guard_used")
+            or profile.get("context_compressed")
+            or "komprimiert" in lower_notice
+            or "compression" in lower_notice
+        ):
+            before = (
+                profile.get("pre_run_compression_tokens")
+                or profile.get("post_run_compression_tokens")
+                or profile.get("handoff_context_tokens")
+                or ""
+            )
+            after = (
+                profile.get("pre_run_compression_tokens_after")
+                or profile.get("post_run_compression_tokens_after")
+                or profile.get("handoff_context_tokens_after")
+                or ""
+            )
+            details = []
+            if before:
+                details.append(f"vorher~{before}")
+            if after:
+                details.append(f"nachher~{after}")
+            suffix = f" ({', '.join(details)})" if details else ""
+            return "context_compaction", node_name, f"Compaction aktiv: {node_name}{suffix}"
+
+    return "", "", ""
+
+
 def _delta_text(text: str, emitted: str) -> str:
     if not text:
         return ""
@@ -1769,6 +1837,7 @@ async def _stream_chat_events(
     emitted_text_by_message: dict[str, str] = {}
     emitted_reasoning = ""
     emitted_activity: set[str] = set()
+    emitted_context_activity: set[str] = set()
     explicit_reasoning_seen = False
     internal_reasoning_sections: set[str] = set()
     emitted_internal_updates: set[str] = set()
@@ -1796,6 +1865,19 @@ async def _stream_chat_events(
                 if include_activity and activity and activity not in emitted_activity:
                     emitted_activity.add(activity)
                     yield _activity_chunk(activity, model)
+
+                context_kind, context_label, context_text = _extract_context_activity(part)
+                if include_activity and context_text and context_text not in emitted_context_activity:
+                    emitted_context_activity.add(context_text)
+                    yield _stream_data(
+                        _chunk(
+                            "",
+                            model,
+                            reasoning_content=f"{context_text}\n",
+                            alpha_reasoning_kind=context_kind,
+                            alpha_reasoning_label=context_label,
+                        )
+                    )
 
                 internal_update = _extract_internal_plan_update(part)
                 if internal_update and internal_update not in emitted_internal_updates:
@@ -3000,6 +3082,7 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
     emitted_text_by_message: dict[str, str] = {}
     emitted_reasoning = ""
     emitted_activity: set[str] = set()
+    emitted_context_activity: set[str] = set()
     seen_tool_calls: set[str] = set()
     seen_tool_updates: set[str] = set()
     tool_inputs: dict[str, dict[str, Any]] = {}
@@ -3030,6 +3113,16 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
                 if BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS and activity and activity not in emitted_activity:
                     emitted_activity.add(activity)
                     for event in builder.reasoning_delta(f"Status: {activity}\n", alpha_kind="status"):
+                        yield event
+
+                context_kind, context_label, context_text = _extract_context_activity(part)
+                if BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS and context_text and context_text not in emitted_context_activity:
+                    emitted_context_activity.add(context_text)
+                    for event in builder.reasoning_delta(
+                        f"{context_text}\n",
+                        alpha_kind=context_kind,
+                        alpha_label=context_label,
+                    ):
                         yield event
 
                 internal_update = _extract_internal_plan_update(part)

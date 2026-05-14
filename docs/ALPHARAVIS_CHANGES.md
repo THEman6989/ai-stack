@@ -482,6 +482,12 @@ while preserving the latest user turn and records the trim in `run_profile`.
 The shared context estimator now ignores UI-only `thinking` / `reasoning`
 blocks in both compression and model metadata token estimates.
 
+Bridge Test UI context terminal follow-up: Bridge streaming now emits semantic
+context activity reasoning events for `context_compaction` and `context_hard`
+when LangGraph reports pre-run/post-run/handoff compression, hard trim, or hard
+cutoff state. The Test UI shows those events in a dedicated `Kontext` live
+terminal: compaction is yellow and hard trim/cutoff is red.
+
 Docker/Tailscale operational follow-up: published ports for Hermes,
 LangGraph, the bridge, media gallery, Bridge Test UI, LiteLLM, RAG API,
 DeepAgents UI, custom agent UI, LibreChat, OpenWebUI, service dashboard,

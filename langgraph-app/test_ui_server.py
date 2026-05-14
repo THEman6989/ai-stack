@@ -560,7 +560,7 @@ HTML = """<!doctype html>
     .nav-button { display: inline-flex; align-items: center; justify-content: center; border: 1px solid #3a4252; border-radius: 8px; background: #171b23; color: #eef1f5; padding: 8px 11px; font-size: 13px; text-decoration: none; }
     .nav-button:hover { background: #202633; }
     .status { color: #9aa4b2; font-size: 13px; }
-    .live-panels { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .live-panels { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
     .live-panel { border: 1px solid #2d3340; border-radius: 8px; background: #0d1016; min-height: 112px; display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
     .live-panel.expanded { grid-column: 1 / -1; min-height: 280px; }
     .live-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid #202633; padding: 6px 8px 6px 10px; }
@@ -583,6 +583,12 @@ HTML = """<!doctype html>
     .reasoning-label { color: #9aa4b2; font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: 0; }
     .reasoning-body { font-size: 12px; line-height: 1.45; color: #cbd5e1; white-space: pre-wrap; }
     .reasoning-status { color: #9aa4b2; }
+    .context-terminal { display: grid; gap: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .context-event { border-left: 3px solid #3a4252; padding-left: 7px; white-space: pre-wrap; }
+    .context-event.compaction { border-color: #d1a32c; color: #f3c969; }
+    .context-event.hard { border-color: #d94b4b; color: #f59b9b; }
+    #live-context.context-compaction { color: #f3c969; }
+    #live-context.context-hard { color: #f59b9b; }
     form { display: grid; gap: 10px; border-top: 1px solid #2d3340; padding-top: 14px; }
     textarea { width: 100%; min-height: 96px; resize: vertical; border: 1px solid #3a4252; border-radius: 8px; background: #0d1016; color: #eef1f5; padding: 12px; font: inherit; }
     .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
@@ -626,6 +632,10 @@ HTML = """<!doctype html>
         <div class="live-panel-head"><h2>Planer</h2><button class="panel-toggle" type="button" data-panel-toggle>Gross</button></div>
         <pre id="live-plan">(leer)</pre>
       </div>
+      <div class="live-panel">
+        <div class="live-panel-head"><h2>Kontext</h2><button class="panel-toggle" type="button" data-panel-toggle>Gross</button></div>
+        <pre id="live-context">(leer)</pre>
+      </div>
     </section>
     <section id="chat" aria-live="polite"></section>
     <form id="form">
@@ -663,6 +673,7 @@ HTML = """<!doctype html>
     const liveStatusEl = document.getElementById('live-status');
     const liveReasoningEl = document.getElementById('live-reasoning');
     const livePlanEl = document.getElementById('live-plan');
+    const liveContextEl = document.getElementById('live-context');
     const rawEl = document.getElementById('raw');
     const traceSummary = document.getElementById('trace-summary');
     const traceBody = document.getElementById('trace-body');
@@ -825,7 +836,7 @@ HTML = """<!doctype html>
         const body = document.createElement('div');
         body.textContent = msg.content || '(leer)';
         el.append(meta, body);
-        if (msg.role === 'assistant' && (msg.reasoningStatus || msg.internalPlan || msg.reasoning)) {
+        if (msg.role === 'assistant' && (msg.reasoningStatus || msg.internalPlan || msg.reasoning || (msg.contextEvents && msg.contextEvents.length))) {
           const details = document.createElement('details');
           details.className = 'reasoning-details';
           details.open = Boolean(msg.reasoningOpen);
@@ -871,6 +882,23 @@ HTML = """<!doctype html>
             reasoningSection.append(reasoningLabel, reasoningBody);
             details.appendChild(reasoningSection);
           }
+          if (msg.contextEvents && msg.contextEvents.length) {
+            const contextSection = document.createElement('div');
+            contextSection.className = 'reasoning-section';
+            const contextLabel = document.createElement('div');
+            contextLabel.className = 'reasoning-label';
+            contextLabel.textContent = 'Kontext';
+            const contextBody = document.createElement('div');
+            contextBody.className = 'reasoning-body context-terminal';
+            for (const item of msg.contextEvents) {
+              const line = document.createElement('div');
+              line.className = `context-event ${item.kind === 'context_hard' ? 'hard' : 'compaction'}`;
+              line.textContent = item.text;
+              contextBody.appendChild(line);
+            }
+            contextSection.append(contextLabel, contextBody);
+            details.appendChild(contextSection);
+          }
           el.appendChild(details);
         }
         chat.appendChild(el);
@@ -884,12 +912,19 @@ HTML = """<!doctype html>
       const statusText = msg && msg.reasoningStatus ? msg.reasoningStatus.trim() : '';
       const reasoningText = msg && msg.reasoning ? msg.reasoning.trim() : '';
       const planText = msg && msg.internalPlan ? msg.internalPlan.trim() : '';
+      const contextText = msg && msg.contextEvents && msg.contextEvents.length
+        ? msg.contextEvents.map((item) => `${item.kind === 'context_hard' ? '[HARD]' : '[COMPACT]'} ${item.text}`).join('\\n')
+        : '';
       liveStatusEl.textContent = statusText || '(leer)';
       liveReasoningEl.textContent = reasoningText || '(leer)';
       livePlanEl.textContent = planText || '(leer)';
+      liveContextEl.textContent = contextText || '(leer)';
+      liveContextEl.classList.toggle('context-hard', Boolean(msg && msg.contextEvents && msg.contextEvents.some((item) => item.kind === 'context_hard')));
+      liveContextEl.classList.toggle('context-compaction', Boolean(msg && msg.contextEvents && msg.contextEvents.some((item) => item.kind === 'context_compaction')));
       liveStatusEl.scrollTop = liveStatusEl.scrollHeight;
       liveReasoningEl.scrollTop = liveReasoningEl.scrollHeight;
       livePlanEl.scrollTop = livePlanEl.scrollHeight;
+      liveContextEl.scrollTop = liveContextEl.scrollHeight;
     }
 
     function parseSseBlock(block) {
@@ -964,6 +999,10 @@ HTML = """<!doctype html>
 
     function cleanInternalReasoning(text) {
       return String(text || '').replace(/^Interner Plan \\([^)]*\\):\\n?/, '');
+    }
+
+    function isContextReasoningKind(kind) {
+      return kind === 'context_compaction' || kind === 'context_hard';
     }
 
     function routeClass(routeName) {
@@ -1088,6 +1127,7 @@ HTML = """<!doctype html>
         reasoning: '',
         reasoningStatus: '',
         internalPlan: '',
+        contextEvents: [],
         reasoningMode: '',
         reasoningOpen: false,
         route: ''
@@ -1139,6 +1179,11 @@ HTML = """<!doctype html>
                 assistantMsg.reasoningStatus += reasoning;
               } else if (kind === 'internal_plan') {
                 assistantMsg.internalPlan += cleanInternalReasoning(reasoning);
+              } else if (isContextReasoningKind(kind)) {
+                const text = String(reasoning || '').trim();
+                if (text && !assistantMsg.contextEvents.some((item) => item.kind === kind && item.text === text)) {
+                  assistantMsg.contextEvents.push({ kind, text });
+                }
               } else {
                 assistantMsg.reasoning += reasoning;
               }

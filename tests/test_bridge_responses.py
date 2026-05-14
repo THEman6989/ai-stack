@@ -564,6 +564,44 @@ def test_bridge_observer_records_raw_and_model_context() -> None:
     assert record["receive"]["output_text"] == "Hallo"
 
 
+def test_context_activity_extracts_compaction_and_hard_trim() -> None:
+    compaction = bridge_server._extract_context_activity(
+        {
+            "event": "updates",
+            "data": {
+                "pre_run_context_guard": {
+                    "run_profile": {
+                        "pre_run_compression_used": True,
+                        "pre_run_compression_tokens": 120000,
+                        "pre_run_compression_tokens_after": 64000,
+                    }
+                }
+            },
+        }
+    )
+    hard = bridge_server._extract_context_activity(
+        {
+            "event": "updates",
+            "data": {
+                "pre_run_context_guard": {
+                    "run_profile": {
+                        "hard_context_trim_used": True,
+                        "hard_context_trim_tokens_before": 130000,
+                        "hard_context_trim_tokens_after": 90000,
+                        "hard_context_trim_removed_messages": 12,
+                    }
+                }
+            },
+        }
+    )
+
+    assert compaction[0] == "context_compaction"
+    assert "Compaction aktiv" in compaction[2]
+    assert hard[0] == "context_hard"
+    assert "Hard-Trim aktiv" in hard[2]
+    assert "entfernt=12" in hard[2]
+
+
 def test_input_items_and_delete_routes_use_stored_response() -> None:
     bridge_server._RESPONSES_STORE.clear()
     bridge_server._RESPONSES_INPUT_ITEMS.clear()
