@@ -472,6 +472,16 @@ short `ALPHARAVIS_FAST_PATH_NOTICE_TEXT` marker, defaulting to `Fastpath`, after
 the model answer. The previous explanatory prefix about the fast-path route and
 thread lock is no longer included in the assistant text.
 
+Pre-run context compression fix: the LangGraph flow now runs
+`pre_run_context_guard` between `run_profile_start` and `route_decision`. This
+means old checkpointed thread state can be compacted before the hard context
+cutoff and before fast-path or swarm model calls. If a thread is already above
+the hard limit and normal Hermes-style compression fails or cannot reduce it
+enough, `ALPHARAVIS_ENABLE_HARD_CONTEXT_TRIM=true` removes old active messages
+while preserving the latest user turn and records the trim in `run_profile`.
+The shared context estimator now ignores UI-only `thinking` / `reasoning`
+blocks in both compression and model metadata token estimates.
+
 Docker/Tailscale operational follow-up: published ports for Hermes,
 LangGraph, the bridge, media gallery, Bridge Test UI, LiteLLM, RAG API,
 DeepAgents UI, custom agent UI, LibreChat, OpenWebUI, service dashboard,

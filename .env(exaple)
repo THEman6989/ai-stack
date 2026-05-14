@@ -795,6 +795,14 @@ ALPHARAVIS_COMPRESSION_MIN_SAVINGS_RATIO=0.10
 # stores archives when possible, and avoids repeatedly retrying until cooldown.
 ALPHARAVIS_COMPRESSION_FAILURE_COOLDOWN_SECONDS=600
 
+# Pre-run compression runs before route selection and before the hard context
+# cutoff, so old explicit thread state can be compacted before the next model
+# call. If compression still cannot get under the hard limit, hard trim removes
+# old active messages while preserving the latest user turn.
+ALPHARAVIS_ENABLE_PRE_RUN_COMPRESSION=true
+ALPHARAVIS_ENABLE_HARD_CONTEXT_TRIM=true
+ALPHARAVIS_HARD_CONTEXT_TRIM_RATIO=0.80
+
 # Enables second-tier compression for old archive blocks.
 # Allowed values: true, false
 ALPHARAVIS_ENABLE_HIERARCHICAL_COMPRESSION=true

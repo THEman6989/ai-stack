@@ -188,17 +188,19 @@ Still needed:
     Bridge now defaults to ephemeral threads unless an explicit conversation
     id/header is present, and Observer records the existing LangGraph state
     profile beside the prepared model context.
-  - The hard context cutoff should not block the user's newest message. Replace
-    the current hard refusal with context trimming/compression: preserve the
-    latest user turn, drop/truncate oldest carried context from the tail/head
-    as appropriate, and record what was removed in run metadata. Keep refusal
-    only for a single newest user message or explicit attachment that alone
-    exceeds the hard limit.
-  - Partially mitigated: active-context token estimates now ignore UI
-    reasoning/thinking blocks and provider usage metadata, because those are
-    not model input context. Remaining work is to add hard-limit trimming or
-    compression before the route decision so a genuinely old explicit thread
-    still degrades by dropping/archiving old context rather than refusing `Hi`.
+  - Implemented: `pre_run_context_guard` now runs before `route_decision`, so
+    an old explicit thread can compact old context before the hard cutoff. If a
+    thread is already above the hard limit and normal compression fails or
+    remains too large, hard trim removes old active messages while preserving
+    the latest user turn and records the result in `run_profile`.
+  - Implemented: active-context token estimates now ignore UI
+    reasoning/thinking blocks and provider usage metadata in the graph,
+    compressor, and model metadata estimator, because those are not model input
+    context. Verified with a synthetic LangGraph runtime probe that forces
+    compression failure under a tiny hard limit: old messages are removed and
+    the latest user message remains active. Remaining live verification:
+    exercise a real long explicit thread with LibreChat once enough old state is
+    available and confirm the visible request is rescued rather than refused.
 
 ## Custom Model / Power Management
 

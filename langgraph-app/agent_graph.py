@@ -6074,6 +6074,211 @@ async def _run_hermes_style_compression(
     return result, archive_key, updates
 
 
+def _is_remove_message(message: Any) -> bool:
+    return isinstance(message, RemoveMessage) or _message_to_json(message).get("type") == "remove"
+
+
+def _message_role_name(message: Any) -> str:
+    if isinstance(message, dict):
+        return str(message.get("role") or message.get("type") or "").lower()
+    return str(getattr(message, "type", getattr(message, "role", "")) or "").lower()
+
+
+def _latest_human_index(messages: list[Any]) -> int:
+    for index in range(len(messages) - 1, -1, -1):
+        if _message_role_name(messages[index]) in {"human", "user"}:
+            return index
+    return max(0, len(messages) - 1)
+
+
+def _hard_context_trim_update(
+    state: AlphaRavisState,
+    *,
+    messages: list[Any],
+    token_estimate: int,
+    hard_limit: int,
+    reason: str,
+) -> dict[str, Any]:
+    if hard_limit <= 0 or not messages:
+        return {}
+
+    ratio = max(0.10, min(_env_float("ALPHARAVIS_HARD_CONTEXT_TRIM_RATIO", 0.80), 0.95))
+    target_limit = max(1, int(hard_limit * ratio))
+    latest_human_index = _latest_human_index(messages)
+    summary = SystemMessage(
+        content=(
+            "<context-hard-trim-summary>\n"
+            "[CONTEXT HARD TRIM - REFERENCE ONLY]\n"
+            "Older active messages were removed before this run because the thread "
+            f"was above the hard context limit. reason: {reason}. "
+            "Answer only the latest user request after this summary. If older exact "
+            "details are needed, use archive/RAG retrieval instead of guessing.\n\n"
+            f"tokens_before_estimate: {token_estimate}\n"
+            f"hard_context_limit: {hard_limit}\n"
+            f"target_after_trim: {target_limit}\n"
+            "</context-hard-trim-summary>"
+        ),
+        id=f"alpharavis_hard_context_trim_{int(time.time())}",
+    )
+
+    kept: list[Any] = []
+    summary_tokens = _estimate_tokens([summary])
+    budget = max(1, target_limit - summary_tokens)
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        candidate = [message, *kept]
+        must_keep = index >= latest_human_index
+        if must_keep or _estimate_tokens(candidate) <= budget:
+            kept = candidate
+
+    rebuilt = [summary, *kept]
+    tokens_after = _estimate_tokens(rebuilt)
+    removed_count = max(0, len(messages) - len(kept))
+    notice = (
+        "Ich habe alten aktiven Kontext vor dem Modelllauf hart getrimmt, "
+        f"weil der Thread mit ca. {token_estimate} Tokens ueber dem Hard-Limit "
+        f"von {hard_limit} lag. {removed_count} alte Messages wurden aus dem "
+        "aktiven Kontext entfernt; die neueste Nutzernachricht bleibt erhalten."
+    )
+    return {
+        "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *rebuilt],
+        "memory_notice": notice,
+        "memory_notice_key": hashlib.sha256(
+            f"hard-trim:{_latest_user_query(messages)}:{token_estimate}:{tokens_after}".encode("utf-8")
+        ).hexdigest()[:16],
+        "run_profile": _profile_update(
+            state,
+            hard_context_trim_used=True,
+            hard_context_trim_reason=reason,
+            hard_context_trim_tokens_before=token_estimate,
+            hard_context_trim_tokens_after=tokens_after,
+            hard_context_trim_removed_messages=removed_count,
+        ),
+    }
+
+
+async def pre_run_context_guard_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
+    messages = _drop_previous_compaction_messages(list(state.get("messages", [])))
+    if not messages:
+        return {}
+
+    token_estimate = _estimate_tokens(messages)
+    active_limit = _active_context_token_limit()
+    hard_limit = _hard_context_token_limit()
+    force_hard_rescue = hard_limit > 0 and token_estimate > hard_limit
+    force_compression = _compression_forced_by_user(messages)
+    enabled = _env_bool("ALPHARAVIS_ENABLE_PRE_RUN_COMPRESSION", "true")
+    if not enabled and not force_hard_rescue and not force_compression:
+        return {}
+
+    if token_estimate <= active_limit and not force_hard_rescue and not force_compression:
+        return {}
+
+    if _compression_paused_by_user(messages) and not force_hard_rescue and not force_compression:
+        return {
+            "memory_notice": (
+                "Pre-run-Kompression wurde fuer diesen Lauf ausgesetzt. "
+                "Falls der Kontext spaeter das Hard-Limit erreicht, wird alter "
+                "Kontext trotzdem vor dem Modelllauf getrimmt."
+            ),
+            "memory_notice_key": hashlib.sha256(
+                f"pre-run-compression-paused:{_latest_user_query(messages)}:{token_estimate}".encode("utf-8")
+            ).hexdigest()[:16],
+        }
+
+    token_limit = active_limit
+    if force_hard_rescue:
+        token_limit = min(active_limit, max(1, int(hard_limit * 0.80)))
+
+    try:
+        result, archive_key, compression_updates = await _run_hermes_style_compression(
+            state=state,
+            runtime=runtime,
+            mode="pre_run",
+            token_limit=token_limit,
+            force=force_hard_rescue or force_compression,
+        )
+    except Exception as exc:
+        if force_hard_rescue and _env_bool("ALPHARAVIS_ENABLE_HARD_CONTEXT_TRIM", "true"):
+            return _hard_context_trim_update(
+                state,
+                messages=messages,
+                token_estimate=token_estimate,
+                hard_limit=hard_limit,
+                reason=f"pre-run compression failed: {type(exc).__name__}",
+            )
+        warning = f"Pre-run context compression failed cleanly. The full context remains active for now. Error: {exc}"
+        return {
+            "memory_notice": warning,
+            "memory_notice_key": hashlib.sha256(warning.encode("utf-8")).hexdigest()[:16],
+            "run_profile": _profile_update(state, pre_run_compression_error=str(exc)[:300]),
+        }
+
+    if result.skipped:
+        if force_hard_rescue and _env_bool("ALPHARAVIS_ENABLE_HARD_CONTEXT_TRIM", "true"):
+            return _hard_context_trim_update(
+                state,
+                messages=messages,
+                token_estimate=token_estimate,
+                hard_limit=hard_limit,
+                reason=f"pre-run compression skipped: {result.reason}",
+            )
+        if force_compression:
+            notice = (
+                "Manuelle Pre-run-Kompression wurde angefragt, aber der gemeinsame "
+                f"Hermes-style Compressor hat nichts Sinnvolles zum Archivieren gefunden ({result.reason})."
+            )
+            return {
+                "compression_stats": result.compression_stats,
+                "memory_notice": notice,
+                "memory_notice_key": hashlib.sha256(notice.encode("utf-8")).hexdigest()[:16],
+                "run_profile": _profile_update(state, pre_run_compression_skipped=result.reason),
+            }
+        return {}
+
+    rebuilt_messages = [
+        message for message in compression_updates.get("messages", []) if not _is_remove_message(message)
+    ]
+    tokens_after = _estimate_tokens(_drop_previous_compaction_messages(rebuilt_messages))
+    if force_hard_rescue and hard_limit > 0 and tokens_after > hard_limit and _env_bool(
+        "ALPHARAVIS_ENABLE_HARD_CONTEXT_TRIM", "true"
+    ):
+        return _hard_context_trim_update(
+            state,
+            messages=rebuilt_messages,
+            token_estimate=tokens_after,
+            hard_limit=hard_limit,
+            reason="pre-run compression remained over hard limit",
+        )
+
+    hierarchy_notice = str(compression_updates.pop("archive_compression_notice", "") or "")
+    prefix = "Hard-Limit-Rettung: " if force_hard_rescue else ("Manuelle Pre-run-Kompression: " if force_compression else "")
+    notice = (
+        f"{prefix}Ich habe den aktiven Kontext vor dem Modelllauf mit dem gemeinsamen "
+        f"Hermes-style Compressor komprimiert: ca. {_compressor_estimate_tokens(result.middle)} "
+        f"Tokens aus dem alten Mittelteil wurden als Archiv `{archive_key}` gespeichert. "
+        "Die neueste Nutzernachricht und die neuesten Tail-Messages bleiben aktiv."
+    )
+    if hierarchy_notice:
+        notice += f" {hierarchy_notice}"
+    if result.summary_failed:
+        notice += " Hinweis: Das Summary-Modell ist fehlgeschlagen; ein fail-safe Summary wurde verwendet."
+
+    return {
+        **compression_updates,
+        "memory_notice": notice,
+        "memory_notice_key": archive_key,
+        "run_profile": _profile_update(
+            state,
+            pre_run_compression_used=True,
+            pre_run_compression_tokens=result.token_estimate_before,
+            pre_run_compression_tokens_after=result.token_estimate_after,
+            pre_run_compression_archive_key=archive_key,
+            hard_context_rescued=force_hard_rescue,
+        ),
+    }
+
+
 async def handoff_context_guard_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
     if not _env_bool("ALPHARAVIS_ENABLE_HANDOFF_CONTEXT_GUARD", "true"):
         return {}
@@ -7760,6 +7965,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
 
     builder = StateGraph(AlphaRavisState)
     builder.add_node("run_profile_start", run_profile_start_node)
+    builder.add_node("pre_run_context_guard", pre_run_context_guard_node)
     builder.add_node("route_decision", route_decision_node)
     builder.add_node("hard_context_stop", hard_context_stop_node)
     builder.add_node("crisis_preflight", crisis_preflight_node)
@@ -7779,7 +7985,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     builder.add_node("memory_notice", memory_notice_node)
     builder.add_node("run_profile_finish", run_profile_finish_node)
     builder.add_edge(START, "run_profile_start")
-    builder.add_edge("run_profile_start", "route_decision")
+    builder.add_edge("run_profile_start", "pre_run_context_guard")
+    builder.add_edge("pre_run_context_guard", "route_decision")
     builder.add_conditional_edges(
         "route_decision",
         route_after_decision,

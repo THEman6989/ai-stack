@@ -21,6 +21,7 @@ from context_compressor import (  # noqa: E402
     should_compress,
 )
 from model_metadata import context_limit_from_ratio, get_model_context_length  # noqa: E402
+from model_metadata import estimate_message_tokens_rough  # noqa: E402
 
 
 def test_estimate_tokens_counts_images_and_tool_args() -> None:
@@ -46,6 +47,25 @@ def test_estimate_tokens_counts_images_and_tool_args() -> None:
     ]
 
     assert estimate_tokens_rough(messages) > 1700
+
+
+def test_reasoning_blocks_do_not_count_as_active_context() -> None:
+    message = {
+        "role": "assistant",
+        "content": [
+            {"type": "thinking", "thinking": "hidden " * 4000},
+            {"type": "reasoning", "content": "internal " * 4000},
+            {"type": "text", "text": "visible answer"},
+        ],
+        "usage_metadata": {"total_tokens": 50000},
+    }
+
+    assert estimate_tokens_rough([message]) < 20
+    assert estimate_message_tokens_rough(message) < 20
+    prep = prepare_messages_for_summary([message])
+    assert "visible answer" in prep.text
+    assert "hidden" not in prep.text
+    assert "internal" not in prep.text
 
 
 def test_json_safe_tool_args_truncation_preserves_json() -> None:

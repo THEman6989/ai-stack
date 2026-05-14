@@ -68,6 +68,8 @@ def _content_to_text(content: Any) -> str:
         parts: list[str] = []
         for block in content:
             if isinstance(block, dict):
+                if str(block.get("type") or "") in {"thinking", "reasoning"}:
+                    continue
                 if "text" in block:
                     parts.append(str(block.get("text") or ""))
                 elif "content" in block:
@@ -102,6 +104,8 @@ def content_token_estimate(content: Any) -> int:
         total = 0
         for block in content:
             if isinstance(block, dict):
+                if str(block.get("type") or "") in {"thinking", "reasoning"}:
+                    continue
                 if _is_image_block(block):
                     total += image_token_estimate()
                 total += estimate_tokens_rough_text(_content_to_text(block))

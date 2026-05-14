@@ -841,8 +841,10 @@ ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT=128000
 BRIDGE_HARD_INPUT_TOKEN_LIMIT=128000
 ```
 
-The bridge checks before sending a request to LangGraph. The graph checks again
-before invoking any model.
+The bridge checks the raw incoming request before sending it to LangGraph. The
+graph checks again before invoking any model, but it first runs pre-run
+compression/trim on the active LangGraph thread state so an old thread can drop
+or compact old context instead of rejecting the newest user message.
 
 ## File Safety
 
@@ -869,23 +871,33 @@ own artifact/media roots.
 
 ## Memory And Compression
 
-Active chat compression happens automatically after the current LangGraph run
-finishes when the thread grows above `ALPHARAVIS_ACTIVE_TOKEN_LIMIT`.
+Active chat compression happens automatically before route selection and again
+after the current LangGraph run finishes when the thread grows above
+`ALPHARAVIS_ACTIVE_TOKEN_LIMIT`.
 
 When compression happens, AlphaRavis can show a visible `Memory-Notice`.
 The current task brief and latest handoff packet are preserved verbatim when
 available, so the next run still knows the plan, completed work, open tasks,
 and verification state.
 
+Before route selection, the pre-run guard compresses old active thread state.
+This is the guard that prevents the hard cutoff from blocking a small latest
+message on an old thread. If normal compression cannot reduce a context that is
+already beyond the hard limit, hard trim removes old active messages while
+preserving the latest user turn and records the trim in `run_profile`.
+
 Before the swarm starts, AlphaRavis also has a handoff-context guard. If the
-context is already too large, it compresses the beginning of the current run
-into a handoff summary and archives the exact original messages, while keeping
-the task brief, memory/skill hints, latest handoff packet, and recent messages
-active.
+agent-path context is already too large after planner/memory/skill setup, it
+compresses the beginning of the current run into a handoff summary and archives
+the exact original messages, while keeping the task brief, memory/skill hints,
+latest handoff packet, and recent messages active.
 
 Useful handoff settings:
 
 ```text
+ALPHARAVIS_ENABLE_PRE_RUN_COMPRESSION=true
+ALPHARAVIS_ENABLE_HARD_CONTEXT_TRIM=true
+ALPHARAVIS_HARD_CONTEXT_TRIM_RATIO=0.80
 ALPHARAVIS_ENABLE_HANDOFF_CONTEXT_GUARD=true
 ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT=8500
 ALPHARAVIS_HANDOFF_CONTEXT_KEEP_LAST_MESSAGES=16

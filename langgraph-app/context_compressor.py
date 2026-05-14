@@ -129,6 +129,8 @@ def _content_to_text(content: Any) -> str:
         parts: list[str] = []
         for block in content:
             if isinstance(block, dict):
+                if str(block.get("type") or "") in {"thinking", "reasoning"}:
+                    continue
                 if "text" in block:
                     parts.append(str(block.get("text") or ""))
                 elif "content" in block:
@@ -183,7 +185,7 @@ def estimate_tokens_rough(value: Any) -> int:
     if isinstance(value, list):
         total = 0
         for item in value:
-            total += extract_usage_tokens(item) or estimate_message_tokens_rough(item)
+            total += estimate_message_tokens_rough(item)
         return max(1, total)
     if isinstance(value, dict):
         return estimate_message_tokens_rough(value)

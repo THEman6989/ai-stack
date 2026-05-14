@@ -390,6 +390,7 @@ The graph is built as:
 ```text
 START
   -> run_profile_start
+  -> pre_run_context_guard
   -> route_decision
   -> hard_context_stop OR fast_chat OR crisis_preflight
   -> crisis_manager when owner crisis recovery is enabled and the big LLM preflight fails
@@ -828,7 +829,11 @@ collection tier.
 The active engine lives in `langgraph-app/context_compressor.py` and is shared by
 both trigger points:
 
-- `handoff_context_guard`: pre-swarm trigger when a run is already too large.
+- `pre_run_context_guard`: pre-route trigger that compacts old active thread
+  state before the hard context cutoff and before fast-path/agent-path model
+  calls.
+- `handoff_context_guard`: pre-swarm trigger when planner/memory/skill setup
+  made an agent-path run too large.
 - `context_guard_after`: post-run safety net after the current answer is done.
 
 There are not two competing active compression algorithms anymore. Both paths
@@ -850,6 +855,9 @@ ALPHARAVIS_COMPRESSION_TRIGGER_RATIO=0.50
 ALPHARAVIS_ACTIVE_CONTEXT_TRIGGER_RATIO=0.50
 ALPHARAVIS_HANDOFF_CONTEXT_TRIGGER_RATIO=0.50
 ALPHARAVIS_HARD_CONTEXT_RATIO=0.95
+ALPHARAVIS_ENABLE_PRE_RUN_COMPRESSION=true
+ALPHARAVIS_ENABLE_HARD_CONTEXT_TRIM=true
+ALPHARAVIS_HARD_CONTEXT_TRIM_RATIO=0.80
 ALPHARAVIS_ENABLE_POST_RUN_COMPRESSION=true
 ALPHARAVIS_COMPRESSION_PROTECT_FIRST_MESSAGES=3
 ALPHARAVIS_COMPRESSION_PROTECT_LAST_MESSAGES=16
@@ -865,10 +873,13 @@ hard_cutoff         = context_length * ALPHARAVIS_HARD_CONTEXT_RATIO
 ```
 
 For a 128k llama.cpp context and the default 50 percent trigger, handoff and
-post-run compression start around 64k estimated tokens, while the hard stop
-starts around 121k. If the endpoint cannot report context length, the fallback
-values `ALPHARAVIS_MODEL_CONTEXT_LENGTH` and `ALPHARAVIS_DEFAULT_CONTEXT_LENGTH`
-are used. Set `ALPHARAVIS_ENABLE_PERCENT_CONTEXT_LIMITS=false` to return to the
+pre-run, handoff, and post-run compression start around 64k estimated tokens,
+while the hard stop starts around 121k. The pre-run guard runs before the hard
+stop; if normal compression cannot rescue a thread already above the hard limit,
+hard trim removes old active messages while preserving the latest user turn. If
+the endpoint cannot report context length, the fallback values
+`ALPHARAVIS_MODEL_CONTEXT_LENGTH` and `ALPHARAVIS_DEFAULT_CONTEXT_LENGTH` are
+used. Set `ALPHARAVIS_ENABLE_PERCENT_CONTEXT_LIMITS=false` to return to the
 fixed legacy limits `ALPHARAVIS_ACTIVE_TOKEN_LIMIT` and
 `ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT`.
 
@@ -1311,11 +1322,11 @@ ALPHARAVIS_HARD_CONTEXT_RATIO=0.95
 ```
 
 The bridge refuses oversized incoming requests before they reach LangGraph. The
-graph checks the active checkpointed context again before routing to fast path,
-planner, swarm, or crisis manager. When percentage limits are enabled, the graph
-hard cutoff is computed from discovered context length and
-`ALPHARAVIS_HARD_CONTEXT_RATIO`; `ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT=0`
-still disables the graph hard stop explicitly.
+graph then compacts or trims the active checkpointed context before routing to
+fast path, planner, swarm, or crisis manager. When percentage limits are
+enabled, the graph hard cutoff is computed from discovered context length and
+`ALPHARAVIS_HARD_CONTEXT_RATIO`; `ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT=0` still
+disables the graph hard stop explicitly.
 
 ## Fast Path And Run Profile
 
