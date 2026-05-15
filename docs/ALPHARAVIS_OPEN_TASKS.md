@@ -24,8 +24,7 @@ Implemented:
 
 Still needed:
 
-- Live browser polish pass on the owner machine after the next normal
-  `make config` run, especially for very narrow mobile-sized windows.
+- Done: Live browser polish pass on the owner machine for very narrow mobile-sized windows.
 
 ## Service Dashboard And Tailscale HTTPS
 
@@ -1114,11 +1113,62 @@ Already adopted or partly adopted:
   - failure cooldown
   - image/tool-argument-aware token estimation
   - percentage-based context-length triggers with local model context discovery
+  - Hermes-style recent-tail protection with a 3-message minimum plus token
+    budget/soft ceiling, rather than preserving 16 latest messages verbatim
+  - latest user-message anchoring so the active request stays outside the
+    reference-only summary
+  - multi-pass pre-run compression that re-estimates after each pass before
+    falling back to hard trim
+  - pre-run static prompt/tool reserve, so active-message thresholds leave room
+    for the actual DeepAgents system prompt and tool schemas
+  - the same static reserve is applied to handoff and post-run compression
+    thresholds
+  - final model-call budget estimation that counts active messages plus model
+    kwargs and bound DeepAgents tool schemas before invocation
+  - direct `archive_key` / `read_archive_record` references in active
+    compaction summaries
 - `agent/context_engine.py` inspired the lightweight AlphaRavis
   `compression_stats` state. A full plugin-style context engine is not needed
   yet because AlphaRavis compression also writes archives and pgvector records.
 - Hermes skill ideas are represented by reviewed repo skill cards under
   `ai-skills/`, plus the Store-backed skill-library candidate flow.
+
+Current Hermes-style context hardening plan:
+
+- Implemented: local context discovery queries llama.cpp/OpenAI-compatible
+  endpoints directly and uses `/props` or `/v1/props` for actual `n_ctx`.
+- Implemented: run/profile budget accounting includes message tokens, static
+  prompt/tool reserve, request estimate, active/hard thresholds, and archive
+  counts.
+- Implemented: make static context reserve agent-specific instead of always
+  reserving the largest DeepAgents tool/schema block.
+- Implemented: add an `inspect_context_budget` tool for operators and agents to
+  see context length source, active/effective limits, reserve details, archive
+  counts, and whether compression or hard rescue is needed.
+- Implemented: add a final LangGraph budget-rescue node before the Swarm model
+  call. If the assembled request would exceed the effective budget, it should
+  run aggressive Hermes-style compression and archive the middle before the
+  model sees the request.
+- Implemented: provider-side context-overflow prevention now happens via
+  `final_budget_rescue` before the Swarm model call. If the Swarm provider call
+  still raises `context_overflow` or `payload_too_large`, AlphaRavis runs rescue
+  once and retries the Swarm invocation with compressed state.
+- Implemented: provider overflow retry parses provider-reported context limits
+  from errors such as llama.cpp `n_ctx_slot` / "maximum context length" messages
+  and recomputes the rescue budget from that smaller real limit.
+- Still future: retry an already-failed provider call inside deeply nested
+  third-party subgraphs when the exception happens after the AlphaRavis Swarm
+  wrapper no longer has clean state ownership.
+- Implemented: add archive-recall nudges when the latest user message clearly
+  refers to old compressed context, so agents prefer `context_retrieval_agent`
+  and `read_archive_record(...)` over guessing from summaries.
+- Implemented: make multi-pass preflight and final budget rescue configurable as
+  "until under full request budget" with a bounded maximum pass count. Node
+  tests cover provider-reported budget snapshots and dynamic multi-pass final
+  rescue.
+- Still future: broaden live UI/Observer validation after the next real
+  over-budget llama.cpp run, using the recorded `provider_reported_context_limit`
+  and `final_budget_rescue_budget_met` fields.
 
 Implementation chunks:
 

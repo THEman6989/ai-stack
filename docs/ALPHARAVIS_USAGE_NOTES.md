@@ -841,13 +841,61 @@ Hard request cutoffs:
 
 ```text
 ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT=128000
-BRIDGE_HARD_INPUT_TOKEN_LIMIT=128000
+BRIDGE_HARD_INPUT_TOKEN_LIMIT=0
+ALPHARAVIS_ENABLE_STATIC_CONTEXT_RESERVE=true
+ALPHARAVIS_STATIC_CONTEXT_RESERVE_TOKENS=0
+ALPHARAVIS_USE_AGENT_SPECIFIC_CONTEXT_RESERVE=true
+ALPHARAVIS_ENABLE_FINAL_LLM_BUDGET_GUARD=true
+ALPHARAVIS_ENABLE_FINAL_BUDGET_RESCUE=true
+ALPHARAVIS_FINAL_BUDGET_RESCUE_MAX_PASSES=3
+ALPHARAVIS_ENABLE_PROVIDER_OVERFLOW_RETRY=true
+ALPHARAVIS_ENABLE_PROVIDER_CONTEXT_LIMIT_RETRY=true
+ALPHARAVIS_DYNAMIC_COMPRESSION_UNTIL_BUDGET=true
+ALPHARAVIS_DYNAMIC_COMPRESSION_MAX_PASSES=6
+ALPHARAVIS_DYNAMIC_COMPRESSION_HARD_MAX_PASSES=12
 ```
 
-The bridge checks the raw incoming request before sending it to LangGraph. The
-graph checks again before invoking any model, but it first runs pre-run
-compression/trim on the active LangGraph thread state so an old thread can drop
-or compact old context instead of rejecting the newest user message.
+The bridge cutoff is disabled by default. LangGraph owns the normal hard
+context decision, asks the model endpoint for its context length when discovery
+is enabled, and then runs pre-run compression/trim on the active thread state
+before invoking any model. Set `BRIDGE_HARD_INPUT_TOKEN_LIMIT` to a positive
+value only for deployments that intentionally want the bridge to reject raw
+oversized requests before LangGraph can compact them.
+
+`ALPHARAVIS_ENABLE_STATIC_CONTEXT_RESERVE` makes pre-run compression reserve
+budget for the largest configured DeepAgents system prompt and tool schema.
+This mirrors Hermes' preflight estimate, where tool schemas are counted before
+the model call. Leave `ALPHARAVIS_STATIC_CONTEXT_RESERVE_TOKENS=0` for automatic
+reserve calculation; set a positive value only when you want to pin the reserve
+manually. The same reserve is used for handoff and post-run compression, so the
+thread is compacted back to a budget that leaves room for the next real agent
+request. With `ALPHARAVIS_USE_AGENT_SPECIFIC_CONTEXT_RESERVE=true`, AlphaRavis
+uses the selected/active agent's own reserve once that is known and falls back
+to the largest agent reserve earlier in the run.
+
+`ALPHARAVIS_ENABLE_FINAL_LLM_BUDGET_GUARD` keeps a final Hermes-style estimate
+at the actual model invocation point. It includes active messages plus tool
+schemas and model kwargs, and it logs a warning when the assembled request is
+near or above the LangGraph hard context budget.
+
+`ALPHARAVIS_ENABLE_FINAL_BUDGET_RESCUE` adds a final compression checkpoint
+immediately before the Swarm model call. If the full request estimate is still
+over the effective budget, AlphaRavis archives and compresses the middle again
+until the request is under budget, bounded by
+`ALPHARAVIS_DYNAMIC_COMPRESSION_MAX_PASSES` and
+`ALPHARAVIS_DYNAMIC_COMPRESSION_HARD_MAX_PASSES`, before calling the model.
+Use the `inspect_context_budget` tool to inspect the same budget fields from
+inside an agent run.
+
+`ALPHARAVIS_ENABLE_PROVIDER_OVERFLOW_RETRY` adds one rescue-and-retry path
+around the Swarm model invocation if the provider still reports
+`context_overflow` or `payload_too_large`. With
+`ALPHARAVIS_ENABLE_PROVIDER_CONTEXT_LIMIT_RETRY=true`, the retry path parses
+provider error text for the real context window and recomputes the rescue budget
+from that smaller limit.
+
+The Bridge Test UI Observer (`/observer`) includes a `Context Budget` strip for
+each observed request when budget data is available.
 
 ## File Safety
 

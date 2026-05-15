@@ -602,6 +602,33 @@ def test_context_activity_extracts_compaction_and_hard_trim() -> None:
     assert "entfernt=12" in hard[2]
 
 
+def test_bridge_observer_records_context_budget_updates() -> None:
+    bridge_server._BRIDGE_OBSERVATIONS.clear()
+    bridge_server._BRIDGE_OBSERVATIONS.appendleft({"id": "obs_budget", "receive": {}})
+
+    bridge_server._observer_note_budget(
+        "obs_budget",
+        node_name="final_budget_rescue",
+        profile={
+            "final_context_budget": {
+                "context_length": 128000,
+                "message_tokens": 70000,
+                "static_context_reserve_tokens": 4557,
+                "request_tokens": 74557,
+                "effective_active_limit": 59443,
+            },
+            "final_budget_rescue_used": True,
+            "final_budget_rescue_passes": 2,
+        },
+    )
+
+    budget = bridge_server._BRIDGE_OBSERVATIONS[0]["receive"]["context_budget"]
+    assert budget["node"] == "final_budget_rescue"
+    assert budget["request_tokens"] == 74557
+    assert budget["final_budget_rescue_used"] is True
+    assert budget["final_budget_rescue_passes"] == 2
+
+
 def test_input_items_and_delete_routes_use_stored_response() -> None:
     bridge_server._RESPONSES_STORE.clear()
     bridge_server._RESPONSES_INPUT_ITEMS.clear()

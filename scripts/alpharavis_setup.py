@@ -70,7 +70,7 @@ MODEL_MANAGEMENT_KEYS = [
     ("ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING", "false, true, or tool_calling"),
     ("ALPHARAVIS_DEEPAGENTS_REQUIRE_RESPONSES", "fail startup instead of falling back for DeepAgents"),
     ("BRIDGE_PREFERRED_API_MODE", "responses or chat_completions"),
-    ("BRIDGE_HARD_INPUT_TOKEN_LIMIT", "hard bridge request cutoff"),
+    ("BRIDGE_HARD_INPUT_TOKEN_LIMIT", "optional hard bridge request cutoff"),
     ("BRIDGE_HARD_INPUT_HTTP_ERROR", "return HTTP 413 instead of visible message"),
     ("ALPHARAVIS_ENABLE_POWER_MANAGEMENT", "allow power-management intent handling"),
     ("ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS", "allow real external model/power actions"),

@@ -400,6 +400,29 @@ def context_limit_from_ratio(
     return max(int(minimum), int(context_length * ratio))
 
 
+def parse_context_limit_from_error(error_msg: str) -> int | None:
+    """Extract a provider-reported context window from common overflow errors."""
+
+    error_lower = str(error_msg or "").lower().replace(",", "")
+    patterns = [
+        r"(?:max(?:imum)?|limit)\s*(?:context\s*)?(?:length|size|window)?\s*(?:is|of|:)?\s*(\d{4,})",
+        r"context\s*(?:length|size|window)\s*(?:is|of|:)?\s*(\d{4,})",
+        r"n_ctx(?:_slot)?\s*[=:]\s*(\d{4,})",
+        r"context_window\s*[=:]\s*(\d{4,})",
+        r"(\d{4,})\s*(?:token)?s?\s*(?:context|limit)",
+        r">\s*(\d{4,})\s*(?:max|limit|token)",
+        r"(\d{4,})\s*(?:max(?:imum)?)\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, error_lower)
+        if not match:
+            continue
+        limit = _coerce_reasonable_int(match.group(1))
+        if limit is not None:
+            return limit
+    return None
+
+
 def get_model_context_length(
     model: str | None = None,
     provider: str | None = None,

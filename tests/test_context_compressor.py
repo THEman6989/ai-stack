@@ -22,6 +22,7 @@ from context_compressor import (  # noqa: E402
 )
 from model_metadata import context_limit_from_ratio, get_model_context_length  # noqa: E402
 from model_metadata import estimate_message_tokens_rough  # noqa: E402
+from model_metadata import parse_context_limit_from_error  # noqa: E402
 
 
 def test_estimate_tokens_counts_images_and_tool_args() -> None:
@@ -47,6 +48,12 @@ def test_estimate_tokens_counts_images_and_tool_args() -> None:
     ]
 
     assert estimate_tokens_rough(messages) > 1700
+
+
+def test_parse_context_limit_from_provider_errors() -> None:
+    assert parse_context_limit_from_error("maximum context length is 32768 tokens") == 32768
+    assert parse_context_limit_from_error("llama.cpp n_ctx_slot = 131072, prompt is too long") == 131072
+    assert parse_context_limit_from_error("input 250000 tokens > 200000 maximum") == 200000
 
 
 def test_reasoning_blocks_do_not_count_as_active_context() -> None:
@@ -116,6 +123,63 @@ def test_head_middle_tail_keeps_handoff_packet_protected() -> None:
     selection = select_head_middle_tail(messages, token_limit=100, protected_message_ids=set())
     assert 10 in selection.head_indexes
     assert messages[10] in selection.head
+
+
+def test_tail_protection_uses_hermes_style_token_budget_not_fixed_sixteen_messages() -> None:
+    old_values = {
+        key: os.environ.get(key)
+        for key in (
+            "ALPHARAVIS_COMPRESSION_PROTECT_LAST_MESSAGES",
+            "ALPHARAVIS_COMPRESSION_TAIL_TOKEN_RATIO",
+            "ALPHARAVIS_COMPRESSION_TAIL_SOFT_CEILING_RATIO",
+        )
+    }
+    try:
+        os.environ.pop("ALPHARAVIS_COMPRESSION_PROTECT_LAST_MESSAGES", None)
+        os.environ["ALPHARAVIS_COMPRESSION_TAIL_TOKEN_RATIO"] = "0.10"
+        os.environ["ALPHARAVIS_COMPRESSION_TAIL_SOFT_CEILING_RATIO"] = "1.5"
+        messages = [{"id": f"m{i}", "role": "user", "content": f"message {i} " + ("x" * 80)} for i in range(30)]
+
+        selection = select_head_middle_tail(messages, token_limit=400, protected_message_ids=set())
+
+        assert len(selection.tail_indexes) < 16
+        assert selection.tail_indexes[-3:] == [27, 28, 29]
+        assert selection.middle
+    finally:
+        for key, value in old_values.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_tail_protection_anchors_latest_user_message_like_hermes() -> None:
+    old_values = {
+        key: os.environ.get(key)
+        for key in (
+            "ALPHARAVIS_COMPRESSION_PROTECT_LAST_MESSAGES",
+            "ALPHARAVIS_COMPRESSION_TAIL_TOKEN_RATIO",
+            "ALPHARAVIS_COMPRESSION_TAIL_SOFT_CEILING_RATIO",
+        )
+    }
+    try:
+        os.environ["ALPHARAVIS_COMPRESSION_PROTECT_LAST_MESSAGES"] = "3"
+        os.environ["ALPHARAVIS_COMPRESSION_TAIL_TOKEN_RATIO"] = "0.05"
+        os.environ["ALPHARAVIS_COMPRESSION_TAIL_SOFT_CEILING_RATIO"] = "1.0"
+        messages = [{"id": f"m{i}", "role": "assistant", "content": f"assistant {i} " + ("x" * 80)} for i in range(30)]
+        messages[20] = {"id": "latest-user", "role": "user", "content": "current active request"}
+
+        selection = select_head_middle_tail(messages, token_limit=120, protected_message_ids=set())
+
+        assert 20 in selection.tail_indexes
+        assert selection.tail_indexes == list(range(20, 30))
+        assert all(index not in selection.middle_indexes for index in range(20, 30))
+    finally:
+        for key, value in old_values.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def test_anti_thrashing_blocks_auto_and_force_ignores_it() -> None:
@@ -215,6 +279,8 @@ def test_reference_only_summary_message() -> None:
     assert "REFERENCE ONLY" in content
     assert "Do NOT answer questions" in content
     assert "Answer only the latest user request" in content
+    assert "source_type: archive" in content
+    assert 'read_archive_record(archive_key="archive_1")' in content
 
 
 def test_redacted_archive_json_is_meaningful() -> None:
@@ -233,6 +299,8 @@ def _run_all() -> None:
         test_tool_output_deduplication_for_summary_prompt,
         test_informative_tool_result_summary,
         test_head_middle_tail_keeps_handoff_packet_protected,
+        test_tail_protection_uses_hermes_style_token_budget_not_fixed_sixteen_messages,
+        test_tail_protection_anchors_latest_user_message_like_hermes,
         test_anti_thrashing_blocks_auto_and_force_ignores_it,
         test_percent_context_limit_helper_and_env_override,
         test_summary_failure_returns_visible_fallback_and_archive_content,

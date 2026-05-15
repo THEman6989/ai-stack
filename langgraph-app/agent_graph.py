@@ -123,9 +123,11 @@ else:
 try:
     from model_metadata import context_limit_from_ratio as _context_limit_from_ratio
     from model_metadata import get_model_context_length as _get_model_context_length
+    from model_metadata import parse_context_limit_from_error as _parse_context_limit_from_error
 except Exception as exc:  # pragma: no cover - optional local helper
     _context_limit_from_ratio = None
     _get_model_context_length = None
+    _parse_context_limit_from_error = None
     MODEL_METADATA_IMPORT_ERROR: Exception | None = exc
 else:
     MODEL_METADATA_IMPORT_ERROR = None
@@ -344,6 +346,8 @@ class AlphaRavisState(MessagesState):
     archive_collection_keys: NotRequired[list[str]]
     compressed_archive_keys: NotRequired[list[str]]
     compression_stats: NotRequired[dict[str, Any]]
+    provider_reported_context_limit: NotRequired[int]
+    provider_context_error: NotRequired[dict[str, Any]]
     memory_notice: NotRequired[str]
     memory_notice_key: NotRequired[str]
     memory_notice_seen_key: NotRequired[str]
@@ -573,6 +577,9 @@ MCP_SERVER_INFOS: list[dict[str, Any]] = []
 MCP_LOAD_WARNINGS: list[str] = []
 MCP_SCHEMA_CACHE: dict[str, list[dict[str, str]]] = {}
 GRAPH_TOOLSET_PROFILE: dict[str, Any] = {}
+GRAPH_STATIC_CONTEXT_RESERVE_TOKENS = 0
+GRAPH_STATIC_CONTEXT_RESERVE_DETAIL: dict[str, Any] = {}
+GRAPH_AGENT_CONTEXT_RESERVES: dict[str, dict[str, Any]] = {}
 
 if not COMFY_IP:
     print("WARNING: 'comfy_server' IP not found in REMOTE_PCS env variable.")
@@ -640,8 +647,17 @@ def _classified_error_profile(
     context_length: int = 0,
     num_messages: int = 0,
 ) -> dict[str, Any]:
+    provider_limit = None
+    if _parse_context_limit_from_error is not None:
+        try:
+            provider_limit = _parse_context_limit_from_error(str(exc))
+        except Exception:
+            provider_limit = None
     if _classify_api_error is None:
-        return {"reason": "unclassified", "message": str(exc)[:500]}
+        profile = {"reason": "unclassified", "message": str(exc)[:500]}
+        if provider_limit:
+            profile["provider_reported_context_limit"] = provider_limit
+        return profile
     classified = _classify_api_error(
         exc,
         provider=provider,
@@ -650,7 +666,10 @@ def _classified_error_profile(
         context_length=context_length,
         num_messages=num_messages,
     )
-    return classified.to_profile()
+    profile = classified.to_profile()
+    if provider_limit:
+        profile["provider_reported_context_limit"] = provider_limit
+    return profile
 
 
 _PERSISTENT_CONTEXT_THREAT_PATTERNS = [
@@ -896,6 +915,285 @@ def _plain_text_messages(messages: Any) -> Any:
     return messages
 
 
+def _model_input_messages(input_value: Any) -> list[Any]:
+    if isinstance(input_value, dict):
+        messages = input_value.get("messages")
+        if isinstance(messages, list):
+            return messages
+        return []
+    if isinstance(input_value, list):
+        return input_value
+    to_messages = getattr(input_value, "to_messages", None)
+    if callable(to_messages):
+        try:
+            messages = to_messages()
+            return messages if isinstance(messages, list) else []
+        except Exception:
+            return []
+    return []
+
+
+def _estimate_text_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return _compressor_estimate_tokens([{"role": "system", "content": text}])
+
+
+def _tool_schema_for_budget(tool_obj: Any) -> dict[str, Any]:
+    if isinstance(tool_obj, dict):
+        return tool_obj
+    data: dict[str, Any] = {}
+    for attr in ("name", "description", "args", "args_schema"):
+        value = getattr(tool_obj, attr, None)
+        if value is not None:
+            data[attr] = value
+    return data or {"tool": str(tool_obj)}
+
+
+def _estimate_tool_schema_tokens(tools: list[Any] | tuple[Any, ...] | None) -> int:
+    if not tools:
+        return 0
+    try:
+        schema_text = json.dumps([_tool_schema_for_budget(tool) for tool in tools], ensure_ascii=False, default=str)
+    except Exception:
+        schema_text = str(tools)
+    return _estimate_text_tokens(schema_text)
+
+
+def _estimate_request_tokens(
+    messages: list[Any],
+    *,
+    system_prompt: str = "",
+    tools: list[Any] | tuple[Any, ...] | None = None,
+    model_kwargs: dict[str, Any] | None = None,
+) -> dict[str, int]:
+    message_tokens = _estimate_tokens(messages)
+    system_tokens = _estimate_text_tokens(system_prompt)
+    tool_tokens = _estimate_tool_schema_tokens(tools)
+    kwargs_tokens = _estimate_text_tokens(json.dumps(model_kwargs, ensure_ascii=False, default=str)) if model_kwargs else 0
+    return {
+        "message_tokens": message_tokens,
+        "system_prompt_tokens": system_tokens,
+        "tool_schema_tokens": tool_tokens,
+        "model_kwargs_tokens": kwargs_tokens,
+        "total_tokens": message_tokens + system_tokens + tool_tokens + kwargs_tokens,
+    }
+
+
+def _register_static_context_reserve(
+    agent_name: str,
+    *,
+    system_prompt: str = "",
+    tools: list[Any] | tuple[Any, ...] | None = None,
+    model_kwargs: dict[str, Any] | None = None,
+) -> None:
+    if not _env_bool("ALPHARAVIS_ENABLE_STATIC_CONTEXT_RESERVE", "true"):
+        return
+    budget = _estimate_request_tokens([], system_prompt=system_prompt, tools=tools, model_kwargs=model_kwargs)
+    global GRAPH_STATIC_CONTEXT_RESERVE_TOKENS, GRAPH_STATIC_CONTEXT_RESERVE_DETAIL, GRAPH_AGENT_CONTEXT_RESERVES
+    detail = {
+        "agent": agent_name,
+        "system_prompt_tokens": budget["system_prompt_tokens"],
+        "tool_schema_tokens": budget["tool_schema_tokens"],
+        "model_kwargs_tokens": budget["model_kwargs_tokens"],
+        "total_tokens": budget["total_tokens"],
+        "tool_count": len(tools or []),
+    }
+    GRAPH_AGENT_CONTEXT_RESERVES[agent_name] = detail
+    if budget["total_tokens"] > GRAPH_STATIC_CONTEXT_RESERVE_TOKENS:
+        GRAPH_STATIC_CONTEXT_RESERVE_TOKENS = budget["total_tokens"]
+        GRAPH_STATIC_CONTEXT_RESERVE_DETAIL = detail
+
+
+def _agent_name_from_toolsets(toolsets: list[str]) -> str:
+    joined = " ".join(toolsets).lower()
+    if "agent/research" in joined or "research" in joined:
+        return "research_expert"
+    if "agent/debugger" in joined or "debug" in joined:
+        return "debugger_agent"
+    if "agent/hermes" in joined or "coding/write" in joined or "code" in joined:
+        return "hermes_coding_agent"
+    if "agent/context" in joined or "rag/memory" in joined or "archive" in joined:
+        return "context_retrieval_agent"
+    if "agent/power" in joined or "power" in joined:
+        return "power_management_agent"
+    if "agent/crisis" in joined or "crisis" in joined:
+        return "crisis_manager_agent"
+    if "agent/ui" in joined or "browser" in joined or "ui" in joined:
+        return "ui_assistant"
+    return "general_assistant"
+
+
+def _static_context_reserve_tokens(state: dict[str, Any] | None = None) -> int:
+    override = int(os.getenv("ALPHARAVIS_STATIC_CONTEXT_RESERVE_TOKENS", "0") or "0")
+    if override > 0:
+        return override
+    if not _env_bool("ALPHARAVIS_ENABLE_STATIC_CONTEXT_RESERVE", "true"):
+        return 0
+    if state and _env_bool("ALPHARAVIS_USE_AGENT_SPECIFIC_CONTEXT_RESERVE", "true"):
+        agent_name = str(state.get("active_agent") or "")
+        if not agent_name:
+            toolsets = state.get("selected_toolsets")
+            agent_name = _agent_name_from_toolsets(toolsets if isinstance(toolsets, list) else [])
+        detail = GRAPH_AGENT_CONTEXT_RESERVES.get(agent_name)
+        if isinstance(detail, dict):
+            return max(0, int(detail.get("total_tokens") or 0))
+    return max(0, int(GRAPH_STATIC_CONTEXT_RESERVE_TOKENS))
+
+
+def _static_context_reserve_detail(state: dict[str, Any] | None = None) -> dict[str, Any]:
+    if state and _env_bool("ALPHARAVIS_USE_AGENT_SPECIFIC_CONTEXT_RESERVE", "true"):
+        agent_name = str(state.get("active_agent") or "")
+        if not agent_name:
+            toolsets = state.get("selected_toolsets")
+            agent_name = _agent_name_from_toolsets(toolsets if isinstance(toolsets, list) else [])
+        detail = GRAPH_AGENT_CONTEXT_RESERVES.get(agent_name)
+        if isinstance(detail, dict):
+            return dict(detail)
+    return dict(GRAPH_STATIC_CONTEXT_RESERVE_DETAIL)
+
+
+def _effective_context_limit(limit: int, reserve_tokens: int) -> int:
+    if limit <= 0:
+        return limit
+    minimum = int(os.getenv("ALPHARAVIS_MIN_COMPRESSION_TOKEN_LIMIT", "4096"))
+    return max(minimum, limit - max(0, reserve_tokens))
+
+
+def _log_model_request_budget(
+    *,
+    purpose: str,
+    messages: list[Any],
+    system_prompt: str = "",
+    tools: list[Any] | tuple[Any, ...] | None = None,
+    model_kwargs: dict[str, Any] | None = None,
+    trace_id: str = "",
+) -> dict[str, int]:
+    budget = _estimate_request_tokens(
+        messages,
+        system_prompt=system_prompt,
+        tools=tools,
+        model_kwargs=model_kwargs,
+    )
+    hard_limit = _hard_context_token_limit()
+    active_limit = _active_context_token_limit()
+    over_hard = hard_limit > 0 and budget["total_tokens"] > hard_limit
+    near_hard = hard_limit > 0 and budget["total_tokens"] > int(hard_limit * 0.90)
+    _log_event(
+        logging.WARNING if over_hard or near_hard else logging.INFO,
+        "llm.request_budget.estimated",
+        purpose=purpose,
+        message_count=len(messages),
+        total_context_tokens=budget["total_tokens"],
+        message_context_tokens=budget["message_tokens"],
+        system_prompt_context_tokens=budget["system_prompt_tokens"],
+        tool_schema_context_tokens=budget["tool_schema_tokens"],
+        model_kwargs_context_tokens=budget["model_kwargs_tokens"],
+        active_context_limit=active_limit,
+        hard_context_limit=hard_limit,
+        context_length=_detected_context_length(),
+        over_hard_context_limit=over_hard,
+        near_hard_context_limit=near_hard,
+        tool_count=len(tools or []),
+        trace_id=trace_id,
+    )
+    return budget
+
+
+def _bound_tools_from_args(args: tuple[Any, ...], kwargs: dict[str, Any]) -> list[Any]:
+    candidate = kwargs.get("tools")
+    if candidate is None and args:
+        candidate = args[0]
+    if isinstance(candidate, list):
+        return candidate
+    if isinstance(candidate, tuple):
+        return list(candidate)
+    return []
+
+
+def _budget_guarded_agent_model(model: Any, *, purpose: str, tools: list[Any] | None = None) -> Any:
+    if not _env_bool("ALPHARAVIS_ENABLE_FINAL_LLM_BUDGET_GUARD", "true"):
+        return model
+    if getattr(model, "_alpharavis_budget_guarded", False):
+        return model
+
+    static_tools = list(tools or [])
+    original_invoke = getattr(model, "invoke", None)
+    original_ainvoke = getattr(model, "ainvoke", None)
+    original_stream = getattr(model, "stream", None)
+    original_astream = getattr(model, "astream", None)
+    original_bind = getattr(model, "bind", None)
+    original_bind_tools = getattr(model, "bind_tools", None)
+
+    if callable(original_invoke):
+        def invoke(input: Any, *args: Any, **kwargs: Any) -> Any:
+            messages = _model_input_messages(input)
+            if messages:
+                _log_model_request_budget(purpose=purpose, messages=messages, tools=static_tools)
+            return original_invoke(input, *args, **kwargs)
+
+        object.__setattr__(model, "invoke", invoke)
+
+    if callable(original_ainvoke):
+        async def ainvoke(input: Any, *args: Any, **kwargs: Any) -> Any:
+            messages = _model_input_messages(input)
+            if messages:
+                _log_model_request_budget(purpose=purpose, messages=messages, tools=static_tools)
+            return await original_ainvoke(input, *args, **kwargs)
+
+        object.__setattr__(model, "ainvoke", ainvoke)
+
+    if callable(original_stream):
+        def stream(input: Any, *args: Any, **kwargs: Any) -> Any:
+            messages = _model_input_messages(input)
+            if messages:
+                _log_model_request_budget(purpose=purpose, messages=messages, tools=static_tools)
+            return original_stream(input, *args, **kwargs)
+
+        object.__setattr__(model, "stream", stream)
+
+    if callable(original_astream):
+        async def astream(input: Any, *args: Any, **kwargs: Any) -> Any:
+            messages = _model_input_messages(input)
+            if messages:
+                _log_model_request_budget(purpose=purpose, messages=messages, tools=static_tools)
+            async for chunk in original_astream(input, *args, **kwargs):
+                yield chunk
+
+        object.__setattr__(model, "astream", astream)
+
+    if callable(original_bind):
+        def bind(*args: Any, **kwargs: Any) -> Any:
+            return _budget_guarded_agent_model(original_bind(*args, **kwargs), purpose=purpose, tools=static_tools)
+
+        object.__setattr__(model, "bind", bind)
+
+    if callable(original_bind_tools):
+        def bind_tools(*args: Any, **kwargs: Any) -> Any:
+            return _budget_guarded_agent_model(
+                original_bind_tools(*args, **kwargs),
+                purpose=purpose,
+                tools=[*static_tools, *_bound_tools_from_args(args, kwargs)],
+            )
+
+        object.__setattr__(model, "bind_tools", bind_tools)
+
+    object.__setattr__(model, "_alpharavis_budget_guarded", True)
+    return model
+
+
+def _create_budgeted_deep_agent(
+    *,
+    model: Any,
+    tools: list[Any],
+    name: str,
+    system_prompt: str,
+    **kwargs: Any,
+) -> Any:
+    _register_static_context_reserve(name, system_prompt=system_prompt, tools=tools)
+    return create_deep_agent(model=model, tools=tools, name=name, system_prompt=system_prompt, **kwargs)
+
+
 def _text_only_agent_model(model: Any) -> Any:
     if not _env_bool("ALPHARAVIS_FORCE_TEXT_ONLY_AGENT_MODEL_CONTENT", "true"):
         return model
@@ -990,6 +1288,12 @@ async def _ainvoke_direct_model(
     purpose: str = "direct",
     trace_id: str = "",
 ) -> AIMessage:
+    request_budget = _log_model_request_budget(
+        purpose=purpose,
+        messages=messages,
+        model_kwargs=model_kwargs,
+        trace_id=trace_id,
+    )
     if _responses_direct_calls_enabled():
         started = time.perf_counter()
         responses_model = model_name or os.getenv("ALPHARAVIS_RESPONSES_MODEL", "")
@@ -1005,7 +1309,7 @@ async def _ainvoke_direct_model(
             model=responses_model,
             provider_profile=provider_profile,
             message_count=len(messages),
-            approx_tokens=_estimate_tokens(messages),
+            approx_tokens=request_budget["total_tokens"],
             trace_id=trace_id,
         )
         try:
@@ -1023,7 +1327,7 @@ async def _ainvoke_direct_model(
                 model=result.model or model_name or "",
                 elapsed_seconds=result.elapsed_seconds or round(time.perf_counter() - started, 3),
                 message_count=len(messages),
-                approx_tokens=_estimate_tokens(messages),
+                approx_tokens=request_budget["total_tokens"],
                 compatibility_retry=result.compatibility_retry,
                 provider_profile=provider_profile,
                 trace_id=trace_id,
@@ -1049,7 +1353,7 @@ async def _ainvoke_direct_model(
                 exc,
                 provider="responses",
                 model=responses_model,
-                approx_tokens=_estimate_tokens(messages),
+                approx_tokens=request_budget["total_tokens"],
                 context_length=_hard_context_token_limit(),
                 num_messages=len(messages),
             )
@@ -1063,7 +1367,7 @@ async def _ainvoke_direct_model(
                 elapsed_seconds=round(time.perf_counter() - started, 3),
                 classification=classified,
                 provider_profile=provider_profile,
-                approx_tokens=_estimate_tokens(messages),
+                approx_tokens=request_budget["total_tokens"],
                 num_messages=len(messages),
                 trace_id=trace_id,
             )
@@ -1089,7 +1393,7 @@ async def _ainvoke_direct_model(
         purpose=purpose,
         model=model_name or os.getenv("ALPHARAVIS_MODEL", ""),
         provider_profile=provider_profile,
-        approx_tokens=_estimate_tokens(messages),
+        approx_tokens=request_budget["total_tokens"],
         num_messages=len(messages),
         trace_id=trace_id,
     )
@@ -1104,7 +1408,7 @@ async def _ainvoke_direct_model(
             model=model_name or os.getenv("ALPHARAVIS_MODEL", ""),
             elapsed_seconds=round(time.perf_counter() - started, 3),
             provider_profile=provider_profile,
-            approx_tokens=_estimate_tokens(messages),
+            approx_tokens=request_budget["total_tokens"],
             num_messages=len(messages),
             trace_id=trace_id,
         )
@@ -1117,7 +1421,7 @@ async def _ainvoke_direct_model(
         model=model_name or os.getenv("ALPHARAVIS_MODEL", ""),
         elapsed_seconds=round(time.perf_counter() - started, 3),
         provider_profile=provider_profile,
-        approx_tokens=_estimate_tokens(messages),
+        approx_tokens=request_budget["total_tokens"],
         num_messages=len(messages),
         trace_id=trace_id,
     )
@@ -4472,7 +4776,74 @@ def _detected_context_length() -> int:
         return max(4096, fallback)
 
 
+def _provider_context_length_override(state: dict[str, Any] | None, detected_context_length: int) -> int | None:
+    if not _env_bool("ALPHARAVIS_ENABLE_PROVIDER_CONTEXT_LIMIT_RETRY", "true"):
+        return None
+    raw = (state or {}).get("provider_reported_context_limit")
+    try:
+        value = int(raw) if raw is not None else 0
+    except (TypeError, ValueError):
+        return None
+    if value < 4096:
+        return None
+    return max(4096, min(value, detected_context_length))
+
+
+def _context_budget_snapshot(state: dict[str, Any] | None = None, *, messages: list[Any] | None = None) -> dict[str, Any]:
+    active_messages = messages if messages is not None else list((state or {}).get("messages", []))
+    message_tokens = _estimate_tokens(_drop_previous_compaction_messages(active_messages))
+    reserve = _static_context_reserve_tokens(state)
+    detected_context_length = _detected_context_length()
+    provider_context_length = _provider_context_length_override(state, detected_context_length)
+    context_length = provider_context_length or detected_context_length
+    active_limit = _ratio_token_limit_for_context(
+        context_length,
+        ratio_env="ALPHARAVIS_ACTIVE_CONTEXT_TRIGGER_RATIO",
+        fixed_env="ALPHARAVIS_ACTIVE_TOKEN_LIMIT",
+        fixed_default="30000",
+        default_ratio=0.50,
+    )
+    hard_limit = _hard_context_token_limit_for_context(context_length)
+    return {
+        "context_length": context_length,
+        "detected_context_length": detected_context_length,
+        "provider_reported_context_limit": provider_context_length,
+        "context_discovery_model": _context_discovery_model(),
+        "context_discovery_base_url": _context_discovery_base_url(),
+        "message_tokens": message_tokens,
+        "static_context_reserve_tokens": reserve,
+        "static_context_reserve_detail": _static_context_reserve_detail(state),
+        "request_tokens": message_tokens + reserve,
+        "active_limit": active_limit,
+        "effective_active_limit": _effective_context_limit(active_limit, reserve),
+        "hard_limit": hard_limit,
+        "effective_hard_limit": _effective_context_limit(hard_limit, reserve),
+        "compression_needed": message_tokens > _effective_context_limit(active_limit, reserve),
+        "hard_rescue_needed": hard_limit > 0 and message_tokens + reserve > hard_limit,
+        "message_count": len(active_messages),
+        "archived_context_count": len(list((state or {}).get("archived_context_keys") or [])),
+        "archive_collection_count": len(list((state or {}).get("archive_collection_keys") or [])),
+    }
+
+
 def _ratio_token_limit(
+    *,
+    ratio_env: str,
+    fixed_env: str,
+    fixed_default: str,
+    default_ratio: float,
+) -> int:
+    return _ratio_token_limit_for_context(
+        _detected_context_length(),
+        ratio_env=ratio_env,
+        fixed_env=fixed_env,
+        fixed_default=fixed_default,
+        default_ratio=default_ratio,
+    )
+
+
+def _ratio_token_limit_for_context(
+    context_length: int,
     *,
     ratio_env: str,
     fixed_env: str,
@@ -4481,8 +4852,7 @@ def _ratio_token_limit(
 ) -> int:
     fixed_limit = int(os.getenv(fixed_env, fixed_default))
     if not _env_bool("ALPHARAVIS_ENABLE_PERCENT_CONTEXT_LIMITS", "true"):
-        return fixed_limit
-    context_length = _detected_context_length()
+        return min(fixed_limit, max(1, int(context_length)))
     ratio = _env_float(ratio_env, _env_float("ALPHARAVIS_COMPRESSION_TRIGGER_RATIO", default_ratio))
     minimum = int(os.getenv("ALPHARAVIS_MIN_COMPRESSION_TOKEN_LIMIT", "4096"))
     if _context_limit_from_ratio is not None:
@@ -4509,10 +4879,13 @@ def _handoff_context_token_limit() -> int:
 
 
 def _hard_context_token_limit() -> int:
+    return _hard_context_token_limit_for_context(_detected_context_length())
+
+
+def _hard_context_token_limit_for_context(context_length: int) -> int:
     fixed_limit = int(os.getenv("ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT", "128000"))
     if fixed_limit == 0 or not _env_bool("ALPHARAVIS_ENABLE_PERCENT_CONTEXT_LIMITS", "true"):
-        return fixed_limit
-    context_length = _detected_context_length()
+        return 0 if fixed_limit == 0 else min(fixed_limit, max(1, int(context_length)))
     ratio = _env_float("ALPHARAVIS_HARD_CONTEXT_RATIO", 0.95)
     minimum = int(os.getenv("ALPHARAVIS_MIN_HARD_CONTEXT_TOKEN_LIMIT", "8192"))
     if _context_limit_from_ratio is not None:
@@ -4988,6 +5361,17 @@ async def queue_vector_memory_backfill(
     return _json_tool_result(result)
 
 
+@tool
+def inspect_context_budget(message_text: str = ""):
+    """Inspect AlphaRavis context length, reserves, limits, and budget pressure."""
+
+    messages: list[Any] = [HumanMessage(content=message_text)] if message_text else []
+    snapshot = _context_budget_snapshot({"selected_toolsets": _infer_selected_toolsets(message_text)}, messages=messages)
+    snapshot["all_agent_static_reserves"] = GRAPH_AGENT_CONTEXT_RESERVES
+    snapshot["max_static_reserve"] = GRAPH_STATIC_CONTEXT_RESERVE_DETAIL
+    return _json_tool_result(snapshot)
+
+
 def _curated_memory_ns(scope: str) -> tuple[str, ...]:
     return ("alpharavis", "curated_memory", scope)
 
@@ -5075,6 +5459,27 @@ def _compression_forced_by_user(messages: list[Any]) -> bool:
     return any(pattern in latest for pattern in patterns)
 
 
+def _looks_like_archive_recall_request(text: str) -> bool:
+    lowered = (text or "").lower()
+    patterns = (
+        "archiv",
+        "archive",
+        "vorhin",
+        "vorher",
+        "oben",
+        "damals",
+        "frueher",
+        "früher",
+        "letzte nachricht",
+        "letzten nachrichten",
+        "old context",
+        "previous context",
+        "compressed context",
+        "zusammenfassung",
+    )
+    return any(pattern in lowered for pattern in patterns)
+
+
 def _profile_update(state: AlphaRavisState, **updates: Any) -> dict[str, Any]:
     profile = dict(state.get("run_profile") or {})
     profile.update(updates)
@@ -5149,7 +5554,7 @@ def _infer_selected_toolsets(text: str) -> list[str]:
         selected.append("coding/write")
     if any(word in lowered for word in ("bild", "image", "pixelle", "comfy")):
         selected.append("media/image")
-    if any(word in lowered for word in ("memory", "archiv", "damals", "frueher", "pgvector")):
+    if any(word in lowered for word in ("memory", "archiv", "archive", "damals", "frueher", "früher", "vorhin", "vorher", "pgvector")):
         selected.append("rag/memory")
     return sorted(dict.fromkeys(selected))
 
@@ -5224,11 +5629,16 @@ async def run_profile_start_node(state: AlphaRavisState) -> dict[str, Any]:
     bridge_refs = [item for item in list(state.get("bridge_context_references") or []) if isinstance(item, dict)]
     selected_toolsets, toolset_context = _toolset_context_for_request(latest)
     stable_context = _stable_prompt_context()
+    token_estimate = _estimate_tokens(messages)
+    static_reserve = _static_context_reserve_tokens({"selected_toolsets": selected_toolsets})
     profile = {
         "started_at": time.time(),
         "latest_user_chars": len(latest),
         "message_count": len(messages),
-        "token_estimate": _estimate_tokens(messages),
+        "token_estimate": token_estimate,
+        "request_token_estimate": token_estimate + static_reserve,
+        "static_context_reserve_tokens": static_reserve,
+        "static_context_reserve_detail": _static_context_reserve_detail({"selected_toolsets": selected_toolsets}),
         "bridge_context_references": bridge_refs[:8],
         "bridge_context_reference_count": sum(int(item.get("reference_count", 0)) for item in bridge_refs),
         "selected_toolsets": selected_toolsets,
@@ -5241,6 +5651,8 @@ async def run_profile_start_node(state: AlphaRavisState) -> dict[str, Any]:
         thread_key=_state_thread_key(state),
         message_count=profile["message_count"],
         token_estimate=profile["token_estimate"],
+        request_token_estimate=profile["request_token_estimate"],
+        static_context_reserve_tokens=static_reserve,
         latest_user_chars=profile["latest_user_chars"],
         bridge_context_reference_count=profile["bridge_context_reference_count"],
     )
@@ -5257,6 +5669,8 @@ async def run_profile_start_node(state: AlphaRavisState) -> dict[str, Any]:
                 trace_started,
                 message_count=len(messages),
                 token_estimate=profile["token_estimate"],
+                request_token_estimate=profile["request_token_estimate"],
+                static_context_reserve_tokens=static_reserve,
                 trace_id=trace_id,
             )
         ],
@@ -5270,11 +5684,15 @@ async def route_decision_node(state: AlphaRavisState) -> dict[str, Any]:
     messages = list(state.get("messages", []))
     token_estimate = _estimate_tokens(messages)
     hard_limit = _hard_context_token_limit()
-    if hard_limit > 0 and token_estimate > hard_limit:
+    static_reserve = _static_context_reserve_tokens(state)
+    request_estimate = token_estimate + static_reserve
+    effective_hard_limit = _effective_context_limit(hard_limit, static_reserve)
+    if hard_limit > 0 and request_estimate > hard_limit:
         message = (
             "Hard context cutoff: Diese Anfrage wird nicht ausgefuehrt, weil der "
-            f"aktive Kontext mit ca. {token_estimate} Tokens ueber dem Limit "
-            f"von {hard_limit} liegt. Bitte kuerze die Eingabe oder frage nach "
+            f"geschaetzte Modell-Request mit ca. {request_estimate} Tokens "
+            f"(aktive Messages ca. {token_estimate}, statische Prompts/Tools ca. "
+            f"{static_reserve}) ueber dem Limit von {hard_limit} liegt. Bitte kuerze die Eingabe oder frage nach "
             "Archiv-/RAG-Suche statt den ganzen Verlauf direkt zu senden."
         )
         _log_event(
@@ -5282,7 +5700,10 @@ async def route_decision_node(state: AlphaRavisState) -> dict[str, Any]:
             "route.hard_stop",
             thread_id=_state_thread_id(state),
             token_estimate=token_estimate,
+            request_token_estimate=request_estimate,
+            static_context_reserve_tokens=static_reserve,
             hard_context_limit=hard_limit,
+            effective_active_hard_limit=effective_hard_limit,
             message="Hard context cutoff triggered.",
         )
         return {
@@ -5297,6 +5718,8 @@ async def route_decision_node(state: AlphaRavisState) -> dict[str, Any]:
                     route="hard_stop",
                     reason="hard context limit exceeded",
                     token_estimate=token_estimate,
+                    request_token_estimate=request_estimate,
+                    static_context_reserve_tokens=static_reserve,
                 ),
             ),
             "run_profile": _profile_update(
@@ -5304,7 +5727,10 @@ async def route_decision_node(state: AlphaRavisState) -> dict[str, Any]:
                 route="hard_stop",
                 route_reason="hard context limit exceeded",
                 token_estimate=token_estimate,
+                request_token_estimate=request_estimate,
+                static_context_reserve_tokens=static_reserve,
                 hard_context_limit=hard_limit,
+                effective_active_hard_limit=effective_hard_limit,
             ),
         }
 
@@ -5521,6 +5947,17 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
                 f"{hermes_health.get('status')}. Use AlphaRavis/DeepAgents fallback visibly.\n"
             )
 
+    archive_recall_hint = ""
+    archived_keys = list(state.get("archived_context_keys") or [])
+    if archived_keys and _looks_like_archive_recall_request(latest):
+        archive_recall_hint = (
+            "\nArchive recall hint: The latest user request appears to refer to "
+            "older compressed context. Prefer context_retrieval_agent or "
+            "read_archive_record(...) with the relevant archive_key instead of "
+            "guessing from a summary. Recent archive keys: "
+            f"{', '.join(str(key) for key in archived_keys[-5:])}.\n"
+        )
+
     prompt = (
         "Create a compact execution plan for AlphaRavis before the swarm acts. "
         "Do not solve the task. Do not include hidden reasoning. Name likely "
@@ -5531,6 +5968,7 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
         "Use the toolset registry as categories first; do not request concrete "
         "MCP tools unless the chosen category is needed.\n\n"
         f"{hermes_hint}"
+        f"{archive_recall_hint}"
         f"User request:\n{latest}"
     )
 
@@ -5637,6 +6075,7 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
             state,
             planner_used=True,
             hermes_route_hint=bool(hermes_hint),
+            archive_recall_hint=bool(archive_recall_hint),
             selected_toolsets=selected_toolsets,
             **({"provider_hardening_last_retry": planner_compatibility_retry} if planner_compatibility_retry else {}),
             **({"provider_hardening_profile": planner_provider_profile} if planner_provider_profile else {}),
@@ -6078,6 +6517,22 @@ def _is_remove_message(message: Any) -> bool:
     return isinstance(message, RemoveMessage) or _message_to_json(message).get("type") == "remove"
 
 
+def _state_with_node_updates(state: AlphaRavisState, updates: dict[str, Any]) -> AlphaRavisState:
+    merged: AlphaRavisState = dict(state)
+    for key, value in updates.items():
+        if key == "messages" and isinstance(value, list):
+            incoming = [message for message in value if not _is_remove_message(message)]
+            if any(_is_remove_message(message) for message in value):
+                merged["messages"] = incoming
+            else:
+                merged["messages"] = [*list(merged.get("messages", [])), *incoming]
+        elif key == "run_profile" and isinstance(value, dict):
+            merged["run_profile"] = {**dict(merged.get("run_profile") or {}), **value}
+        else:
+            merged[key] = value
+    return merged
+
+
 def _message_role_name(message: Any) -> str:
     if isinstance(message, dict):
         return str(message.get("role") or message.get("type") or "").lower()
@@ -6157,21 +6612,46 @@ def _hard_context_trim_update(
     }
 
 
+def _dynamic_compression_max_passes(scope: str, legacy_env: str, legacy_default: str) -> int:
+    if _env_bool("ALPHARAVIS_DYNAMIC_COMPRESSION_UNTIL_BUDGET", "true"):
+        raw = os.getenv(f"ALPHARAVIS_{scope}_DYNAMIC_COMPRESSION_MAX_PASSES") or os.getenv(
+            "ALPHARAVIS_DYNAMIC_COMPRESSION_MAX_PASSES",
+            legacy_default,
+        )
+    else:
+        raw = os.getenv(legacy_env, legacy_default)
+    hard_cap = max(1, int(os.getenv("ALPHARAVIS_DYNAMIC_COMPRESSION_HARD_MAX_PASSES", "12")))
+    try:
+        passes = int(raw)
+    except (TypeError, ValueError):
+        passes = int(legacy_default)
+    return max(1, min(passes, hard_cap))
+
+
+def _budget_met_for_messages(state: AlphaRavisState, *, messages: list[Any], token_limit: int) -> bool:
+    budget = _context_budget_snapshot(state, messages=messages)
+    return int(budget["message_tokens"]) <= token_limit and not bool(budget["hard_rescue_needed"])
+
+
 async def pre_run_context_guard_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
     messages = _drop_previous_compaction_messages(list(state.get("messages", [])))
     if not messages:
         return {}
 
-    token_estimate = _estimate_tokens(messages)
-    active_limit = _active_context_token_limit()
-    hard_limit = _hard_context_token_limit()
-    force_hard_rescue = hard_limit > 0 and token_estimate > hard_limit
+    budget = _context_budget_snapshot(state, messages=messages)
+    token_estimate = int(budget["message_tokens"])
+    static_reserve = int(budget["static_context_reserve_tokens"])
+    hard_limit = int(budget["hard_limit"])
+    effective_active_limit = int(budget["effective_active_limit"])
+    effective_hard_limit = int(budget["effective_hard_limit"])
+    request_estimate = int(budget["request_tokens"])
+    force_hard_rescue = bool(budget["hard_rescue_needed"])
     force_compression = _compression_forced_by_user(messages)
     enabled = _env_bool("ALPHARAVIS_ENABLE_PRE_RUN_COMPRESSION", "true")
     if not enabled and not force_hard_rescue and not force_compression:
         return {}
 
-    if token_estimate <= active_limit and not force_hard_rescue and not force_compression:
+    if token_estimate <= effective_active_limit and not force_hard_rescue and not force_compression:
         return {}
 
     if _compression_paused_by_user(messages) and not force_hard_rescue and not force_compression:
@@ -6186,76 +6666,94 @@ async def pre_run_context_guard_node(state: AlphaRavisState, runtime: Any | None
             ).hexdigest()[:16],
         }
 
-    token_limit = active_limit
+    token_limit = effective_active_limit
     if force_hard_rescue:
-        token_limit = min(active_limit, max(1, int(hard_limit * 0.80)))
+        token_limit = min(effective_active_limit, max(1, int(effective_hard_limit * 0.80)))
 
-    try:
-        result, archive_key, compression_updates = await _run_hermes_style_compression(
-            state=state,
-            runtime=runtime,
-            mode="pre_run",
-            token_limit=token_limit,
-            force=force_hard_rescue or force_compression,
-        )
-    except Exception as exc:
-        if force_hard_rescue and _env_bool("ALPHARAVIS_ENABLE_HARD_CONTEXT_TRIM", "true"):
-            return _hard_context_trim_update(
-                state,
-                messages=messages,
-                token_estimate=token_estimate,
-                hard_limit=hard_limit,
-                reason=f"pre-run compression failed: {type(exc).__name__}",
-            )
-        warning = f"Pre-run context compression failed cleanly. The full context remains active for now. Error: {exc}"
-        return {
-            "memory_notice": warning,
-            "memory_notice_key": hashlib.sha256(warning.encode("utf-8")).hexdigest()[:16],
-            "run_profile": _profile_update(state, pre_run_compression_error=str(exc)[:300]),
-        }
+    pass_state: AlphaRavisState = dict(state)
+    result: CompressionResult | None = None
+    archive_key = ""
+    compression_updates: dict[str, Any] = {}
+    rebuilt_messages = messages
+    tokens_after = token_estimate
+    max_passes = _dynamic_compression_max_passes("PRE_RUN", "ALPHARAVIS_PRE_RUN_COMPRESSION_MAX_PASSES", "6")
+    passes_used = 0
 
-    if result.skipped:
-        if force_hard_rescue and _env_bool("ALPHARAVIS_ENABLE_HARD_CONTEXT_TRIM", "true"):
-            return _hard_context_trim_update(
-                state,
-                messages=messages,
-                token_estimate=token_estimate,
-                hard_limit=hard_limit,
-                reason=f"pre-run compression skipped: {result.reason}",
+    for pass_index in range(max_passes):
+        try:
+            result, archive_key, compression_updates = await _run_hermes_style_compression(
+                state=pass_state,
+                runtime=runtime,
+                mode="pre_run",
+                token_limit=token_limit,
+                force=force_hard_rescue or force_compression or pass_index > 0,
             )
-        if force_compression:
-            notice = (
-                "Manuelle Pre-run-Kompression wurde angefragt, aber der gemeinsame "
-                f"Hermes-style Compressor hat nichts Sinnvolles zum Archivieren gefunden ({result.reason})."
-            )
+        except Exception as exc:
+            if force_hard_rescue and _env_bool("ALPHARAVIS_ENABLE_HARD_CONTEXT_TRIM", "true"):
+                return _hard_context_trim_update(
+                    state,
+                    messages=rebuilt_messages,
+                    token_estimate=tokens_after,
+                    hard_limit=effective_hard_limit,
+                    reason=f"pre-run compression failed: {type(exc).__name__}",
+                )
+            warning = f"Pre-run context compression failed cleanly. The full context remains active for now. Error: {exc}"
             return {
-                "compression_stats": result.compression_stats,
-                "memory_notice": notice,
-                "memory_notice_key": hashlib.sha256(notice.encode("utf-8")).hexdigest()[:16],
-                "run_profile": _profile_update(state, pre_run_compression_skipped=result.reason),
+                "memory_notice": warning,
+                "memory_notice_key": hashlib.sha256(warning.encode("utf-8")).hexdigest()[:16],
+                "run_profile": _profile_update(state, pre_run_compression_error=str(exc)[:300]),
             }
-        return {}
 
-    rebuilt_messages = [
-        message for message in compression_updates.get("messages", []) if not _is_remove_message(message)
-    ]
-    tokens_after = _estimate_tokens(_drop_previous_compaction_messages(rebuilt_messages))
-    if force_hard_rescue and hard_limit > 0 and tokens_after > hard_limit and _env_bool(
+        if result.skipped:
+            if force_hard_rescue and _env_bool("ALPHARAVIS_ENABLE_HARD_CONTEXT_TRIM", "true"):
+                return _hard_context_trim_update(
+                    state,
+                    messages=rebuilt_messages,
+                    token_estimate=tokens_after,
+                    hard_limit=effective_hard_limit,
+                    reason=f"pre-run compression skipped: {result.reason}",
+                )
+            if force_compression:
+                notice = (
+                    "Manuelle Pre-run-Kompression wurde angefragt, aber der gemeinsame "
+                    f"Hermes-style Compressor hat nichts Sinnvolles zum Archivieren gefunden ({result.reason})."
+                )
+                return {
+                    "compression_stats": result.compression_stats,
+                    "memory_notice": notice,
+                    "memory_notice_key": hashlib.sha256(notice.encode("utf-8")).hexdigest()[:16],
+                    "run_profile": _profile_update(state, pre_run_compression_skipped=result.reason),
+                }
+            return {}
+
+        passes_used += 1
+        rebuilt_messages = [
+            message for message in compression_updates.get("messages", []) if not _is_remove_message(message)
+        ]
+        tokens_after = _estimate_tokens(_drop_previous_compaction_messages(rebuilt_messages))
+        pass_state = {**pass_state, **compression_updates, "messages": rebuilt_messages}
+        if _budget_met_for_messages(pass_state, messages=rebuilt_messages, token_limit=token_limit):
+            break
+        if len(result.middle) == 0:
+            break
+
+    if force_hard_rescue and hard_limit > 0 and (tokens_after + static_reserve) > hard_limit and _env_bool(
         "ALPHARAVIS_ENABLE_HARD_CONTEXT_TRIM", "true"
     ):
         return _hard_context_trim_update(
             state,
             messages=rebuilt_messages,
             token_estimate=tokens_after,
-            hard_limit=hard_limit,
+            hard_limit=effective_hard_limit,
             reason="pre-run compression remained over hard limit",
         )
 
     hierarchy_notice = str(compression_updates.pop("archive_compression_notice", "") or "")
     prefix = "Hard-Limit-Rettung: " if force_hard_rescue else ("Manuelle Pre-run-Kompression: " if force_compression else "")
+    pass_note = f" in {passes_used} Preflight-Paessen" if passes_used > 1 else ""
     notice = (
         f"{prefix}Ich habe den aktiven Kontext vor dem Modelllauf mit dem gemeinsamen "
-        f"Hermes-style Compressor komprimiert: ca. {_compressor_estimate_tokens(result.middle)} "
+        f"Hermes-style Compressor{pass_note} komprimiert: ca. {_compressor_estimate_tokens(result.middle if result else [])} "
         f"Tokens aus dem alten Mittelteil wurden als Archiv `{archive_key}` gespeichert. "
         "Die neueste Nutzernachricht und die neuesten Tail-Messages bleiben aktiv."
     )
@@ -6271,9 +6769,21 @@ async def pre_run_context_guard_node(state: AlphaRavisState, runtime: Any | None
         "run_profile": _profile_update(
             state,
             pre_run_compression_used=True,
-            pre_run_compression_tokens=result.token_estimate_before,
-            pre_run_compression_tokens_after=result.token_estimate_after,
+            pre_run_compression_tokens=token_estimate,
+            pre_run_compression_tokens_after=tokens_after,
+            pre_run_request_tokens=token_estimate + static_reserve,
+            pre_run_request_tokens_after=tokens_after + static_reserve,
+            pre_run_static_context_reserve_tokens=static_reserve,
+            pre_run_effective_active_limit=effective_active_limit,
+            pre_run_effective_hard_limit=effective_hard_limit,
             pre_run_compression_archive_key=archive_key,
+            pre_run_compression_passes=passes_used,
+            pre_run_compression_budget_met=_budget_met_for_messages(
+                pass_state,
+                messages=rebuilt_messages,
+                token_limit=token_limit,
+            ),
+            pre_run_compression_max_passes=max_passes,
             hard_context_rescued=force_hard_rescue,
         ),
     }
@@ -6297,7 +6807,9 @@ async def handoff_context_guard_node(state: AlphaRavisState, runtime: Any | None
         updates["handoff_packet"] = latest_packet
         updates["handoff_packet_key"] = packet_key
 
-    token_limit = _handoff_context_token_limit()
+    static_reserve = _static_context_reserve_tokens(state)
+    raw_token_limit = _handoff_context_token_limit()
+    token_limit = _effective_context_limit(raw_token_limit, static_reserve)
     token_estimate = _estimate_tokens(_drop_previous_compaction_messages([*messages, *inject_messages]))
     if token_estimate <= token_limit:
         if inject_messages:
@@ -6321,7 +6833,12 @@ async def handoff_context_guard_node(state: AlphaRavisState, runtime: Any | None
             **updates,
             "memory_notice": warning,
             "memory_notice_key": hashlib.sha256(warning.encode("utf-8")).hexdigest()[:16],
-            "run_profile": _profile_update(state, handoff_context_guard_error=str(exc)[:300]),
+            "run_profile": _profile_update(
+                state,
+                handoff_context_guard_error=str(exc)[:300],
+                handoff_static_context_reserve_tokens=static_reserve,
+                handoff_effective_context_limit=token_limit,
+            ),
         }
 
     if result.skipped:
@@ -6365,7 +6882,121 @@ async def handoff_context_guard_node(state: AlphaRavisState, runtime: Any | None
             handoff_context_guard_used=True,
             handoff_context_tokens=result.token_estimate_before,
             handoff_context_tokens_after=result.token_estimate_after,
+            handoff_request_tokens=result.token_estimate_before + static_reserve,
+            handoff_request_tokens_after=result.token_estimate_after + static_reserve,
+            handoff_static_context_reserve_tokens=static_reserve,
+            handoff_effective_context_limit=token_limit,
             handoff_context_archive_key=archive_key,
+        ),
+    }
+
+
+async def final_budget_rescue_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
+    if not _env_bool("ALPHARAVIS_ENABLE_FINAL_BUDGET_RESCUE", "true"):
+        return {}
+
+    messages = list(state.get("messages", []))
+    if not messages:
+        return {}
+
+    budget = _context_budget_snapshot(state, messages=messages)
+    token_limit = int(budget["effective_active_limit"])
+    hard_limit = int(budget["hard_limit"])
+    needs_rescue = bool(budget["compression_needed"] or budget["hard_rescue_needed"])
+    if not needs_rescue:
+        return {"run_profile": _profile_update(state, final_context_budget=budget)}
+
+    max_passes = _dynamic_compression_max_passes("FINAL_RESCUE", "ALPHARAVIS_FINAL_BUDGET_RESCUE_MAX_PASSES", "6")
+    pass_state: AlphaRavisState = dict(state)
+    compression_updates: dict[str, Any] = {}
+    result: CompressionResult | None = None
+    archive_key = ""
+    rebuilt_messages = messages
+    passes_used = 0
+
+    for pass_index in range(max_passes):
+        try:
+            result, archive_key, compression_updates = await _run_hermes_style_compression(
+                state=pass_state,
+                runtime=runtime,
+                mode="pre_run",
+                token_limit=token_limit,
+                force=True,
+            )
+        except Exception as exc:
+            if budget["hard_rescue_needed"] and _env_bool("ALPHARAVIS_ENABLE_HARD_CONTEXT_TRIM", "true"):
+                return _hard_context_trim_update(
+                    state,
+                    messages=rebuilt_messages,
+                    token_estimate=int(budget["message_tokens"]),
+                    hard_limit=int(budget["effective_hard_limit"]),
+                    reason=f"final budget rescue compression failed: {type(exc).__name__}",
+                )
+            return {
+                "memory_notice": f"Final budget rescue failed before model invocation: {exc}",
+                "memory_notice_key": hashlib.sha256(f"final-budget-rescue:{exc}".encode("utf-8")).hexdigest()[:16],
+                "run_profile": _profile_update(state, final_budget_rescue_error=str(exc)[:300], final_context_budget=budget),
+            }
+
+        if result.skipped:
+            if budget["hard_rescue_needed"] and _env_bool("ALPHARAVIS_ENABLE_HARD_CONTEXT_TRIM", "true"):
+                return _hard_context_trim_update(
+                    state,
+                    messages=rebuilt_messages,
+                    token_estimate=int(budget["message_tokens"]),
+                    hard_limit=int(budget["effective_hard_limit"]),
+                    reason=f"final budget rescue skipped: {result.reason}",
+                )
+            return {
+                "compression_stats": result.compression_stats,
+                "run_profile": _profile_update(
+                    state,
+                    final_budget_rescue_skipped=result.reason,
+                    final_context_budget=budget,
+                ),
+            }
+
+        passes_used += 1
+        rebuilt_messages = [
+            message for message in compression_updates.get("messages", []) if not _is_remove_message(message)
+        ]
+        pass_state = {**pass_state, **compression_updates, "messages": rebuilt_messages}
+        budget = _context_budget_snapshot(pass_state, messages=rebuilt_messages)
+        if not budget["compression_needed"] and not budget["hard_rescue_needed"]:
+            break
+        if len(result.middle) == 0:
+            break
+
+    if hard_limit > 0 and bool(budget["hard_rescue_needed"]) and _env_bool("ALPHARAVIS_ENABLE_HARD_CONTEXT_TRIM", "true"):
+        return _hard_context_trim_update(
+            state,
+            messages=rebuilt_messages,
+            token_estimate=int(budget["message_tokens"]),
+            hard_limit=int(budget["effective_hard_limit"]),
+            reason="final budget rescue remained over hard limit",
+        )
+
+    hierarchy_notice = str(compression_updates.pop("archive_compression_notice", "") or "")
+    notice = (
+        "Final Budget Rescue: Ich habe den aktiven Kontext direkt vor dem "
+        f"Swarm-Modellaufruf komprimiert, damit der volle Request unter Budget bleibt. "
+        f"Archiv: `{archive_key}`; Paesse: {passes_used}."
+    )
+    if hierarchy_notice:
+        notice += f" {hierarchy_notice}"
+
+    return {
+        **compression_updates,
+        "memory_notice": notice,
+        "memory_notice_key": archive_key or hashlib.sha256(notice.encode("utf-8")).hexdigest()[:16],
+        "run_profile": _profile_update(
+            state,
+            final_budget_rescue_used=True,
+            final_budget_rescue_passes=passes_used,
+            final_budget_rescue_budget_met=not bool(budget["compression_needed"] or budget["hard_rescue_needed"]),
+            final_budget_rescue_max_passes=max_passes,
+            final_budget_rescue_archive_key=archive_key,
+            final_context_budget=budget,
         ),
     }
 
@@ -6928,7 +7559,9 @@ async def skill_library_node(state: AlphaRavisState, runtime: Any | None = None)
 
 async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
     messages = list(state.get("messages", []))
-    token_limit = _active_context_token_limit()
+    static_reserve = _static_context_reserve_tokens(state)
+    raw_token_limit = _active_context_token_limit()
+    token_limit = _effective_context_limit(raw_token_limit, static_reserve)
     token_estimate = _estimate_tokens(_drop_previous_compaction_messages(messages))
     force_compression = _compression_forced_by_user(messages)
 
@@ -6967,7 +7600,12 @@ async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None)
         return {
             "memory_notice": warning,
             "memory_notice_key": hashlib.sha256(warning.encode("utf-8")).hexdigest()[:16],
-            "run_profile": _profile_update(state, post_run_compression_error=str(exc)[:300]),
+            "run_profile": _profile_update(
+                state,
+                post_run_compression_error=str(exc)[:300],
+                post_run_static_context_reserve_tokens=static_reserve,
+                post_run_effective_context_limit=token_limit,
+            ),
         }
 
     if result.skipped:
@@ -7029,6 +7667,10 @@ async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None)
             post_run_compression_used=True,
             post_run_compression_tokens=result.token_estimate_before,
             post_run_compression_tokens_after=result.token_estimate_after,
+            post_run_request_tokens=result.token_estimate_before + static_reserve,
+            post_run_request_tokens_after=result.token_estimate_after + static_reserve,
+            post_run_static_context_reserve_tokens=static_reserve,
+            post_run_effective_context_limit=token_limit,
             post_run_compression_archive_key=archive_key,
         ),
     }
@@ -7167,7 +7809,7 @@ def _create_ui_assistant(llm: Any, handoff_tools: list[Any]):
             print(f"WARNING: langgraph-cua could not initialize: {exc}")
 
     reason = f" ({CUA_IMPORT_ERROR})" if CUA_IMPORT_ERROR else ""
-    return create_deep_agent(
+    return _create_budgeted_deep_agent(
         model=llm,
         tools=handoff_tools,
         name="ui_assistant",
@@ -7182,7 +7824,7 @@ def _create_ui_assistant(llm: Any, handoff_tools: list[Any]):
 
 
 def _create_debugger_subgraph(llm: Any, tools: list[Any], handoff_tools: list[Any]):
-    debugger_worker = create_deep_agent(
+    debugger_worker = _create_budgeted_deep_agent(
         model=llm,
         tools=_dedupe_tools([*tools, *handoff_tools]),
         name="debugger_agent_worker",
@@ -7243,12 +7885,18 @@ def _create_debugger_subgraph(llm: Any, tools: list[Any], handoff_tools: list[An
 
 
 def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
-    global MCP_SCHEMA_CACHE, GRAPH_TOOLSET_PROFILE
+    global MCP_SCHEMA_CACHE, GRAPH_TOOLSET_PROFILE, GRAPH_STATIC_CONTEXT_RESERVE_TOKENS, GRAPH_STATIC_CONTEXT_RESERVE_DETAIL, GRAPH_AGENT_CONTEXT_RESERVES
 
     _warn_about_mongo_checkpointer()
     _configure_llm_cache()
+    GRAPH_STATIC_CONTEXT_RESERVE_TOKENS = 0
+    GRAPH_STATIC_CONTEXT_RESERVE_DETAIL = {}
+    GRAPH_AGENT_CONTEXT_RESERVES = {}
 
-    llm = _text_only_agent_model(_deep_agent_model())
+    llm = _budget_guarded_agent_model(
+        _text_only_agent_model(_deep_agent_model()),
+        purpose="deep_agent",
+    )
     mcp_tools = mcp_tools or []
     MCP_SCHEMA_CACHE = _build_mcp_schema_cache(MCP_SERVER_INFOS) if _build_mcp_schema_cache is not None else {}
     memory_manage_tool = create_manage_memory_tool(namespace=("memories",))
@@ -7414,6 +8062,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             search_archived_context,
             read_archive_record,
             read_archive_collection,
+            inspect_context_budget,
             search_debugging_lessons,
             record_debugging_lesson,
             describe_optional_tool_registry,
@@ -7469,7 +8118,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             ]
         return _dedupe_tools([*base_tools, *(extra_tools or [])])
 
-    research_worker = create_deep_agent(
+    research_worker = _create_budgeted_deep_agent(
         model=llm,
         tools=_agent_tools("research_expert", [
             deep_web_research,
@@ -7495,6 +8144,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             extract_review_insights,
             normalize_research_sources,
             build_specialist_report,
+            inspect_context_budget,
         ], [
             transfer_to_generalist,
             transfer_to_debugger,
@@ -7541,7 +8191,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         + AGENT_POLICY_PROMPT,
     )
 
-    general_worker = create_deep_agent(
+    general_worker = _create_budgeted_deep_agent(
         model=llm,
         tools=_agent_tools("general_assistant", [
             start_pixelle_remote,
@@ -7567,6 +8217,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             suggest_thread_title,
             extract_review_insights,
             build_specialist_report,
+            inspect_context_budget,
             search_agent_memory,
             record_agent_memory,
             search_curated_memory,
@@ -7680,6 +8331,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             reload_repo_ai_skills,
             suggest_thread_title,
             extract_review_insights,
+            inspect_context_budget,
             build_specialist_report,
             search_skill_library,
             list_skill_candidates,
@@ -7697,7 +8349,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         ],
     )
 
-    hermes_worker = create_deep_agent(
+    hermes_worker = _create_budgeted_deep_agent(
         model=llm,
         tools=_agent_tools("hermes_coding_agent", [
             check_hermes_agent,
@@ -7721,6 +8373,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             reload_repo_ai_skills,
             suggest_thread_title,
             extract_review_insights,
+            inspect_context_budget,
         ], [
             transfer_to_generalist,
             transfer_to_debugger,
@@ -7752,7 +8405,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         + AGENT_POLICY_PROMPT,
     )
 
-    context_worker = create_deep_agent(
+    context_worker = _create_budgeted_deep_agent(
         model=llm,
         tools=_agent_tools("context_retrieval_agent", [
             search_archived_context,
@@ -7780,6 +8433,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             suggest_thread_title,
             extract_review_insights,
             read_alpha_ravis_architecture,
+            inspect_context_budget,
             build_specialist_report,
         ], [
             transfer_to_generalist,
@@ -7830,15 +8484,15 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         context_worker,
     ]
     if advanced_model_management_enabled:
-        power_llm = _text_only_agent_model(_deep_agent_model(
+        power_llm = _budget_guarded_agent_model(_text_only_agent_model(_deep_agent_model(
             model_name=os.getenv(
                 "ALPHARAVIS_POWER_MANAGER_MODEL",
                 os.getenv("ALPHARAVIS_CRISIS_MANAGER_MODEL", "openai/edge-gemma"),
             ),
             timeout_seconds=float(os.getenv("ALPHARAVIS_POWER_MANAGER_TIMEOUT_SECONDS", "90")),
             model_kwargs={"chat_template_kwargs": {"enable_thinking": False}},
-        ))
-        power_worker = create_deep_agent(
+        )), purpose="power_management_agent")
+        power_worker = _create_budgeted_deep_agent(
             model=power_llm,
             tools=_agent_tools("power_management_agent", [
                 inspect_model_management_status,
@@ -7887,12 +8541,12 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         )
         swarm_workers.append(power_worker)
     if crisis_manager_enabled:
-        crisis_llm = _text_only_agent_model(_deep_agent_model(
+        crisis_llm = _budget_guarded_agent_model(_text_only_agent_model(_deep_agent_model(
             model_name=os.getenv("ALPHARAVIS_CRISIS_MANAGER_MODEL", "openai/edge-gemma"),
             timeout_seconds=float(os.getenv("ALPHARAVIS_CRISIS_TIMEOUT_SECONDS", "120")),
             model_kwargs={"chat_template_kwargs": {"enable_thinking": False}},
-        ))
-        crisis_worker = create_deep_agent(
+        )), purpose="crisis_manager_agent")
+        crisis_worker = _create_budgeted_deep_agent(
             model=crisis_llm,
             tools=_agent_tools("crisis_manager_agent", [
                 *owner_safe_power_tools,
@@ -7915,10 +8569,57 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     else:
         crisis_worker = None
 
+    GRAPH_TOOLSET_PROFILE["static_context_reserve"] = dict(GRAPH_STATIC_CONTEXT_RESERVE_DETAIL)
+    GRAPH_TOOLSET_PROFILE["agent_static_context_reserves"] = dict(GRAPH_AGENT_CONTEXT_RESERVES)
+
     swarm = create_swarm(
         swarm_workers,
         default_active_agent="general_assistant",
     ).compile(store=store)
+
+    async def run_swarm_with_context_retry(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
+        try:
+            return await swarm.ainvoke(state)
+        except Exception as exc:
+            current_budget = _context_budget_snapshot(state)
+            classified = _classified_error_profile(
+                exc,
+                provider="alpha_ravis_swarm",
+                model=os.getenv("ALPHARAVIS_RESPONSES_MODEL", os.getenv("ALPHARAVIS_MODEL", "")),
+                approx_tokens=int(current_budget.get("request_tokens") or 0),
+                context_length=int(current_budget.get("context_length") or 0),
+                num_messages=len(list(state.get("messages", []))),
+            )
+            if not (
+                _env_bool("ALPHARAVIS_ENABLE_PROVIDER_OVERFLOW_RETRY", "true")
+                and classified.get("should_compress")
+                and classified.get("reason") in {"context_overflow", "payload_too_large"}
+            ):
+                raise
+
+            _log_exception(
+                "swarm.context_overflow_retry.started",
+                exc,
+                level=logging.WARNING,
+                classification=classified,
+            )
+            rescue_state: AlphaRavisState = dict(state)
+            provider_limit = classified.get("provider_reported_context_limit")
+            if provider_limit:
+                rescue_state["provider_reported_context_limit"] = int(provider_limit)
+                rescue_state["provider_context_error"] = classified
+            rescue_updates = await final_budget_rescue_node(rescue_state, runtime=runtime)
+            retry_state = _state_with_node_updates(rescue_state, rescue_updates)
+            result = await swarm.ainvoke(retry_state)
+            if isinstance(result, dict):
+                result["run_profile"] = _profile_update(
+                    retry_state,
+                    **dict(result.get("run_profile") or {}),
+                    provider_context_overflow_retry_used=True,
+                    provider_reported_context_limit=provider_limit,
+                    provider_context_overflow_retry_classification=classified,
+                )
+            return result
 
     async def run_crisis_manager(state: AlphaRavisState) -> dict[str, Any]:
         if crisis_worker is None:
@@ -7977,8 +8678,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     builder.add_node("skill_library_trace_finish", _trace_marker_node("langgraph.skill_library.completed"))
     builder.add_node("handoff_context_guard", handoff_context_guard_node)
     builder.add_node("handoff_context_guard_trace_finish", _trace_marker_node("langgraph.handoff_context_guard.completed"))
+    builder.add_node("final_budget_rescue", final_budget_rescue_node)
     builder.add_node("swarm_trace_start", swarm_trace_start_node)
-    builder.add_node("alpha_ravis_swarm", swarm)
+    builder.add_node("alpha_ravis_swarm", run_swarm_with_context_retry)
     builder.add_node("swarm_trace_finish", swarm_trace_finish_node)
     builder.add_node("memory_kernel_after", memory_kernel_sync_node)
     builder.add_node("context_guard_after", context_guard_node)
@@ -8005,7 +8707,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     builder.add_edge("skill_library", "skill_library_trace_finish")
     builder.add_edge("skill_library_trace_finish", "handoff_context_guard")
     builder.add_edge("handoff_context_guard", "handoff_context_guard_trace_finish")
-    builder.add_edge("handoff_context_guard_trace_finish", "swarm_trace_start")
+    builder.add_edge("handoff_context_guard_trace_finish", "final_budget_rescue")
+    builder.add_edge("final_budget_rescue", "swarm_trace_start")
     builder.add_edge("swarm_trace_start", "alpha_ravis_swarm")
     builder.add_edge("alpha_ravis_swarm", "swarm_trace_finish")
     builder.add_edge("swarm_trace_finish", "memory_kernel_after")

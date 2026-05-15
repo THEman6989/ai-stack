@@ -366,23 +366,24 @@ def render_index() -> bytes:
     h1 {{
       margin: 0;
       max-width: 960px;
-      font-size: clamp(34px, 6vw, 72px);
+      font-size: clamp(28px, 6vw, 72px);
       line-height: .98;
-      letter-spacing: 0;
+      letter-spacing: -0.02em;
     }}
     .subhead {{
       max-width: 860px;
       margin: 0;
       color: var(--soft);
-      font-size: 17px;
+      font-size: 16px;
+      line-height: 1.4;
     }}
     .toolbar {{
       display: flex;
       flex-wrap: wrap;
-      gap: 10px;
+      gap: 12px;
       align-items: center;
       justify-content: space-between;
-      margin: 26px 0 18px;
+      margin: 20px 0 16px;
     }}
     .search {{
       width: min(420px, 100%);
@@ -393,6 +394,7 @@ def render_index() -> bytes:
       color: var(--text);
       padding: 0 14px;
       outline: none;
+      font-size: 16px; /* Prevents iOS zoom */
     }}
     .search:focus {{ border-color: #47d7ac; box-shadow: 0 0 0 3px rgba(71, 215, 172, .16); }}
     .count {{
@@ -402,33 +404,33 @@ def render_index() -> bytes:
     .mode {{
       display: inline-flex;
       align-items: center;
-      min-height: 32px;
+      min-height: 28px;
       border: 1px solid rgba(71, 215, 172, .36);
       border-radius: 999px;
       padding: 0 12px;
       color: #d8fff2;
       background: rgba(71, 215, 172, .08);
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 800;
     }}
     .grid {{
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      gap: 14px;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 12px;
     }}
     .card {{
-      min-height: 226px;
+      min-height: 200px;
       display: flex;
       flex-direction: column;
-      gap: 13px;
+      gap: 12px;
       position: relative;
       overflow: hidden;
       text-decoration: none;
       color: inherit;
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 10px;
       background: linear-gradient(180deg, rgba(21, 29, 41, .96), rgba(12, 17, 25, .97));
-      padding: 18px;
+      padding: 16px;
       transition: transform .16s ease, border-color .16s ease, background .16s ease;
     }}
     .card::before {{
@@ -443,53 +445,65 @@ def render_index() -> bytes:
       border-color: color-mix(in srgb, var(--accent, #47d7ac) 70%, white 8%);
       background: linear-gradient(180deg, rgba(25, 35, 50, .98), rgba(13, 19, 28, .99));
     }}
+    .card:active {{
+      transform: translateY(0);
+      background: var(--panel-2);
+    }}
     .card[aria-disabled="true"] {{
       cursor: default;
+      opacity: 0.8;
     }}
     .topline {{
       display: flex;
       align-items: flex-start;
       justify-content: space-between;
-      gap: 12px;
+      gap: 10px;
     }}
     .name {{
       margin: 0;
-      font-size: 20px;
+      font-size: 19px;
       line-height: 1.15;
-      letter-spacing: 0;
+      letter-spacing: -0.01em;
+      font-weight: 700;
     }}
     .kind {{
       flex: none;
-      max-width: 120px;
+      max-width: 130px;
       border: 1px solid rgba(255,255,255,.12);
       border-radius: 999px;
-      padding: 4px 9px;
+      padding: 3px 9px;
       color: var(--soft);
-      font-size: 12px;
+      font-size: 11px;
       text-align: center;
       overflow-wrap: anywhere;
+      background: rgba(255,255,255,0.03);
     }}
     .description {{
       margin: 0;
       color: var(--muted);
-      min-height: 45px;
+      font-size: 14px;
+      line-height: 1.4;
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
     }}
     .meta {{
       display: grid;
-      gap: 8px;
+      gap: 6px;
       margin-top: auto;
       color: var(--soft);
-      font-size: 13px;
+      font-size: 12px;
     }}
     .row {{
       display: grid;
-      grid-template-columns: 58px minmax(0, 1fr);
+      grid-template-columns: 52px minmax(0, 1fr);
       gap: 8px;
       align-items: baseline;
     }}
     .label {{
       color: var(--muted);
-      font-size: 11px;
+      font-size: 10px;
       font-weight: 800;
       letter-spacing: .06em;
       text-transform: uppercase;
@@ -498,13 +512,18 @@ def render_index() -> bytes:
       color: #f8fbff;
       font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       overflow-wrap: anywhere;
+      background: rgba(255,255,255,0.05);
+      padding: 1px 4px;
+      border-radius: 4px;
     }}
     .actions {{
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 10px;
+      gap: 8px;
       margin-top: 4px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(255,255,255,0.05);
     }}
     .open {{
       color: var(--accent, #47d7ac);
@@ -513,18 +532,28 @@ def render_index() -> bytes:
     }}
     .profile {{
       color: #f8df72;
-      font-size: 12px;
+      font-size: 11px;
+      opacity: 0.9;
     }}
     .url-mode {{
       color: #47d7ac;
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
     }}
-    @media (max-width: 680px) {{
-      main {{ width: min(100% - 24px, 1480px); padding-top: 22px; }}
-      .card {{ min-height: 214px; }}
-      .topline {{ display: grid; }}
-      .kind {{ max-width: none; width: fit-content; }}
+    @media (max-width: 780px) {{
+      main {{ width: calc(100% - 32px); padding: 24px 0; }}
+      h1 {{ font-size: clamp(26px, 10vw, 48px); }}
+      .grid {{ grid-template-columns: 1fr; }}
+      .card {{ min-height: auto; }}
+      .description {{ -webkit-line-clamp: 4; }}
+    }}
+    @media (max-width: 480px) {{
+      main {{ width: calc(100% - 24px); }}
+      .toolbar {{ flex-direction: column; align-items: stretch; }}
+      .mode {{ width: fit-content; }}
+      .count {{ text-align: right; margin-top: -30px; }}
     }}
   </style>
 </head>

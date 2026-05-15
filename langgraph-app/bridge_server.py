@@ -72,7 +72,7 @@ BRIDGE_RESPONSES_STREAM_REASONING_EVENTS = _env_bool("BRIDGE_RESPONSES_STREAM_RE
 BRIDGE_RESPONSES_TOOL_OUTPUT_MAX_CHARS = int(os.getenv("BRIDGE_RESPONSES_TOOL_OUTPUT_MAX_CHARS", "8000"))
 BRIDGE_RESPONSES_OUTPUT_DELTA_MAX_CHARS = int(os.getenv("BRIDGE_RESPONSES_OUTPUT_DELTA_MAX_CHARS", "1"))
 BRIDGE_RESPONSES_REASONING_DELTA_MAX_CHARS = int(os.getenv("BRIDGE_RESPONSES_REASONING_DELTA_MAX_CHARS", "1"))
-BRIDGE_HARD_INPUT_TOKEN_LIMIT = int(os.getenv("BRIDGE_HARD_INPUT_TOKEN_LIMIT", "128000"))
+BRIDGE_HARD_INPUT_TOKEN_LIMIT = int(os.getenv("BRIDGE_HARD_INPUT_TOKEN_LIMIT", "0"))
 BRIDGE_HARD_INPUT_HTTP_ERROR = _env_bool("BRIDGE_HARD_INPUT_HTTP_ERROR", "false")
 BRIDGE_ALLOW_RAW_MEDIA_CONTEXT = _env_bool("BRIDGE_ALLOW_RAW_MEDIA_CONTEXT", "false")
 BRIDGE_MEDIA_CONTEXT_MODE = os.getenv("BRIDGE_MEDIA_CONTEXT_MODE", "metadata").lower()
@@ -766,6 +766,63 @@ def _observer_note_event(observation_id: str, event_name: str) -> None:
                 counts = receive.setdefault("event_counts", {})
                 if isinstance(counts, dict):
                     counts[event_name] = int(counts.get(event_name, 0)) + 1
+            return
+
+
+def _budget_profile_from_run_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(profile, dict):
+        return {}
+    budget = profile.get("final_context_budget") if isinstance(profile.get("final_context_budget"), dict) else {}
+    result = dict(budget)
+    mapping = {
+        "message_tokens": ("token_estimate", "pre_run_compression_tokens_after", "post_run_compression_tokens_after"),
+        "request_tokens": ("request_token_estimate", "pre_run_request_tokens_after", "post_run_request_tokens_after"),
+        "static_context_reserve_tokens": (
+            "static_context_reserve_tokens",
+            "pre_run_static_context_reserve_tokens",
+            "post_run_static_context_reserve_tokens",
+            "handoff_static_context_reserve_tokens",
+        ),
+        "effective_active_limit": (
+            "pre_run_effective_active_limit",
+            "post_run_effective_context_limit",
+            "handoff_effective_context_limit",
+        ),
+        "effective_hard_limit": ("pre_run_effective_hard_limit",),
+        "hard_limit": ("hard_context_limit",),
+    }
+    for target, keys in mapping.items():
+        if result.get(target) is not None:
+            continue
+        for key in keys:
+            if profile.get(key) is not None:
+                result[target] = profile.get(key)
+                break
+    for key in (
+        "final_budget_rescue_used",
+        "final_budget_rescue_passes",
+        "final_budget_rescue_archive_key",
+        "hard_context_trim_used",
+        "hard_context_rescued",
+        "pre_run_compression_used",
+        "post_run_compression_used",
+        "handoff_context_guard_used",
+    ):
+        if profile.get(key) is not None:
+            result[key] = profile.get(key)
+    return result
+
+
+def _observer_note_budget(observation_id: str, *, node_name: str, profile: dict[str, Any]) -> None:
+    budget = _budget_profile_from_run_profile(profile)
+    if not budget:
+        return
+    budget["node"] = node_name
+    for record in _BRIDGE_OBSERVATIONS:
+        if record.get("id") == observation_id:
+            receive = record.setdefault("receive", {})
+            if isinstance(receive, dict):
+                receive["context_budget"] = _observer_safe(budget)
             return
 
 
@@ -1827,6 +1884,7 @@ async def _stream_chat_events(
     model: str,
     *,
     include_activity: bool = True,
+    observation_id: str = "",
 ) -> AsyncIterator[str]:
     yield _stream_data(_chunk("", model, role="assistant"))
     if include_activity and BRIDGE_SHOW_ACTIVITY_EVENTS and BRIDGE_ACTIVITY_DETAIL != "off":
@@ -1867,6 +1925,12 @@ async def _stream_chat_events(
                     yield _activity_chunk(activity, model)
 
                 context_kind, context_label, context_text = _extract_context_activity(part)
+                if observation_id and _stream_event_name(part) == "updates":
+                    update_data = _stream_event_data(part)
+                    if isinstance(update_data, dict):
+                        for node_name, update in update_data.items():
+                            if isinstance(update, dict) and isinstance(update.get("run_profile"), dict):
+                                _observer_note_budget(observation_id, node_name=str(node_name), profile=update["run_profile"])
                 if include_activity and context_text and context_text not in emitted_context_activity:
                     emitted_context_activity.add(context_text)
                     yield _stream_data(
@@ -2133,7 +2197,7 @@ async def _stream_chat(body: dict[str, Any], request: Request) -> AsyncIterator[
         )
         return
 
-    async for chunk in _stream_chat_events(client, thread_id, run_payload, model):
+    async for chunk in _stream_chat_events(client, thread_id, run_payload, model, observation_id=observation_id):
         _observer_accumulate_chat_chunk(observed_chunks, chunk)
         yield chunk
     _log_event(

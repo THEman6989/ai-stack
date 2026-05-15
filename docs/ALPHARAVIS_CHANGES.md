@@ -4,6 +4,89 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-15 - Hermes-Style Tail And LangGraph-Owned Hard Context
+
+### Summary
+
+AlphaRavis compression now protects the recent tail closer to Hermes: the
+default hard minimum is 3 latest messages, while the real tail size is governed
+by `ALPHARAVIS_COMPRESSION_TAIL_TOKEN_RATIO` and
+`ALPHARAVIS_COMPRESSION_TAIL_SOFT_CEILING_RATIO`. This removes the previous
+default that kept at least 16 latest messages verbatim, which could leave a
+large uncompressible tail. The latest user/human message is now anchored into
+the protected tail, matching Hermes' active-task preservation rule. Pre-run
+compression now also mirrors Hermes' multi-pass preflight loop: estimate,
+compress, re-estimate, and retry up to
+`ALPHARAVIS_PRE_RUN_COMPRESSION_MAX_PASSES` before hard trim is used as a final
+fallback.
+
+The bridge hard input cutoff is disabled by default
+(`BRIDGE_HARD_INPUT_TOKEN_LIMIT=0`). LangGraph now owns the normal hard-context
+decision so it can use discovered llama.cpp/model context length, pre-run
+compression, and hard trim before deciding whether a thread is still too large.
+
+Active compaction summaries also include a direct archive reference block with
+`source_type: archive`, the `archive_key`, and a `read_archive_record(...)`
+hint so agents can inspect exact removed context instead of guessing from the
+summary.
+
+Pre-run compression now reserves static model-call overhead before deciding
+whether the active thread is below budget. The reserve is computed from the
+largest configured DeepAgents system prompt and tool schema budget, matching
+Hermes' habit of counting tool schemas during preflight. The route hard stop
+also checks active messages plus this reserve, so the graph is not comparing
+only chat history against a limit that the actual model request will exceed.
+Handoff and post-run compression also use the reserve, keeping the active state
+ready for the next model request after tool traces or handoff packets are added.
+The reserve is now tracked per configured agent and used per selected/active
+agent when possible, with the maximum reserve kept as a safe fallback.
+
+AlphaRavis now has a final budget rescue node immediately before the Swarm
+model invocation. It checks the same full request budget snapshot, forces
+Hermes-style compression when needed, and only falls back to hard trim if the
+request is still over the hard budget. Agents also get an `inspect_context_budget`
+tool for visibility into detected context length, effective limits, reserves,
+and archive counts.
+If the provider still reports context overflow or payload-too-large from the
+Swarm path, AlphaRavis now runs that rescue path once and retries the Swarm
+invocation with compressed state.
+
+Pre-run and final rescue compression now run in "until under budget" mode by
+default. Instead of stopping after the old fixed 3-pass cap, the nodes
+re-estimate the full request budget after every compression pass and continue
+until the message window plus static reserve is below the effective active
+limit, bounded by `ALPHARAVIS_DYNAMIC_COMPRESSION_MAX_PASSES` and
+`ALPHARAVIS_DYNAMIC_COMPRESSION_HARD_MAX_PASSES`.
+
+Provider overflow retry also parses provider-reported context limits from
+messages such as llama.cpp `n_ctx_slot` or "maximum context length is ..."
+errors. When a smaller real limit is reported, the retry stores it in
+`provider_reported_context_limit`, recomputes active/hard thresholds from that
+limit, and exposes the classification in `provider_context_error` /
+`run_profile`.
+
+The Bridge Test UI Observer now has a `Context Budget` strip so operators can
+see the latest message/reserve/request/limit numbers without digging through
+raw JSON.
+
+Final LLM invocations now also emit a Hermes-style request-budget estimate.
+The estimate includes active messages plus model kwargs and bound DeepAgents
+tool schemas, so warnings are based on the prompt that is actually about to be
+sent rather than only the user-visible chat history.
+
+Planner prompts now nudge archive retrieval when a user appears to reference
+older compressed context and archive keys are available, steering agents toward
+`context_retrieval_agent` / `read_archive_record(...)` instead of guessing.
+
+### Verification
+
+```text
+pytest -q tests/test_context_compressor.py tests/test_agent_context_budget.py tests/test_bridge_responses.py
+pytest -q tests/test_bridge_test_ui.py
+PYTHONPYCACHEPREFIX=/tmp/alpharavis-pyc python -m py_compile langgraph-app/agent_graph.py langgraph-app/model_metadata.py langgraph-app/context_compressor.py
+python scripts/alpharavis_setup.py bridge-smoke
+```
+
 ## 2026-05-14 - Makefile Operator Reference
 
 ### Summary

@@ -311,7 +311,7 @@ OBSERVER_HTML = """<!doctype html>
     :root { color-scheme: dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; background: #0f1117; color: #eef1f5; }
-    main { width: 100%; min-height: 100vh; padding: 16px; display: grid; grid-template-rows: auto minmax(320px, 1fr) minmax(260px, 42vh); gap: 12px; }
+    main { width: 100%; min-height: 100vh; padding: 16px; display: grid; grid-template-rows: auto minmax(300px, 1fr) auto minmax(240px, 36vh); gap: 12px; }
     header { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #2b3240; padding-bottom: 10px; }
     h1 { margin: 0; font-size: 20px; font-weight: 700; }
     .tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
@@ -330,6 +330,12 @@ OBSERVER_HTML = """<!doctype html>
     .done { border-color: #2f8f5b; color: #7dd3a8; }
     .detail { border: 1px solid #2b3240; border-radius: 8px; background: #0c1017; display: grid; grid-template-rows: auto 1fr; min-height: 0; }
     .detail-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; border-bottom: 1px solid #222938; padding: 8px; }
+    .budget { border: 1px solid #2b3240; border-radius: 8px; background: #11151d; padding: 10px; display: grid; gap: 8px; }
+    .budget-title { display: flex; align-items: center; justify-content: space-between; color: #cbd5e1; font-weight: 650; font-size: 13px; }
+    .budget-grid { display: grid; grid-template-columns: repeat(8, minmax(100px, 1fr)); gap: 8px; }
+    .metric { border: 1px solid #252d3b; border-radius: 7px; padding: 7px; background: #0c1017; min-width: 0; }
+    .metric span { display: block; color: #8994a5; font-size: 11px; }
+    .metric strong { display: block; color: #eef1f5; font-size: 13px; overflow-wrap: anywhere; }
     .tabs, .mode { display: flex; gap: 6px; align-items: center; }
     pre { margin: 0; padding: 12px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.45; color: #d6deeb; }
     .empty { color: #9aa4b2; }
@@ -365,12 +371,20 @@ OBSERVER_HTML = """<!doctype html>
             <th>Model Msg</th>
             <th>Model Tokens</th>
             <th>State Msg</th>
+            <th>Budget</th>
             <th>Output</th>
             <th>Reasoning</th>
           </tr>
         </thead>
         <tbody id="rows"></tbody>
       </table>
+    </section>
+    <section class="budget" aria-label="Context Budget">
+      <div class="budget-title">
+        <span>Context Budget</span>
+        <span id="budgetStatus" class="status">Keine Anfrage ausgewählt.</span>
+      </div>
+      <div id="budgetGrid" class="budget-grid"></div>
     </section>
     <section class="detail">
       <div class="detail-head">
@@ -397,6 +411,8 @@ OBSERVER_HTML = """<!doctype html>
     const receiveTab = document.getElementById('receiveTab');
     const contextMode = document.getElementById('contextMode');
     const fullMode = document.getElementById('fullMode');
+    const budgetGrid = document.getElementById('budgetGrid');
+    const budgetStatus = document.getElementById('budgetStatus');
     let records = [];
     let selectedId = '';
     let activeTab = 'send';
@@ -412,6 +428,23 @@ OBSERVER_HTML = """<!doctype html>
     }
     function pretty(value) {
       return JSON.stringify(value ?? {}, null, 2);
+    }
+    function budgetOf(record) {
+      const receiveBudget = record?.receive?.context_budget || {};
+      const stateProfile = record?.send?.langgraph_state_profile || {};
+      const finalBudget = stateProfile.final_context_budget || {};
+      return Object.keys(receiveBudget).length ? receiveBudget : finalBudget;
+    }
+    function metric(label, value) {
+      const el = document.createElement('div');
+      el.className = 'metric';
+      const small = document.createElement('span');
+      small.textContent = label;
+      const strong = document.createElement('strong');
+      strong.textContent = value ?? '';
+      el.appendChild(small);
+      el.appendChild(strong);
+      return el;
     }
     function selectedRecord() {
       return records.find((record) => record.id === selectedId) || records[0] || null;
@@ -429,6 +462,7 @@ OBSERVER_HTML = """<!doctype html>
         const send = record.send || {};
         const receive = record.receive || {};
         const stateProfile = send.langgraph_state_profile || {};
+        const budget = budgetOf(record);
         const cells = [
           fmtTime(record.created_at),
           record.protocol,
@@ -442,6 +476,7 @@ OBSERVER_HTML = """<!doctype html>
           send.model_context_message_count,
           send.model_context_token_estimate,
           stateProfile.message_count,
+          budget.request_tokens || budget.message_tokens || '',
           receive.output_chars,
           receive.reasoning_chars,
         ];
@@ -462,6 +497,7 @@ OBSERVER_HTML = """<!doctype html>
           selectedId = record.id;
           renderRows();
           renderDetail();
+          renderBudget();
         });
         rowsEl.appendChild(tr);
       }
@@ -482,6 +518,7 @@ OBSERVER_HTML = """<!doctype html>
               thread_id: record.thread_id,
               model_context_token_estimate: send.model_context_token_estimate,
               langgraph_state_profile: send.langgraph_state_profile || {},
+              context_budget: budgetOf(record),
               model_context_messages: send.model_context_messages || [],
               model_context: send.model_context || {},
             })
@@ -493,10 +530,31 @@ OBSERVER_HTML = """<!doctype html>
               status: receive.status,
               output_text: receive.output_text || '',
               reasoning_text: receive.reasoning_text || '',
+              context_budget: receive.context_budget || {},
               event_counts: receive.event_counts || {},
             })
           : pretty(receive);
       }
+    }
+    function renderBudget() {
+      budgetGrid.innerHTML = '';
+      const record = selectedRecord();
+      const budget = budgetOf(record);
+      if (!record || !budget || !Object.keys(budget).length) {
+        budgetStatus.textContent = 'Noch keine Budgetdaten.';
+        return;
+      }
+      budgetStatus.textContent = budget.node ? `letzter Knoten: ${budget.node}` : 'Budgetdaten vorhanden';
+      [
+        ['Kontext', budget.context_length],
+        ['Messages', budget.message_tokens],
+        ['Reserve', budget.static_context_reserve_tokens],
+        ['Request', budget.request_tokens],
+        ['Active', budget.active_limit],
+        ['Eff. Active', budget.effective_active_limit],
+        ['Hard', budget.hard_limit],
+        ['Eff. Hard', budget.effective_hard_limit],
+      ].forEach(([name, value]) => budgetGrid.appendChild(metric(name, value)));
     }
     async function loadRecords() {
       const limit = Math.max(1, Math.min(200, Number(limitEl.value || 80)));
@@ -508,6 +566,7 @@ OBSERVER_HTML = """<!doctype html>
       if (selectedId && !records.some((record) => record.id === selectedId) && records[0]) selectedId = records[0].id;
       renderRows();
       renderDetail();
+      renderBudget();
       statusEl.textContent = `${records.length} Requests`;
     }
     function setTab(tab) {
@@ -529,6 +588,7 @@ OBSERVER_HTML = """<!doctype html>
       selectedId = '';
       renderRows();
       renderDetail();
+      renderBudget();
       statusEl.textContent = 'geleert';
     });
     sendTab.addEventListener('click', () => setTab('send'));

@@ -566,6 +566,15 @@ def _expand_for_tool_pairs(indexes: set[int], messages: list[Any], head_indexes:
     return expanded
 
 
+def _latest_user_message_index(messages: list[Any], head_indexes: set[int]) -> int:
+    for index in range(len(messages) - 1, -1, -1):
+        if index in head_indexes:
+            continue
+        if message_role(messages[index]).lower() in {"user", "human"}:
+            return index
+    return -1
+
+
 def select_head_middle_tail(
     messages: list[Any],
     *,
@@ -574,9 +583,11 @@ def select_head_middle_tail(
 ) -> CompressionSelection:
     protected_message_ids = protected_message_ids or set()
     protect_first = max(0, _env_int("ALPHARAVIS_COMPRESSION_PROTECT_FIRST_MESSAGES", 3))
-    protect_last = max(1, _env_int("ALPHARAVIS_COMPRESSION_PROTECT_LAST_MESSAGES", 16))
+    protect_last = max(1, _env_int("ALPHARAVIS_COMPRESSION_PROTECT_LAST_MESSAGES", 3))
     tail_ratio = max(0.05, min(_env_float("ALPHARAVIS_COMPRESSION_TAIL_TOKEN_RATIO", 0.20), 0.75))
-    tail_budget = max(estimate_tokens_rough(messages[-protect_last:]), int(token_limit * tail_ratio))
+    tail_budget = max(1, int(token_limit * tail_ratio))
+    soft_ceiling_ratio = max(1.0, _env_float("ALPHARAVIS_COMPRESSION_TAIL_SOFT_CEILING_RATIO", 1.5))
+    tail_soft_ceiling = max(tail_budget, int(tail_budget * soft_ceiling_ratio))
 
     head_indexes: set[int] = set(range(min(protect_first, len(messages))))
     for index, message in enumerate(messages):
@@ -588,10 +599,17 @@ def select_head_middle_tail(
     for index in range(len(messages) - 1, -1, -1):
         if index in head_indexes:
             continue
+        message_tokens = estimate_tokens_rough([messages[index]])
         if len(tail_indexes) >= protect_last and tail_tokens >= tail_budget:
             break
+        if len(tail_indexes) >= protect_last and tail_tokens + message_tokens > tail_soft_ceiling:
+            break
         tail_indexes.add(index)
-        tail_tokens += estimate_tokens_rough([messages[index]])
+        tail_tokens += message_tokens
+
+    latest_user_index = _latest_user_message_index(messages, head_indexes)
+    if latest_user_index >= 0:
+        tail_indexes.update(index for index in range(latest_user_index, len(messages)) if index not in head_indexes)
 
     tail_indexes = _expand_for_tool_pairs(tail_indexes, messages, head_indexes)
     tail_indexes -= head_indexes
@@ -843,6 +861,15 @@ def build_summary_message_content(
     token_estimate_before: int,
     token_estimate_after: int,
 ) -> str:
+    if archive_key and archive_key != "not-stored":
+        archive_reference = (
+            "Archive reference:\n"
+            "source_type: archive\n"
+            f"archive_key: {archive_key}\n"
+            f"read_archive_record: read_archive_record(archive_key=\"{archive_key}\")\n"
+        )
+    else:
+        archive_reference = "Archive reference: not-stored\n"
     return (
         "<context-compaction-summary>\n"
         f"{SUMMARY_PREFIX}\n\n"
@@ -852,6 +879,7 @@ def build_summary_message_content(
         f"archive_key: {archive_key or 'not-stored'}\n"
         f"tokens_before_estimate: {token_estimate_before}\n"
         f"tokens_after_estimate: {token_estimate_after}\n\n"
+        f"{archive_reference}\n"
         f"{summary.strip()}\n"
         "</context-compaction-summary>"
     )

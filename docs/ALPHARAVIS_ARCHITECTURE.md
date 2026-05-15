@@ -858,10 +858,23 @@ ALPHARAVIS_HARD_CONTEXT_RATIO=0.95
 ALPHARAVIS_ENABLE_PRE_RUN_COMPRESSION=true
 ALPHARAVIS_ENABLE_HARD_CONTEXT_TRIM=true
 ALPHARAVIS_HARD_CONTEXT_TRIM_RATIO=0.80
+ALPHARAVIS_ENABLE_STATIC_CONTEXT_RESERVE=true
+ALPHARAVIS_STATIC_CONTEXT_RESERVE_TOKENS=0
+ALPHARAVIS_USE_AGENT_SPECIFIC_CONTEXT_RESERVE=true
+ALPHARAVIS_ENABLE_FINAL_LLM_BUDGET_GUARD=true
+ALPHARAVIS_ENABLE_FINAL_BUDGET_RESCUE=true
+ALPHARAVIS_FINAL_BUDGET_RESCUE_MAX_PASSES=3
+ALPHARAVIS_ENABLE_PROVIDER_OVERFLOW_RETRY=true
+ALPHARAVIS_ENABLE_PROVIDER_CONTEXT_LIMIT_RETRY=true
+ALPHARAVIS_DYNAMIC_COMPRESSION_UNTIL_BUDGET=true
+ALPHARAVIS_DYNAMIC_COMPRESSION_MAX_PASSES=6
+ALPHARAVIS_DYNAMIC_COMPRESSION_HARD_MAX_PASSES=12
 ALPHARAVIS_ENABLE_POST_RUN_COMPRESSION=true
 ALPHARAVIS_COMPRESSION_PROTECT_FIRST_MESSAGES=3
-ALPHARAVIS_COMPRESSION_PROTECT_LAST_MESSAGES=16
+ALPHARAVIS_COMPRESSION_PROTECT_LAST_MESSAGES=3
 ALPHARAVIS_COMPRESSION_TAIL_TOKEN_RATIO=0.20
+ALPHARAVIS_COMPRESSION_TAIL_SOFT_CEILING_RATIO=1.5
+ALPHARAVIS_PRE_RUN_COMPRESSION_MAX_PASSES=3
 ```
 
 With percentage limits enabled, AlphaRavis resolves the model context length
@@ -903,7 +916,13 @@ What happens:
 
 1. The engine protects the head: policy/system context, current task brief,
    planner context, MemoryKernel context, skill hint, and latest handoff packet.
-2. It protects a recent tail by message count and token budget.
+2. It protects a recent tail Hermes-style: a small hard minimum by message
+   count plus a token budget. The default is the latest 3 messages, then older
+   messages until roughly 20 percent of the compression limit is active. A
+   soft ceiling prevents a single older oversized message from dragging in a
+   huge tail after the minimum is already satisfied. Like Hermes, the latest
+   user/human message is always anchored into the tail so the active request is
+   never compressed into a reference-only summary.
 3. The middle is summarized. Tool outputs are pruned into informative previews
    before the summary call, repeated old tool outputs are deduplicated by hash,
    tool-call JSON arguments are shortened without breaking JSON, and secrets are
@@ -924,6 +943,65 @@ What happens:
 The compaction summary is reference-only. It explicitly tells the next agent
 that previous turns are already handled and that it should answer only the latest
 user request.
+
+Pre-run compression follows Hermes' safety shape: estimate the active request,
+compact when it is over the threshold, re-estimate, and continue until the full
+request is under budget. The default dynamic cap is
+`ALPHARAVIS_DYNAMIC_COMPRESSION_MAX_PASSES=6`, with
+`ALPHARAVIS_DYNAMIC_COMPRESSION_HARD_MAX_PASSES` as the absolute safety cap.
+Set `ALPHARAVIS_DYNAMIC_COMPRESSION_UNTIL_BUDGET=false` to return to the legacy
+fixed `ALPHARAVIS_PRE_RUN_COMPRESSION_MAX_PASSES` behavior. Like Hermes, the
+preflight budget is not just visible chat messages. At
+graph build time AlphaRavis estimates the largest DeepAgents static prompt/tool
+schema overhead and reserves that budget from the active-message threshold.
+`ALPHARAVIS_STATIC_CONTEXT_RESERVE_TOKENS=0` means auto-reserve; set a positive
+value only to force an operator override. When
+`ALPHARAVIS_USE_AGENT_SPECIFIC_CONTEXT_RESERVE=true`, AlphaRavis uses the
+selected or active agent's own reserve once routing/toolset context is known and
+falls back to the largest reserve only before that point. This is why the normal
+path should stay below the discovered model context without requiring the bridge
+to reject the request first.
+
+The same reserve is applied to handoff and post-run compression thresholds, so
+tool-heavy agent runs compact back under the effective budget after they add
+tool traces or handoff packets. The active state is therefore kept ready for the
+next full model request, not merely under the raw chat-history threshold.
+
+`final_budget_rescue` runs immediately before the Swarm model node. It inspects
+the full request budget snapshot and, when the active request would exceed the
+effective threshold, forces Hermes-style compression until the request is under
+the effective budget or the dynamic pass cap is reached before the model
+invocation. With dynamic mode disabled, it uses the legacy
+`ALPHARAVIS_FINAL_BUDGET_RESCUE_MAX_PASSES` cap.
+If the request is still over the hard budget and hard trim is enabled, it trims
+old active messages while keeping the latest user turn.
+
+If the provider still raises a classified context overflow or payload-too-large
+error from the Swarm model path, `ALPHARAVIS_ENABLE_PROVIDER_OVERFLOW_RETRY`
+lets AlphaRavis run final budget rescue once and retry the Swarm invocation
+with the compressed state. `ALPHARAVIS_ENABLE_PROVIDER_CONTEXT_LIMIT_RETRY`
+also extracts provider-reported context limits from errors such as llama.cpp
+`n_ctx_slot` messages and recomputes the retry budget from that smaller real
+window.
+
+The final model-call budget guard mirrors Hermes' request estimate more closely
+than the active-message compressor can: immediately before direct LLM calls and
+inside DeepAgents model invocations, AlphaRavis estimates messages plus bound
+tool schemas, model kwargs, and any system prompt that the agent runtime has
+materialized into the message list. It logs `llm.request_budget.estimated` with
+message/tool/system split counts and warns near or above the LangGraph hard
+limit. This guard is observational by default; compression still happens in the
+pre-run LangGraph state where old messages can be archived instead of silently
+dropped.
+
+Agents can call `inspect_context_budget` to see the detected context length,
+discovery base URL, active and hard thresholds, effective thresholds after
+static reserves, all agent-specific reserves, archive counts, and whether the
+current estimate needs compression or hard rescue.
+
+The Bridge test UI Observer shows the latest recorded context-budget snapshot in
+a dedicated `Context Budget` section for each request, including message tokens,
+reserve, request estimate, active/effective limits, and hard/effective limits.
 
 The current compressor borrows mature single-agent ideas from Hermes but does
 not import Hermes at runtime. AlphaRavis keeps its own LangGraph-state design,
@@ -1316,17 +1394,20 @@ records. It is not a startup-time full-history import.
 AlphaRavis has two hard cutoff layers:
 
 ```text
-BRIDGE_HARD_INPUT_TOKEN_LIMIT=128000
+BRIDGE_HARD_INPUT_TOKEN_LIMIT=0
 ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT=128000
 ALPHARAVIS_HARD_CONTEXT_RATIO=0.95
 ```
 
-The bridge refuses oversized incoming requests before they reach LangGraph. The
-graph then compacts or trims the active checkpointed context before routing to
+The bridge-level cutoff is disabled by default. LangGraph owns the normal hard
+context decision so it can first use model context discovery, pre-run
+compression, and hard trim on the active checkpointed context before routing to
 fast path, planner, swarm, or crisis manager. When percentage limits are
 enabled, the graph hard cutoff is computed from discovered context length and
 `ALPHARAVIS_HARD_CONTEXT_RATIO`; `ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT=0` still
-disables the graph hard stop explicitly.
+disables the graph hard stop explicitly. Set `BRIDGE_HARD_INPUT_TOKEN_LIMIT` to
+a positive value only when an operator explicitly wants the bridge to reject
+oversized raw requests before LangGraph sees them.
 
 ## Fast Path And Run Profile
 

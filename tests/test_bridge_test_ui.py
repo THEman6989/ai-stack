@@ -229,5 +229,8 @@ def test_observer_page_is_full_table_view() -> None:
     assert "Vollansicht" in test_ui_server.OBSERVER_HTML
     assert "model_context_messages" in test_ui_server.OBSERVER_HTML
     assert "State Msg" in test_ui_server.OBSERVER_HTML
+    assert "Context Budget" in test_ui_server.OBSERVER_HTML
+    assert "budgetOf(record)" in test_ui_server.OBSERVER_HTML
+    assert "context_budget" in test_ui_server.OBSERVER_HTML
     assert "langgraph_state_profile" in test_ui_server.OBSERVER_HTML
     assert "window.setInterval" in test_ui_server.OBSERVER_HTML

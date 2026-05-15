@@ -237,18 +237,24 @@ HTML = r"""<!doctype html>
     input:focus, select:focus, button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
     main { padding: 20px 22px 92px; }
     nav {
-      display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px;
+      display: flex; gap: 8px; margin-bottom: 18px;
+      overflow-x: auto; padding-bottom: 8px;
+      scrollbar-width: none; -ms-overflow-style: none;
     }
+    nav::-webkit-scrollbar { display: none; }
     nav button, .actions button, .row button {
       min-height: 36px; border: 1px solid var(--line); border-radius: 6px;
       background: var(--panel-2); color: var(--text); padding: 7px 11px; cursor: pointer;
+      transition: background 0.1s, border-color 0.1s;
     }
-    nav button.active { border-color: var(--accent); color: #dff7ec; }
+    nav button { white-space: nowrap; flex-shrink: 0; }
+    nav button:hover, .row button:hover { background: var(--line); }
+    nav button.active { border-color: var(--accent); color: #dff7ec; background: rgba(47, 182, 125, 0.1); }
     section { margin-bottom: 28px; }
     h2 { font-size: 17px; margin: 0 0 12px; letter-spacing: 0; }
     .grid { display: grid; gap: 10px; }
     .row {
-      display: grid; grid-template-columns: minmax(260px, 34%) minmax(260px, 1fr) 96px;
+      display: grid; grid-template-columns: minmax(240px, 34%) minmax(240px, 1fr) 96px;
       gap: 12px; align-items: start; padding: 12px;
       background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
     }
@@ -261,18 +267,25 @@ HTML = r"""<!doctype html>
     .bool button.selected { background: var(--accent); color: #04110b; font-weight: 700; }
     .reset-one { width: 100%; }
     .footer {
-      position: fixed; right: 18px; bottom: 18px; display: flex; gap: 10px; z-index: 5;
+      position: fixed; left: 18px; right: 18px; bottom: 18px; display: flex; gap: 10px; z-index: 5;
       background: rgba(16, 20, 24, 0.94); padding: 10px; border: 1px solid var(--line); border-radius: 8px;
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
     }
-    .save { background: var(--accent) !important; color: #04110b !important; border-color: var(--accent) !important; font-weight: 700; }
+    .save { background: var(--accent) !important; color: #04110b !important; border-color: var(--accent) !important; font-weight: 700; flex: 1; }
     .reset-all { border-color: var(--danger) !important; color: #ffdede !important; }
-    .status { color: var(--muted); align-self: center; min-width: 160px; font-size: 13px; }
+    .status { color: var(--muted); align-self: center; min-width: 140px; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .hidden { display: none; }
     @media (max-width: 780px) {
-      header { display: block; }
+      header { display: block; padding: 12px 16px; }
       .search { width: 100%; margin-top: 12px; }
-      .row { grid-template-columns: 1fr; }
-      .footer { left: 12px; right: 12px; justify-content: flex-end; }
+      .row { grid-template-columns: 1fr; gap: 8px; }
+      .row > div:nth-child(2) { margin-top: 4px; }
+      main { padding: 16px 16px 120px; }
+    }
+    @media (max-width: 480px) {
+      .footer { bottom: 0; left: 0; right: 0; border-radius: 0; border-left: 0; border-right: 0; flex-wrap: wrap; justify-content: space-between; }
+      .status { width: 100%; text-align: center; margin-bottom: 4px; order: -1; }
+      .reset-all, .save { flex: 1; }
     }
   </style>
 </head>
