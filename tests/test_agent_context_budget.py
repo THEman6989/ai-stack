@@ -207,6 +207,61 @@ def test_rag_state_update_from_archive_ingest_stays_passive() -> None:
     assert update == {"archive_rag_mode": "tool_only"}
 
 
+def test_run_profile_start_ingests_large_paste_and_replaces_active_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_ingest_source(**kwargs):
+        calls["ingest"] = kwargs
+        return {
+            "source_key": kwargs["source_key"],
+            "rag_file_id": kwargs["source_key"],
+            "index_status": "indexed",
+            "indexed_backends": ["rag_api"],
+            "rag_active": True,
+            "active_source_keys": [kwargs["source_key"]],
+            "active_rag_file_ids": [kwargs["source_key"]],
+            "rag_activation_reason": "large_paste",
+            "archive_rag_mode": "tool_only",
+            "metadata": {
+                "source_key": kwargs["source_key"],
+                "rag_file_id": kwargs["source_key"],
+                "rag_active": True,
+                "active_source_keys": [kwargs["source_key"]],
+                "active_rag_file_ids": [kwargs["source_key"]],
+                "rag_activation_reason": "large_paste",
+                "archive_rag_mode": "tool_only",
+            },
+        }
+
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "20")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MARKER_PREVIEW_CHARS", "8")
+    monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
+    monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", object())
+
+    content = "0123456789" * 5
+    updates = asyncio.run(
+        agent_graph.run_profile_start_node(
+            {
+                "messages": [{"role": "human", "content": content, "id": "msg-1"}],
+                "thread_id": "thread-1",
+                "thread_key": "thread-key",
+            }
+        )
+    )
+
+    assert calls["ingest"]["source_type"] == "large_paste"
+    assert calls["ingest"]["content"] == content
+    assert updates["rag_active"] is True
+    assert updates["rag_activation_reason"] == "large_paste"
+    assert updates["active_source_keys"] == [calls["ingest"]["source_key"]]
+    replacement_messages = updates["messages"]
+    assert isinstance(replacement_messages[0], agent_graph.RemoveMessage)
+    replacement_text = replacement_messages[1]["content"]
+    assert "Large paste indexed for bounded RAG retrieval" in replacement_text
+    assert content not in replacement_text
+    assert updates["run_profile"]["large_paste_ingests"][0]["index_status"] == "indexed"
+
+
 def test_context_budget_snapshot_uses_provider_reported_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALPHARAVIS_ENABLE_PERCENT_CONTEXT_LIMITS", "true")
     monkeypatch.setenv("ALPHARAVIS_ACTIVE_CONTEXT_TRIGGER_RATIO", "0.50")

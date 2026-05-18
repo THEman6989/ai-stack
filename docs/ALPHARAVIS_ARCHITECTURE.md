@@ -1372,6 +1372,10 @@ sources so later graph nodes can auto-retrieve bounded chunks from those
 sources. Compression archives set `rag_active=false` and
 `archive_rag_mode=tool_only`, preserving the rule that archives are searched
 only through explicit retrieval intent or tools.
+For large pasted human messages, `run_profile_start_node` calls
+`ingest_source(source_type="large_paste")` before pre-run context compression.
+If indexing succeeds, the full pasted text is replaced in active context by a
+small retrieval marker with the source id and preview.
 The AlphaRavis pgvector path follows the same retriever shape as `rag_api`:
 `query + source key(s) + k`, where a single source maps to `$eq` semantics and
 multiple sources map to `$in` semantics. It can also apply an optional

@@ -229,11 +229,13 @@ Implemented:
 - `AlphaRavisState` can carry `rag_active`, `active_rag_file_ids`,
   `active_source_keys`, `rag_activation_reason`, and `archive_rag_mode`.
   Run-profile snapshots expose these fields for observer/debugging.
+- Large human paste messages are detected at `run_profile_start_node`. When
+  `ingest_source(source_type="large_paste")` succeeds, the active model context
+  receives a compact retrieval marker instead of the full pasted text.
 
 Still needed:
 
-- Route large-paste ingest and future document/PDF upload paths through
-  `ingest_source(...)`.
+- Route future document/PDF upload paths through `ingest_source(...)`.
 - Add auto-retrieval behavior that consumes active document metadata and injects
   only bounded chunks. Keep archive-only threads passive unless tool/intent
   explicitly asks for old archive details.

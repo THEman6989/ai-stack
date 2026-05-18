@@ -140,6 +140,9 @@ External document / PDF / large paste default:
 - return thread-activation metadata with `rag_active=true`,
   `active_source_keys`, `active_rag_file_ids`, and
   `rag_activation_reason=document_ingest|large_paste`
+- large human messages are now detected in `run_profile_start_node`; after
+  successful `ingest_source(source_type="large_paste")`, the active chat context
+  gets a compact retrieval marker instead of the full pasted text
 
 Archive / compression default:
 
@@ -194,8 +197,7 @@ follow-up.
 
 ## Next Best Steps
 
-1. Route large-paste ingest and future document/PDF upload paths through
-   `ingest_source(...)`.
+1. Route future document/PDF upload paths through `ingest_source(...)`.
 
 2. Add optional auto-on-intent behavior that consumes the new thread RAG
    activation metadata. Keep compression archives passive by default; only

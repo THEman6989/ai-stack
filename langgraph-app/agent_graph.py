@@ -5921,6 +5921,119 @@ def _rag_state_update_from_ingest(state: dict[str, Any], ingest_result: dict[str
     return update
 
 
+def _large_paste_ingest_enabled() -> bool:
+    return _env_bool("ALPHARAVIS_ENABLE_LARGE_PASTE_RAG_INGEST", "true")
+
+
+def _large_paste_min_chars() -> int:
+    return max(1, int(os.getenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "20000")))
+
+
+def _large_paste_marker(*, source_key: str, rag_file_id: str, title: str, content: str) -> str:
+    preview_chars = max(0, int(os.getenv("ALPHARAVIS_LARGE_PASTE_RAG_MARKER_PREVIEW_CHARS", "900")))
+    preview = content[:preview_chars].strip() if preview_chars else ""
+    lines = [
+        f"[Large paste indexed for bounded RAG retrieval: source_key={source_key}; rag_file_id={rag_file_id}; title={title}]",
+        "Use agentic_rag_retrieve or query_source against this source when details from the pasted text are needed.",
+    ]
+    if preview:
+        lines.append(f"Paste preview:\n{preview}")
+    return "\n\n".join(lines)
+
+
+def _replace_message_content(message: Any, content: str) -> Any:
+    if isinstance(message, dict):
+        updated = dict(message)
+        updated["content"] = content
+        return updated
+    role = _message_role_name(message)
+    message_id = _message_id(message) or None
+    if role in {"human", "user"}:
+        return HumanMessage(content=content, id=message_id)
+    if role in {"ai", "assistant"}:
+        return AIMessage(content=content, id=message_id)
+    if role == "system":
+        return SystemMessage(content=content, id=message_id)
+    return {"role": role or "human", "content": content, "id": message_id}
+
+
+async def _ingest_large_paste_messages(
+    state: dict[str, Any],
+    messages: list[Any],
+) -> tuple[list[Any], list[dict[str, Any]], dict[str, Any]]:
+    if not _large_paste_ingest_enabled() or _router_ingest_source is None:
+        return messages, [], {}
+
+    min_chars = _large_paste_min_chars()
+    thread_id = _state_thread_id(state)
+    thread_key = _state_thread_key(state)
+    output: list[Any] = []
+    ingests: list[dict[str, Any]] = []
+    rag_update: dict[str, Any] = {}
+    for index, message in enumerate(messages):
+        role = _message_role_name(message)
+        content = _message_content_text(message)
+        if role not in {"human", "user"} or len(content) < min_chars:
+            output.append(message)
+            continue
+
+        digest = hashlib.sha256(f"{thread_id}:{index}:{content}".encode("utf-8")).hexdigest()[:16]
+        source_key = f"large_paste:{thread_id}:{digest}"
+        title = f"Large paste {digest}"
+        try:
+            ingest_result = await _router_ingest_source(
+                source_type="large_paste",
+                source_key=source_key,
+                title=title,
+                content=content,
+                thread_id=thread_id,
+                thread_key=thread_key,
+                scope="thread",
+                metadata={
+                    "source_type": "large_paste",
+                    "source_key": source_key,
+                    "rag_activation_reason": "large_paste",
+                    "origin": "chat_large_paste",
+                    "message_index": index,
+                    "content_chars": len(content),
+                },
+                preferred_backend="auto",
+                pgvector_index=_maybe_index_vector_memory,
+            )
+        except Exception as exc:
+            ingests.append({"source_key": source_key, "index_status": "failed", "error": str(exc)[:500]})
+            output.append(message)
+            continue
+
+        ingests.append(
+            {
+                "source_key": source_key,
+                "rag_file_id": ingest_result.get("rag_file_id", ""),
+                "index_status": ingest_result.get("index_status", ""),
+                "indexed_backends": list(ingest_result.get("indexed_backends") or []),
+                "rag_active": bool(ingest_result.get("rag_active")),
+                "content_chars": len(content),
+            }
+        )
+        rag_update.update(_rag_state_update_from_ingest({**state, **rag_update}, ingest_result))
+        if ingest_result.get("index_status") in {"indexed", "partial"} and ingest_result.get("rag_active"):
+            output.append(
+                _replace_message_content(
+                    message,
+                    _large_paste_marker(
+                        source_key=source_key,
+                        rag_file_id=str(ingest_result.get("rag_file_id") or source_key),
+                        title=title,
+                        content=content,
+                    ),
+                )
+            )
+        else:
+            output.append(message)
+
+    return output, ingests, rag_update
+
+
 def _tool_name_for_profile(tool_obj: Any) -> str:
     if _toolset_tool_name is not None:
         return _toolset_tool_name(tool_obj)
@@ -6056,10 +6169,11 @@ def _fast_path_decision(state: AlphaRavisState) -> tuple[bool, str]:
     return True, "short non-tool chat"
 
 
-async def run_profile_start_node(state: AlphaRavisState) -> dict[str, Any]:
+async def run_profile_start_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
     trace_started = time.perf_counter()
     trace_id = _state_trace_id(state)
     messages = list(state.get("messages", []))
+    messages, large_paste_ingests, rag_update = await _ingest_large_paste_messages(state, messages)
     latest = _latest_user_query(messages)
     bridge_refs = [item for item in list(state.get("bridge_context_references") or []) if isinstance(item, dict)]
     selected_toolsets, toolset_context = _toolset_context_for_request(latest)
@@ -6076,11 +6190,12 @@ async def run_profile_start_node(state: AlphaRavisState) -> dict[str, Any]:
         "static_context_reserve_detail": _static_context_reserve_detail({"selected_toolsets": selected_toolsets}),
         "bridge_context_references": bridge_refs[:8],
         "bridge_context_reference_count": sum(int(item.get("reference_count", 0)) for item in bridge_refs),
-        "rag_active": bool(state.get("rag_active")),
-        "active_source_keys": list(state.get("active_source_keys") or []),
-        "active_rag_file_ids": list(state.get("active_rag_file_ids") or []),
-        "rag_activation_reason": str(state.get("rag_activation_reason") or ""),
-        "archive_rag_mode": str(state.get("archive_rag_mode") or "tool_only"),
+        "large_paste_ingests": large_paste_ingests,
+        "rag_active": bool(rag_update.get("rag_active", state.get("rag_active"))),
+        "active_source_keys": list(rag_update.get("active_source_keys") or state.get("active_source_keys") or []),
+        "active_rag_file_ids": list(rag_update.get("active_rag_file_ids") or state.get("active_rag_file_ids") or []),
+        "rag_activation_reason": str(rag_update.get("rag_activation_reason") or state.get("rag_activation_reason") or ""),
+        "archive_rag_mode": str(rag_update.get("archive_rag_mode") or state.get("archive_rag_mode") or "tool_only"),
         "selected_toolsets": selected_toolsets,
         "loaded_toolsets": GRAPH_TOOLSET_PROFILE,
     }
@@ -6114,7 +6229,10 @@ async def run_profile_start_node(state: AlphaRavisState) -> dict[str, Any]:
                 trace_id=trace_id,
             )
         ],
+        **rag_update,
     }
+    if large_paste_ingests:
+        updates["messages"] = [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages]
     return updates
 
 

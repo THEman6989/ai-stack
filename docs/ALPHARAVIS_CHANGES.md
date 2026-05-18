@@ -180,6 +180,15 @@ explicit retrieval tools instead of automatic full-archive injection.
 `AlphaRavisState` now has matching fields and run-profile snapshots expose the
 current values for debugging.
 
+Large-paste ingest is now wired at `run_profile_start_node`. If a human message
+exceeds `ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS` and
+`ALPHARAVIS_ENABLE_LARGE_PASTE_RAG_INGEST=true`, AlphaRavis indexes the full
+text through `ingest_source(source_type="large_paste")`. Only after successful
+indexing does the active message get replaced with a compact retrieval marker
+containing the `source_key`/`rag_file_id` and a short preview. This prevents a
+large paste from consuming the active model window while preserving explicit
+retrieval through `agentic_rag_retrieve` or `query_source`.
+
 Added `docs/ALPHARAVIS_RAG_HANDOFF.md` as the explicit context-window handoff
 for this RAG effort. It records the user intent, local reference files,
 implemented router functions, current defaults, next steps, verification
