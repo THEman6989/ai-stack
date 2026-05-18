@@ -161,9 +161,14 @@ Agentic-RAG router slice:
 - is exposed through `agent_graph.py` as the `agentic_rag_retrieve` tool for
   explicit source-scoped RAG calls
 
-This is not yet exposed as a full LangGraph subgraph or automatic context
-injection path. It remains an explicit tool call so full archives are not loaded
-just because they exist.
+Active document / large-paste RAG:
+
+- `active_rag_prefetch_node` runs after memory prefetch and before skill/handoff
+  preparation when `rag_active=true`
+- it retrieves from `active_source_keys` / `active_rag_file_ids` with bounded
+  `agentic_rag_retrieve(...)`
+- it injects only a compact `<active-rag-context>` system message
+- archive-only state with `archive_rag_mode=tool_only` stays passive
 
 ## Embedding / Chunking Decisions
 
@@ -199,9 +204,9 @@ follow-up.
 
 1. Route future document/PDF upload paths through `ingest_source(...)`.
 
-2. Add optional auto-on-intent behavior that consumes the new thread RAG
-   activation metadata. Keep compression archives passive by default; only
-   explicit documents/PDFs/large paste should auto-retrieve bounded chunks.
+2. Add optional archive auto-on-intent behavior. Keep compression archives
+   passive by default; only enable archive auto-retrieval when
+   `archive_rag_mode=auto_on_intent` and intent heuristics are proven.
 
 3. Add optional reranking behind the router.
    Desired flow:

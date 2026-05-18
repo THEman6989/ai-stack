@@ -232,13 +232,17 @@ Implemented:
 - Large human paste messages are detected at `run_profile_start_node`. When
   `ingest_source(source_type="large_paste")` succeeds, the active model context
   receives a compact retrieval marker instead of the full pasted text.
+- `active_rag_prefetch_node` consumes active document/large-paste RAG metadata
+  after memory prefetch and injects only a bounded `<active-rag-context>` system
+  message. Archive-only state with `archive_rag_mode=tool_only` remains
+  passive.
 
 Still needed:
 
 - Route future document/PDF upload paths through `ingest_source(...)`.
-- Add auto-retrieval behavior that consumes active document metadata and injects
-  only bounded chunks. Keep archive-only threads passive unless tool/intent
-  explicitly asks for old archive details.
+- Add optional archive `auto_on_intent` behavior after live quality/latency is
+  measured. Keep archive-only threads passive unless this mode is explicitly
+  enabled.
 - Add optional reranking behind the router, default-off until measured.
 - Add optional LLM structured-output grading after deterministic grading is
   proven in live use.

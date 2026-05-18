@@ -1207,6 +1207,10 @@ archives remain passive by default with `archive_rag_mode=tool_only`.
 Large pasted messages above `ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS` are indexed
 first; after successful indexing, the model sees a compact retrieval marker
 instead of the entire paste.
+When `ALPHARAVIS_ENABLE_ACTIVE_RAG_PREFETCH=true`, active document/large-paste
+threads automatically prefetch bounded chunks into `<active-rag-context>`.
+Archive-only threads remain tool-only unless a future `auto_on_intent` archive
+mode is enabled.
 If weak pgvector hits are too noisy, set
 `ALPHARAVIS_PGVECTOR_DISTANCE_THRESHOLD` for AlphaRavis's own pgvector table.
 This is separate from `rag_api`'s `RAG_DISTANCE_THRESHOLD`, but uses the same

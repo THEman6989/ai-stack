@@ -189,6 +189,22 @@ containing the `source_key`/`rag_file_id` and a short preview. This prevents a
 large paste from consuming the active model window while preserving explicit
 retrieval through `agentic_rag_retrieve` or `query_source`.
 
+Active-RAG prefetch is now wired into the LangGraph path after memory prefetch
+and before skill/handoff preparation. When `rag_active=true` and active
+source/file ids exist, `active_rag_prefetch_node` runs bounded
+`agentic_rag_retrieve(...)` and injects a compact `<active-rag-context>` system
+message. It skips trivial queries, missing sources, router failures, and
+archive-only state with `archive_rag_mode=tool_only`.
+
+Operator knobs:
+
+```text
+ALPHARAVIS_ENABLE_ACTIVE_RAG_PREFETCH=true
+ALPHARAVIS_ACTIVE_RAG_PREFETCH_LIMIT=4
+ALPHARAVIS_ACTIVE_RAG_PREFETCH_CONTEXT_CHARS=5000
+ALPHARAVIS_ACTIVE_RAG_PREFETCH_MIN_QUERY_CHARS=8
+```
+
 Added `docs/ALPHARAVIS_RAG_HANDOFF.md` as the explicit context-window handoff
 for this RAG effort. It records the user intent, local reference files,
 implemented router functions, current defaults, next steps, verification

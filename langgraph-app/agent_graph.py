@@ -416,6 +416,7 @@ CURRENT_TASK_BRIEF_MESSAGE_ID = "alpharavis_current_task_brief"
 HANDOFF_CONTEXT_MESSAGE_ID = "alpharavis_handoff_context_summary"
 HANDOFF_PACKET_MESSAGE_ID = "alpharavis_handoff_packet"
 MEMORY_KERNEL_CONTEXT_MESSAGE_ID = "alpharavis_memory_kernel_context"
+ACTIVE_RAG_CONTEXT_MESSAGE_ID = "alpharavis_active_rag_context"
 CONTEXT_COMPACTION_MESSAGE_ID = "alpharavis_context_compaction_summary"
 ARCHIVE_POLICY_MESSAGE_ID = "alpharavis_archived_context_policy"
 CURATED_MEMORY_INDEX_NS = ("alpharavis", "curated_memory_index")
@@ -5334,6 +5335,7 @@ def _protected_context_messages(messages: list[Any]) -> list[Any]:
         CURRENT_TASK_BRIEF_MESSAGE_ID,
         PLANNER_CONTEXT_MESSAGE_ID,
         MEMORY_KERNEL_CONTEXT_MESSAGE_ID,
+        ACTIVE_RAG_CONTEXT_MESSAGE_ID,
         SKILL_CONTEXT_MESSAGE_ID,
         HANDOFF_CONTEXT_MESSAGE_ID,
         HANDOFF_PACKET_MESSAGE_ID,
@@ -6814,6 +6816,7 @@ def _compression_protected_message_ids() -> set[str]:
         CURRENT_TASK_BRIEF_MESSAGE_ID,
         PLANNER_CONTEXT_MESSAGE_ID,
         MEMORY_KERNEL_CONTEXT_MESSAGE_ID,
+        ACTIVE_RAG_CONTEXT_MESSAGE_ID,
         SKILL_CONTEXT_MESSAGE_ID,
         HANDOFF_PACKET_MESSAGE_ID,
     }
@@ -8188,6 +8191,119 @@ async def memory_kernel_sync_node(state: AlphaRavisState, runtime: Any | None = 
     }
 
 
+def _active_rag_prefetch_enabled() -> bool:
+    return _env_bool("ALPHARAVIS_ENABLE_ACTIVE_RAG_PREFETCH", "true")
+
+
+def _active_rag_prefetch_context_chars() -> int:
+    return max(1, int(os.getenv("ALPHARAVIS_ACTIVE_RAG_PREFETCH_CONTEXT_CHARS", "5000")))
+
+
+def _active_rag_prefetch_limit() -> int:
+    return max(1, min(int(os.getenv("ALPHARAVIS_ACTIVE_RAG_PREFETCH_LIMIT", "4")), 10))
+
+
+def _active_rag_prefetch_query(text: str) -> bool:
+    stripped = str(text or "").strip()
+    if len(stripped) < int(os.getenv("ALPHARAVIS_ACTIVE_RAG_PREFETCH_MIN_QUERY_CHARS", "8")):
+        return False
+    return stripped.lower() not in {"hi", "hallo", "hello", "ok", "okay", "danke", "thanks", "weiter"}
+
+
+def _format_active_rag_context_packet(packet: dict[str, Any]) -> str:
+    chunks = packet.get("chunks") if isinstance(packet, dict) else []
+    if not isinstance(chunks, list) or not chunks:
+        return ""
+    lines = [
+        "<active-rag-context>",
+        "[System note: bounded retrieved context from active document/large-paste sources. Use only when relevant; cite source_key/rank when useful.]",
+        f"query: {packet.get('query', '')}",
+    ]
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            continue
+        lines.extend(
+            [
+                "",
+                (
+                    f"[rank={chunk.get('rank')} source_key={chunk.get('source_key', '')} "
+                    f"backend={chunk.get('retrieval_backend', '')} relevance={chunk.get('relevance_score', '')}]"
+                ),
+                str(chunk.get("chunk_text") or "").strip(),
+            ]
+        )
+    lines.append("</active-rag-context>")
+    return "\n".join(lines).strip()
+
+
+async def active_rag_prefetch_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
+    if not _active_rag_prefetch_enabled() or not state.get("rag_active"):
+        return {"run_profile": _profile_update(state, active_rag_prefetch_status="disabled_or_inactive")}
+    if _router_agentic_rag_retrieve is None:
+        return {"run_profile": _profile_update(state, active_rag_prefetch_status="router_unavailable")}
+
+    source_keys = _merge_unique_strings(state.get("active_source_keys"))
+    rag_file_ids = _merge_unique_strings(state.get("active_rag_file_ids"))
+    if not source_keys and not rag_file_ids:
+        return {"run_profile": _profile_update(state, active_rag_prefetch_status="no_active_sources")}
+    if str(state.get("archive_rag_mode") or "tool_only") == "tool_only" and not source_keys:
+        return {"run_profile": _profile_update(state, active_rag_prefetch_status="archive_tool_only")}
+
+    query = _latest_user_query(list(state.get("messages", []))).strip()
+    if not _active_rag_prefetch_query(query):
+        return {"run_profile": _profile_update(state, active_rag_prefetch_status="trivial_query")}
+
+    try:
+        payload = await _router_agentic_rag_retrieve(
+            query=query,
+            source_keys=source_keys or rag_file_ids,
+            source_type="all",
+            limit=_active_rag_prefetch_limit(),
+            include_other_threads=False,
+            thread_id=_state_thread_id(state),
+            pgvector_search=_pgvector_semantic_search,
+            pgvector_available=_vector_memory_available(),
+            pgvector_import_error=PGVECTOR_IMPORT_ERROR,
+            rag_query_func=_rag_query_sources,
+            rag_source_keys=rag_file_ids or None,
+            allow_rewrite=True,
+            max_context_chars=_active_rag_prefetch_context_chars(),
+        )
+    except Exception as exc:
+        _log_exception("memory.active_rag_prefetch.failed", exc, level=logging.WARNING, dependency="retrieval_router")
+        return {
+            "run_profile": _profile_update(
+                state,
+                active_rag_prefetch_status="failed",
+                active_rag_prefetch_error=str(exc)[:500],
+            )
+        }
+
+    packet = payload.get("context_packet") if isinstance(payload, dict) else {}
+    content = _format_active_rag_context_packet(packet if isinstance(packet, dict) else {})
+    if not content:
+        return {
+            "run_profile": _profile_update(
+                state,
+                active_rag_prefetch_status="no_grounded_context",
+                active_rag_prefetch_trace=payload.get("graph_trace", []) if isinstance(payload, dict) else [],
+            )
+        }
+
+    return {
+        "messages": [SystemMessage(content=content, id=ACTIVE_RAG_CONTEXT_MESSAGE_ID)],
+        "run_profile": _profile_update(
+            state,
+            active_rag_prefetch_status="injected",
+            active_rag_prefetch_chunk_count=int(packet.get("chunk_count") or 0) if isinstance(packet, dict) else 0,
+            active_rag_prefetch_source_keys=source_keys,
+            active_rag_prefetch_rag_file_ids=rag_file_ids,
+            active_rag_prefetch_final_query=payload.get("final_query", "") if isinstance(payload, dict) else "",
+            active_rag_prefetch_trace=payload.get("graph_trace", []) if isinstance(payload, dict) else [],
+        ),
+    }
+
+
 async def skill_library_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
     if os.getenv("ALPHARAVIS_ENABLE_SKILL_LIBRARY", "true").lower() not in {"1", "true", "yes"}:
         return {}
@@ -9402,6 +9518,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     builder.add_node("fast_chat", fast_chat_node)
     builder.add_node("planner", planner_node)
     builder.add_node("memory_kernel_before", memory_kernel_prefetch_node)
+    builder.add_node("active_rag_prefetch", active_rag_prefetch_node)
     builder.add_node("skill_library", skill_library_node)
     builder.add_node("skill_library_trace_finish", _trace_marker_node("langgraph.skill_library.completed"))
     builder.add_node("handoff_context_guard", handoff_context_guard_node)
@@ -9431,7 +9548,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     )
     builder.add_edge("crisis_manager", "planner")
     builder.add_edge("planner", "memory_kernel_before")
-    builder.add_edge("memory_kernel_before", "skill_library")
+    builder.add_edge("memory_kernel_before", "active_rag_prefetch")
+    builder.add_edge("active_rag_prefetch", "skill_library")
     builder.add_edge("skill_library", "skill_library_trace_finish")
     builder.add_edge("skill_library_trace_finish", "handoff_context_guard")
     builder.add_edge("handoff_context_guard", "handoff_context_guard_trace_finish")

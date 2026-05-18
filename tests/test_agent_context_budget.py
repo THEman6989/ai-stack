@@ -262,6 +262,88 @@ def test_run_profile_start_ingests_large_paste_and_replaces_active_context(monke
     assert updates["run_profile"]["large_paste_ingests"][0]["index_status"] == "indexed"
 
 
+def test_active_rag_prefetch_injects_bounded_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_agentic_rag_retrieve(**kwargs):
+        calls.update(kwargs)
+        return {
+            "final_query": kwargs["query"],
+            "graph_trace": [{"node": "retrieve"}],
+            "context_packet": {
+                "query": kwargs["query"],
+                "chunk_count": 1,
+                "chunks": [
+                    {
+                        "rank": 1,
+                        "source_key": "doc-1",
+                        "retrieval_backend": "rag_api",
+                        "relevance_score": 0.9,
+                        "chunk_text": "The grounded document detail.",
+                    }
+                ],
+            },
+        }
+
+    monkeypatch.setattr(agent_graph, "_router_agentic_rag_retrieve", fake_agentic_rag_retrieve)
+
+    updates = asyncio.run(
+        agent_graph.active_rag_prefetch_node(
+            {
+                "messages": [{"role": "human", "content": "Welche Details stehen im Dokument?"}],
+                "thread_id": "thread-1",
+                "rag_active": True,
+                "active_source_keys": ["doc-1"],
+                "active_rag_file_ids": ["doc-1"],
+                "archive_rag_mode": "tool_only",
+            }
+        )
+    )
+
+    assert calls["source_keys"] == ["doc-1"]
+    assert calls["rag_source_keys"] == ["doc-1"]
+    assert updates["run_profile"]["active_rag_prefetch_status"] == "injected"
+    assert updates["messages"][0].id == agent_graph.ACTIVE_RAG_CONTEXT_MESSAGE_ID
+    assert "The grounded document detail." in updates["messages"][0].content
+
+
+def test_active_rag_prefetch_stays_inactive_for_archive_only() -> None:
+    updates = asyncio.run(
+        agent_graph.active_rag_prefetch_node(
+            {
+                "messages": [{"role": "human", "content": "Was war im Archiv?"}],
+                "rag_active": True,
+                "active_rag_file_ids": ["archive:archive-1"],
+                "archive_rag_mode": "tool_only",
+            }
+        )
+    )
+
+    assert "messages" not in updates
+    assert updates["run_profile"]["active_rag_prefetch_status"] == "archive_tool_only"
+
+
+def test_active_rag_prefetch_does_not_inject_without_grounded_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_agentic_rag_retrieve(**kwargs):
+        return {"context_packet": {"query": kwargs["query"], "chunk_count": 0, "chunks": []}, "graph_trace": []}
+
+    monkeypatch.setattr(agent_graph, "_router_agentic_rag_retrieve", fake_agentic_rag_retrieve)
+
+    updates = asyncio.run(
+        agent_graph.active_rag_prefetch_node(
+            {
+                "messages": [{"role": "human", "content": "Welche Details stehen im Dokument?"}],
+                "rag_active": True,
+                "active_source_keys": ["doc-1"],
+                "active_rag_file_ids": ["doc-1"],
+            }
+        )
+    )
+
+    assert "messages" not in updates
+    assert updates["run_profile"]["active_rag_prefetch_status"] == "no_grounded_context"
+
+
 def test_context_budget_snapshot_uses_provider_reported_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALPHARAVIS_ENABLE_PERCENT_CONTEXT_LIMITS", "true")
     monkeypatch.setenv("ALPHARAVIS_ACTIVE_CONTEXT_TRIGGER_RATIO", "0.50")
