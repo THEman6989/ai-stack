@@ -129,6 +129,10 @@ def test_ingest_source_routes_external_document_to_rag_by_default(monkeypatch) -
     assert result["index_status"] == "indexed"
     assert result["indexed_backends"] == ["rag_api"]
     assert result["metadata"]["rag_file_id"] == "doc-1"
+    assert result["rag_active"] is True
+    assert result["active_rag_file_ids"] == ["doc-1"]
+    assert result["active_source_keys"] == ["doc-1"]
+    assert result["rag_activation_reason"] == "document_ingest"
 
 
 def test_ingest_source_indexes_archive_pgvector_without_rag_when_mirror_disabled(monkeypatch) -> None:
@@ -160,6 +164,10 @@ def test_ingest_source_indexes_archive_pgvector_without_rag_when_mirror_disabled
     assert "rag" not in calls
     assert result["rag_file_id"] == "archive:archive-1"
     assert result["indexed_backends"] == ["alpharavis_pgvector"]
+    assert result["rag_active"] is False
+    assert result["active_rag_file_ids"] == []
+    assert result["active_source_keys"] == []
+    assert result["archive_rag_mode"] == "tool_only"
 
 
 def test_ingest_source_reports_partial_when_rag_fails_after_pgvector(monkeypatch) -> None:
@@ -185,6 +193,8 @@ def test_ingest_source_reports_partial_when_rag_fails_after_pgvector(monkeypatch
     assert result["indexed_backends"] == ["alpharavis_pgvector"]
     assert result["errors"] == [{"stage": "rag_api", "error": "embedding backend offline"}]
     assert result["metadata"]["rag_index_status"] == "failed"
+    assert result["rag_active"] is True
+    assert result["rag_activation_reason"] == "large_paste"
 
 
 def test_ingest_source_validates_content() -> None:

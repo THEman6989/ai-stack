@@ -161,6 +161,25 @@ pgvector search scoped to the archive key and additionally queries an existing
 toolset and the context retrieval agent prompt now prefers it when a
 source-scoped question needs retrieve/grade/rewrite behavior.
 
+Next metadata slice: `retrieval_router.ingest_source(...)` now emits
+thread-aware RAG activation fields:
+
+```text
+rag_active
+active_rag_file_ids
+active_source_keys
+rag_activation_reason
+archive_rag_mode
+```
+
+External documents, PDFs, uploaded documents, artifact documents, and large
+paste/large-ingest sources mark RAG active for the thread and carry the relevant
+source/file ids. Compression archives remain passive with
+`archive_rag_mode=tool_only`, so old archived context is still reached through
+explicit retrieval tools instead of automatic full-archive injection.
+`AlphaRavisState` now has matching fields and run-profile snapshots expose the
+current values for debugging.
+
 Added `docs/ALPHARAVIS_RAG_HANDOFF.md` as the explicit context-window handoff
 for this RAG effort. It records the user intent, local reference files,
 implemented router functions, current defaults, next steps, verification

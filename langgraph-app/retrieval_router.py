@@ -31,6 +31,19 @@ def _source_type_key(source_type: str) -> str:
     return str(source_type or "").strip().lower().replace("-", "_")
 
 
+_DOCUMENT_RAG_SOURCE_TYPES = {
+    "external_document",
+    "document",
+    "pdf",
+    "uploaded_document",
+    "artifact_document",
+}
+_LARGE_PASTE_RAG_SOURCE_TYPES = {
+    "large_paste",
+    "large_ingest",
+}
+
+
 def normalize_source_keys(source_keys: Any, *, source_key: str = "") -> list[str]:
     raw_items: list[Any]
     if isinstance(source_keys, str):
@@ -305,6 +318,56 @@ def rag_file_id_for_source(source_type: str, source_key: str, metadata: dict[str
     return source_key
 
 
+def rag_activation_metadata(
+    *,
+    source_type: str,
+    source_key: str,
+    rag_file_id: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    metadata = metadata if isinstance(metadata, dict) else {}
+    normalized_type = _source_type_key(source_type)
+    source_key = str(source_key or "").strip()
+    rag_file_id = str(rag_file_id or "").strip()
+    explicit_reason = str(metadata.get("rag_activation_reason") or "").strip()
+    archive_mode = str(metadata.get("archive_rag_mode") or "").strip()
+
+    if metadata.get("rag_active") is True:
+        return {
+            "rag_active": True,
+            "active_rag_file_ids": normalize_source_keys(metadata.get("active_rag_file_ids"), source_key=rag_file_id),
+            "active_source_keys": normalize_source_keys(metadata.get("active_source_keys"), source_key=source_key),
+            "rag_activation_reason": explicit_reason or "manual_pin",
+            "archive_rag_mode": archive_mode or "manual",
+        }
+
+    if normalized_type in _DOCUMENT_RAG_SOURCE_TYPES:
+        return {
+            "rag_active": True,
+            "active_rag_file_ids": normalize_source_keys(metadata.get("active_rag_file_ids"), source_key=rag_file_id),
+            "active_source_keys": normalize_source_keys(metadata.get("active_source_keys"), source_key=source_key),
+            "rag_activation_reason": explicit_reason or "document_ingest",
+            "archive_rag_mode": archive_mode or "tool_only",
+        }
+
+    if normalized_type in _LARGE_PASTE_RAG_SOURCE_TYPES:
+        return {
+            "rag_active": True,
+            "active_rag_file_ids": normalize_source_keys(metadata.get("active_rag_file_ids"), source_key=rag_file_id),
+            "active_source_keys": normalize_source_keys(metadata.get("active_source_keys"), source_key=source_key),
+            "rag_activation_reason": explicit_reason or "large_paste",
+            "archive_rag_mode": archive_mode or "tool_only",
+        }
+
+    return {
+        "rag_active": False,
+        "active_rag_file_ids": normalize_source_keys(metadata.get("active_rag_file_ids")),
+        "active_source_keys": normalize_source_keys(metadata.get("active_source_keys")),
+        "rag_activation_reason": explicit_reason,
+        "archive_rag_mode": (archive_mode or "tool_only") if normalized_type == "archive" else archive_mode,
+    }
+
+
 def should_mirror_to_rag(
     *,
     source_type: str,
@@ -474,6 +537,12 @@ async def ingest_source(
 
     indexed_backends = list(dict.fromkeys(indexed_backends))
     index_status = "indexed" if indexed_backends and not errors else "partial" if indexed_backends else "failed"
+    activation = rag_activation_metadata(
+        source_type=source_type,
+        source_key=source_key,
+        rag_file_id=rag_file_id,
+        metadata=metadata,
+    )
     result_metadata = {
         **metadata,
         "source_type": source_type,
@@ -484,6 +553,7 @@ async def ingest_source(
         ) else metadata.get("rag_index_status", ""),
         "rag_indexed_at": rag_indexed_at or metadata.get("rag_indexed_at"),
         "indexed_backends": indexed_backends,
+        **activation,
     }
     return {
         "source_type": source_type,
@@ -497,6 +567,7 @@ async def ingest_source(
         "rag_indexed_at": result_metadata.get("rag_indexed_at"),
         "indexed_backends": indexed_backends,
         "index_status": index_status,
+        **activation,
         "backend_results": backend_results,
         "metadata": result_metadata,
         "warnings": warnings,

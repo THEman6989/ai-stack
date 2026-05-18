@@ -365,6 +365,11 @@ class AlphaRavisState(MessagesState):
     stable_prompt_context: NotRequired[str]
     thread_id: NotRequired[str]
     thread_key: NotRequired[str]
+    rag_active: NotRequired[bool]
+    active_rag_file_ids: NotRequired[list[str]]
+    active_source_keys: NotRequired[list[str]]
+    rag_activation_reason: NotRequired[str]
+    archive_rag_mode: NotRequired[str]
     context_summary: NotRequired[str]
     archive_summary: NotRequired[str]
     archived_context_keys: NotRequired[list[str]]
@@ -5861,6 +5866,61 @@ def _profile_update(state: AlphaRavisState, **updates: Any) -> dict[str, Any]:
     return profile
 
 
+def _merge_unique_strings(*values: Any, limit: int = 50) -> list[str]:
+    items: list[str] = []
+    for value in values:
+        if isinstance(value, str):
+            candidates = [part.strip() for part in value.split(",")]
+        elif isinstance(value, (list, tuple, set)):
+            candidates = list(value)
+        elif value:
+            candidates = [value]
+        else:
+            candidates = []
+        for candidate in candidates:
+            text = str(candidate).strip()
+            if text and text not in items:
+                items.append(text)
+    return items[:limit]
+
+
+def _rag_state_update_from_ingest(state: dict[str, Any], ingest_result: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(ingest_result, dict):
+        return {}
+    metadata = ingest_result.get("metadata") if isinstance(ingest_result.get("metadata"), dict) else {}
+    rag_active = bool(ingest_result.get("rag_active") or metadata.get("rag_active"))
+    archive_mode = str(ingest_result.get("archive_rag_mode") or metadata.get("archive_rag_mode") or "").strip()
+    update: dict[str, Any] = {}
+    if archive_mode:
+        update["archive_rag_mode"] = archive_mode
+    if not rag_active:
+        return update
+
+    reason = str(
+        ingest_result.get("rag_activation_reason")
+        or metadata.get("rag_activation_reason")
+        or state.get("rag_activation_reason")
+        or "manual_pin"
+    )
+    update.update(
+        {
+            "rag_active": True,
+            "active_source_keys": _merge_unique_strings(
+                state.get("active_source_keys"),
+                ingest_result.get("active_source_keys") or metadata.get("active_source_keys"),
+                ingest_result.get("source_key") or metadata.get("source_key"),
+            ),
+            "active_rag_file_ids": _merge_unique_strings(
+                state.get("active_rag_file_ids"),
+                ingest_result.get("active_rag_file_ids") or metadata.get("active_rag_file_ids"),
+                ingest_result.get("rag_file_id") or metadata.get("rag_file_id"),
+            ),
+            "rag_activation_reason": reason,
+        }
+    )
+    return update
+
+
 def _tool_name_for_profile(tool_obj: Any) -> str:
     if _toolset_tool_name is not None:
         return _toolset_tool_name(tool_obj)
@@ -6016,6 +6076,11 @@ async def run_profile_start_node(state: AlphaRavisState) -> dict[str, Any]:
         "static_context_reserve_detail": _static_context_reserve_detail({"selected_toolsets": selected_toolsets}),
         "bridge_context_references": bridge_refs[:8],
         "bridge_context_reference_count": sum(int(item.get("reference_count", 0)) for item in bridge_refs),
+        "rag_active": bool(state.get("rag_active")),
+        "active_source_keys": list(state.get("active_source_keys") or []),
+        "active_rag_file_ids": list(state.get("active_rag_file_ids") or []),
+        "rag_activation_reason": str(state.get("rag_activation_reason") or ""),
+        "archive_rag_mode": str(state.get("archive_rag_mode") or "tool_only"),
         "selected_toolsets": selected_toolsets,
         "loaded_toolsets": GRAPH_TOOLSET_PROFILE,
     }
@@ -6839,6 +6904,20 @@ async def _store_compression_archive(
             "indexed_backends": archive_record["indexed_backends"],
             "ingest_status": archive_record.get("ingest_status", ""),
             "ingest_errors": archive_record.get("ingest_errors", []),
+            "rag_active": bool(ingest_result.get("rag_active")),
+            "active_rag_file_ids": list(ingest_result.get("active_rag_file_ids") or []),
+            "active_source_keys": list(ingest_result.get("active_source_keys") or []),
+            "rag_activation_reason": str(ingest_result.get("rag_activation_reason") or ""),
+            "archive_rag_mode": str(ingest_result.get("archive_rag_mode") or "tool_only"),
+        }
+    )
+    archive_record.update(
+        {
+            "rag_active": bool(ingest_result.get("rag_active")),
+            "active_rag_file_ids": list(ingest_result.get("active_rag_file_ids") or []),
+            "active_source_keys": list(ingest_result.get("active_source_keys") or []),
+            "rag_activation_reason": str(ingest_result.get("rag_activation_reason") or ""),
+            "archive_rag_mode": str(ingest_result.get("archive_rag_mode") or "tool_only"),
         }
     )
     await _maybe_put(store, _thread_archive_ns(thread_id), archive_key, archive_record)
@@ -6957,6 +7036,7 @@ async def _run_hermes_style_compression(
         )
         if compact_update.get("archive_compression_notice"):
             updates["archive_compression_notice"] = compact_update["archive_compression_notice"]
+        updates.update(_rag_state_update_from_ingest(state, archive_record))
     return result, archive_key, updates
 
 

@@ -1357,6 +1357,21 @@ When the question needs the Agentic-RAG control loop, `agentic_rag_retrieve`
 runs source-scoped retrieval, deterministic grading, one optional query rewrite,
 and returns a bounded `context_packet` plus `graph_trace`. It is an explicit
 tool path, not automatic archive injection.
+Thread-level RAG activation metadata is carried separately:
+
+```text
+rag_active
+active_rag_file_ids
+active_source_keys
+rag_activation_reason
+archive_rag_mode
+```
+
+`ingest_source(...)` sets these fields for explicit document and large-paste
+sources so later graph nodes can auto-retrieve bounded chunks from those
+sources. Compression archives set `rag_active=false` and
+`archive_rag_mode=tool_only`, preserving the rule that archives are searched
+only through explicit retrieval intent or tools.
 The AlphaRavis pgvector path follows the same retriever shape as `rag_api`:
 `query + source key(s) + k`, where a single source maps to `$eq` semantics and
 multiple sources map to `$in` semantics. It can also apply an optional

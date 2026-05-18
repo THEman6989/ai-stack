@@ -111,6 +111,10 @@ def test_store_compression_archive_uses_ingest_router(monkeypatch: pytest.Monkey
             "rag_index_status": "indexed",
             "rag_indexed_at": 123456,
             "indexed_backends": ["alpharavis_pgvector", "rag_api"],
+            "rag_active": False,
+            "active_rag_file_ids": [],
+            "active_source_keys": [],
+            "archive_rag_mode": "tool_only",
             "errors": [],
         }
 
@@ -156,8 +160,51 @@ def test_store_compression_archive_uses_ingest_router(monkeypatch: pytest.Monkey
     assert record["rag_file_id"] == "archive:archive-key"
     assert record["rag_index_status"] == "indexed"
     assert record["indexed_backends"] == ["alpharavis_pgvector", "rag_api"]
+    assert record["rag_active"] is False
+    assert record["archive_rag_mode"] == "tool_only"
     assert record["metadata"]["ingest_status"] == "indexed"
+    assert record["metadata"]["archive_rag_mode"] == "tool_only"
     assert len(writes) == 2
+
+
+def test_rag_state_update_from_document_ingest_merges_active_sources() -> None:
+    update = agent_graph._rag_state_update_from_ingest(
+        {
+            "rag_active": True,
+            "active_source_keys": ["doc-old"],
+            "active_rag_file_ids": ["file-old"],
+            "rag_activation_reason": "document_ingest",
+        },
+        {
+            "source_key": "doc-new",
+            "rag_file_id": "file-new",
+            "rag_active": True,
+            "active_source_keys": ["doc-new"],
+            "active_rag_file_ids": ["file-new"],
+            "rag_activation_reason": "large_paste",
+            "archive_rag_mode": "tool_only",
+        },
+    )
+
+    assert update["rag_active"] is True
+    assert update["active_source_keys"] == ["doc-old", "doc-new"]
+    assert update["active_rag_file_ids"] == ["file-old", "file-new"]
+    assert update["rag_activation_reason"] == "large_paste"
+    assert update["archive_rag_mode"] == "tool_only"
+
+
+def test_rag_state_update_from_archive_ingest_stays_passive() -> None:
+    update = agent_graph._rag_state_update_from_ingest(
+        {},
+        {
+            "source_key": "archive-1",
+            "rag_file_id": "archive:archive-1",
+            "rag_active": False,
+            "archive_rag_mode": "tool_only",
+        },
+    )
+
+    assert update == {"archive_rag_mode": "tool_only"}
 
 
 def test_context_budget_snapshot_uses_provider_reported_limit(monkeypatch: pytest.MonkeyPatch) -> None:

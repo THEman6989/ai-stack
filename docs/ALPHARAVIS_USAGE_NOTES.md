@@ -1200,6 +1200,10 @@ Use `agentic_rag_retrieve` when the known-source question needs a
 retrieve/grade/rewrite pass and a bounded `context_packet` for a grounded
 answer. It stays tool-only; it does not automatically load complete archives
 into active context.
+For newly ingested explicit documents or large pastes, AlphaRavis records
+thread-level RAG metadata (`rag_active`, active source/file ids, and activation
+reason) so a later auto-retrieval node can use bounded chunks. Compression
+archives remain passive by default with `archive_rag_mode=tool_only`.
 If weak pgvector hits are too noisy, set
 `ALPHARAVIS_PGVECTOR_DISTANCE_THRESHOLD` for AlphaRavis's own pgvector table.
 This is separate from `rag_api`'s `RAG_DISTANCE_THRESHOLD`, but uses the same

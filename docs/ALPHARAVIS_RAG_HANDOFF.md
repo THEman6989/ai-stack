@@ -115,6 +115,11 @@ rag_index_status
 rag_indexed_at
 indexed_backends
 ingest_errors
+rag_active
+active_rag_file_ids
+active_source_keys
+rag_activation_reason
+archive_rag_mode
 ```
 
 ## Current Behavior
@@ -132,6 +137,16 @@ External document / PDF / large paste default:
 - do not also index in AlphaRavis pgvector unless
   `ALPHARAVIS_INGEST_INDEX_DOCUMENTS_IN_PGVECTOR=true` or
   `preferred_backend=both`
+- return thread-activation metadata with `rag_active=true`,
+  `active_source_keys`, `active_rag_file_ids`, and
+  `rag_activation_reason=document_ingest|large_paste`
+
+Archive / compression default:
+
+- `rag_active=false`
+- `archive_rag_mode=tool_only`
+- archive chunks stay available through explicit tools such as
+  `query_archive(...)` and `agentic_rag_retrieve(...)`
 
 Agentic-RAG router slice:
 
@@ -179,24 +194,12 @@ follow-up.
 
 ## Next Best Steps
 
-1. Add thread-aware RAG activation metadata.
-   Needed fields:
-
-```text
-rag_active
-active_rag_file_ids
-active_source_keys
-rag_activation_reason=document_ingest|large_paste|manual_pin
-archive_rag_mode=tool_only|auto_on_intent|manual
-```
-
-Rule:
-
-- explicit documents/PDFs/large paste in a thread -> RAG active automatically
-- only compression archives -> passive by default, use tool/intent
-
-2. Route large-paste ingest and future document/PDF upload paths through
+1. Route large-paste ingest and future document/PDF upload paths through
    `ingest_source(...)`.
+
+2. Add optional auto-on-intent behavior that consumes the new thread RAG
+   activation metadata. Keep compression archives passive by default; only
+   explicit documents/PDFs/large paste should auto-retrieve bounded chunks.
 
 3. Add optional reranking behind the router.
    Desired flow:

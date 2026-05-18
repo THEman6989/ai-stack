@@ -204,7 +204,8 @@ Still needed:
 ## RAG / Retrieval Router
 
 Status: hybrid retrieval router foundation implemented; explicit Agentic-RAG
-tool exposed; automatic thread activation and upload ingest are still planned.
+tool exposed; thread activation metadata implemented; automatic upload ingest
+and auto-retrieval use are still planned.
 
 Implemented:
 
@@ -220,14 +221,22 @@ Implemented:
 - `agentic_rag_retrieve` is exposed from `agent_graph.py` as an explicit tool.
   It runs retrieve, deterministic grade, optional query rewrite, retry, and
   returns a bounded `context_packet` plus `graph_trace`.
+- `ingest_source(...)` returns thread-aware RAG activation metadata. External
+  documents and large-paste style sources set `rag_active=true` with
+  `active_source_keys`, `active_rag_file_ids`, and
+  `rag_activation_reason=document_ingest|large_paste`. Compression archives set
+  `rag_active=false` and `archive_rag_mode=tool_only`.
+- `AlphaRavisState` can carry `rag_active`, `active_rag_file_ids`,
+  `active_source_keys`, `rag_activation_reason`, and `archive_rag_mode`.
+  Run-profile snapshots expose these fields for observer/debugging.
 
 Still needed:
 
-- Add thread-aware RAG activation metadata:
-  `rag_active`, `active_rag_file_ids`, `active_source_keys`,
-  `rag_activation_reason`, and `archive_rag_mode`.
 - Route large-paste ingest and future document/PDF upload paths through
   `ingest_source(...)`.
+- Add auto-retrieval behavior that consumes active document metadata and injects
+  only bounded chunks. Keep archive-only threads passive unless tool/intent
+  explicitly asks for old archive details.
 - Add optional reranking behind the router, default-off until measured.
 - Add optional LLM structured-output grading after deterministic grading is
   proven in live use.
