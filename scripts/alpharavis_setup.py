@@ -22,7 +22,7 @@ IMPORTANT_KEYS = [
     ("LITELLM_MASTER_KEY", "LiteLLM master key"),
     ("BIG_BOSS_API_BASE", "llama.cpp big model OpenAI /v1 URL"),
     ("EDGE_GEMMA_API_BASE", "Ollama fallback OpenAI /v1 URL"),
-    ("EMBEDDING_API_BASE", "Ollama embedding OpenAI /v1 URL"),
+    ("EMBEDDING_API_BASE", "embedding backend base URL; Ollama-native or OpenAI-compatible /v1"),
     ("HERMES_API_BASE", "internal Docker URL for LibreChat/LangGraph to Hermes"),
     ("HERMES_EXTERNAL_API_BASE", "host URL for humans/tools to call Hermes"),
     ("HERMES_API_KEY", "Hermes API bearer token"),

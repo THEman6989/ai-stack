@@ -347,6 +347,56 @@ def test_responses_body_uses_gallery_url_after_video_mirroring(monkeypatch) -> N
     assert "data:video/mp4;base64,QUJD" not in messages[0]["content"]
 
 
+def test_responses_body_mirrors_langchain_string_video_url(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict:
+            return {
+                "asset_id": "asset_response_video_string",
+                "public_url": "http://localhost:8130/media/responses/string-clip.mp4",
+                "download_error": "",
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, url: str, json: dict) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(bridge_server.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(bridge_server, "BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS", True)
+    body = {
+        "conversationId": "conversation_response_video_string",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_video",
+                        "video_url": "data:video/mp4;base64,QUJD",
+                    }
+                ],
+            }
+        ],
+    }
+
+    asyncio.run(bridge_server._mirror_video_parts_in_responses_body(body, _StubRequest(body)))
+    messages = bridge_server._responses_input_to_messages(body)
+
+    assert "http://localhost:8130/media/responses/string-clip.mp4" in messages[0]["content"]
+    assert "data:video/mp4;base64,QUJD" not in messages[0]["content"]
+
+
 def test_response_object_has_stable_ids_and_usage() -> None:
     response = bridge_server._response_object(
         "Hallo",
@@ -619,6 +669,9 @@ def test_bridge_observer_records_context_budget_updates() -> None:
             },
             "final_budget_rescue_used": True,
             "final_budget_rescue_passes": 2,
+            "final_budget_rescue_budget_met": True,
+            "provider_reported_context_limit": 32768,
+            "provider_context_overflow_retry_used": True,
         },
     )
 
@@ -627,6 +680,69 @@ def test_bridge_observer_records_context_budget_updates() -> None:
     assert budget["request_tokens"] == 74557
     assert budget["final_budget_rescue_used"] is True
     assert budget["final_budget_rescue_passes"] == 2
+    assert budget["final_budget_rescue_budget_met"] is True
+    assert budget["provider_reported_context_limit"] == 32768
+    assert budget["provider_context_overflow_retry_used"] is True
+
+
+def test_bridge_observer_prefers_after_compression_budget_fields() -> None:
+    profile = bridge_server._budget_profile_from_run_profile(
+        {
+            "token_estimate": 85214,
+            "request_token_estimate": 92914,
+            "pre_run_compression_tokens_after": 16445,
+            "pre_run_request_tokens_after": 24145,
+            "pre_run_static_context_reserve_tokens": 7700,
+            "pre_run_context_length": 128000,
+            "pre_run_detected_context_length": 128000,
+            "pre_run_active_limit": 64000,
+            "pre_run_hard_limit": 121600,
+            "pre_run_effective_active_limit": 56300,
+            "pre_run_compression_budget_met": True,
+        }
+    )
+
+    assert profile["message_tokens"] == 16445
+    assert profile["request_tokens"] == 24145
+    assert profile["context_length"] == 128000
+    assert profile["active_limit"] == 64000
+    assert profile["hard_limit"] == 121600
+    assert profile["pre_run_compression_budget_met"] is True
+
+
+def test_bridge_observer_extracts_compression_debug_profile() -> None:
+    profile = bridge_server._compression_profile_from_run_profile(
+        {
+            "pre_run_compression_used": True,
+            "pre_run_compression_summary_failed": False,
+            "pre_run_compression_compression_token_limit": 64000,
+            "pre_run_compression_summary_context_token_limit": 128000,
+            "pre_run_compression_summary_prompt_pruned": True,
+            "pre_run_compression_summary_prompt_tokens_estimate": 42000,
+            "pre_run_compression_summary_prompt_token_limit": 48000,
+            "pre_run_compression_summary_prompt_payload_token_limit": 45000,
+            "pre_run_compression_middle_token_estimate": 69571,
+            "pre_run_compression_summary_chunking_used": True,
+            "pre_run_compression_summary_chunk_count": 4,
+            "pre_run_compression_summary_chunk_payload_token_limit": 44000,
+            "pre_run_compression_summary_chunk_prompt_overhead_tokens": 1600,
+            "pre_run_compression_archive_key": "archive123",
+        }
+    )
+
+    pre_run = profile["pre_run_compression"]
+    assert pre_run["used"] is True
+    assert pre_run["summary_failed"] is False
+    assert pre_run["compression_token_limit"] == 64000
+    assert pre_run["summary_context_token_limit"] == 128000
+    assert pre_run["summary_prompt_pruned"] is True
+    assert pre_run["middle_token_estimate"] == 69571
+    assert pre_run["summary_prompt_payload_token_limit"] == 45000
+    assert pre_run["summary_chunking_used"] is True
+    assert pre_run["summary_chunk_count"] == 4
+    assert pre_run["summary_chunk_payload_token_limit"] == 44000
+    assert pre_run["summary_chunk_prompt_overhead_tokens"] == 1600
+    assert pre_run["archive_key"] == "archive123"
 
 
 def test_input_items_and_delete_routes_use_stored_response() -> None:

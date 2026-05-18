@@ -17,6 +17,16 @@ endpoints:
       models:
         default: ["${HERMES_MODEL}"]
         fetch: false
+fileConfig:
+  endpoints:
+    "LangGraph Agent":
+      fileLimit: 3
+      fileSizeLimit: 2000
+      totalSizeLimit: 2000
+      supportedMimeTypes:
+        - "^video/.*"
+        - "^image/.*"
+        - "^application/octet-stream$"
 modelSpecs:
   enforce: false
   prioritize: true

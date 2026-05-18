@@ -201,6 +201,37 @@ Still needed:
     exercise a real long explicit thread with LibreChat once enough old state is
     available and confirm the visible request is rescued rather than refused.
 
+## RAG / Retrieval Router
+
+Status: hybrid retrieval router foundation implemented; explicit Agentic-RAG
+tool exposed; automatic thread activation and upload ingest are still planned.
+
+Implemented:
+
+- `retrieval_router.py` centralizes source ingest selection and scoped retrieval
+  over AlphaRavis pgvector plus optional `rag_api`.
+- Compression archives remain owned by AlphaRavis and are indexed in pgvector by
+  default; `rag_api` archive mirroring stays default-off unless explicitly
+  enabled.
+- External document / large-ingest style sources route toward `rag_api` by
+  default through `ingest_source(...)`.
+- `query_source`, `query_sources`, and `query_archive` search known source keys
+  without loading full archives.
+- `agentic_rag_retrieve` is exposed from `agent_graph.py` as an explicit tool.
+  It runs retrieve, deterministic grade, optional query rewrite, retry, and
+  returns a bounded `context_packet` plus `graph_trace`.
+
+Still needed:
+
+- Add thread-aware RAG activation metadata:
+  `rag_active`, `active_rag_file_ids`, `active_source_keys`,
+  `rag_activation_reason`, and `archive_rag_mode`.
+- Route large-paste ingest and future document/PDF upload paths through
+  `ingest_source(...)`.
+- Add optional reranking behind the router, default-off until measured.
+- Add optional LLM structured-output grading after deterministic grading is
+  proven in live use.
+
 ## Custom Model / Power Management
 
 Status: prepared, default off. Owner tool file exists and safe owner tools are wired.
@@ -349,6 +380,15 @@ Implemented:
 - Bridge strips raw media blocks from chat context by default, preserves
   metadata markers, and automatically mirrors incoming video blocks into
   `media-gallery` when `BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS=true`.
+- LibreChat's normal `AlphaRavis Responses` model spec accepts video uploads on
+  the `LangGraph Agent` endpoint. The LibreChat container applies
+  `scripts/patch_librechat_video_uploads.js` at startup so this local endpoint
+  emits `video_url` attachments instead of forcing the generic custom
+  endpoint/text-upload path. The patch covers both the backend encoder and the
+  client upload menu/drag-drop bundle, and preserves `videos`/`audios` in
+  LibreChat's prompt formatter. It also patches LibreChat's OpenAI Responses
+  converter so `video_url` reaches the Bridge as `input_video` while still
+  setting `useResponsesApi: true` for the assistant response.
 - The AlphaRavis-facing marker is rewritten to the stable gallery URL after a
   successful mirror. LibreChat's original visible attachment/file record stays
   untouched in this phase.
@@ -682,12 +722,19 @@ ALPHARAVIS_VIDEO_ANALYSIS_TRANSCRIBE_AUDIO=false
       before LangGraph sees it. Implemented for Bridge-facing HTTP(S) and
       inline `data:` video blocks; rewriting the visible LibreChat message card
       itself remains intentionally out of scope for this phase.
-  12. Run a real Docker/LibreChat upload smoke:
+  12. Run a real Docker/LibreChat upload smoke with `AlphaRavis Responses`:
       - send a chat video through LibreChat
       - verify the Bridge registers it in `media-gallery`
       - verify the stable gallery URL appears in AlphaRavis-facing context
       - verify the gallery card is created and the stored bytes resolve through
         the media service URL
+      - partial 2026-05-16: LibreChat stored `vitpose_00001.mp4` as a local
+        `video/mp4` attachment and the restarted prompt formatter preserves
+        `video_url` content parts. Follow-up Bridge Observer evidence showed
+        LibreChat's Responses converter still reduced the request to
+        `input_text`; the local patch now converts `video_url` to `input_video`.
+        Repeat the browser send after reload to verify the Bridge/media-gallery
+        side end-to-end.
   13. Investigate an explicit LibreChat-visible rewrite phase:
       - either rewrite the persisted LibreChat message/file metadata to the
         Media Gallery URL
@@ -1166,9 +1213,569 @@ Current Hermes-style context hardening plan:
   "until under full request budget" with a bounded maximum pass count. Node
   tests cover provider-reported budget snapshots and dynamic multi-pass final
   rescue.
-- Still future: broaden live UI/Observer validation after the next real
-  over-budget llama.cpp run, using the recorded `provider_reported_context_limit`
-  and `final_budget_rescue_budget_met` fields.
+- Implemented: live UI/Observer validation after a real over-budget llama.cpp
+  run. On 2026-05-15 `/props` reported `n_ctx=128000`; a 61-message request
+  with about 84.9k raw tokens compacted before the model call and returned
+  `LIVE_OVER_BUDGET_OK`. Observer record `obs_23d3389c9d5f` showed
+  `context_length=128000`, `request_tokens=23383`,
+  `effective_active_limit=56300`, `pre_run_compression_passes=1`, and
+  `pre_run_compression_budget_met=true`.
+- Implemented: optional chunked summary compression is available behind
+  `ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=false`. It only activates when
+  the summary-model prompt would otherwise be pruned, summarizes bounded chunks,
+  then synthesizes one active reference summary while preserving exact raw
+  messages in the archive. Observer/debug metadata includes chunk counts,
+  omitted chars, prompt overhead/payload budgets, output budget, and
+  synthesis-pruning status. If max chunks omit prepared summary input, the final
+  synthesis prompt now explicitly tells the model to mention archive lookup for
+  omitted middle details.
+- Implemented: summary max settings are ratio-first. `*_MAX_TOKENS=0` disables
+  a fixed absolute cap, so summary output, summary prompt payload, and chunk
+  output budgets scale from the effective compression limit derived from the
+  discovered model context length. `inspect_context_budget` exposes the same
+  derived values under `compression_summary_budget`.
+- Implemented: Bridge Test UI Observer has a visual `Shrinking` section in
+  addition to the raw `Kompression` JSON tab. It shows before/after tokens,
+  shrink percentage, pass counts, budget status, head/middle/tail counts,
+  prompt pruning, chunking, omitted chunk chars, chunk output budget, synthesis
+  pruning, and archive key per compression scope.
+- Implemented: Bridge Test UI Observer has a `Chunking Lab` for local chunked
+  summary diagnostics. It starts runs through `POST /api/chunking/runs`, exposes
+  results through `GET /api/chunking/runs/{run_id}`, uses the real AlphaRavis
+  context compressor with chunked summary enabled, and renders action logs,
+  summary calls, tool-pruning stats, prompt overhead/payload budgets, chunk
+  omissions, synthesis pruning, and acceptance checks. The diagnostic uses a
+  deterministic synthetic web-like corpus plus generated tool traces and
+  variable prompt load, so it is available without external network fetches.
+  The lab distinguishes `summary_mode=stub` from `summary_mode=real_llm`;
+  `stub` validates plumbing only, while `real_llm` calls the configured summary
+  model and is required for latency/quality evidence.
+- Still future: run a live llama.cpp over-budget check with
+  `ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=true` before considering it for
+  any default profile.
+- Still future: promote chunked summary compression only after the live-soak
+  pass proves it works with both static and variable prompt load in the running
+  stack. The live Observer acceptance criteria are `summary_failed=false`,
+  `summary_chunking_used=true`, `summary_chunk_omitted_chars=0`, and budget
+  success for the relevant pre-run/final-rescue compression scope. Until that
+  evidence exists, keep `ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=false`
+  in default profiles.
+
+External context-management learnings to evaluate:
+
+- Planned: add a compact feature matrix for external systems and keep the
+  AlphaRavis decision explicit. Current references:
+  - OpenAI Responses `/responses/compact`: stateless compaction with opaque
+    encrypted compaction items and verbatim prior user messages.
+  - Claude Code `/compact [instructions]`: manual/auto compaction, focus
+    instructions, `PreCompact` hooks, and CLAUDE.md summary instructions.
+  - Cursor summarization: product-level chat summarization and separate smart
+    condensation for large files/folders.
+  - Letta/MemGPT: explicit in-context memory plus out-of-context archival and
+    recall memory tiers.
+  - LangChain/LangGraph: reusable trim/summarization middleware and state/store
+    primitives, but no single opinionated AlphaRavis-style archive contract.
+  - Google ADK: sliding-window event compaction plus Session/State/Memory split.
+- Planned: run an external chunking/compaction comparison spike and record the
+  result in architecture docs before changing defaults. Compare three distinct
+  mechanisms rather than treating all "chunking" as one thing:
+  - Document/RAG chunking: split large sources into chunks, embed, store, and
+    retrieve only relevant chunks. Letta documents this explicitly for archival
+    memory; AlphaRavis should map this to `rag_api` plus federated
+    `semantic_memory_search`.
+  - Conversation compaction: shrink old turns while preserving active task
+    continuity. OpenAI `/responses/compact`, Claude `/compact [instructions]`,
+    Hermes, and AlphaRavis all fit here, but OpenAI is opaque while AlphaRavis
+    should stay inspectable.
+  - Workflow/event compaction: summarize agent workflow events/tool telemetry
+    separately from chat messages. Google ADK is the main reference here; this
+    may become a separate AlphaRavis action-log compaction path.
+- Planned: source links for the comparison spike:
+  - https://platform.openai.com/docs/guides/conversation-state?api-mode=responses
+  - https://platform.openai.com/docs/api-reference/responses/compact?api-mode=responses
+  - https://docs.anthropic.com/en/docs/claude-code/slash-commands
+  - https://google.github.io/adk-docs/context/compaction/
+  - https://docs.letta.com/guides/ade/archival-memory
+  - https://docs.letta.com/concepts/memory-management
+- Planned: derive concrete AlphaRavis improvement proposals from that spike.
+  Initial candidates:
+  - Add Claude-style focus instructions for both manual compaction and chunked
+    summary runs.
+  - Keep OpenAI-style provider-native opaque compact items optional only; never
+    replace AlphaRavis readable summaries and raw/retrievable archives.
+  - Use Letta-style archival/RAG chunking as the default answer for large pasted
+    documents instead of lossy conversation compression.
+  - Add ADK-style event-log compaction for tool/action telemetry so UI history
+    can stay inspectable without bloating model context.
+  - Add progress events for chunked compression and RAG ingest so users see
+    `chunk 1/N`, `chunk 2/N`, synthesis, and completion states in the chat/UI.
+- Planned: compare `rag_api` document chunking with AlphaRavis' own pgvector
+  retrieval backend and document what should be reused, federated, or kept
+  separate. Current code-level anchors:
+  - `rag_api` uses LangChain `RecursiveCharacterTextSplitter` with `CHUNK_SIZE`
+    and `CHUNK_OVERLAP`, stores chunks under `file_id`, adds `user_id` and
+    `digest` metadata, supports batch embedding, and queries by `file_id` or
+    `file_ids`.
+  - AlphaRavis `vector_memory.py` already implements a RAG-like pgvector backend
+    with its own embedding model, semantic section splitting, overlap, full
+    chunk storage, source catalog rows/table-of-contents, HNSW pgvector indexes,
+    source metadata, and `semantic_memory_search`.
+  - Decision to make explicit: `rag_api` is the generic external document RAG
+    service, while AlphaRavis pgvector is the agent-memory/archive/artifact
+    retrieval layer. They are conceptually similar, but ownership and source of
+    truth differ.
+- Planned: evaluate improvements to port from `rag_api` into AlphaRavis
+  pgvector where useful:
+  - configurable splitter profile per source type, including a LangChain
+    `RecursiveCharacterTextSplitter` option for generic prose/PDF/document
+    sources;
+  - `file_id`/`source_key`-scoped targeted search for big-message ingest;
+  - chunk digest/dedup metadata for repeated pasted text and repeated archive
+    chunks;
+  - batch embedding and bounded queue behavior for very large ingests;
+  - distance/similarity threshold tuning so weak vector hits do not consume
+    downstream LLM context;
+  - optional full-document context reconstruction endpoint/tool when the user
+    explicitly asks to load a known source, with hard token safeguards.
+- Planned: refactor the RAG write/ingest and retrieval path toward a
+  LangChain-native internal implementation while keeping AlphaRavis ownership
+  of archives, thread metadata, access checks, and context-budget decisions.
+  This should make the implementation less "attached from the side" than the
+  first `rag_api` integration, without throwing away the useful `rag_api`
+  patterns already copied.
+  - Keep `rag_api` as the reference implementation for the current pragmatic
+    document flow: `file_id`, `file_ids`, LangChain splitter, batch embedding,
+    digest metadata, pgvector filtering, and optional distance threshold.
+  - Use LangChain/LangGraph directly inside AlphaRavis for reusable primitives:
+    loaders, splitters, embedding clients, vector-store adapters, retrievers,
+    contextual compression/reranking, and future graph nodes.
+  - Do not hand archive ownership to LangChain. MongoDB/LangGraph Store remains
+    the source of truth for raw archives, compression lineage, redaction state,
+    `archive_key`, `thread_id`, and `read_archive_record(...)`.
+  - Build a stable AlphaRavis-facing interface first:
+    `ingest_source(...)`, `query_source(...)`, `query_sources(...)`,
+    `query_archive(...)`, and later `rerank_chunks(...)`. Internally the router
+    may call `rag_api`, AlphaRavis pgvector, or LangChain retrievers.
+    First ingest slice implemented: `retrieval_router.ingest_source(...)`
+    exists as the stable write-side router entrypoint. It validates source
+    content, chooses AlphaRavis pgvector, `rag_api`, or both from source type,
+    metadata, environment flags, and `preferred_backend`, returns normalized
+    `rag_file_id`, `rag_index_status`, `indexed_backends`, `index_status`,
+    backend results, warnings, and errors. Current routing rules keep external
+    documents/large pastes on `rag_api` by default, keep archives in AlphaRavis
+    pgvector unless `ALPHARAVIS_ENABLE_RAG_ARCHIVE_MIRROR=true` or the caller
+    explicitly requests `rag_api`, and allow `preferred_backend=both` for
+    evaluation. Follow-up: wire compression archives, large-paste ingest, and
+    future document upload flows through this function instead of direct backend
+    calls.
+    Implemented first product call-site: compression archive creation now calls
+    `ingest_source(source_type="archive", preferred_backend="auto")` instead of
+    directly mirroring to `rag_api` and separately indexing pgvector. The archive
+    record stores the router's normalized `ingest_status`, `rag_file_id`,
+    `rag_index_status`, `rag_indexed_at`, `indexed_backends`, and
+    `ingest_errors`. Remaining call-sites to migrate: large-paste ingest,
+    explicit document/PDF upload, artifacts, and any future manual `/ingest`
+    command.
+  - Move backend selection out of `agent_graph.py` and into
+    `retrieval_router.py`, so LangGraph nodes/tools call one AlphaRavis API
+    instead of knowing about `rag_api`, pgvector, mirrors, and fallback rules.
+    First slice implemented: source-key query backend orchestration now lives in
+    `retrieval_router.query_sources_with_backends(...)`. `agent_graph.py` keeps
+    the LangGraph tool wrappers, archive-key lookup, store access, and logging,
+    but delegates source query execution to the router. The router combines
+    AlphaRavis pgvector hits and explicit `rag_api` file-id hits, normalizes
+    backend provenance, and keeps archive-only `rag_api` retrieval passive unless
+    a mirror/file id is explicitly supplied.
+  - Keep result normalization in AlphaRavis: every backend should return bounded
+    chunks with source metadata, score fields, backend provenance, thread/source
+    scope, and instructions that raw archive reads are a separate explicit step.
+  - Add a small evaluation matrix before replacing working code: compare
+    `rag_api` HTTP path, direct LangChain pgvector retriever, AlphaRavis
+    pgvector source search, and optional reranked results on the same archive
+    and document questions.
+  - Local reference checkout: `helper-repos/awesome-rag` contains the
+    noworneverev/Awesome-RAG catalogue. Use it as a discovery map for projects
+    and patterns, especially LangChain, LlamaIndex, Dify, Flowise, Haystack,
+    RAGFlow, Cognita, fastRAG, AutoRAG, FlashRAG, GraphRAG, vector stores,
+    memory systems, evaluation frameworks, document parsers, and model serving.
+    Do not import runtime code from this catalogue; inspect linked projects and
+    official docs before copying implementation ideas. Local read-through
+    finding: the checked-out Awesome-RAG content is mostly a catalogue; its
+    `techniques.md` and `papers.md` pages are still placeholders, so it is
+    useful for discovery but not a direct LangGraph implementation template.
+  - Local LangGraph agentic-RAG Schablone:
+    `helper-repos/langgraph-agentic-rag-template` contains a downloaded copy of
+    the current LangChain docs page plus the archived
+    `langgraph_agentic_rag.ipynb` example. Use the docs page as authoritative;
+    the notebook is useful as concrete code but marks itself archival. Pattern
+    to adapt:
+    - `agent` / `generate_query_or_respond`: decide direct answer vs retrieval;
+    - `retrieve`: call AlphaRavis `retrieval_router`, not a demo vector store;
+    - `grade_documents`: relevance gate before using retrieved chunks;
+    - `rewrite_question`: sharpen weak archive/document queries;
+    - `generate_answer`: answer from bounded chunks, with raw archive reads only
+      as an explicit fallback.
+    Follow-up: implement an AlphaRavis-specific agentic-RAG graph slice using
+    this loop around `query_sources_with_backends(...)` and thread-aware
+    `rag_active` metadata.
+    First router-level slice implemented:
+    `retrieval_router.agentic_rag_retrieve(...)` now wraps
+    `query_sources_with_backends(...)` with the Schablone steps
+    `retrieve -> grade_documents -> rewrite_question -> retrieve retry ->
+    generate_answer context packet`. It uses a deterministic relevance gate and
+    query rewrite first, not an LLM grader yet, so it is safe to test locally.
+    It returns `graph_trace`, `grade`, `context_packet`, `next_action`,
+    `final_query`, and `rewritten_query`.
+    Implemented follow-up: `agent_graph.py` exposes this as the
+    `agentic_rag_retrieve` tool and the RAG/memory toolset includes it. It is
+    still explicit tool use, not automatic archive injection. Remaining
+    follow-up: replace or augment the deterministic grader with optional LLM
+    structured-output grading/reranking after latency is measured.
+    Handoff for new context windows:
+    `docs/ALPHARAVIS_RAG_HANDOFF.md` summarizes the user intent, implemented
+    files, current routing behavior, LangGraph Schablone mapping, verification
+    commands, and the next best steps.
+- Implemented: added a more RAG-API-like "ask this source" retrieval surface for
+  AlphaRavis pgvector. Agents can still call broad `semantic_memory_search(...)`
+  and then `read_archive_record(...)`, but `rag_api` also has a simpler and more
+  model-friendly pattern: `query + file_id(s) -> relevant chunks`. The
+  AlphaRavis tool/API shaped like:
+  - `query_source(query, source_type, source_key, limit=...)`
+  - `query_archive(query, archive_key, limit=...)`
+  - `query_sources(query, source_keys=[...], source_type=..., limit=...)`
+  returns chunk text, score/similarity, chunk index/count, source metadata, and
+  retrieval instructions. The local pgvector path mirrors `rag_api`'s `$eq` /
+  `$in` filter shape and optional distance-threshold semantics through
+  `ALPHARAVIS_PGVECTOR_DISTANCE_THRESHOLD`. This gives the model exactly the
+  interface it usually wants: "I know which archive/document/source matters;
+  fetch only the relevant parts for this question."
+- Planned: copy the useful `rag_api` retrieval pattern, not blindly copy the
+  whole backend. Relevant patterns to adapt:
+  - filter vector search by `file_id`/`source_key`;
+  - support multi-source filtered search like `/query_multiple`;
+  - include authorization/thread scope checks before returning chunks;
+  - expose distance/similarity threshold behavior;
+  - keep raw archive reads separate from chunk search so exact-history loads stay
+    deliberate.
+- Planned: decide archive indexing ownership explicitly instead of drifting into
+  two competing RAG stores. Current recommendation is hybrid, not a full
+  migration:
+  - Keep MongoDB/LangGraph Store as the source of truth for AlphaRavis archives,
+    because archive records include thread lineage, compression metadata,
+    covered message ranges, raw redacted messages, archive collections, and
+    `read_archive_record(...)` semantics.
+  - Keep AlphaRavis pgvector as the primary index for agent memory, archives,
+    artifacts, skills, and thread-scoped retrieval because it already stores
+    `source_type`, `source_key`, `thread_id`, `thread_key`, catalog rows, chunk
+    maps, and archive-specific metadata.
+  - Use `rag_api` as the primary backend for external documents and large pasted
+    document ingests where `file_id`-scoped document search, LangChain loaders,
+    and generic document chunking are a better fit.
+  - Consider optionally mirroring archive text into `rag_api` only as a secondary
+    federated index, with `file_id=archive:<archive_key>` and clear ownership
+    metadata. Do not make `rag_api` the only archive source unless it can preserve
+    thread isolation, raw archive retrieval, collection hierarchy, and redaction
+    guarantees.
+  - Add an evaluation task before any migration: compare archive recall quality,
+    latency, metadata fidelity, dedup behavior, and operational complexity for
+    AlphaRavis pgvector-only vs `rag_api` mirror vs full `rag_api` archive index.
+- Partially implemented path: build the hybrid archive/document retrieval
+  wrapper instead of replacing `vector_memory.py`.
+  - Keep archive source of truth in MongoDB/LangGraph Store. The raw compressed
+    middle messages, redaction state, thread lineage, archive collections, and
+    exact `read_archive_record(...)` behavior stay owned by AlphaRavis.
+  - Add an optional `rag_api` mirror for large text sources, especially
+    compression archives, artifacts, and future big pasted documents. Use stable
+    file ids such as `archive:<archive_key>` and `artifact:<artifact_id>`.
+  - Store mirror metadata on the AlphaRavis source record:
+    - `rag_file_id`
+    - `rag_index_status`
+    - `rag_indexed_at`
+    - `rag_chunk_count` when available
+    - `indexed_backends`, for example `["alpharavis_pgvector", "rag_api"]`
+  - Add a small `rag_api_client.py` rather than importing the FastAPI app
+    directly into LangGraph. Use the HTTP API first so `rag_api` keeps its own
+    config, vector-store setup, batch embedding behavior, distance threshold,
+    and LangChain/ExtendedPgVector internals isolated.
+    Implemented: `langgraph-app/rag_api_client.py` wraps `/embed`, `/query`,
+    and `/query_multiple`.
+  - On archive creation, after the Store write succeeds, optionally mirror the
+    archive `content` into `rag_api` when enabled. If mirroring fails, keep the
+    AlphaRavis archive valid and record the failure in metadata/run profile;
+    retrieval falls back to AlphaRavis pgvector.
+    Partially implemented: `ALPHARAVIS_ENABLE_RAG_ARCHIVE_MIRROR=false` is the
+    default-off flag. When enabled, newly created compression archives are sent
+    to `rag_api` as `file_id=archive:<archive_key>` and the archive record gets
+    `rag_file_id`, `rag_index_status`, `rag_indexed_at`, and
+    `indexed_backends`. Failures are recorded without invalidating the archive.
+  - Make `query_archive(...)`, `query_source(...)`, and `query_sources(...)`
+    route through a retrieval wrapper:
+    - prefer `rag_api /query` or `/query_multiple` when a `rag_file_id` mirror
+      exists or the source type is an external/big document;
+    - fall back to AlphaRavis `vector_memory.py` source-key search when no
+      mirror exists, the source is agent-memory/catalog/media, or `rag_api` is
+      unavailable;
+    - never load full raw archives automatically just because an archive key is
+      present.
+    Partially implemented: `query_archive(...)` checks existing archive mirror
+    metadata and queries `rag_api` first when a ready `rag_file_id` exists, then
+    still returns AlphaRavis pgvector fallback hits. `query_source(...)` and
+    `query_sources(...)` use the same `rag_api` client for source/file-id
+    queries while keeping AlphaRavis pgvector source-key search.
+  - Planned: add optional reranking support in the AlphaRavis retrieval router.
+    Current `rag_api` does vector top-k retrieval plus optional
+    `RAG_DISTANCE_THRESHOLD`; it does not implement a real cross-encoder or
+    reranker pass. The AlphaRavis wrapper should support:
+    - retrieve a wider candidate set from `rag_api`/pgvector, for example top
+      20-50;
+    - rerank `query + chunk` pairs with a configurable backend such as
+      local `bge-reranker`, Jina/Cohere-compatible rerank APIs, or a future
+      LiteLLM/OpenAI-compatible rerank route;
+    - return only the final top 3-8 chunks to the LLM with original vector score,
+      rerank score, source metadata, and backend provenance;
+    - keep reranking default-off until latency and quality are measured in the
+      Bridge Test UI, because reranking improves precision but costs another
+      model/API call per candidate chunk;
+    - add a smoke/probe surface that compares vector-only vs reranked results on
+      archive/document questions.
+  - Planned: add a thread-aware RAG activation router so retrieval is used at
+    the right time instead of always injecting vector hits. The routing rule
+    should distinguish user-ingested documents from passive archives:
+    - If the user adds a PDF, pasted document, artifact, or other explicit
+      non-archive source to a thread and it is indexed in `rag_api`, mark the
+      thread as RAG-active. Future LLM calls in that thread should automatically
+      run source-scoped retrieval against the indexed document(s) and inject
+      only bounded top chunks, because the user intentionally gave the thread a
+      document context.
+    - If the thread only has compression archives, keep RAG passive by default.
+      Do not automatically search every archive on every turn. Instead expose
+      `query_archive(...)` / `search_archive(...)` as the model-facing tool and
+      use lightweight prompt/user-intent heuristics such as "wie war das
+      nochmal", "hatten wir", "Archiv", "Dokument", "in meinem Repo", or a
+      referenced archive/source id to trigger retrieval.
+    - If both explicit documents and archives exist, automatically retrieve from
+      the active document set first, and let the agent call archive retrieval
+      only when the question asks for older compressed context or the document
+      hits are insufficient.
+    - Store the decision inputs as thread/source metadata, for example
+      `rag_active=true`, `active_rag_file_ids`, `active_source_keys`,
+      `rag_activation_reason=document_ingest|large_paste|manual_pin`, and
+      `archive_rag_mode=tool_only|auto_on_intent|manual`.
+    - Add an override so the operator/user can pin or unpin RAG for a thread
+      without changing archive storage. This keeps normal short chats cheap,
+      makes explicit document conversations behave like document-RAG, and avoids
+      pulling 100k-token archives into context just because they exist.
+  - Add an operator smoke surface in Bridge Test UI / Observer so the archive
+    RAG foundation can be validated without manual curl commands.
+    Implemented: `Archive RAG Smoke` posts to `/api/archive-rag-smoke`, mirrors
+    a small archive as `file_id=archive:<archive_key>`, queries that source, and
+    returns acceptance checks plus runtime errors as JSON. Live smoke currently
+    reaches `rag_api` and LiteLLM, but fails because LiteLLM's `memory-embed`
+    backend at `192.168.178.140:11434` refuses the connection. After the
+    embedding backend is online, rerun this smoke and expect `acceptance_ok=true`
+    with at least one bounded hit containing the archive retrieval rule.
+  - Planned: build a minimal `memory-embed` backend bring-up path before adding
+    more RAG features. This is separate from deciding what memory content should
+    be indexed. The immediate work is: pick/reach a text embedding backend,
+    validate the OpenAI-compatible `/v1/embeddings` or Ollama `/api/embed`
+    surface, measure input-size and latency limits, then wire that stable route
+    into AlphaRavis pgvector and the optional `rag_api` archive mirror.
+    Decision: use a normal text embedding model first via Ollama behind
+    LiteLLM. Default config now targets
+    `EMBEDDING_LITELLM_MODEL=ollama/qwen3-embedding:4b` and
+    `EMBEDDING_API_BASE=http://<ollama-host>:11434`. The operator must pull
+    `qwen3-embedding:4b` on the Ollama host, then recreate LiteLLM and rerun the
+    Memory Embed Tester. Treat 32k tokens as the expected context target for
+    `qwen3-embedding:4b`, but validate the actual accepted input size and
+    latency with the tester because Ollama/server limits may differ. Keep the
+    OpenAI-compatible path documented for future llama.cpp/LM Studio embedding
+    backends by setting
+    `EMBEDDING_LITELLM_MODEL=openai/<served-model>` and a `/v1` base URL.
+    Live result: LiteLLM `memory-embed` is functional and returns 2560-dim
+    vectors. Performance on the current Ollama host is slow for large chunks
+    (2048 chars ~20s, 4096 chars ~42s, 8192 chars ~86s). Defaults now use
+    profile-specific token chunking: default 900 tokens / 125 overlap, chat
+    700 / 100, logs 1200 / 75, code 600 / 80, with
+    `ALPHARAVIS_PGVECTOR_CHARS_PER_TOKEN=4.0` and 45s embedding timeout.
+    Follow-up: decide whether to keep this throughput, use smaller queue
+    batches, switch to `qwen3-embedding:0.6b`, or move embeddings to a faster
+    OpenAI-compatible backend.
+    Additional probe: `qwen3-embedding:0.6b` works through Ollama `/api/embed`,
+    returns 1024-dim vectors, reports a 32768-token context, and completed a
+    131072-char / ~32768-rough-token probe in ~40.5s. `aroxima/gte-qwen2-1.5b-
+    instruct` reports 131072 context and 1536 embedding length in metadata, but
+    Ollama rejects `/api/embed` with HTTP 501, so it is not usable as an Ollama
+    embedding backend in this setup. Follow-up decision: switch `memory-embed`
+    from `qwen3-embedding:4b` to `qwen3-embedding:0.6b` if speed is more
+    important than vector dimensionality.
+  - Planned: add real vision-embedding backend support after the text
+    `memory-embed` route is proven. Test whether the target llama.cpp/OpenAI-
+    compatible server accepts the intended vision payload and returns vectors;
+    do not assume Ollama can serve the selected vision embedding model. Keep the
+    first implementation as a capability probe plus config documentation before
+    indexing production media through it.
+    Decision: vision embedding remains default-off and experimental. It should
+    only be enabled with an explicit flag/argument after text embedding is
+    stable, because it may require a separate RTX 3090/remote backend and more
+    model-management logic.
+    Implemented probe: Bridge Test UI Observer now has `Memory Embed Tester`,
+    which can target a custom IP/base URL, model, OpenAI-compatible or Ollama
+    endpoint, text or experimental vision payload, and step through increasing
+    input sizes until rejection or a slow-response threshold.
+    Live result: the panel is served by Bridge Test UI, but the default
+    `memory-embed` probe currently fails at LiteLLM with HTTP 500 because the
+    downstream embedding backend is unreachable. Bring up or repoint the
+    embedding backend, then rerun the text probe before testing vision payloads.
+  - Keep `read_archive_record(...)` as an explicit exact-history tool for the
+    rare cases where chunk retrieval is not enough. The model should first use
+    `query_archive(...)` to find relevant chunks and only call
+    `read_archive_record(...)` when exact raw turns are required.
+  - Avoid unbounded storage duplication. The raw archive exists once in
+    MongoDB/Store. Retrieval indexes may duplicate chunk text and embeddings;
+    this is expected RAG index overhead. Do not mirror every small memory or
+    metadata-only catalog row into `rag_api`; mirror only large text sources
+    where the stronger document retriever is useful.
+  - Preserve thread isolation by carrying `thread_id`, `thread_key`, and source
+    ownership metadata in `rag_api` document metadata. `query_archive(...)`
+    must check the AlphaRavis source record before querying the mirror so a
+    caller cannot use arbitrary `file_id` values to bypass thread boundaries.
+  - Later, split current responsibilities into clearer modules:
+    - `vector_memory.py`: AlphaRavis pgvector backend, catalog rows, agent
+      memory/archive/artifact/media indexes.
+    - `rag_api_client.py`: `/embed`/upload/query/query_multiple/document lookup
+      client.
+    - `retrieval_router.py`: backend selection and result normalization for
+      `query_source`, `query_sources`, and `query_archive`.
+    Implemented first slice: `rag_api_client.py` and a small
+    `retrieval_router.py` exist. Backend selection still mostly lives in
+    `agent_graph.py` and should be moved behind the router in a follow-up.
+  - Acceptance:
+    - A compression archive records an `archive_key` and, when enabled, a
+      `rag_file_id=archive:<archive_key>` mirror.
+    - `query_archive(query, archive_key)` returns relevant chunks without
+      loading the whole raw archive.
+    - If `rag_api` is down or the mirror is missing, `query_archive` falls back
+      to AlphaRavis pgvector source-key search.
+    - `read_archive_record(...)` remains available but is not part of the
+      normal first retrieval step.
+    - A 100k-token archive can be searched by question with bounded returned
+      chunks and without injecting the full archive into active model context.
+- Planned: document the conceptual answer for operators: RAG is not "only
+  searching", but a pipeline: ingest/load -> split/chunk -> embed -> store in a
+  vector/index backend -> retrieve/rerank relevant chunks -> ground the LLM
+  answer in those chunks. Semantic search is the retrieval part of RAG; an
+  embedding model plus pgvector backend is enough to build a local RAG retrieval
+  system when paired with ingestion and chunk management.
+- Planned: add an operator/user-provided `focus_topic` or `compact_instructions`
+  path to AlphaRavis compression. This should feed the summary prompt, the
+  Chunking Lab, manual diagnostics, and archive metadata so focused compaction
+  can preserve one task/topic more strongly instead of treating all middle
+  context equally.
+- Planned: evaluate `PreCompact` / `PostCompact` runtime events for AlphaRavis.
+  The first implementation can be Observer/debug-only: emit reason, scope,
+  token pressure, selected head/middle/tail counts, whether chunking will run,
+  and archive key/result. Later this can become a local hook surface for
+  operators, but do not run arbitrary hooks in the main path until there is a
+  clear sandbox/timeout story.
+- Planned: keep AlphaRavis transparent rather than adopting OpenAI-style opaque
+  compaction items as the primary local format. If an opaque/provider-native
+  compaction item is ever used, wrap it beside the existing readable summary and
+  raw archive record, not instead of them.
+- Planned: add a Letta-style memory-tier review for compressed context:
+  distinguish active summary, raw archive records, archive collections,
+  semantic/vector recall, durable MemoryKernel facts, and temporary workflow
+  state. The outcome should be a small policy table that says what is loaded
+  every turn, what is retrieved on demand, what is archived only, and what can be
+  compacted again.
+- Planned: evaluate Google-ADK-style workflow event compaction separately from
+  chat-message compression. Tool/action telemetry may need its own compacted
+  event log so the active LLM context can stay small while the UI still shows an
+  inspectable action history.
+- Planned: add a quality rubric for promoting chunked summary from opt-in to a
+  default profile. Minimum evidence should include live over-budget runs,
+  static prompt plus variable prompt load, real LLM latency, before/after manual
+  inspection, archive-recall success for omitted details, and no silent loss
+  when `summary_chunk_omitted_chars > 0`.
+- Planned: stream fine-grained compression and ingest progress to the chat UI.
+  The Bridge already has a status path through Responses reasoning deltas and
+  Chat Completions `reasoning_content` activity chunks, but the compressor does
+  not yet emit per-chunk lifecycle events while it is running. Add a progress
+  callback/event channel that can report:
+  - `compression.started`
+  - `compression.chunk.started` / `compression.chunk.completed` with
+    `index`, `total`, source char/token estimates, elapsed time, and output
+    summary chars
+  - `compression.synthesis.started` / `compression.synthesis.completed`
+  - `large_ingest.started`, `large_ingest.chunk_indexed`, and
+    `large_ingest.completed` for RAG-backed big-message ingest
+  - failure/fallback events when summary generation fails or the system switches
+    to archive/RAG-only behavior.
+- Planned: prefer non-final-answer status surfaces first. For Responses streams,
+  emit these as `response.reasoning.delta` with `alpha_reasoning_kind=status` or
+  a more specific `context_compaction` / `large_ingest` kind. For Chat
+  Completions streams, emit `reasoning_content` activity deltas when LibreChat
+  renders them cleanly. Keep a profile-controlled fallback that injects visible
+  plaintext progress lines such as `[Compression] Chunk 4/5 abgeschlossen` only
+  when the UI/client cannot display status/reasoning events.
+- Planned: make status emission configurable and not too noisy:
+  `ALPHARAVIS_STREAM_COMPRESSION_PROGRESS=true`, max update frequency, and a
+  plaintext fallback flag. Observer/Test UI should show the same events in the
+  live status panel and persist them with the compression/ingest run metadata.
+- Planned: do not copy Cursor/OpenAI automatic truncation behavior that silently
+  drops old context. AlphaRavis should prefer explicit compression, explicit
+  hard-trim notices, archive lookup instructions, and Observer-visible stats.
+- Planned: design a separate "large single-message ingest" path for the case
+  where the first/latest user message itself contains a huge pasted document
+  such as 130k tokens. This must not be treated as ordinary conversation
+  compression because the latest user message is intentionally protected by the
+  current Hermes-style compressor and hard-trim logic. Treat it as document
+  ingestion plus retrieval:
+  - Bridge-level MVP: detect a large latest user message before LangGraph sees
+    it, split the large body into archived chunks, index it for retrieval, and
+    replace the active user message with the user's actual question plus a small
+    manifest/source handle.
+  - Preferred backend: use the existing `rag_api` document index for large pasted
+    documents where possible. The current stack already exposes `/embed`,
+    `/embed-upload`, `/query`, `/query_multiple`, `/documents/{id}/context`, and
+    federated AlphaRavis search via `semantic_memory_search` with
+    `source_type=external_document`. The Bridge ingest layer should create a
+    stable `file_id` / source key, send the text as a temporary text file or add a
+    narrow text-body embed endpoint, then keep only the manifest and user question
+    in active context.
+  - Archive relationship: do not duplicate the full document into both RAG and
+    AlphaRavis active archives by default. Store a small AlphaRavis manifest
+    archive with the RAG `file_id`, source title, chunk/index stats, and raw-text
+    preservation policy. If exact raw preservation outside RAG is required, make
+    that an explicit `preserve_raw=true` ingest mode.
+  - Explicit syntax: support advanced text markers such as `/ingest`,
+    `/big-context`, or fenced `<big-context name="...">...</big-context>` blocks
+    so operators can opt into ingestion from normal LibreChat without a custom
+    UI. "Protect" should mean preserve exact raw text in archive, not keep the
+    whole body in active model context.
+  - Automatic fallback: if a single latest user message exceeds a configurable
+    threshold and no marker is present, either auto-ingest with a visible notice
+    or ask the user whether to ingest, depending on a profile flag. Never silently
+    truncate the latest user text.
+  - Query handling: if the huge pasted text includes an explicit question, keep
+    that question active and retrieve relevant chunks before answering. If there
+    is no task/question, create only a lightweight manifest/table-of-contents and
+    ask what to extract or analyze.
+  - Summary policy: do not make a lossy whole-document summary the source of
+    truth for unknown future questions. Raw archived chunks remain authoritative;
+    any overview summary must point back to chunk/archive keys.
+  - UI follow-up: a custom Big Message / Document Ingest panel can later provide
+    upload/paste progress, token/chunk stats, source handles, before/after active
+    prompt view, and retrieval previews. Deep Agents UI may be a useful base, but
+    the first implementation should work through the Bridge so LibreChat users
+    are not blocked.
+  - Tools/API: expose source-key lookup for agents, e.g. reuse
+    `semantic_memory_search` plus `read_archive_record(...)` where possible, or
+    add a narrower `read_large_context_chunk(source_key, chunk_id)` tool if raw
+    archive records become too coarse.
+  - Acceptance: a first-message 130k-token document plus a short question should
+    complete without provider context overflow, show an Observer-visible ingest
+    record, preserve exact raw chunks, retrieve relevant chunks for the answer,
+    and avoid claiming unsupported facts from an overview summary.
 
 Implementation chunks:
 

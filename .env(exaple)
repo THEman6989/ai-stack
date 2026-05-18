@@ -175,21 +175,30 @@ EDGE_GEMMA_API_BASE=http://192.168.178.140:11434/v1
 EDGE_GEMMA_TIMEOUT_SECONDS=60
 EDGE_GEMMA_STREAM_TIMEOUT_SECONDS=15
 
-# Optional embedding models used only when pgvector semantic memory is enabled.
-# EMBEDDING_API_BASE should expose an OpenAI-compatible /v1 API on the
-# dedicated Ollama embedding node.
+# Optional text embedding models used only when pgvector semantic memory is
+# enabled. Default route is Ollama-native through LiteLLM.
 # Primary:
-#   ollama pull Q78KG/gte-Qwen2-1.5B-instruct
+#   ollama pull qwen3-embedding:4b
 # Fallback:
 #   ollama pull bge-m3
-EMBEDDING_LITELLM_MODEL=openai/Q78KG/gte-Qwen2-1.5B-instruct
-EMBEDDING_FALLBACK_LITELLM_MODEL=openai/bge-m3
-EMBEDDING_API_BASE=http://192.168.178.140:11434/v1
+# `qwen3-embedding:4b` is expected to support roughly a 32k-token embedding
+# context; verify the real accepted size with the Bridge Test UI Memory Embed
+# Tester because server/runtime limits can still be lower.
+#
+# For an OpenAI-compatible/llama.cpp/LM Studio style embedding server instead,
+# set for example:
+#   EMBEDDING_LITELLM_MODEL=openai/<served-embedding-model>
+#   EMBEDDING_API_BASE=http://<embedding-host>:<port>/v1
+EMBEDDING_LITELLM_MODEL=ollama/qwen3-embedding:4b
+EMBEDDING_FALLBACK_LITELLM_MODEL=ollama/bge-m3
+EMBEDDING_API_BASE=http://192.168.178.140:11434
 EMBEDDING_TIMEOUT_SECONDS=30
 
-# Optional vision embedding route. Use a single multimodal model only if it
-# returns a consistent dimension for text queries and image/video-frame inputs.
-# Otherwise AlphaRavis keeps vision embeddings in a separate table.
+# Experimental optional vision embedding route. Startup/default operation keeps
+# vision vector memory disabled; enable it only with the explicit
+# ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY flag or Makefile argument after a
+# Memory Embed Tester probe proves that the target endpoint accepts the chosen
+# vision payload and returns stable vectors.
 VISION_EMBEDDING_LITELLM_MODEL=openai/Qwen2BVL
 VISION_EMBEDDING_FALLBACK_LITELLM_MODEL=openai/bge-m3
 VISION_EMBEDDING_API_BASE=http://192.168.178.140:11434/v1
@@ -479,7 +488,7 @@ ALPHARAVIS_MODEL_IDLE_SECONDS=600
 ALPHARAVIS_EMBEDDING_LOAD_POLICY=idle_or_big_llm_active
 ALPHARAVIS_OLLAMA_BASE_URL=http://192.168.178.140:11434
 ALPHARAVIS_OLLAMA_CHAT_MODEL=gemma4:e2b
-ALPHARAVIS_OLLAMA_EMBED_MODEL=Q78KG/gte-Qwen2-1.5B-instruct
+ALPHARAVIS_OLLAMA_EMBED_MODEL=qwen3-embedding:4b
 ALPHARAVIS_OLLAMA_EMBED_FALLBACK_MODEL=bge-m3
 
 # Hard graph-level cutoff. If the active LangGraph context is above this
@@ -767,7 +776,18 @@ ALPHARAVIS_DYNAMIC_COMPRESSION_MAX_PASSES=6
 ALPHARAVIS_DYNAMIC_COMPRESSION_HARD_MAX_PASSES=12
 ALPHARAVIS_COMPRESSION_SUMMARY_RATIO=0.20
 ALPHARAVIS_COMPRESSION_SUMMARY_MIN_TOKENS=1200
-ALPHARAVIS_COMPRESSION_SUMMARY_MAX_TOKENS=6000
+ALPHARAVIS_COMPRESSION_SUMMARY_MAX_TOKENS=0
+ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_RATIO=0.75
+ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MIN_TOKENS=8192
+ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MAX_TOKENS=0
+ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_CHARS_PER_TOKEN=2.0
+ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_OVERHEAD_RESERVE_TOKENS=512
+ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=false
+ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_RATIO=0.03
+ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_MIN_TOKENS=300
+ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_MAX_TOKENS=0
+ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_OVERLAP_CHARS=1000
+ALPHARAVIS_COMPRESSION_SUMMARY_MAX_CHUNKS=12
 ALPHARAVIS_SUMMARY_TIMEOUT_SECONDS=60
 ALPHARAVIS_COMPRESSION_TOOL_OUTPUT_MAX_CHARS=6000
 ALPHARAVIS_COMPRESSION_TOOL_OUTPUT_HEAD_CHARS=4000
@@ -943,7 +963,7 @@ ALPHARAVIS_PGVECTOR_EMBEDDING_BASE_URL=http://litellm:4000/v1
 ALPHARAVIS_PGVECTOR_EMBEDDING_API_KEY=sk-local-dev
 ALPHARAVIS_PGVECTOR_EMBEDDING_MODEL=memory-embed
 ALPHARAVIS_PGVECTOR_FALLBACK_EMBEDDING_MODEL=memory-embed-fallback
-ALPHARAVIS_PGVECTOR_EMBEDDING_TIMEOUT_SECONDS=20
+ALPHARAVIS_PGVECTOR_EMBEDDING_TIMEOUT_SECONDS=45
 
 # Indexing mode.
 # Allowed values:
@@ -987,10 +1007,22 @@ ALPHARAVIS_PGVECTOR_STORE_FULL_CHUNKS=true
 # Allowed values: true, false
 ALPHARAVIS_PGVECTOR_CATALOG_ENABLED=true
 
-# Chunking controls for full source text. Long chats, archives, code, and
-# artifacts are split into overlapping chunks; each chunk gets its own vector.
-ALPHARAVIS_PGVECTOR_CHUNK_MAX_CHARS=6000
-ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_CHARS=800
+# Token-based chunking controls for full source text. Long chats, archives,
+# code, logs, and artifacts are split into overlapping chunks; each chunk gets
+# its own vector. AlphaRavis estimates chars from tokens with
+# ALPHARAVIS_PGVECTOR_CHARS_PER_TOKEN.
+ALPHARAVIS_PGVECTOR_CHARS_PER_TOKEN=4.0
+ALPHARAVIS_PGVECTOR_CHUNK_TOKENS=900
+ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_TOKENS=125
+ALPHARAVIS_PGVECTOR_CHAT_CHUNK_TOKENS=700
+ALPHARAVIS_PGVECTOR_CHAT_CHUNK_OVERLAP_TOKENS=100
+ALPHARAVIS_PGVECTOR_LOG_CHUNK_TOKENS=1200
+ALPHARAVIS_PGVECTOR_LOG_CHUNK_OVERLAP_TOKENS=75
+ALPHARAVIS_PGVECTOR_CODE_CHUNK_TOKENS=600
+ALPHARAVIS_PGVECTOR_CODE_CHUNK_OVERLAP_TOKENS=80
+# Legacy char overrides. Leave empty to use the profile-specific token settings.
+ALPHARAVIS_PGVECTOR_CHUNK_MAX_CHARS=
+ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_CHARS=
 ALPHARAVIS_PGVECTOR_PREVIEW_CHARS=900
 
 # Number of completed chat turns used for one session-turn vector window.
@@ -1020,9 +1052,20 @@ ALPHARAVIS_PGVECTOR_PREFETCH_MAX_CHARS=1800
 # Allowed values: true, false
 ALPHARAVIS_ENABLE_RAG_FEDERATED_SEARCH=true
 ALPHARAVIS_RAG_API_URL=http://rag_api:8000
+ALPHARAVIS_RAG_API_BEARER_TOKEN=
+# Optional explicit JWT secret for rag_api calls. When empty, AlphaRavis uses
+# JWT_SECRET from the shared stack environment if present.
+ALPHARAVIS_RAG_JWT_SECRET=
+ALPHARAVIS_RAG_JWT_TTL_SECONDS=3600
+ALPHARAVIS_RAG_ENTITY_ID=alpharavis
 ALPHARAVIS_RAG_FEDERATED_TIMEOUT_SECONDS=20
 ALPHARAVIS_RAG_FEDERATED_MAX_FILE_IDS=200
 ALPHARAVIS_RAG_RESULT_PREVIEW_CHARS=1400
+ALPHARAVIS_RETRIEVAL_PREFER_RAG_MIRRORS=true
+# Experimental: keep normal archive storage unchanged, but also mirror newly
+# created compression archives into rag_api as file_id=archive:<archive_key>.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_RAG_ARCHIVE_MIRROR=false
 
 
 # =====================================================================

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -12,10 +14,18 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from context_compressor import compress_messages, estimate_tokens_rough, prepare_messages_for_summary
+from rag_api_client import RagApiClientError
+from rag_api_client import mirror_text as rag_api_mirror_text
+from rag_api_client import query_sources as rag_api_query_sources
+from retrieval_router import archive_rag_file_id
+
 
 BRIDGE_BASE_URL = os.getenv("TEST_UI_BRIDGE_BASE_URL", "http://api-bridge:8123/v1").rstrip("/")
 BRIDGE_MODEL = os.getenv("TEST_UI_MODEL", "my-agent")
 BRIDGE_TIMEOUT_SECONDS = float(os.getenv("TEST_UI_BRIDGE_TIMEOUT_SECONDS", "240"))
+CHUNKING_RUNS: dict[str, dict[str, Any]] = {}
+CHUNKING_RUN_RETENTION = int(os.getenv("TEST_UI_CHUNKING_RUN_RETENTION", "20"))
 
 app = FastAPI(title="AlphaRavis Bridge Test UI")
 
@@ -27,6 +37,41 @@ class ChatRequest(BaseModel):
     stream: bool = True
     session_id: str = ""
     trace_id: str = ""
+
+
+class ChunkingRunRequest(BaseModel):
+    approx_tokens: int = 300000
+    token_limit: int = 64000
+    summary_context_token_limit: int = 128000
+    max_chunks: int = 12
+    include_tools: bool = True
+    variable_prompt_load: bool = True
+    summary_mode: str = "stub"
+    corpus_text: str = ""
+
+
+class ArchiveRagSmokeRequest(BaseModel):
+    archive_key: str = ""
+    archive_text: str = ""
+    query: str = "Welche Retrieval-Entscheidung steht im Archiv?"
+    limit: int = 4
+
+
+class MemoryEmbedProbeRequest(BaseModel):
+    base_url: str = "http://litellm:4000/v1"
+    model: str = "memory-embed"
+    api_key: str = "sk-local-dev"
+    backend: str = "openai"
+    input_kind: str = "text"
+    text: str = "AlphaRavis memory embedding smoke text."
+    image_data_url: str = ""
+    start_chars: int = 256
+    max_chars: int = 131072
+    multiplier: float = 2.0
+    timeout_seconds: float = 30.0
+    slow_seconds: float = 10.0
+    stop_on_slow: bool = True
+    max_steps: int = 8
 
 
 def _extract_responses_text(payload: dict[str, Any]) -> str:
@@ -128,6 +173,741 @@ def _test_ui_event(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _bounded_int(value: Any, *, minimum: int, maximum: int, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def _bounded_float(value: Any, *, minimum: float, maximum: float, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not parsed == parsed:
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def _chunking_log(run: dict[str, Any], event: str, **details: Any) -> None:
+    started = float(run.get("started_monotonic") or time.perf_counter())
+    run.setdefault("actions", []).append(
+        {
+            "t": round(time.perf_counter() - started, 3),
+            "event": event,
+            **details,
+        }
+    )
+
+
+def _synthetic_web_corpus(target_tokens: int) -> str:
+    target_chars = max(4000, int(target_tokens) * 4)
+    paragraphs = [
+        (
+            "Source: local synthetic web corpus. Section {i}. AlphaRavis chunking "
+            "diagnostic text mixes documentation notes, issue comments, log excerpts, "
+            "search-result style snippets, and repeated facts so compression must keep "
+            "stable details while ignoring already-handled noise. "
+            "Decision marker AR-{marker}: keep archive lookup guidance, preserve tool "
+            "failures, and distinguish old instructions from the latest request."
+        ),
+        (
+            "Search result {i}: context compression with static prompts, variable "
+            "handoff notes, MemoryKernel facts, skill hints, and oversized tool output. "
+            "The active summary should mention chunk coverage, omitted characters, "
+            "budget limits, and whether exact details require read_archive_record."
+        ),
+        (
+            "Log excerpt {i}: pytest -q tests/test_context_compressor.py completed; "
+            "summary_prompt_pruned may become true; summary_chunking_used should become "
+            "true when the prepared middle exceeds the summary prompt budget. "
+            "Repeated terminal output follows: INFO action=probe status=ok."
+        ),
+    ]
+    parts: list[str] = []
+    index = 0
+    while sum(len(part) for part in parts) < target_chars:
+        template = paragraphs[index % len(paragraphs)]
+        parts.append(template.format(i=index, marker=f"{index % 97:02d}") + "\n")
+        index += 1
+    return "".join(parts)[:target_chars]
+
+
+def _slice_text(text: str, *, chunk_chars: int) -> list[str]:
+    return [text[index : index + chunk_chars] for index in range(0, len(text), chunk_chars) if text[index : index + chunk_chars]]
+
+
+def _build_chunking_messages(corpus: str, *, include_tools: bool) -> list[dict[str, Any]]:
+    slices = _slice_text(corpus, chunk_chars=3600)
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": "AlphaRavis chunking diagnostic policy: preserve only reference facts."},
+        {"role": "user", "content": "Start a long diagnostic thread. Latest real request appears after compression."},
+    ]
+    duplicate_tool_output = (
+        "Search results found 42 matches for AlphaRavis chunking.\n"
+        + "\n".join(f"/repo/file_{i}.py:{i}: summary_chunking_used marker" for i in range(80))
+    )
+    tool_index = 0
+    for index, segment in enumerate(slices):
+        if include_tools and index % 14 == 5:
+            call_id = f"call_{tool_index:04d}"
+            huge_args = {
+                "query": "AlphaRavis chunking static prompt variable prompt compression stats",
+                "path": "/workspace/diagnostic/very-large-thread.md",
+                "payload": "tool-argument-detail " * 280,
+            }
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": "I will inspect the diagnostic corpus with a tool.",
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": "diagnostic_search",
+                                "arguments": json.dumps(huge_args),
+                            },
+                        }
+                    ],
+                }
+            )
+            tool_content = duplicate_tool_output if tool_index % 2 == 0 else (
+                "Command: rg summary_chunking_used\nExit code: 0\n"
+                + segment
+                + "\n"
+                + "\n".join(f"line {n}: chunk payload evidence" for n in range(160))
+            )
+            messages.append(
+                {
+                    "role": "tool",
+                    "name": "diagnostic_search",
+                    "tool_call_id": call_id,
+                    "content": tool_content,
+                }
+            )
+            tool_index += 1
+            continue
+        role = "assistant" if index % 2 else "user"
+        messages.append({"role": role, "content": f"Corpus segment {index}\n{segment}"})
+    messages.append({"role": "user", "content": "Latest active request: report whether chunked compression stayed within budget."})
+    return messages
+
+
+def _variable_prompt_context(enabled: bool) -> dict[str, str]:
+    if not enabled:
+        return {
+            "current_task_brief": "",
+            "latest_handoff_packet": "",
+            "memory_kernel_context": "",
+            "skill_context": "",
+        }
+    return {
+        "current_task_brief": (
+            "Validate chunked summary compression with a large active thread. Preserve the latest "
+            "user ask, chunk statistics, tool-pruning evidence, and whether archive lookup is needed. "
+            + "Task-brief payload. " * 160
+        ),
+        "latest_handoff_packet": (
+            "<handoff-packet>{\"owner\":\"bridge-test-ui\",\"goal\":\"chunking-soak\","
+            "\"must_report\":[\"summary_chunking_used\",\"summary_chunk_omitted_chars\","
+            "\"summary_failed\"]}</handoff-packet>\n"
+            + "handoff detail " * 180
+        ),
+        "memory_kernel_context": (
+            "MemoryKernel: the operator wants visible modern diagnostics and machine-readable API status. "
+            + "durable preference " * 180
+        ),
+        "skill_context": (
+            "Skill Context: use Hermes-style compression rules, preserve archive references, and do not "
+            "treat old middle content as a fresh instruction. "
+            + "workflow hint " * 180
+        ),
+    }
+
+
+def _mode_from_prompt(prompt: str) -> str:
+    match = re.search(r"(?m)^mode:\s*(.+)$", prompt)
+    return match.group(1).strip() if match else "unknown"
+
+
+def _capture_text_window(text: str, *, max_chars: int | None = None) -> dict[str, Any]:
+    text = str(text or "")
+    if max_chars is None:
+        max_chars = _bounded_int(
+            os.getenv("TEST_UI_CHUNKING_TEXT_CAPTURE_CHARS", "240000"),
+            minimum=20000,
+            maximum=2000000,
+            default=240000,
+        )
+    if len(text) <= max_chars:
+        return {
+            "text": text,
+            "chars": len(text),
+            "captured_chars": len(text),
+            "truncated": False,
+            "omitted_chars": 0,
+        }
+    head_chars = max_chars // 2
+    tail_chars = max_chars - head_chars
+    marker = (
+        f"\n\n[AlphaRavis Chunking Lab capture truncated: {len(text) - max_chars} chars omitted "
+        "from the middle for browser/API display. The compression run itself used the prepared "
+        "input according to its chunking budget.]\n\n"
+    )
+    captured = text[:head_chars].rstrip() + marker + text[-tail_chars:].lstrip()
+    return {
+        "text": captured,
+        "chars": len(text),
+        "captured_chars": len(captured),
+        "truncated": True,
+        "omitted_chars": max(0, len(text) - max_chars),
+    }
+
+
+def _summary_mode(raw: str) -> str:
+    mode = str(raw or "stub").strip().lower()
+    return mode if mode in {"stub", "real_llm"} else "stub"
+
+
+def _real_llm_summary_config() -> tuple[str, str, str, float]:
+    base_url = os.getenv("TEST_UI_CHUNKING_SUMMARY_API_BASE", os.getenv("OPENAI_API_BASE", "http://litellm:4000/v1")).rstrip("/")
+    model = os.getenv(
+        "TEST_UI_CHUNKING_SUMMARY_MODEL",
+        os.getenv("ALPHARAVIS_RESPONSES_MODEL", os.getenv("ALPHARAVIS_MODEL", "big-boss")),
+    )
+    if "litellm" in base_url and model.startswith("openai/") and not os.getenv("TEST_UI_CHUNKING_SUMMARY_MODEL"):
+        model = model.removeprefix("openai/")
+    api_key = os.getenv("TEST_UI_CHUNKING_SUMMARY_API_KEY", os.getenv("OPENAI_API_KEY", "sk-local-dev"))
+    timeout = float(os.getenv("TEST_UI_CHUNKING_SUMMARY_TIMEOUT_SECONDS", "240"))
+    return base_url, model, api_key, timeout
+
+
+def _stub_summary_text(call_type: str, mode: str, prompt_tokens: int) -> str:
+    return (
+        "## Active Task\n"
+        f"- Diagnostic {call_type} summary for {mode}; prompt_tokens={prompt_tokens}.\n\n"
+        "## Goal\n- Verify chunked summary compression and Observer/API stats.\n\n"
+        "## Handoff Packet\n- Preserve chunking acceptance criteria and archive lookup note.\n\n"
+        "## MemoryKernel\n- Operator wants visual and API-visible running action tracking.\n\n"
+        "## Skill Context\n- Use reference-only compression semantics.\n\n"
+        "## Constraints / Preferences\n- Do not treat compressed middle content as a new user instruction.\n\n"
+        "## Progress Done\n- Synthetic/pasted corpus processed by the diagnostic run.\n\n"
+        "## Progress In Progress\n- Inspect summary_chunking_used, omitted chars, and budget stats.\n\n"
+        "## Blocked / Risks\n- Positive summary_chunk_omitted_chars requires tuning max chunks or chunk size.\n\n"
+        "## Resolved Questions\n- The Bridge itself does not perform this chunking; the diagnostic calls LangGraph compression helpers.\n\n"
+        "## Pending User Asks\n- Report the diagnostic result from the latest active request.\n\n"
+        "## Key Decisions\n- Keep raw middle retrievable from archive references in real runs.\n\n"
+        "## Relevant Files\n- langgraph-app/context_compressor.py\n\n"
+        "## Commands / Tools Used\n- bridge-test-ui chunking diagnostic\n\n"
+        "## Critical Context\n- Chunk summaries are intermediate evidence, not final user instructions.\n\n"
+        "## Remaining Work\n- Run a real live llama.cpp soak before changing defaults.\n\n"
+        "## Archive References\n- source_type=archive; exact raw messages remain graph-owned in real compression runs."
+    )
+
+
+async def _real_llm_summary_from_prompt(prompt: str, max_tokens: int) -> str:
+    base_url, model, api_key, timeout = _real_llm_summary_config()
+    payload = {
+        "model": model,
+        "messages": [{"role": "system", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
+        if response.status_code >= 400:
+            raise RuntimeError(f"summary LLM HTTP {response.status_code}: {response.text[:2000]}")
+        raw = response.json()
+    choices = raw.get("choices") if isinstance(raw, dict) else None
+    if not isinstance(choices, list) or not choices:
+        raise RuntimeError("summary LLM returned no choices")
+    message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+    content = message.get("content", "")
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("summary LLM returned empty content")
+    return content
+
+
+async def _run_chunking_diagnostic(request: ChunkingRunRequest, run: dict[str, Any] | None = None) -> dict[str, Any]:
+    run = run if run is not None else {"started_monotonic": time.perf_counter(), "actions": []}
+    approx_tokens = _bounded_int(request.approx_tokens, minimum=10000, maximum=500000, default=300000)
+    token_limit = _bounded_int(request.token_limit, minimum=4096, maximum=256000, default=64000)
+    summary_context = _bounded_int(
+        request.summary_context_token_limit,
+        minimum=8192,
+        maximum=512000,
+        default=128000,
+    )
+    max_chunks = _bounded_int(request.max_chunks, minimum=1, maximum=64, default=12)
+    summary_mode = _summary_mode(request.summary_mode)
+    summary_base_url, summary_model, _summary_api_key, _summary_timeout = _real_llm_summary_config()
+    _chunking_log(
+        run,
+        "configured",
+        approx_tokens=approx_tokens,
+        token_limit=token_limit,
+        summary_context_token_limit=summary_context,
+        max_chunks=max_chunks,
+        include_tools=bool(request.include_tools),
+        variable_prompt_load=bool(request.variable_prompt_load),
+        summary_mode=summary_mode,
+    )
+    await asyncio.sleep(0)
+
+    corpus = str(request.corpus_text or "").strip()
+    if corpus:
+        source = "pasted"
+        _chunking_log(run, "corpus.loaded", source=source, chars=len(corpus))
+    else:
+        source = "synthetic_web_like"
+        corpus = _synthetic_web_corpus(approx_tokens)
+        _chunking_log(run, "corpus.generated", source=source, chars=len(corpus))
+    await asyncio.sleep(0)
+
+    messages = _build_chunking_messages(corpus, include_tools=bool(request.include_tools))
+    prompt_context = _variable_prompt_context(bool(request.variable_prompt_load))
+    prepared = prepare_messages_for_summary(messages)
+    _chunking_log(
+        run,
+        "messages.prepared",
+        message_count=len(messages),
+        estimated_tokens=estimate_tokens_rough(messages),
+        prepared_summary_chars=len(prepared.text),
+        pruned_tools=prepared.pruned_tool_count,
+        deduped_tools=prepared.deduped_tool_count,
+        truncated_tool_args=prepared.tool_args_truncated_count,
+    )
+    await asyncio.sleep(0)
+
+    summary_calls: list[dict[str, Any]] = []
+
+    async def summarize(prompt: str, max_tokens: int) -> str:
+        mode = _mode_from_prompt(prompt)
+        call_type = "synthesis" if "chunked_synthesis" in mode else ("chunk" if "_chunk_" in mode else "one_shot")
+        call_started = time.perf_counter()
+        call = {
+            "index": len(summary_calls) + 1,
+            "mode": mode,
+            "type": call_type,
+            "summary_mode": summary_mode,
+            "prompt_chars": len(prompt),
+            "prompt_tokens_estimate": estimate_tokens_rough(prompt),
+            "max_tokens": max_tokens,
+        }
+        summary_calls.append(call)
+        _chunking_log(run, "summary.call", **call)
+        if summary_mode == "real_llm":
+            _chunking_log(run, "summary.llm.request", index=call["index"], model=summary_model, base_url=summary_base_url)
+            try:
+                summary = await _real_llm_summary_from_prompt(prompt, max_tokens)
+            except Exception as exc:
+                call["elapsed_seconds"] = round(time.perf_counter() - call_started, 3)
+                detail = str(exc) or repr(exc)
+                _chunking_log(
+                    run,
+                    "summary.failed",
+                    index=call["index"],
+                    elapsed_seconds=call["elapsed_seconds"],
+                    error_type=type(exc).__name__,
+                    detail=detail[:1000],
+                )
+                raise RuntimeError(f"{type(exc).__name__}: {detail}") from exc
+        else:
+            summary = _stub_summary_text(call_type, mode, call["prompt_tokens_estimate"])
+        call["elapsed_seconds"] = round(time.perf_counter() - call_started, 3)
+        _chunking_log(run, "summary.completed", index=call["index"], elapsed_seconds=call["elapsed_seconds"], summary_chars=len(summary))
+        return summary
+
+    previous_max_chunks = os.environ.get("ALPHARAVIS_COMPRESSION_SUMMARY_MAX_CHUNKS")
+    os.environ["ALPHARAVIS_COMPRESSION_SUMMARY_MAX_CHUNKS"] = str(max_chunks)
+    try:
+        _chunking_log(run, "compression.started")
+        result = await compress_messages(
+            messages,
+            mode="bridge_test_ui_chunking",
+            thread_id=f"chunking_diag_{uuid.uuid4().hex[:10]}",
+            thread_key="bridge-test-ui-chunking-diagnostic",
+            token_limit=token_limit,
+            previous_summary=None,
+            summary_context_token_limit=summary_context,
+            summarize_fn=summarize,
+            force=True,
+            enable_chunked_summary=True,
+            **prompt_context,
+        )
+    finally:
+        if previous_max_chunks is None:
+            os.environ.pop("ALPHARAVIS_COMPRESSION_SUMMARY_MAX_CHUNKS", None)
+        else:
+            os.environ["ALPHARAVIS_COMPRESSION_SUMMARY_MAX_CHUNKS"] = previous_max_chunks
+
+    metadata = result.archive_metadata
+    acceptance = {
+        "summary_failed_false": result.summary_failed is False,
+        "summary_chunking_used_true": metadata.get("summary_chunking_used") is True,
+        "summary_chunk_omitted_chars_zero": int(metadata.get("summary_chunk_omitted_chars") or 0) == 0,
+        "token_estimate_after_under_limit": int(result.token_estimate_after or 0) <= token_limit,
+    }
+    _chunking_log(
+        run,
+        "compression.completed",
+        summary_failed=result.summary_failed,
+        summary_chunking_used=metadata.get("summary_chunking_used"),
+        summary_chunk_count=metadata.get("summary_chunk_count"),
+        summary_chunk_omitted_chars=metadata.get("summary_chunk_omitted_chars"),
+        token_estimate_before=result.token_estimate_before,
+        token_estimate_after=result.token_estimate_after,
+    )
+    return {
+        "source": source,
+        "config": {
+            "approx_tokens": approx_tokens,
+            "token_limit": token_limit,
+            "summary_context_token_limit": summary_context,
+            "max_chunks": max_chunks,
+            "include_tools": bool(request.include_tools),
+            "variable_prompt_load": bool(request.variable_prompt_load),
+            "summary_mode": summary_mode,
+            "summary_api_base": summary_base_url if summary_mode == "real_llm" else "",
+            "summary_model": summary_model if summary_mode == "real_llm" else "stub",
+        },
+        "input": {
+            "corpus_chars": len(corpus),
+            "message_count": len(messages),
+            "estimated_tokens": estimate_tokens_rough(messages),
+            "prepared_summary_chars": len(prepared.text),
+            "prepared_summary_tokens": estimate_tokens_rough(prepared.text),
+        },
+        "tool_stats": {
+            "pruned_tool_count": result.pruned_tool_count,
+            "deduped_tool_count": result.deduped_tool_count,
+            "tool_args_truncated_count": result.tool_args_truncated_count,
+        },
+        "summary_calls": summary_calls,
+        "summary_call_count": len(summary_calls),
+        "archive_metadata": metadata,
+        "token_estimate_before": result.token_estimate_before,
+        "token_estimate_after": result.token_estimate_after,
+        "summary_preview": result.summary[:1600],
+        "comparison": {
+            "before_prepared_summary_input": _capture_text_window(prepared.text),
+            "after_summary": _capture_text_window(result.summary, max_chars=120000),
+            "before_tokens_estimate": estimate_tokens_rough(prepared.text),
+            "after_tokens_estimate": estimate_tokens_rough(result.summary),
+            "active_tokens_before": result.token_estimate_before,
+            "active_tokens_after": result.token_estimate_after,
+            "active_shrink_ratio": round(1 - (result.token_estimate_after / max(1, result.token_estimate_before)), 4),
+        },
+        "acceptance": acceptance,
+        "acceptance_ok": all(acceptance.values()),
+    }
+
+
+def _default_archive_smoke_text(archive_key: str) -> str:
+    return (
+        f"AlphaRavis archive smoke record {archive_key}.\n\n"
+        "Decision: compression archives stay in MongoDB/LangGraph Store as the "
+        "source of truth, while rag_api may hold a secondary retrieval mirror.\n"
+        "Important retrieval rule: query_archive should retrieve bounded chunks "
+        "by question and must not inject the entire raw archive into active model "
+        "context.\n"
+        "Fallback: if rag_api is missing or the mirror does not exist, AlphaRavis "
+        "falls back to source-key search in vector_memory.py.\n"
+    )
+
+
+def _rag_smoke_payload_ok(payload: dict[str, Any]) -> bool:
+    status = payload.get("status", True)
+    if isinstance(status, bool):
+        return status
+    if isinstance(status, str):
+        return status.strip().lower() not in {"false", "failed", "error"}
+    return bool(payload)
+
+
+async def _run_archive_rag_smoke(request: ArchiveRagSmokeRequest) -> dict[str, Any]:
+    started = time.perf_counter()
+    archive_key = re.sub(r"[^a-zA-Z0-9_.:-]+", "_", str(request.archive_key or "").strip())[:80]
+    if not archive_key:
+        archive_key = f"smoke_{uuid.uuid4().hex[:10]}"
+    file_id = archive_rag_file_id(archive_key)
+    text = str(request.archive_text or "").strip() or _default_archive_smoke_text(archive_key)
+    query = str(request.query or "").strip() or "Welche Retrieval-Entscheidung steht im Archiv?"
+    limit = _bounded_int(request.limit, minimum=1, maximum=20, default=4)
+
+    actions: list[dict[str, Any]] = []
+
+    def log(event: str, **details: Any) -> None:
+        actions.append({"t": round(time.perf_counter() - started, 3), "event": event, **details})
+
+    mirror: dict[str, Any] = {}
+    hits: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
+    log("mirror.started", file_id=file_id, chars=len(text))
+    try:
+        mirror = await rag_api_mirror_text(
+            file_id=file_id,
+            text=text,
+            filename=f"{file_id.replace(':', '_')}.txt",
+        )
+        log("mirror.completed", status=mirror.get("status"), file_id=mirror.get("file_id"))
+        if not _rag_smoke_payload_ok(mirror):
+            message = str(mirror.get("message") or mirror.get("error") or "rag_api mirror returned failed status")
+            errors.append({"stage": "mirror", "error": message})
+            log("mirror.status_failed", error=message[:500])
+    except (RagApiClientError, httpx.HTTPError) as exc:
+        errors.append({"stage": "mirror", "error": str(exc)})
+        log("mirror.failed", error=str(exc)[:500])
+    except Exception as exc:
+        errors.append({"stage": "mirror", "error": f"{type(exc).__name__}: {exc}"})
+        log("mirror.failed", error=f"{type(exc).__name__}: {exc}"[:500])
+
+    if mirror and not errors:
+        log("query.started", file_id=file_id, limit=limit)
+        try:
+            hits = await rag_api_query_sources(query, [file_id], limit=limit)
+            log("query.completed", hit_count=len(hits))
+        except (RagApiClientError, httpx.HTTPError) as exc:
+            errors.append({"stage": "query", "error": str(exc)})
+            log("query.failed", error=str(exc)[:500])
+        except Exception as exc:
+            errors.append({"stage": "query", "error": f"{type(exc).__name__}: {exc}"})
+            log("query.failed", error=f"{type(exc).__name__}: {exc}"[:500])
+
+    first_hit = hits[0] if hits else {}
+    hit_text = str(first_hit.get("chunk_text") or first_hit.get("preview_text") or "")
+    acceptance = {
+        "mirror_status_ok": bool(mirror) and _rag_smoke_payload_ok(mirror),
+        "rag_file_id_matches": str(mirror.get("file_id") or file_id) == file_id,
+        "query_returned_hits": len(hits) > 0,
+        "retrieved_expected_archive_rule": "query_archive" in hit_text or "bounded chunks" in hit_text,
+        "no_runtime_errors": not errors,
+    }
+    return {
+        "archive_key": archive_key,
+        "rag_file_id": file_id,
+        "query": query,
+        "text_chars": len(text),
+        "status": "passed" if all(acceptance.values()) else "failed",
+        "errors": errors,
+        "mirror": mirror,
+        "hits": hits,
+        "hit_count": len(hits),
+        "actions": actions,
+        "acceptance": acceptance,
+        "acceptance_ok": all(acceptance.values()),
+        "elapsed_seconds": round(time.perf_counter() - started, 3),
+    }
+
+
+def _embed_probe_text(seed: str, target_chars: int) -> str:
+    seed = (seed or "AlphaRavis memory embedding probe.").strip()
+    marker = " ALPHARAVIS_MEMORY_EMBED_PROBE "
+    repeated = (seed + marker) * max(1, (target_chars // max(1, len(seed) + len(marker))) + 1)
+    return repeated[:target_chars]
+
+
+def _embed_probe_steps(start_chars: int, max_chars: int, multiplier: float, max_steps: int) -> list[int]:
+    steps: list[int] = []
+    current = max(1, start_chars)
+    max_chars = max(current, max_chars)
+    multiplier = max(1.1, multiplier)
+    for _ in range(max_steps):
+        if current not in steps:
+            steps.append(current)
+        if current >= max_chars:
+            break
+        next_value = max(current + 1, int(current * multiplier))
+        current = min(max_chars, next_value)
+    return steps
+
+
+def _strip_data_url(value: str) -> str:
+    value = str(value or "").strip()
+    if "," in value and value.split(",", 1)[0].lower().startswith("data:"):
+        return value.split(",", 1)[1].strip()
+    return value
+
+
+def _embedding_dimension(payload: Any) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    if isinstance(data, list) and data:
+        first = data[0]
+        if isinstance(first, dict) and isinstance(first.get("embedding"), list):
+            return len(first["embedding"])
+    embeddings = payload.get("embeddings")
+    if isinstance(embeddings, list) and embeddings:
+        first = embeddings[0]
+        if isinstance(first, list):
+            return len(first)
+    embedding = payload.get("embedding")
+    if isinstance(embedding, list):
+        return len(embedding)
+    return None
+
+
+def _embedding_endpoint(base_url: str, backend: str) -> str:
+    base = str(base_url or "").strip().rstrip("/")
+    if not base:
+        base = "http://litellm:4000/v1"
+    if backend == "ollama_embed":
+        return f"{base.removesuffix('/v1')}/api/embed"
+    if backend == "ollama_embeddings":
+        return f"{base.removesuffix('/v1')}/api/embeddings"
+    return f"{base}/embeddings" if base.endswith("/v1") else f"{base}/v1/embeddings"
+
+
+def _embedding_payload(request: MemoryEmbedProbeRequest, text: str, backend: str) -> dict[str, Any]:
+    input_kind = str(request.input_kind or "text").strip().lower()
+    image_data = str(request.image_data_url or "").strip()
+    if backend == "ollama_embed":
+        payload: dict[str, Any] = {"model": request.model, "input": text}
+        if input_kind == "vision" and image_data:
+            payload["images"] = [_strip_data_url(image_data)]
+        return payload
+    if backend == "ollama_embeddings":
+        payload = {"model": request.model, "prompt": text}
+        if input_kind == "vision" and image_data:
+            payload["images"] = [_strip_data_url(image_data)]
+        return payload
+    if input_kind == "vision" and image_data:
+        return {
+            "model": request.model,
+            "input": [
+                {"type": "input_text", "text": text},
+                {"type": "input_image", "image_url": image_data},
+            ],
+        }
+    return {"model": request.model, "input": text}
+
+
+async def _run_memory_embed_probe(request: MemoryEmbedProbeRequest) -> dict[str, Any]:
+    started = time.perf_counter()
+    backend = str(request.backend or "openai").strip().lower()
+    if backend not in {"openai", "ollama_embed", "ollama_embeddings"}:
+        backend = "openai"
+    timeout_seconds = _bounded_float(request.timeout_seconds, minimum=1.0, maximum=240.0, default=30.0)
+    slow_seconds = _bounded_float(request.slow_seconds, minimum=0.1, maximum=240.0, default=10.0)
+    start_chars = _bounded_int(request.start_chars, minimum=1, maximum=2_000_000, default=256)
+    max_chars = _bounded_int(request.max_chars, minimum=start_chars, maximum=2_000_000, default=8192)
+    max_steps = _bounded_int(request.max_steps, minimum=1, maximum=32, default=8)
+    multiplier = _bounded_float(request.multiplier, minimum=1.1, maximum=10.0, default=2.0)
+    endpoint = _embedding_endpoint(request.base_url, backend)
+    headers = {"Authorization": f"Bearer {request.api_key.strip()}"} if backend == "openai" and request.api_key.strip() else {}
+    steps = _embed_probe_steps(start_chars, max_chars, multiplier, max_steps)
+    results: list[dict[str, Any]] = []
+    stop_reason = "completed"
+
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        for chars in steps:
+            text = _embed_probe_text(request.text, chars)
+            payload = _embedding_payload(request, text, backend)
+            call_started = time.perf_counter()
+            result: dict[str, Any] = {
+                "chars": chars,
+                "approx_tokens": estimate_tokens_rough(text),
+                "backend": backend,
+                "endpoint": endpoint,
+            }
+            try:
+                response = await client.post(endpoint, json=payload, headers=headers)
+                elapsed = round(time.perf_counter() - call_started, 3)
+                result.update({"status_code": response.status_code, "elapsed_seconds": elapsed})
+                if response.status_code >= 400:
+                    result.update({"ok": False, "error": response.text[:1000]})
+                    stop_reason = "rejected"
+                    results.append(result)
+                    break
+                try:
+                    body = response.json()
+                except Exception:
+                    body = {"raw": response.text[:1000]}
+                dim = _embedding_dimension(body)
+                result.update(
+                    {
+                        "ok": dim is not None,
+                        "embedding_dimensions": dim,
+                        "slow": elapsed >= slow_seconds,
+                        "response_keys": sorted(body.keys()) if isinstance(body, dict) else [],
+                    }
+                )
+                if dim is None:
+                    result["error"] = "Embedding response did not contain a recognized embedding vector."
+                    stop_reason = "unexpected_response"
+                    results.append(result)
+                    break
+                results.append(result)
+                if result["slow"] and request.stop_on_slow:
+                    stop_reason = "slow_threshold"
+                    break
+            except Exception as exc:
+                result.update(
+                    {
+                        "ok": False,
+                        "elapsed_seconds": round(time.perf_counter() - call_started, 3),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                results.append(result)
+                stop_reason = "error"
+                break
+
+    accepted = [item for item in results if item.get("ok")]
+    return {
+        "status": "passed" if accepted and stop_reason == "completed" else ("partial" if accepted else "failed"),
+        "backend": backend,
+        "input_kind": str(request.input_kind or "text").strip().lower(),
+        "base_url": str(request.base_url or "").strip(),
+        "endpoint": endpoint,
+        "model": request.model,
+        "steps": steps,
+        "results": results,
+        "accepted_step_count": len(accepted),
+        "max_accepted_chars": max([int(item["chars"]) for item in accepted], default=0),
+        "max_accepted_approx_tokens": max([int(item["approx_tokens"]) for item in accepted], default=0),
+        "stop_reason": stop_reason,
+        "acceptance_ok": bool(accepted) and stop_reason == "completed",
+        "elapsed_seconds": round(time.perf_counter() - started, 3),
+        "notes": [
+            "Vision embedding support is backend/model specific; this tester reports whether the selected endpoint accepts the submitted vision payload.",
+            "Use OpenAI-compatible mode for LiteLLM or llama.cpp /v1 servers; use Ollama native modes for direct Ollama /api/embed or /api/embeddings probes.",
+        ],
+    }
+
+
+def _trim_chunking_runs() -> None:
+    if len(CHUNKING_RUNS) <= CHUNKING_RUN_RETENTION:
+        return
+    ordered = sorted(CHUNKING_RUNS.items(), key=lambda item: float(item[1].get("created_at") or 0), reverse=True)
+    keep = {run_id for run_id, _run in ordered[:CHUNKING_RUN_RETENTION]}
+    for run_id in list(CHUNKING_RUNS):
+        if run_id not in keep:
+            CHUNKING_RUNS.pop(run_id, None)
+
+
+async def _chunking_job(run_id: str, request: ChunkingRunRequest) -> None:
+    run = CHUNKING_RUNS[run_id]
+    run["status"] = "running"
+    try:
+        run["result"] = await _run_chunking_diagnostic(request, run)
+        run["status"] = "completed"
+    except Exception as exc:
+        _chunking_log(run, "failed", detail=str(exc))
+        run["status"] = "failed"
+        run["error"] = str(exc)
+    finally:
+        run["elapsed_seconds"] = round(time.perf_counter() - float(run.get("started_monotonic") or time.perf_counter()), 3)
+        _trim_chunking_runs()
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
     return HTMLResponse(HTML, headers={"Cache-Control": "no-store"})
@@ -161,6 +941,40 @@ async def clear_observer_records() -> JSONResponse:
         response = await client.delete(f"{BRIDGE_BASE_URL.removesuffix('/v1')}/_alpharavis/bridge-observer")
         response.raise_for_status()
         return JSONResponse(response.json())
+
+
+@app.post("/api/chunking/runs")
+async def start_chunking_run(request: ChunkingRunRequest) -> JSONResponse:
+    run_id = f"chunk_{uuid.uuid4().hex[:12]}"
+    CHUNKING_RUNS[run_id] = {
+        "id": run_id,
+        "status": "queued",
+        "created_at": time.time(),
+        "started_monotonic": time.perf_counter(),
+        "actions": [],
+        "result": None,
+    }
+    _chunking_log(CHUNKING_RUNS[run_id], "queued")
+    asyncio.create_task(_chunking_job(run_id, request))
+    return JSONResponse(CHUNKING_RUNS[run_id])
+
+
+@app.get("/api/chunking/runs/{run_id}")
+async def get_chunking_run(run_id: str) -> JSONResponse:
+    run = CHUNKING_RUNS.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="chunking run not found")
+    return JSONResponse(run)
+
+
+@app.post("/api/archive-rag-smoke")
+async def archive_rag_smoke(request: ArchiveRagSmokeRequest) -> JSONResponse:
+    return JSONResponse(await _run_archive_rag_smoke(request))
+
+
+@app.post("/api/memory-embed-probe")
+async def memory_embed_probe(request: MemoryEmbedProbeRequest) -> JSONResponse:
+    return JSONResponse(await _run_memory_embed_probe(request))
 
 
 @app.post("/api/send")
@@ -311,7 +1125,7 @@ OBSERVER_HTML = """<!doctype html>
     :root { color-scheme: dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; background: #0f1117; color: #eef1f5; }
-    main { width: 100%; min-height: 100vh; padding: 16px; display: grid; grid-template-rows: auto minmax(300px, 1fr) auto minmax(240px, 36vh); gap: 12px; }
+    main { width: 100%; min-height: 100vh; padding: 16px; display: grid; grid-template-rows: auto minmax(300px, 1fr) auto auto minmax(240px, 36vh); gap: 12px; }
     header { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #2b3240; padding-bottom: 10px; }
     h1 { margin: 0; font-size: 20px; font-weight: 700; }
     .tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
@@ -328,17 +1142,54 @@ OBSERVER_HTML = """<!doctype html>
     .pill { display: inline-block; border: 1px solid #3a4252; border-radius: 999px; padding: 1px 7px; color: #cbd5e1; }
     .hard { border-color: #8f3b3b; color: #f59b9b; }
     .done { border-color: #2f8f5b; color: #7dd3a8; }
+    .warn { border-color: #9a6b24; color: #f6c46d; }
+    .ok { border-color: #2f8f5b; color: #7dd3a8; }
     .detail { border: 1px solid #2b3240; border-radius: 8px; background: #0c1017; display: grid; grid-template-rows: auto 1fr; min-height: 0; }
     .detail-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; border-bottom: 1px solid #222938; padding: 8px; }
     .budget { border: 1px solid #2b3240; border-radius: 8px; background: #11151d; padding: 10px; display: grid; gap: 8px; }
     .budget-title { display: flex; align-items: center; justify-content: space-between; color: #cbd5e1; font-weight: 650; font-size: 13px; }
-    .budget-grid { display: grid; grid-template-columns: repeat(8, minmax(100px, 1fr)); gap: 8px; }
+    .budget-grid { display: grid; grid-template-columns: repeat(12, minmax(96px, 1fr)); gap: 8px; }
+    .shrink { border: 1px solid #2b3240; border-radius: 8px; background: #11151d; padding: 10px; display: grid; gap: 8px; }
+    .shrink-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; }
+    .shrink-card { border: 1px solid #252d3b; border-radius: 7px; background: #0c1017; padding: 9px; display: grid; gap: 8px; min-width: 0; }
+    .shrink-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .shrink-card h3 { margin: 0; font-size: 13px; color: #eef1f5; }
+    .shrink-bar { height: 8px; background: #1a2230; border-radius: 999px; overflow: hidden; }
+    .shrink-bar span { display: block; height: 100%; background: #2f8f5b; border-radius: inherit; }
+    .shrink-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+    .chunk-lab { border: 1px solid #2b3240; border-radius: 8px; background: #11151d; padding: 10px; display: grid; gap: 10px; }
+    .chunk-lab-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .chunk-lab h2 { margin: 0; font-size: 13px; color: #cbd5e1; }
+    .chunk-form { display: grid; grid-template-columns: repeat(8, minmax(96px, 1fr)); gap: 8px; align-items: end; }
+    .chunk-form label { display: grid; gap: 4px; color: #8994a5; font-size: 11px; }
+    .chunk-form input[type="number"] { width: 100%; }
+    .chunk-form .check { display: flex; align-items: center; gap: 7px; min-height: 35px; }
+    .chunk-form .run { min-height: 35px; }
+    .archive-rag-form { grid-template-columns: 180px minmax(240px, 1fr) 90px 130px; }
+    .archive-rag-form textarea { min-height: 58px; resize: vertical; }
+    .embed-form { grid-template-columns: minmax(220px, 1.4fr) 150px 120px 120px repeat(4, minmax(86px, 1fr)) 130px; }
+    .embed-text-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .embed-text-form textarea { min-height: 58px; resize: vertical; }
+    .chunk-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+    .chunk-actions { border: 1px solid #252d3b; border-radius: 7px; background: #0c1017; max-height: 180px; overflow: auto; }
+    .chunk-actions div { display: grid; grid-template-columns: 58px minmax(120px, 1fr) 2fr; gap: 8px; padding: 6px 8px; border-bottom: 1px solid #182030; color: #cbd5e1; font-size: 12px; }
+    .chunk-actions div:last-child { border-bottom: 0; }
+    .chunk-actions .muted { color: #8994a5; }
+    .chunk-compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .chunk-compare details { border: 1px solid #252d3b; border-radius: 7px; background: #0c1017; min-width: 0; }
+    .chunk-compare summary { cursor: pointer; padding: 8px 10px; color: #cbd5e1; font-size: 12px; user-select: none; }
+    .chunk-compare pre { max-height: 340px; border-top: 1px solid #182030; }
+    .chunk-raw { max-height: 220px; border: 1px solid #252d3b; border-radius: 7px; background: #0c1017; }
     .metric { border: 1px solid #252d3b; border-radius: 7px; padding: 7px; background: #0c1017; min-width: 0; }
+    .metric.ok { border-color: #246d4a; background: #0c1712; }
+    .metric.warn { border-color: #7b5a20; background: #1a150c; }
+    .metric.hard { border-color: #783232; background: #190f12; }
     .metric span { display: block; color: #8994a5; font-size: 11px; }
     .metric strong { display: block; color: #eef1f5; font-size: 13px; overflow-wrap: anywhere; }
     .tabs, .mode { display: flex; gap: 6px; align-items: center; }
     pre { margin: 0; padding: 12px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.45; color: #d6deeb; }
     .empty { color: #9aa4b2; }
+    @media (max-width: 900px) { .chunk-form { grid-template-columns: repeat(2, minmax(0, 1fr)); } .chunk-compare { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -386,11 +1237,129 @@ OBSERVER_HTML = """<!doctype html>
       </div>
       <div id="budgetGrid" class="budget-grid"></div>
     </section>
+    <section class="shrink" aria-label="Compression Shrinking">
+      <div class="budget-title">
+        <span>Shrinking</span>
+        <span id="shrinkStatus" class="status">Keine Kompressionsdaten.</span>
+      </div>
+      <div id="shrinkGrid" class="shrink-grid"></div>
+    </section>
+    <section class="chunk-lab" aria-label="Chunking Lab">
+      <div class="chunk-lab-head">
+        <h2>Chunking Lab</h2>
+        <span id="chunkingStatus" class="status">bereit</span>
+      </div>
+      <div class="chunk-form">
+        <label>Tokens
+          <input id="chunkTokens" type="number" min="10000" max="500000" step="10000" value="300000">
+        </label>
+        <label>Active Limit
+          <input id="chunkActiveLimit" type="number" min="4096" max="256000" step="1024" value="64000">
+        </label>
+        <label>Summary Context
+          <input id="chunkSummaryContext" type="number" min="8192" max="512000" step="1024" value="128000">
+        </label>
+        <label>Max Chunks
+          <input id="chunkMaxChunks" type="number" min="1" max="64" step="1" value="12">
+        </label>
+        <label class="check"><input id="chunkTools" type="checkbox" checked> Tool-Spuren</label>
+        <label class="check"><input id="chunkVariablePrompt" type="checkbox" checked> Prompt-Last</label>
+        <label>Summary Mode
+          <select id="chunkSummaryMode">
+            <option value="stub">Stub schnell</option>
+            <option value="real_llm">Real LLM</option>
+          </select>
+        </label>
+        <button id="runChunking" class="run" type="button">Test Chunking</button>
+      </div>
+      <div id="chunkingStats" class="chunk-stats"></div>
+      <div id="chunkingActions" class="chunk-actions"></div>
+      <div id="chunkingCompare" class="chunk-compare"></div>
+      <pre id="chunkingRaw" class="chunk-raw">{}</pre>
+    </section>
+    <section class="chunk-lab" aria-label="Archive RAG Smoke">
+      <div class="chunk-lab-head">
+        <h2>Archive RAG Smoke</h2>
+        <span id="archiveRagStatus" class="status">bereit</span>
+      </div>
+      <div class="chunk-form archive-rag-form">
+        <label>Archive Key
+          <input id="archiveRagKey" type="text" value="smoke_archive">
+        </label>
+        <label>Query
+          <input id="archiveRagQuery" type="text" value="Welche Retrieval-Entscheidung steht im Archiv?">
+        </label>
+        <label>Limit
+          <input id="archiveRagLimit" type="number" min="1" max="20" step="1" value="4">
+        </label>
+        <button id="runArchiveRagSmoke" class="run" type="button">Smoke</button>
+      </div>
+      <div class="chunk-form archive-rag-form">
+        <label style="grid-column: 1 / -1;">Archive Text
+          <textarea id="archiveRagText">Decision: query_archive should retrieve bounded chunks from a rag_api mirror and must not inject the whole raw archive into active context. Fallback: AlphaRavis vector_memory.py remains available when rag_api is missing.</textarea>
+        </label>
+      </div>
+      <div id="archiveRagStats" class="chunk-stats"></div>
+      <div id="archiveRagActions" class="chunk-actions"></div>
+      <pre id="archiveRagRaw" class="chunk-raw">{}</pre>
+    </section>
+    <section class="chunk-lab" aria-label="Memory Embed Probe">
+      <div class="chunk-lab-head">
+        <h2>Memory Embed Tester</h2>
+        <span id="memoryEmbedStatus" class="status">bereit</span>
+      </div>
+      <div class="chunk-form embed-form">
+        <label>Base URL
+          <input id="memoryEmbedBaseUrl" type="text" value="http://litellm:4000/v1">
+        </label>
+        <label>Model
+          <input id="memoryEmbedModel" type="text" value="memory-embed">
+        </label>
+        <label>Backend
+          <select id="memoryEmbedBackend">
+            <option value="openai">OpenAI /v1</option>
+            <option value="ollama_embed">Ollama /api/embed</option>
+            <option value="ollama_embeddings">Ollama /api/embeddings</option>
+          </select>
+        </label>
+        <label>Input
+          <select id="memoryEmbedInputKind">
+            <option value="text">Text</option>
+            <option value="vision">Vision</option>
+          </select>
+        </label>
+        <label>Start
+          <input id="memoryEmbedStartChars" type="number" min="1" max="2000000" step="128" value="256">
+        </label>
+        <label>Max
+          <input id="memoryEmbedMaxChars" type="number" min="1" max="2000000" step="4096" value="131072">
+        </label>
+        <label>Slow s
+          <input id="memoryEmbedSlowSeconds" type="number" min="0.1" max="240" step="0.5" value="10">
+        </label>
+        <label>Timeout
+          <input id="memoryEmbedTimeout" type="number" min="1" max="240" step="1" value="30">
+        </label>
+        <button id="runMemoryEmbedProbe" class="run" type="button">Probe</button>
+      </div>
+      <div class="chunk-form embed-text-form">
+        <label>Probe Text
+          <textarea id="memoryEmbedText">AlphaRavis memory embed probe. This text is repeated to test accepted input size, latency, and embedding dimensions.</textarea>
+        </label>
+        <label>Vision Data URL / Base64
+          <textarea id="memoryEmbedImageData" placeholder="optional: data:image/png;base64,..."></textarea>
+        </label>
+      </div>
+      <div id="memoryEmbedStats" class="chunk-stats"></div>
+      <div id="memoryEmbedActions" class="chunk-actions"></div>
+      <pre id="memoryEmbedRaw" class="chunk-raw">{}</pre>
+    </section>
     <section class="detail">
       <div class="detail-head">
         <div class="tabs">
           <button id="sendTab" class="active" type="button">Senden</button>
           <button id="receiveTab" type="button">Empfang</button>
+          <button id="compressionTab" type="button">Kompression</button>
         </div>
         <div class="mode">
           <button id="contextMode" class="active" type="button">Nur Kontext</button>
@@ -409,14 +1378,56 @@ OBSERVER_HTML = """<!doctype html>
     const clearBtn = document.getElementById('clear');
     const sendTab = document.getElementById('sendTab');
     const receiveTab = document.getElementById('receiveTab');
+    const compressionTab = document.getElementById('compressionTab');
     const contextMode = document.getElementById('contextMode');
     const fullMode = document.getElementById('fullMode');
     const budgetGrid = document.getElementById('budgetGrid');
     const budgetStatus = document.getElementById('budgetStatus');
+    const shrinkGrid = document.getElementById('shrinkGrid');
+    const shrinkStatus = document.getElementById('shrinkStatus');
+    const chunkingStatus = document.getElementById('chunkingStatus');
+    const chunkTokens = document.getElementById('chunkTokens');
+    const chunkActiveLimit = document.getElementById('chunkActiveLimit');
+    const chunkSummaryContext = document.getElementById('chunkSummaryContext');
+    const chunkMaxChunks = document.getElementById('chunkMaxChunks');
+    const chunkTools = document.getElementById('chunkTools');
+    const chunkVariablePrompt = document.getElementById('chunkVariablePrompt');
+    const chunkSummaryMode = document.getElementById('chunkSummaryMode');
+    const runChunking = document.getElementById('runChunking');
+    const chunkingStats = document.getElementById('chunkingStats');
+    const chunkingActions = document.getElementById('chunkingActions');
+    const chunkingCompare = document.getElementById('chunkingCompare');
+    const chunkingRaw = document.getElementById('chunkingRaw');
+    const archiveRagStatus = document.getElementById('archiveRagStatus');
+    const archiveRagKey = document.getElementById('archiveRagKey');
+    const archiveRagQuery = document.getElementById('archiveRagQuery');
+    const archiveRagLimit = document.getElementById('archiveRagLimit');
+    const archiveRagText = document.getElementById('archiveRagText');
+    const runArchiveRagSmoke = document.getElementById('runArchiveRagSmoke');
+    const archiveRagStats = document.getElementById('archiveRagStats');
+    const archiveRagActions = document.getElementById('archiveRagActions');
+    const archiveRagRaw = document.getElementById('archiveRagRaw');
+    const memoryEmbedStatus = document.getElementById('memoryEmbedStatus');
+    const memoryEmbedBaseUrl = document.getElementById('memoryEmbedBaseUrl');
+    const memoryEmbedModel = document.getElementById('memoryEmbedModel');
+    const memoryEmbedBackend = document.getElementById('memoryEmbedBackend');
+    const memoryEmbedInputKind = document.getElementById('memoryEmbedInputKind');
+    const memoryEmbedStartChars = document.getElementById('memoryEmbedStartChars');
+    const memoryEmbedMaxChars = document.getElementById('memoryEmbedMaxChars');
+    const memoryEmbedSlowSeconds = document.getElementById('memoryEmbedSlowSeconds');
+    const memoryEmbedTimeout = document.getElementById('memoryEmbedTimeout');
+    const memoryEmbedText = document.getElementById('memoryEmbedText');
+    const memoryEmbedImageData = document.getElementById('memoryEmbedImageData');
+    const runMemoryEmbedProbe = document.getElementById('runMemoryEmbedProbe');
+    const memoryEmbedStats = document.getElementById('memoryEmbedStats');
+    const memoryEmbedActions = document.getElementById('memoryEmbedActions');
+    const memoryEmbedRaw = document.getElementById('memoryEmbedRaw');
     let records = [];
     let selectedId = '';
     let activeTab = 'send';
     let activeMode = 'context';
+    let chunkingRunId = '';
+    let chunkingPollTimer = null;
 
     function fmtTime(value) {
       if (!value) return '';
@@ -435,9 +1446,66 @@ OBSERVER_HTML = """<!doctype html>
       const finalBudget = stateProfile.final_context_budget || {};
       return Object.keys(receiveBudget).length ? receiveBudget : finalBudget;
     }
-    function metric(label, value) {
+    function compressionOf(record) {
+      return record?.receive?.compression || {};
+    }
+    function num(value) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    function fmtNumber(value) {
+      const parsed = num(value);
+      return parsed === null ? (value ?? '') : parsed.toLocaleString();
+    }
+    function budgetHeadroom(budget) {
+      const request = num(budget.request_tokens);
+      const active = num(budget.effective_active_limit || budget.active_limit);
+      return request !== null && active !== null ? active - request : null;
+    }
+    function shrinkPct(scope) {
+      const before = num(scope?.tokens);
+      const after = num(scope?.tokens_after);
+      if (before === null || after === null || before <= 0) return null;
+      return Math.max(0, Math.min(100, Math.round(((before - after) / before) * 100)));
+    }
+    function shrinkSummary(record) {
+      const compression = compressionOf(record);
+      return ['pre_run_compression', 'final_budget_rescue', 'post_run_compression', 'handoff_context']
+        .map((name) => ({ name, data: compression[name] || {} }))
+        .filter((scope) => Object.keys(scope.data).length)
+        .map((scope) => ({
+          scope: scope.name,
+          tokens_before: scope.data.tokens,
+          tokens_after: scope.data.tokens_after,
+          shrink_pct: shrinkPct(scope.data),
+          passes: scope.data.passes,
+          budget_met: scope.data.budget_met,
+          summary_failed: scope.data.summary_failed,
+          summary_prompt_pruned: scope.data.summary_prompt_pruned,
+          summary_chunking_used: scope.data.summary_chunking_used,
+          summary_chunk_count: scope.data.summary_chunk_count,
+          archive_key: scope.data.archive_key,
+        }));
+    }
+    function budgetState(budget) {
+      if (!budget || !Object.keys(budget).length) return { label: 'keine Daten', className: 'pill' };
+      if (budget.hard_context_trim_used || budget.hard_rescue_needed) return { label: 'Hard Rescue', className: 'pill hard' };
+      if (budget.final_budget_rescue_budget_met === true || budget.pre_run_compression_budget_met === true) {
+        return { label: 'Rescue OK', className: 'pill ok' };
+      }
+      if (budget.compression_needed || budget.final_budget_rescue_used || budget.pre_run_compression_used) {
+        return { label: 'Kompression', className: 'pill warn' };
+      }
+      const headroom = budgetHeadroom(budget);
+      if (headroom !== null && headroom < 0) return { label: 'über Budget', className: 'pill hard' };
+      if (headroom !== null && headroom < Math.max(1000, Number(budget.effective_active_limit || 0) * 0.10)) {
+        return { label: 'knapp', className: 'pill warn' };
+      }
+      return { label: 'unter Budget', className: 'pill ok' };
+    }
+    function metric(label, value, className = '') {
       const el = document.createElement('div');
-      el.className = 'metric';
+      el.className = `metric ${className}`.trim();
       const small = document.createElement('span');
       small.textContent = label;
       const strong = document.createElement('strong');
@@ -445,6 +1513,330 @@ OBSERVER_HTML = """<!doctype html>
       el.appendChild(small);
       el.appendChild(strong);
       return el;
+    }
+    function scopeLabel(name) {
+      return {
+        pre_run_compression: 'Pre-Run',
+        final_budget_rescue: 'Final Rescue',
+        post_run_compression: 'Post-Run',
+        handoff_context: 'Handoff',
+      }[name] || name;
+    }
+    function renderShrinking() {
+      shrinkGrid.innerHTML = '';
+      const record = selectedRecord();
+      const compression = compressionOf(record);
+      const scopes = ['pre_run_compression', 'final_budget_rescue', 'post_run_compression', 'handoff_context']
+        .map((name) => ({ name, data: compression[name] || {} }))
+        .filter((scope) => Object.keys(scope.data).length);
+      if (!record || !scopes.length) {
+        shrinkStatus.textContent = 'Keine Kompressionsdaten fuer diese Anfrage.';
+        shrinkStatus.className = 'status';
+        return;
+      }
+      shrinkStatus.textContent = compression.node ? `letzter Knoten: ${compression.node}` : `${scopes.length} Scope(s)`;
+      shrinkStatus.className = 'status ok';
+      for (const scope of scopes) {
+        const data = scope.data;
+        const pct = shrinkPct(data);
+        const card = document.createElement('div');
+        card.className = 'shrink-card';
+        const head = document.createElement('div');
+        head.className = 'shrink-card-head';
+        const title = document.createElement('h3');
+        title.textContent = scopeLabel(scope.name);
+        const badge = document.createElement('span');
+        badge.className = data.summary_failed ? 'pill hard' : (data.summary_chunking_used ? 'pill warn' : 'pill ok');
+        badge.textContent = data.summary_failed ? 'Summary Fehler' : (data.summary_chunking_used ? 'Chunking' : 'One-shot');
+        head.appendChild(title);
+        head.appendChild(badge);
+        const bar = document.createElement('div');
+        bar.className = 'shrink-bar';
+        const fill = document.createElement('span');
+        fill.style.width = `${pct ?? 0}%`;
+        bar.appendChild(fill);
+        const grid = document.createElement('div');
+        grid.className = 'shrink-metrics';
+        [
+          ['Before', fmtNumber(data.tokens)],
+          ['After', fmtNumber(data.tokens_after)],
+          ['Shrink', pct === null ? '' : `${pct}%`],
+          ['Request', data.request_tokens_after ? `${fmtNumber(data.request_tokens)} -> ${fmtNumber(data.request_tokens_after)}` : ''],
+          ['Passes', data.max_passes ? `${data.passes || 0}/${data.max_passes}` : (data.passes || '')],
+          ['Budget OK', data.budget_met === undefined ? '' : (data.budget_met ? 'ja' : 'nein')],
+          ['Compress Limit', fmtNumber(data.compression_token_limit || '')],
+          ['Summary Context', fmtNumber(data.summary_context_token_limit || '')],
+          ['Head/Middle/Tail', `${data.head_message_count ?? ''}/${data.middle_message_count ?? ''}/${data.tail_message_count ?? ''}`],
+          ['Middle Tokens', fmtNumber(data.middle_token_estimate)],
+          ['Prompt Tokens', data.summary_prompt_tokens_estimate ? `${fmtNumber(data.summary_prompt_tokens_estimate)} / ${fmtNumber(data.summary_prompt_token_limit)}` : ''],
+          ['Prompt Payload', data.summary_prompt_payload_token_limit ? fmtNumber(data.summary_prompt_payload_token_limit) : ''],
+          ['Prompt Overhead', data.summary_prompt_overhead_tokens_estimate ? fmtNumber(data.summary_prompt_overhead_tokens_estimate) : ''],
+          ['Prompt Pruned', data.summary_prompt_pruned === undefined ? '' : (data.summary_prompt_pruned ? 'ja' : 'nein')],
+          ['Chunk Count', data.summary_chunk_count ? `${data.summary_chunk_count}` : ''],
+          ['Chunk Payload', data.summary_chunk_payload_token_limit ? fmtNumber(data.summary_chunk_payload_token_limit) : ''],
+          ['Chunk Overhead', data.summary_chunk_prompt_overhead_tokens ? fmtNumber(data.summary_chunk_prompt_overhead_tokens) : ''],
+          ['Chunk Omitted', fmtNumber(data.summary_chunk_omitted_chars || '')],
+          ['Chunk Output', fmtNumber(data.summary_chunk_output_tokens || '')],
+          ['Synth Pruned', data.summary_chunk_synthesis_pruned === undefined ? '' : (data.summary_chunk_synthesis_pruned ? 'ja' : 'nein')],
+          ['Synth Payload', data.summary_chunk_synthesis_payload_token_limit ? fmtNumber(data.summary_chunk_synthesis_payload_token_limit) : ''],
+          ['Archive', short(data.archive_key || '', 24)],
+        ].forEach(([name, value]) => {
+          if (value !== '') grid.appendChild(metric(name, value));
+        });
+        card.appendChild(head);
+        card.appendChild(bar);
+        card.appendChild(grid);
+        shrinkGrid.appendChild(card);
+      }
+    }
+    function chunkMetric(label, value, className = '') {
+      return metric(label, value, className);
+    }
+    function renderChunkingRun(run) {
+      const result = run?.result || {};
+      const meta = result.archive_metadata || {};
+      const acceptance = result.acceptance || {};
+      const comparison = result.comparison || {};
+      chunkingStatus.textContent = run?.status === 'completed'
+        ? `fertig in ${run.elapsed_seconds || 0}s`
+        : (run?.status || 'bereit');
+      chunkingStatus.className = `status ${run?.status === 'failed' ? 'hard' : (run?.status === 'completed' ? 'ok' : 'warn')}`;
+      chunkingStats.innerHTML = '';
+      [
+        ['Status', run?.status || '', run?.status === 'failed' ? 'hard' : (result.acceptance_ok ? 'ok' : 'warn')],
+        ['Summary Mode', result.config?.summary_mode || ''],
+        ['Summary Model', result.config?.summary_model || ''],
+        ['Input Tokens', fmtNumber(result.input?.estimated_tokens || '')],
+        ['Prepared Tokens', fmtNumber(result.input?.prepared_summary_tokens || '')],
+        ['Before', fmtNumber(result.token_estimate_before || '')],
+        ['After', fmtNumber(result.token_estimate_after || '')],
+        ['Chunking', meta.summary_chunking_used === undefined ? '' : (meta.summary_chunking_used ? 'ja' : 'nein'), meta.summary_chunking_used ? 'ok' : 'warn'],
+        ['Chunk Count', fmtNumber(meta.summary_chunk_count || '')],
+        ['Chunk Omitted', fmtNumber(meta.summary_chunk_omitted_chars || 0), Number(meta.summary_chunk_omitted_chars || 0) > 0 ? 'hard' : 'ok'],
+        ['Summary Failed', meta.summary_failed === undefined ? '' : (meta.summary_failed ? 'ja' : 'nein'), meta.summary_failed ? 'hard' : 'ok'],
+        ['Prompt Payload', fmtNumber(meta.summary_chunk_payload_token_limit || meta.summary_prompt_payload_token_limit || '')],
+        ['Prompt Overhead', fmtNumber(meta.summary_chunk_prompt_overhead_tokens || meta.summary_prompt_overhead_tokens_estimate || '')],
+        ['Synth Pruned', meta.summary_chunk_synthesis_pruned === undefined ? '' : (meta.summary_chunk_synthesis_pruned ? 'ja' : 'nein'), meta.summary_chunk_synthesis_pruned ? 'warn' : 'ok'],
+        ['Tool Pruned', fmtNumber(result.tool_stats?.pruned_tool_count || 0)],
+        ['Tool Dedup', fmtNumber(result.tool_stats?.deduped_tool_count || 0)],
+        ['Args Trunc', fmtNumber(result.tool_stats?.tool_args_truncated_count || 0)],
+        ['Acceptance', result.acceptance_ok === undefined ? '' : (result.acceptance_ok ? 'ok' : 'prüfen'), result.acceptance_ok ? 'ok' : 'warn'],
+      ].forEach(([label, value, className]) => chunkingStats.appendChild(chunkMetric(label, value, className || '')));
+      chunkingActions.innerHTML = '';
+      const actions = Array.isArray(run?.actions) ? run.actions : [];
+      for (const action of actions.slice(-80)) {
+        const row = document.createElement('div');
+        const time = document.createElement('span');
+        time.className = 'muted';
+        time.textContent = `${Number(action.t || 0).toFixed(3)}s`;
+        const event = document.createElement('span');
+        event.textContent = action.event || '';
+        const detail = document.createElement('span');
+        detail.className = 'muted';
+        detail.textContent = Object.entries(action)
+          .filter(([key]) => !['t', 'event'].includes(key))
+          .map(([key, value]) => `${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`)
+          .join(' ');
+        row.append(time, event, detail);
+        chunkingActions.appendChild(row);
+      }
+      chunkingCompare.innerHTML = '';
+      function comparePanel(title, payload, open) {
+        const details = document.createElement('details');
+        details.open = Boolean(open);
+        const summary = document.createElement('summary');
+        const flags = [];
+        if (payload?.chars !== undefined) flags.push(`${fmtNumber(payload.chars)} chars`);
+        if (payload?.truncated) flags.push(`${fmtNumber(payload.omitted_chars)} omitted`);
+        summary.textContent = flags.length ? `${title} (${flags.join(', ')})` : title;
+        const pre = document.createElement('pre');
+        pre.textContent = payload?.text || '(leer)';
+        details.append(summary, pre);
+        return details;
+      }
+      chunkingCompare.appendChild(comparePanel('Vorher: Prepared Compression Input', comparison.before_prepared_summary_input || {}, false));
+      chunkingCompare.appendChild(comparePanel('Nachher: Finale Summary', comparison.after_summary || {}, true));
+      chunkingRaw.textContent = pretty({
+        id: run?.id,
+        status: run?.status,
+        error: run?.error,
+        config: result.config,
+        acceptance,
+        archive_metadata: meta,
+        comparison_stats: {
+          before_tokens_estimate: comparison.before_tokens_estimate,
+          after_tokens_estimate: comparison.after_tokens_estimate,
+          active_tokens_before: comparison.active_tokens_before,
+          active_tokens_after: comparison.active_tokens_after,
+          active_shrink_ratio: comparison.active_shrink_ratio,
+        },
+        summary_calls: result.summary_calls,
+        summary_preview: result.summary_preview,
+        summary_chunk_omitted_chars_zero: acceptance.summary_chunk_omitted_chars_zero,
+      });
+    }
+    async function pollChunkingRun(runId) {
+      const response = await fetch(`/api/chunking/runs/${encodeURIComponent(runId)}`, { cache: 'no-store' });
+      if (!response.ok) throw new Error(await response.text());
+      const run = await response.json();
+      renderChunkingRun(run);
+      if (!['completed', 'failed'].includes(run.status)) {
+        chunkingPollTimer = window.setTimeout(() => pollChunkingRun(runId).catch((error) => {
+          chunkingStatus.textContent = error.message;
+          chunkingStatus.className = 'status hard';
+        }), 700);
+      }
+    }
+    async function startChunkingRun() {
+      if (chunkingPollTimer) window.clearTimeout(chunkingPollTimer);
+      runChunking.disabled = true;
+      chunkingStatus.textContent = 'starte...';
+      chunkingStatus.className = 'status warn';
+      try {
+        const response = await fetch('/api/chunking/runs', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            approx_tokens: Number(chunkTokens.value || 300000),
+            token_limit: Number(chunkActiveLimit.value || 64000),
+            summary_context_token_limit: Number(chunkSummaryContext.value || 128000),
+            max_chunks: Number(chunkMaxChunks.value || 12),
+            include_tools: chunkTools.checked,
+            variable_prompt_load: chunkVariablePrompt.checked,
+            summary_mode: chunkSummaryMode.value || 'stub',
+          }),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        const run = await response.json();
+        chunkingRunId = run.id;
+        renderChunkingRun(run);
+        await pollChunkingRun(chunkingRunId);
+      } catch (error) {
+        chunkingStatus.textContent = error.message;
+        chunkingStatus.className = 'status hard';
+      } finally {
+        runChunking.disabled = false;
+      }
+    }
+    function renderArchiveRagSmoke(result) {
+      const hasErrors = Array.isArray(result.errors) && result.errors.length > 0;
+      archiveRagStatus.textContent = result.acceptance_ok ? `ok in ${result.elapsed_seconds || 0}s` : (hasErrors ? 'runtime prüfen' : 'prüfen');
+      archiveRagStatus.className = `status ${result.acceptance_ok ? 'ok' : (hasErrors ? 'hard' : 'warn')}`;
+      archiveRagStats.innerHTML = '';
+      [
+        ['RAG File ID', result.rag_file_id || ''],
+        ['Mirror', result.acceptance?.mirror_status_ok ? 'ok' : 'prüfen', result.acceptance?.mirror_status_ok ? 'ok' : 'warn'],
+        ['Hits', fmtNumber(result.hit_count || 0), Number(result.hit_count || 0) > 0 ? 'ok' : 'hard'],
+        ['Rule Found', result.acceptance?.retrieved_expected_archive_rule ? 'ja' : 'nein', result.acceptance?.retrieved_expected_archive_rule ? 'ok' : 'warn'],
+        ['Runtime', result.acceptance?.no_runtime_errors ? 'ok' : 'Fehler', result.acceptance?.no_runtime_errors ? 'ok' : 'hard'],
+      ].forEach(([label, value, className]) => archiveRagStats.appendChild(chunkMetric(label, value, className || '')));
+      archiveRagActions.innerHTML = '';
+      for (const action of (result.actions || [])) {
+        const row = document.createElement('div');
+        const time = document.createElement('span');
+        time.className = 'muted';
+        time.textContent = `${Number(action.t || 0).toFixed(3)}s`;
+        const event = document.createElement('span');
+        event.textContent = action.event || '';
+        const detail = document.createElement('span');
+        detail.className = 'muted';
+        detail.textContent = Object.entries(action)
+          .filter(([key]) => !['t', 'event'].includes(key))
+          .map(([key, value]) => `${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`)
+          .join(' ');
+        row.append(time, event, detail);
+        archiveRagActions.appendChild(row);
+      }
+      archiveRagRaw.textContent = pretty(result);
+    }
+    async function startArchiveRagSmoke() {
+      runArchiveRagSmoke.disabled = true;
+      archiveRagStatus.textContent = 'starte...';
+      archiveRagStatus.className = 'status warn';
+      try {
+        const response = await fetch('/api/archive-rag-smoke', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            archive_key: archiveRagKey.value || '',
+            archive_text: archiveRagText.value || '',
+            query: archiveRagQuery.value || '',
+            limit: Number(archiveRagLimit.value || 4),
+          }),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        renderArchiveRagSmoke(await response.json());
+      } catch (error) {
+        archiveRagStatus.textContent = error.message;
+        archiveRagStatus.className = 'status hard';
+      } finally {
+        runArchiveRagSmoke.disabled = false;
+      }
+    }
+    function renderMemoryEmbedProbe(result) {
+      const passed = result.status === 'passed';
+      const partial = result.status === 'partial';
+      memoryEmbedStatus.textContent = `${result.status || 'unknown'} in ${result.elapsed_seconds || 0}s`;
+      memoryEmbedStatus.className = `status ${passed ? 'ok' : (partial ? 'warn' : 'hard')}`;
+      memoryEmbedStats.innerHTML = '';
+      [
+        ['Backend', result.backend || ''],
+        ['Endpoint', result.endpoint || ''],
+        ['Accepted', fmtNumber(result.accepted_step_count || 0), Number(result.accepted_step_count || 0) > 0 ? 'ok' : 'hard'],
+        ['Max Chars', fmtNumber(result.max_accepted_chars || 0), result.max_accepted_chars ? 'ok' : 'hard'],
+        ['Max Tokens', fmtNumber(result.max_accepted_approx_tokens || 0), result.max_accepted_approx_tokens ? 'ok' : 'hard'],
+        ['Stop', result.stop_reason || '', result.stop_reason === 'completed' ? 'ok' : 'warn'],
+      ].forEach(([label, value, className]) => memoryEmbedStats.appendChild(chunkMetric(label, value, className || '')));
+      memoryEmbedActions.innerHTML = '';
+      for (const item of (result.results || [])) {
+        const row = document.createElement('div');
+        const time = document.createElement('span');
+        time.className = 'muted';
+        time.textContent = `${Number(item.elapsed_seconds || 0).toFixed(3)}s`;
+        const event = document.createElement('span');
+        event.textContent = item.ok ? `${fmtNumber(item.chars)} chars ok` : `${fmtNumber(item.chars)} chars failed`;
+        const detail = document.createElement('span');
+        detail.className = 'muted';
+        detail.textContent = item.ok
+          ? `dim=${item.embedding_dimensions || ''} slow=${Boolean(item.slow)} status=${item.status_code || ''}`
+          : `${item.status_code || ''} ${item.error || ''}`;
+        row.append(time, event, detail);
+        memoryEmbedActions.appendChild(row);
+      }
+      memoryEmbedRaw.textContent = pretty(result);
+    }
+    async function startMemoryEmbedProbe() {
+      runMemoryEmbedProbe.disabled = true;
+      memoryEmbedStatus.textContent = 'starte...';
+      memoryEmbedStatus.className = 'status warn';
+      try {
+        const response = await fetch('/api/memory-embed-probe', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            base_url: memoryEmbedBaseUrl.value || '',
+            model: memoryEmbedModel.value || '',
+            backend: memoryEmbedBackend.value || 'openai',
+            input_kind: memoryEmbedInputKind.value || 'text',
+            text: memoryEmbedText.value || '',
+            image_data_url: memoryEmbedImageData.value || '',
+            start_chars: Number(memoryEmbedStartChars.value || 256),
+            max_chars: Number(memoryEmbedMaxChars.value || 131072),
+            timeout_seconds: Number(memoryEmbedTimeout.value || 30),
+            slow_seconds: Number(memoryEmbedSlowSeconds.value || 10),
+            multiplier: 2,
+            max_steps: 8,
+            stop_on_slow: true,
+          }),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        renderMemoryEmbedProbe(await response.json());
+      } catch (error) {
+        memoryEmbedStatus.textContent = error.message;
+        memoryEmbedStatus.className = 'status hard';
+      } finally {
+        runMemoryEmbedProbe.disabled = false;
+      }
     }
     function selectedRecord() {
       return records.find((record) => record.id === selectedId) || records[0] || null;
@@ -463,6 +1855,10 @@ OBSERVER_HTML = """<!doctype html>
         const receive = record.receive || {};
         const stateProfile = send.langgraph_state_profile || {};
         const budget = budgetOf(record);
+        const budgetStatus = budgetState(budget);
+        const budgetText = budget.request_tokens || budget.message_tokens
+          ? `${fmtNumber(budget.request_tokens || budget.message_tokens)} / ${fmtNumber(budget.effective_active_limit || budget.active_limit || '')}`
+          : '';
         const cells = [
           fmtTime(record.created_at),
           record.protocol,
@@ -476,7 +1872,7 @@ OBSERVER_HTML = """<!doctype html>
           send.model_context_message_count,
           send.model_context_token_estimate,
           stateProfile.message_count,
-          budget.request_tokens || budget.message_tokens || '',
+          budgetText,
           receive.output_chars,
           receive.reasoning_chars,
         ];
@@ -488,7 +1884,14 @@ OBSERVER_HTML = """<!doctype html>
             span.textContent = value || 'received';
             td.appendChild(span);
           } else {
-            td.textContent = value ?? '';
+            if (index === 12 && value) {
+              const span = document.createElement('span');
+              span.className = budgetStatus.className;
+              span.textContent = `${budgetStatus.label}: ${value}`;
+              td.appendChild(span);
+            } else {
+              td.textContent = value ?? '';
+            }
             if ([5, 6].includes(index)) td.className = 'mono';
           }
           tr.appendChild(td);
@@ -498,6 +1901,7 @@ OBSERVER_HTML = """<!doctype html>
           renderRows();
           renderDetail();
           renderBudget();
+          renderShrinking();
         });
         rowsEl.appendChild(tr);
       }
@@ -519,18 +1923,30 @@ OBSERVER_HTML = """<!doctype html>
               model_context_token_estimate: send.model_context_token_estimate,
               langgraph_state_profile: send.langgraph_state_profile || {},
               context_budget: budgetOf(record),
+              shrinking: shrinkSummary(record),
               model_context_messages: send.model_context_messages || [],
               model_context: send.model_context || {},
             })
           : pretty(send);
       } else {
         const receive = record.receive || {};
+        if (activeTab === 'compression') {
+          detailEl.textContent = pretty({
+            context_budget: budgetOf(record),
+            shrinking: shrinkSummary(record),
+            compression: receive.compression || {},
+            memory_notice: receive.output_text || '',
+          });
+          return;
+        }
         detailEl.textContent = activeMode === 'context'
           ? pretty({
               status: receive.status,
               output_text: receive.output_text || '',
               reasoning_text: receive.reasoning_text || '',
               context_budget: receive.context_budget || {},
+              shrinking: shrinkSummary(record),
+              compression: receive.compression || {},
               event_counts: receive.event_counts || {},
             })
           : pretty(receive);
@@ -542,19 +1958,29 @@ OBSERVER_HTML = """<!doctype html>
       const budget = budgetOf(record);
       if (!record || !budget || !Object.keys(budget).length) {
         budgetStatus.textContent = 'Noch keine Budgetdaten.';
+        budgetStatus.className = 'status';
         return;
       }
-      budgetStatus.textContent = budget.node ? `letzter Knoten: ${budget.node}` : 'Budgetdaten vorhanden';
+      const state = budgetState(budget);
+      budgetStatus.textContent = budget.node ? `${state.label}; letzter Knoten: ${budget.node}` : state.label;
+      budgetStatus.className = `status ${state.className.replace('pill', '').trim()}`.trim();
+      const headroom = budgetHeadroom(budget);
+      const providerRetry = budget.provider_context_overflow_retry_used ? 'ja' : 'nein';
+      const providerReason = budget.provider_context_overflow_retry_classification?.reason || '';
       [
-        ['Kontext', budget.context_length],
-        ['Messages', budget.message_tokens],
-        ['Reserve', budget.static_context_reserve_tokens],
-        ['Request', budget.request_tokens],
-        ['Active', budget.active_limit],
-        ['Eff. Active', budget.effective_active_limit],
-        ['Hard', budget.hard_limit],
-        ['Eff. Hard', budget.effective_hard_limit],
-      ].forEach(([name, value]) => budgetGrid.appendChild(metric(name, value)));
+        ['Status', state.label, state.className.replace('pill', '').trim()],
+        ['Restbudget', headroom === null ? '' : fmtNumber(headroom), headroom !== null && headroom < 0 ? 'hard' : (headroom !== null && headroom < 2000 ? 'warn' : 'ok')],
+        ['Kontext', fmtNumber(budget.context_length)],
+        ['Provider Ctx', fmtNumber(budget.provider_reported_context_limit || '')],
+        ['Detected Ctx', fmtNumber(budget.detected_context_length || '')],
+        ['Messages', fmtNumber(budget.message_tokens)],
+        ['Reserve', fmtNumber(budget.static_context_reserve_tokens)],
+        ['Request', fmtNumber(budget.request_tokens)],
+        ['Eff. Active', fmtNumber(budget.effective_active_limit)],
+        ['Eff. Hard', fmtNumber(budget.effective_hard_limit)],
+        ['Rescue Pässe', budget.final_budget_rescue_passes || budget.pre_run_compression_passes || ''],
+        ['Retry', providerReason ? `${providerRetry} (${providerReason})` : providerRetry],
+      ].forEach(([name, value, className]) => budgetGrid.appendChild(metric(name, value, className || '')));
     }
     async function loadRecords() {
       const limit = Math.max(1, Math.min(200, Number(limitEl.value || 80)));
@@ -567,12 +1993,14 @@ OBSERVER_HTML = """<!doctype html>
       renderRows();
       renderDetail();
       renderBudget();
+      renderShrinking();
       statusEl.textContent = `${records.length} Requests`;
     }
     function setTab(tab) {
       activeTab = tab;
       sendTab.classList.toggle('active', tab === 'send');
       receiveTab.classList.toggle('active', tab === 'receive');
+      compressionTab.classList.toggle('active', tab === 'compression');
       renderDetail();
     }
     function setMode(mode) {
@@ -589,12 +2017,17 @@ OBSERVER_HTML = """<!doctype html>
       renderRows();
       renderDetail();
       renderBudget();
+      renderShrinking();
       statusEl.textContent = 'geleert';
     });
     sendTab.addEventListener('click', () => setTab('send'));
     receiveTab.addEventListener('click', () => setTab('receive'));
+    compressionTab.addEventListener('click', () => setTab('compression'));
     contextMode.addEventListener('click', () => setMode('context'));
     fullMode.addEventListener('click', () => setMode('full'));
+    runChunking.addEventListener('click', () => startChunkingRun());
+    runArchiveRagSmoke.addEventListener('click', () => startArchiveRagSmoke());
+    runMemoryEmbedProbe.addEventListener('click', () => startMemoryEmbedProbe());
     loadRecords().catch((error) => { statusEl.textContent = error.message; });
     window.setInterval(() => loadRecords().catch(() => {}), 2500);
   </script>

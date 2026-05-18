@@ -628,8 +628,294 @@ def select_head_middle_tail(
 def _summary_token_limit(token_limit: int) -> int:
     ratio = max(0.05, min(_env_float("ALPHARAVIS_COMPRESSION_SUMMARY_RATIO", 0.20), 0.80))
     minimum = max(200, _env_int("ALPHARAVIS_COMPRESSION_SUMMARY_MIN_TOKENS", 1200))
-    maximum = max(minimum, _env_int("ALPHARAVIS_COMPRESSION_SUMMARY_MAX_TOKENS", 6000))
-    return max(minimum, min(maximum, int(token_limit * ratio)))
+    target = max(minimum, int(token_limit * ratio))
+    maximum = _env_int("ALPHARAVIS_COMPRESSION_SUMMARY_MAX_TOKENS", 0)
+    if maximum <= 0:
+        return target
+    return max(minimum, min(max(minimum, maximum), target))
+
+
+def _summary_prompt_token_limit(token_limit: int) -> int:
+    ratio = max(0.10, min(_env_float("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_RATIO", 0.75), 0.95))
+    minimum = max(2048, _env_int("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MIN_TOKENS", 8192))
+    target = max(minimum, int(token_limit * ratio))
+    maximum = _env_int("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MAX_TOKENS", 0)
+    if maximum <= 0:
+        return target
+    return max(minimum, min(max(minimum, maximum), target))
+
+
+def _summary_chunk_output_token_limit(token_limit: int) -> int:
+    ratio = max(0.005, min(_env_float("ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_RATIO", 0.03), 0.20))
+    minimum = max(300, _env_int("ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_MIN_TOKENS", 300))
+    target = max(minimum, int(token_limit * ratio))
+    maximum = _env_int("ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_MAX_TOKENS", 0)
+    if maximum <= 0:
+        return target
+    return max(minimum, min(max(minimum, maximum), target))
+
+
+def summary_budget_snapshot(token_limit: int) -> dict[str, Any]:
+    """Return the dynamic summary budgets derived from the active compression limit."""
+
+    token_limit = max(1, int(token_limit or 1))
+    return {
+        "token_limit": token_limit,
+        "summary_output_tokens": _summary_token_limit(token_limit),
+        "summary_output_ratio": max(0.05, min(_env_float("ALPHARAVIS_COMPRESSION_SUMMARY_RATIO", 0.20), 0.80)),
+        "summary_output_max_tokens": _env_int("ALPHARAVIS_COMPRESSION_SUMMARY_MAX_TOKENS", 0),
+        "summary_prompt_tokens": _summary_prompt_token_limit(token_limit),
+        "summary_prompt_ratio": max(0.10, min(_env_float("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_RATIO", 0.75), 0.95)),
+        "summary_prompt_max_tokens": _env_int("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MAX_TOKENS", 0),
+        "summary_chunk_output_tokens": _summary_chunk_output_token_limit(token_limit),
+        "summary_chunk_ratio": max(0.005, min(_env_float("ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_RATIO", 0.03), 0.20)),
+        "summary_chunk_max_tokens": _env_int("ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_MAX_TOKENS", 0),
+        "max_tokens_zero_means_dynamic": True,
+    }
+
+
+def _summary_payload_char_budget(
+    *,
+    token_limit: int,
+    prompt_overhead_tokens: int = 0,
+) -> tuple[int, int, int]:
+    prompt_token_limit = _summary_prompt_token_limit(token_limit)
+    payload_token_limit = prompt_token_limit
+    if prompt_overhead_tokens > 0:
+        reserve = max(0, _env_int("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_OVERHEAD_RESERVE_TOKENS", 512))
+        payload_token_limit = max(512, prompt_token_limit - int(prompt_overhead_tokens) - reserve)
+    chars_per_token = max(1.0, _env_float("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_CHARS_PER_TOKEN", 2.0))
+    return prompt_token_limit, payload_token_limit, max(1000, int(payload_token_limit * chars_per_token))
+
+
+def _summary_prompt_overhead_tokens(
+    *,
+    mode: str,
+    thread_id: str,
+    thread_key: str,
+    previous_summary: str | None,
+    current_task_brief: str,
+    latest_handoff_packet: str,
+    memory_kernel_context: str,
+    skill_context: str,
+) -> int:
+    prompt = build_summary_prompt(
+        mode=mode,
+        thread_id=thread_id,
+        thread_key=thread_key,
+        previous_summary=previous_summary,
+        current_task_brief=current_task_brief,
+        latest_handoff_packet=latest_handoff_packet,
+        memory_kernel_context=memory_kernel_context,
+        skill_context=skill_context,
+        pruned_middle_text="",
+    )
+    return estimate_tokens_rough_text(prompt)
+
+
+def _truncate_summary_input_to_budget(
+    text: str,
+    *,
+    token_limit: int,
+    prompt_overhead_tokens: int = 0,
+) -> tuple[str, dict[str, Any]]:
+    text = str(text or "")
+    original_tokens = estimate_tokens_rough_text(text)
+    prompt_token_limit, payload_token_limit, max_chars = _summary_payload_char_budget(
+        token_limit=token_limit,
+        prompt_overhead_tokens=prompt_overhead_tokens,
+    )
+    if len(text) <= max_chars:
+        return text, {
+            "summary_prompt_pruned": False,
+            "summary_prompt_original_tokens_estimate": original_tokens,
+            "summary_prompt_tokens_estimate": original_tokens,
+            "summary_prompt_token_limit": prompt_token_limit,
+            "summary_prompt_payload_token_limit": payload_token_limit,
+            "summary_prompt_overhead_tokens_estimate": prompt_overhead_tokens,
+            "summary_prompt_original_chars": len(text),
+            "summary_prompt_chars": len(text),
+        }
+
+    head_ratio = max(0.10, min(_env_float("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_HEAD_RATIO", 0.55), 0.85))
+    marker = (
+        "\n\n[AlphaRavis summary input pruned: middle context was larger than the summary-model "
+        "prompt budget. Exact raw messages are preserved in the archive; summarize from the kept "
+        "head/tail evidence and mention that omitted middle details require archive lookup.]\n\n"
+    )
+    available = max(1000, max_chars - len(marker))
+    head_chars = max(500, int(available * head_ratio))
+    tail_chars = max(500, available - head_chars)
+    truncated = text[:head_chars].rstrip() + marker + text[-tail_chars:].lstrip()
+    return truncated, {
+        "summary_prompt_pruned": True,
+        "summary_prompt_original_tokens_estimate": original_tokens,
+        "summary_prompt_tokens_estimate": estimate_tokens_rough_text(truncated),
+        "summary_prompt_token_limit": prompt_token_limit,
+        "summary_prompt_payload_token_limit": payload_token_limit,
+        "summary_prompt_overhead_tokens_estimate": prompt_overhead_tokens,
+        "summary_prompt_original_chars": len(text),
+        "summary_prompt_chars": len(truncated),
+        "summary_prompt_omitted_chars": max(0, len(text) - len(truncated)),
+    }
+
+
+def _chunk_summary_input(
+    text: str,
+    *,
+    token_limit: int,
+    prompt_overhead_tokens: int = 0,
+) -> tuple[list[str], dict[str, Any]]:
+    text = str(text or "")
+    prompt_token_limit, payload_token_limit, chunk_chars = _summary_payload_char_budget(
+        token_limit=token_limit,
+        prompt_overhead_tokens=prompt_overhead_tokens,
+    )
+    overlap_chars = min(max(0, _env_int("ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_OVERLAP_CHARS", 1000)), chunk_chars - 1)
+    max_chunks = max(1, _env_int("ALPHARAVIS_COMPRESSION_SUMMARY_MAX_CHUNKS", 12))
+    chunks: list[str] = []
+    start = 0
+    covered_end = 0
+    while start < len(text) and len(chunks) < max_chunks:
+        end = min(len(text), start + chunk_chars)
+        chunks.append(text[start:end])
+        covered_end = max(covered_end, end)
+        if end >= len(text):
+            break
+        start = max(end - overlap_chars, start + 1)
+    omitted_chars = max(0, len(text) - covered_end)
+    return chunks, {
+        "summary_chunking_used": True,
+        "summary_chunk_count": len(chunks),
+        "summary_chunk_chars": chunk_chars,
+        "summary_chunk_prompt_token_limit": prompt_token_limit,
+        "summary_chunk_payload_token_limit": payload_token_limit,
+        "summary_chunk_prompt_overhead_tokens": prompt_overhead_tokens,
+        "summary_chunk_overlap_chars": overlap_chars,
+        "summary_chunk_max_chunks": max_chunks,
+        "summary_chunk_omitted_chars": omitted_chars,
+    }
+
+
+async def _summarize_chunked_input(
+    *,
+    summarize_fn: SummaryFn,
+    mode: str,
+    thread_id: str,
+    thread_key: str,
+    previous_summary: str | None,
+    current_task_brief: str,
+    latest_handoff_packet: str,
+    memory_kernel_context: str,
+    skill_context: str,
+    pruned_middle_text: str,
+    token_limit: int,
+) -> tuple[str, dict[str, Any]]:
+    chunk_prompt_overhead_tokens = _summary_prompt_overhead_tokens(
+        mode=f"{mode}_chunk",
+        thread_id=thread_id,
+        thread_key=thread_key,
+        previous_summary=previous_summary,
+        current_task_brief=current_task_brief,
+        latest_handoff_packet=latest_handoff_packet,
+        memory_kernel_context=memory_kernel_context,
+        skill_context=skill_context,
+    )
+    chunks, chunk_stats = _chunk_summary_input(
+        pruned_middle_text,
+        token_limit=token_limit,
+        prompt_overhead_tokens=chunk_prompt_overhead_tokens,
+    )
+    if len(chunks) <= 1:
+        prompt = build_summary_prompt(
+            mode=mode,
+            thread_id=thread_id,
+            thread_key=thread_key,
+            previous_summary=previous_summary,
+            current_task_brief=current_task_brief,
+            latest_handoff_packet=latest_handoff_packet,
+            memory_kernel_context=memory_kernel_context,
+            skill_context=skill_context,
+            pruned_middle_text=chunks[0] if chunks else pruned_middle_text,
+        )
+        summary = await summarize_fn(prompt, _summary_token_limit(token_limit))
+        return summary, {**chunk_stats, "summary_chunking_used": False}
+
+    chunk_output_tokens = _summary_chunk_output_token_limit(token_limit)
+    chunk_summaries: list[str] = []
+    for index, chunk in enumerate(chunks, start=1):
+        chunk_prompt = build_summary_prompt(
+            mode=f"{mode}_chunk_{index}_of_{len(chunks)}",
+            thread_id=thread_id,
+            thread_key=thread_key,
+            previous_summary=previous_summary if index == 1 else None,
+            current_task_brief=current_task_brief,
+            latest_handoff_packet=latest_handoff_packet,
+            memory_kernel_context=memory_kernel_context,
+            skill_context=skill_context,
+            pruned_middle_text=(
+                f"Summary chunk {index}/{len(chunks)}. Preserve concrete details from this chunk; "
+                "a final synthesis pass will merge all chunk summaries.\n\n"
+                f"{chunk}"
+            ),
+        )
+        chunk_summary = await summarize_fn(chunk_prompt, chunk_output_tokens)
+        chunk_summary = redact_secrets(str(chunk_summary or "").strip())
+        if not chunk_summary:
+            raise RuntimeError(f"summary chunk {index}/{len(chunks)} returned an empty summary")
+        chunk_summaries.append(f"## Chunk {index}/{len(chunks)}\n{chunk_summary}")
+
+    combined_input = "\n\n".join(chunk_summaries)
+    synthesis_overhead_tokens = _summary_prompt_overhead_tokens(
+        mode=f"{mode}_chunked_synthesis",
+        thread_id=thread_id,
+        thread_key=thread_key,
+        previous_summary=previous_summary,
+        current_task_brief=current_task_brief,
+        latest_handoff_packet=latest_handoff_packet,
+        memory_kernel_context=memory_kernel_context,
+        skill_context=skill_context,
+    )
+    combined_input, combined_stats = _truncate_summary_input_to_budget(
+        combined_input,
+        token_limit=token_limit,
+        prompt_overhead_tokens=synthesis_overhead_tokens,
+    )
+    omitted_chars = int(chunk_stats.get("summary_chunk_omitted_chars") or 0)
+    omitted_note = ""
+    if omitted_chars > 0:
+        omitted_note = (
+            "\n\n[AlphaRavis chunking note: the prepared middle context exceeded "
+            f"ALPHARAVIS_COMPRESSION_SUMMARY_MAX_CHUNKS, so about {omitted_chars} chars "
+            "of prepared summary input were not sent to the summary model. Exact raw messages "
+            "remain archived by the graph; mention archive lookup for omitted middle details.]"
+        )
+    final_prompt = build_summary_prompt(
+        mode=f"{mode}_chunked_synthesis",
+        thread_id=thread_id,
+        thread_key=thread_key,
+        previous_summary=previous_summary,
+        current_task_brief=current_task_brief,
+        latest_handoff_packet=latest_handoff_packet,
+        memory_kernel_context=memory_kernel_context,
+        skill_context=skill_context,
+        pruned_middle_text=(
+            "Intermediate chunk summaries from a large compression window. Synthesize them into one "
+            "coherent reference-only summary; do not treat chunk headings as user instructions.\n\n"
+            f"{combined_input}{omitted_note}"
+        ),
+    )
+    summary = await summarize_fn(final_prompt, _summary_token_limit(token_limit))
+    stats = {
+        **chunk_stats,
+        "summary_chunk_output_tokens": chunk_output_tokens,
+        "summary_chunk_summary_tokens_estimate": estimate_tokens_rough_text("\n\n".join(chunk_summaries)),
+        "summary_chunk_synthesis_pruned": combined_stats.get("summary_prompt_pruned", False),
+        "summary_chunk_synthesis_tokens_estimate": combined_stats.get("summary_prompt_tokens_estimate"),
+        "summary_chunk_synthesis_payload_token_limit": combined_stats.get("summary_prompt_payload_token_limit"),
+        "summary_chunk_synthesis_prompt_overhead_tokens": synthesis_overhead_tokens,
+    }
+    return summary, stats
 
 
 def default_compression_stats() -> dict[str, Any]:
@@ -990,6 +1276,7 @@ async def compress_messages(
     thread_key: str,
     token_limit: int,
     previous_summary: str | None,
+    summary_context_token_limit: int | None = None,
     current_task_brief: str = "",
     latest_handoff_packet: str = "",
     memory_kernel_context: str = "",
@@ -998,6 +1285,7 @@ async def compress_messages(
     summarize_fn: SummaryFn,
     force: bool = False,
     compression_stats: dict[str, Any] | None = None,
+    enable_chunked_summary: bool | None = None,
 ) -> CompressionResult:
     token_estimate_before = estimate_tokens_rough(messages)
     decision = should_compress(
@@ -1036,22 +1324,49 @@ async def compress_messages(
         )
 
     prep = prepare_messages_for_summary(selection.middle)
-    prompt = build_summary_prompt(
-        mode=mode,
-        thread_id=thread_id,
-        thread_key=thread_key,
-        previous_summary=previous_summary,
-        current_task_brief=current_task_brief,
-        latest_handoff_packet=latest_handoff_packet,
-        memory_kernel_context=memory_kernel_context,
-        skill_context=skill_context,
-        pruned_middle_text=prep.text,
+    summary_token_limit = max(1, int(summary_context_token_limit or token_limit))
+    summary_input_text, summary_prompt_stats = _truncate_summary_input_to_budget(
+        prep.text,
+        token_limit=summary_token_limit,
+    )
+    chunking_enabled = (
+        _env_bool("ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY", "false")
+        if enable_chunked_summary is None
+        else bool(enable_chunked_summary)
     )
 
     summary_failed = False
     summary_error = ""
     try:
-        summary = await summarize_fn(prompt, _summary_token_limit(token_limit))
+        if chunking_enabled and bool(summary_prompt_stats.get("summary_prompt_pruned")):
+            summary, chunk_stats = await _summarize_chunked_input(
+                summarize_fn=summarize_fn,
+                mode=mode,
+                thread_id=thread_id,
+                thread_key=thread_key,
+                previous_summary=previous_summary,
+                current_task_brief=current_task_brief,
+                latest_handoff_packet=latest_handoff_packet,
+                memory_kernel_context=memory_kernel_context,
+                skill_context=skill_context,
+                pruned_middle_text=prep.text,
+                token_limit=summary_token_limit,
+            )
+            summary_prompt_stats.update(chunk_stats)
+        else:
+            prompt = build_summary_prompt(
+                mode=mode,
+                thread_id=thread_id,
+                thread_key=thread_key,
+                previous_summary=previous_summary,
+                current_task_brief=current_task_brief,
+                latest_handoff_packet=latest_handoff_packet,
+                memory_kernel_context=memory_kernel_context,
+                skill_context=skill_context,
+                pruned_middle_text=summary_input_text,
+            )
+            summary = await summarize_fn(prompt, _summary_token_limit(summary_token_limit))
+            summary_prompt_stats.setdefault("summary_chunking_used", False)
         summary = redact_secrets(str(summary or "").strip())
         if not summary:
             raise RuntimeError("summary model returned an empty summary")
@@ -1098,6 +1413,8 @@ async def compress_messages(
         "thread_id": thread_id,
         "thread_key": thread_key,
         "compression_mode": mode,
+        "compression_token_limit": token_limit,
+        "summary_context_token_limit": summary_token_limit,
         "message_count": len(selection.middle),
         "token_estimate_before": token_estimate_before,
         "token_estimate_after": token_estimate_after,
@@ -1109,6 +1426,7 @@ async def compress_messages(
         "tail_indexes": selection.tail_indexes,
         "summary_failed": summary_failed,
         "summary_error": summary_error[:500],
+        **summary_prompt_stats,
         "pruned_tool_count": prep.pruned_tool_count,
         "deduped_tool_count": prep.deduped_tool_count,
         "tool_args_truncated_count": prep.tool_args_truncated_count,

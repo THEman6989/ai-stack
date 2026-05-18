@@ -996,12 +996,35 @@ dropped.
 
 Agents can call `inspect_context_budget` to see the detected context length,
 discovery base URL, active and hard thresholds, effective thresholds after
-static reserves, all agent-specific reserves, archive counts, and whether the
-current estimate needs compression or hard rescue.
+static reserves, the derived `compression_summary_budget`, all agent-specific
+reserves, archive counts, and whether the current estimate needs compression or
+hard rescue. This is the canonical runtime-facing place to read these numbers:
+agents and tools should use that budget snapshot or `model_metadata.get_model_context_length(...)`
+instead of inventing small static context assumptions.
 
 The Bridge test UI Observer shows the latest recorded context-budget snapshot in
 a dedicated `Context Budget` section for each request, including message tokens,
 reserve, request estimate, active/effective limits, and hard/effective limits.
+It also has a `Shrinking` section that turns compression metadata into
+operator-readable cards. Each card represents one compression scope
+(`pre_run_compression`, `final_budget_rescue`, `post_run_compression`, or
+`handoff_context`) and shows:
+
+- active tokens before and after the pass
+- shrink percentage and a progress bar
+- request-budget before/after when available
+- dynamic pass count and whether the pass reached budget
+- head/middle/tail message counts and middle-token estimate
+- summary-prompt token budget, whether that prompt was pruned, and archive key
+- summary prompt overhead/payload budget so wrapper text and protected notes do
+  not silently eat the model window
+- chunking status, chunk count, chunk payload budget, omitted chunk chars, chunk
+  output token cap, and whether the final chunk-synthesis prompt was pruned
+
+The Observer detail pane still has the raw `Kompression` tab for exact JSON.
+That tab is useful when the visual Shrinking card suggests a bug, for example a
+large before/after gap that does not match `request_tokens_after`, a missing
+archive key, `summary_failed=true`, or `summary_chunk_omitted_chars > 0`.
 
 The current compressor borrows mature single-agent ideas from Hermes but does
 not import Hermes at runtime. AlphaRavis keeps its own LangGraph-state design,
@@ -1013,6 +1036,9 @@ retrieval. The ported mechanisms are local helpers:
 - percentage-based trigger thresholds calibrated from discovered context length
 - JSON-safe tool-call-argument truncation
 - tool-output deduplication for the summary prompt only
+- conservative summary-prompt budget pruning so the summary model call itself
+  stays below the discovered context window while raw middle messages remain in
+  the archive
 - tool-specific summaries for terminal, file, search, browser/web, and generic
   tools
 - anti-thrashing based on `compression_stats.last_compression_savings_pct` and
@@ -1033,9 +1059,100 @@ ALPHARAVIS_COMPRESSION_IMAGE_TOKEN_ESTIMATE=1600
 ALPHARAVIS_COMPRESSION_ANTI_THRASHING_ENABLED=true
 ALPHARAVIS_COMPRESSION_MIN_SAVINGS_RATIO=0.10
 ALPHARAVIS_COMPRESSION_FAILURE_COOLDOWN_SECONDS=600
+ALPHARAVIS_COMPRESSION_SUMMARY_RATIO=0.20
+ALPHARAVIS_COMPRESSION_SUMMARY_MIN_TOKENS=1200
+ALPHARAVIS_COMPRESSION_SUMMARY_MAX_TOKENS=0
+ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_RATIO=0.75
+ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MIN_TOKENS=8192
+ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MAX_TOKENS=0
+ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_CHARS_PER_TOKEN=2.0
+ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_OVERHEAD_RESERVE_TOKENS=512
+ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=false
+ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_RATIO=0.03
+ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_MIN_TOKENS=300
+ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_MAX_TOKENS=0
+ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_OVERLAP_CHARS=1000
+ALPHARAVIS_COMPRESSION_SUMMARY_MAX_CHUNKS=12
 ALPHARAVIS_DEFAULT_CONTEXT_LENGTH=128000
 ALPHARAVIS_MODEL_CONTEXT_LENGTH=128000
 ```
+
+Summary budgets are ratio-first and use the model context window, not the
+smaller active-compression target. This keeps two concepts separate:
+
+- `compression_token_limit`: how small the active LangGraph message state
+  should become after compaction, usually the effective active limit.
+- `summary_context_token_limit`: how much context the summary model can use for
+  the internal summary call, derived from discovered model context length,
+  including llama.cpp `/props` / `n_ctx` when available.
+
+`*_MAX_TOKENS=0` means no fixed absolute cap; a positive max is only an
+operator override for a smaller hard cap. With a 128k model window and a
+75 percent prompt ratio, the summary-prompt budget can therefore be 96k even
+when the active compression target is 64k. The same derived values are exposed
+in `inspect_context_budget` under `compression_summary_budget` so downstream
+agents can see `summary_prompt_tokens`, `summary_output_tokens`, and
+`summary_chunk_output_tokens` without duplicating the math.
+
+Chunked summary compression is experimental and off by default. It exists for
+the case where normal active compression selected a large middle section, but
+the summary-model prompt budget would otherwise force a blunt head/tail prune.
+The default path remains the simpler bounded one-shot summary because it is
+faster and easier to reason about for ordinary over-budget runs.
+
+When `ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=true` and the summary input
+exceeds `ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_*`, AlphaRavis changes only the
+summary-generation step:
+
+1. The selected middle messages are still archived in full redacted form before
+   they leave active context.
+2. The prepared middle summary input is split into bounded chunks sized from
+   the ratio-derived summary-prompt budget and
+   `ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_CHARS_PER_TOKEN`. A positive
+   `ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MAX_TOKENS` can still cap that value,
+   but the default `0` lets it scale with the discovered context. Before sizing
+   a chunk, AlphaRavis estimates the prompt wrapper/protected-note overhead and
+   subtracts that plus
+   `ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_OVERHEAD_RESERVE_TOKENS`; this avoids
+   the chunk call itself exceeding the summary model context.
+3. Adjacent chunks overlap by
+   `ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_OVERLAP_CHARS` so details near chunk
+   boundaries are less likely to disappear.
+4. Each chunk is summarized with the same reference-only section contract.
+5. A final synthesis pass merges the intermediate chunk summaries into the one
+   active compaction summary that remains in LangGraph state.
+6. If chunking itself fails, the normal fail-safe fallback summary is used and
+   the archive reference remains available.
+
+The important debugging fields are:
+
+```text
+summary_chunking_used
+summary_chunk_count
+summary_chunk_chars
+summary_chunk_prompt_token_limit
+summary_chunk_payload_token_limit
+summary_chunk_prompt_overhead_tokens
+summary_chunk_overlap_chars
+summary_chunk_max_chunks
+summary_chunk_omitted_chars
+summary_chunk_output_tokens
+summary_chunk_summary_tokens_estimate
+summary_chunk_synthesis_pruned
+summary_chunk_synthesis_tokens_estimate
+summary_chunk_synthesis_payload_token_limit
+summary_chunk_synthesis_prompt_overhead_tokens
+```
+
+`summary_chunk_omitted_chars` should normally be `0`. A positive value means
+the prepared middle exceeded `ALPHARAVIS_COMPRESSION_SUMMARY_MAX_CHUNKS` and
+some prepared summary input was not sent to the summary model. Exact raw
+messages are still in the archive, and the final synthesis prompt receives an
+explicit note to mention archive lookup for omitted middle details, but the
+active summary may be less complete. Increase the max chunks or reduce chunk
+size/overlap only after checking model latency. The Observer Shrinking section
+exposes these fields directly so a live llama.cpp run can be inspected without
+reading raw JSON first.
 
 `compression_stats` is stored in LangGraph state and currently contains:
 
@@ -1219,6 +1336,10 @@ The tool exposed to agents is:
 
 ```text
 semantic_memory_search
+query_source
+query_sources
+query_archive
+agentic_rag_retrieve
 read_archive_record
 read_archive_collection
 ```
@@ -1227,6 +1348,40 @@ By default it searches the current thread plus global memories and federates
 with `rag_api` for external document hits. `semantic_memory_search` returns
 structured hits containing `source_type`, `source_key`, `title`, `score`,
 `preview_text`, `metadata`, and `child_archive_keys` when present.
+When an agent already knows the relevant `source_key`, archive key, or RAG
+`file_id`, `query_source`, `query_sources`, and `query_archive` run a scoped
+semantic search against only those sources. This keeps known-source questions
+from pulling unrelated chunks into context and mirrors the `rag_api`
+`/query`/`/query_multiple` pattern for external documents.
+When the question needs the Agentic-RAG control loop, `agentic_rag_retrieve`
+runs source-scoped retrieval, deterministic grading, one optional query rewrite,
+and returns a bounded `context_packet` plus `graph_trace`. It is an explicit
+tool path, not automatic archive injection.
+The AlphaRavis pgvector path follows the same retriever shape as `rag_api`:
+`query + source key(s) + k`, where a single source maps to `$eq` semantics and
+multiple sources map to `$in` semantics. It can also apply an optional
+pgvector-distance cutoff with `ALPHARAVIS_PGVECTOR_DISTANCE_THRESHOLD`, matching
+the intent of `rag_api`'s `RAG_DISTANCE_THRESHOLD` while keeping the setting
+separate for AlphaRavis's own table.
+
+Compression archives can optionally be mirrored into `rag_api` as a secondary
+retrieval index with:
+
+```text
+ALPHARAVIS_ENABLE_RAG_ARCHIVE_MIRROR=true
+```
+
+The raw archive still lives in MongoDB/LangGraph Store and remains the source of
+truth. The mirror uses `file_id=archive:<archive_key>` and lets
+`query_archive(...)` retrieve bounded chunks through `rag_api` before falling
+back to AlphaRavis pgvector. This path is default-off so normal archive
+compression behavior does not change unless the operator enables it.
+The Bridge Test UI Observer exposes an `Archive RAG Smoke` panel that exercises
+the same mirror-and-query path and reports acceptance checks without loading the
+whole archive into active model context.
+It also exposes `Memory Embed Tester`, a diagnostic-only probe for validating
+the configured text or vision embedding endpoint before that endpoint is used by
+AlphaRavis pgvector or the optional `rag_api` mirror.
 
 It searches other AlphaRavis threads only when a tool call explicitly sets
 `include_other_threads=true`. Enabling this backend indexes new records from
@@ -1546,8 +1701,10 @@ ALPHARAVIS_MEDIA_VISION_EMBEDDING_MODEL_CARD=vision-embed
 - Dedupe is based on the media source key plus model-card id, media index
   version, and chunking-config hash. Multiple chat references should create
   multiple reference records, not repeated full video embeddings.
-- Optional vision embeddings are written only when
-  `ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true`.
+- Optional vision embeddings are experimental and written only when
+  `ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true`. The normal memory/RAG bring-up
+  path uses text embeddings only through LiteLLM `memory-embed`, defaulting to
+  an Ollama-native `ollama/qwen3-embedding:4b` route.
 - The vision embedding client prefers a direct external model URL when
   configured:
 

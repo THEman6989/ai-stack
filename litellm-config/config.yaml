@@ -23,9 +23,12 @@ model_list:
       stream_timeout: 30
       max_retries: 0
 
-  # Optional embedding route for AlphaRavis pgvector memory.
-  # Keep ALPHARAVIS_VECTOR_BACKEND=off until this model exists on the target
-  # backend. Primary target: gte-qwen2-1.5b-instruct on the dedicated Ollama node.
+  # Text embedding route for AlphaRavis pgvector memory and rag_api mirrors.
+  # Default env uses Ollama-native LiteLLM model ids, for example
+  # EMBEDDING_LITELLM_MODEL=ollama/qwen3-embedding:4b with
+  # EMBEDDING_API_BASE=http://<ollama-host>:11434. For a future
+  # OpenAI-compatible embedding server, set model=openai/<served-model> and
+  # api_base=http://<host>:<port>/v1.
   - model_name: memory-embed
     litellm_params:
       model: os.environ/EMBEDDING_LITELLM_MODEL
@@ -43,9 +46,9 @@ model_list:
       timeout: 30
       max_retries: 0
 
-  # Optional unified text/image/video-frame embedding route. Use this only when
-  # the target model exposes compatible multimodal embeddings; otherwise keep
-  # AlphaRavis vision embeddings in a separate pgvector table.
+  # Experimental vision embedding route. AlphaRavis keeps vision vector memory
+  # disabled by default; use only with ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY
+  # after probing the target backend explicitly.
   - model_name: vision-embed
     litellm_params:
       model: os.environ/VISION_EMBEDDING_LITELLM_MODEL

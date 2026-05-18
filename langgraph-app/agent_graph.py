@@ -93,6 +93,30 @@ else:
     PGVECTOR_IMPORT_ERROR = None
 
 try:
+    from retrieval_router import (
+        agentic_rag_retrieve as _router_agentic_rag_retrieve,
+        archive_rag_file_id as _archive_rag_file_id,
+        ingest_source as _router_ingest_source,
+        mirror_archive_text as _rag_mirror_archive_text,
+        prefer_rag_mirrors as _prefer_rag_mirrors,
+        query_rag_sources as _router_query_rag_sources,
+        query_sources_with_backends as _router_query_sources_with_backends,
+        rag_archive_mirror_enabled as _rag_archive_mirror_enabled,
+    )
+except Exception as exc:  # pragma: no cover - optional local module/deps
+    _router_agentic_rag_retrieve = None
+    _archive_rag_file_id = None
+    _router_ingest_source = None
+    _rag_mirror_archive_text = None
+    _prefer_rag_mirrors = None
+    _router_query_rag_sources = None
+    _router_query_sources_with_backends = None
+    _rag_archive_mirror_enabled = None
+    RETRIEVAL_ROUTER_IMPORT_ERROR: Exception | None = exc
+else:
+    RETRIEVAL_ROUTER_IMPORT_ERROR = None
+
+try:
     from media_analysis import prepare_media_for_model as _prepare_media_for_model
     from media_analysis import decide_media_mode as _decide_media_mode
 except Exception as exc:  # pragma: no cover - optional local helper/deps
@@ -303,6 +327,7 @@ from context_compressor import (
     compress_messages,
     estimate_tokens_rough as _compressor_estimate_tokens,
     redacted_message_to_json,
+    summary_budget_snapshot as _summary_budget_snapshot,
 )
 
 if _setup_operational_logging is not None:
@@ -3347,6 +3372,348 @@ async def _rag_federated_search(query: str, limit: int) -> tuple[list[dict[str, 
     return hits, ""
 
 
+def _normalize_source_keys(source_keys: Any, *, source_key: str = "") -> list[str]:
+    raw_items: list[Any]
+    if isinstance(source_keys, str):
+        raw_items = [part.strip() for part in source_keys.split(",")]
+    elif isinstance(source_keys, (list, tuple, set)):
+        raw_items = list(source_keys)
+    elif source_keys:
+        raw_items = [source_keys]
+    else:
+        raw_items = []
+    if source_key:
+        raw_items.insert(0, source_key)
+    normalized = [str(item).strip() for item in raw_items if str(item).strip()]
+    return list(dict.fromkeys(normalized))[:50]
+
+
+async def _rag_query_sources(query: str, source_keys: list[str], limit: int) -> tuple[list[dict[str, Any]], str]:
+    if _router_query_rag_sources is not None:
+        return await _router_query_rag_sources(query=query, file_ids=source_keys, limit=limit)
+
+    if not source_keys:
+        return [], "No source_key/file_id was provided for RAG query."
+    rag_url = os.getenv("ALPHARAVIS_RAG_API_URL", "http://rag_api:8000").rstrip("/")
+    timeout = float(os.getenv("ALPHARAVIS_RAG_FEDERATED_TIMEOUT_SECONDS", "20"))
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            if len(source_keys) == 1:
+                response = await client.post(
+                    f"{rag_url}/query",
+                    json={"query": query, "file_id": source_keys[0], "k": limit},
+                )
+                endpoint = "/query"
+            else:
+                response = await client.post(
+                    f"{rag_url}/query_multiple",
+                    json={"query": query, "file_ids": source_keys, "k": limit},
+                )
+                endpoint = "/query_multiple"
+            if response.status_code == 404:
+                return [], ""
+            if response.status_code >= 400:
+                return [], f"RAG {endpoint} returned HTTP {response.status_code}: {response.text[:300]}"
+            payload = response.json()
+    except Exception as exc:
+        return [], f"RAG source query unavailable at {rag_url}: {exc}"
+
+    if not isinstance(payload, list):
+        return [], "RAG source query returned an unexpected non-list payload."
+
+    hits = []
+    for item in payload:
+        hit = _normalize_rag_document_hit(item)
+        if hit:
+            hits.append(hit)
+    return hits, ""
+
+
+async def _query_sources_impl(
+    *,
+    query: str,
+    source_keys: list[str],
+    source_type: str = "all",
+    limit: int = 5,
+    include_other_threads: bool = False,
+    rag_source_keys: list[str] | None = None,
+) -> str:
+    started = time.perf_counter()
+    query = str(query or "").strip()
+    source_keys = _normalize_source_keys(source_keys)
+    if not query:
+        return _json_tool_result({"results": [], "warnings": ["query is required."]})
+    if not source_keys:
+        return _json_tool_result({"query": query, "results": [], "warnings": ["source_key is required."]})
+
+    if _router_query_sources_with_backends is not None:
+        payload = await _router_query_sources_with_backends(
+            query=query,
+            source_keys=source_keys,
+            source_type=source_type,
+            limit=limit,
+            include_other_threads=include_other_threads,
+            thread_id=_state_thread_id(),
+            pgvector_search=_pgvector_semantic_search,
+            pgvector_available=_vector_memory_available(),
+            pgvector_import_error=PGVECTOR_IMPORT_ERROR,
+            rag_query_func=_rag_query_sources,
+            rag_source_keys=rag_source_keys,
+        )
+        backend_counts = payload.get("backend_counts") if isinstance(payload, dict) else {}
+        warnings = payload.get("warnings", []) if isinstance(payload, dict) else []
+        _log_event(
+            logging.INFO,
+            "memory.source_query.completed",
+            dependency="retrieval_router",
+            source_type=source_type,
+            source_keys=source_keys,
+            include_other_threads=include_other_threads,
+            limit=limit,
+            memory_hits=(backend_counts or {}).get("alpharavis_pgvector", 0),
+            document_hits=(backend_counts or {}).get("rag_api", 0),
+            warnings=warnings,
+            elapsed_seconds=round(time.perf_counter() - started, 3),
+        )
+        return _json_tool_result(payload)
+
+    limit = max(1, min(int(limit), int(os.getenv("ALPHARAVIS_PGVECTOR_SEARCH_LIMIT", "5"))))
+    if include_other_threads:
+        limit = min(limit, int(os.getenv("ALPHARAVIS_CROSS_THREAD_VECTOR_SEARCH_LIMIT", "3")))
+
+    vector_results = []
+    vector_warning = ""
+    if _vector_memory_available() and _pgvector_semantic_search is not None:
+        try:
+            vector_results = await _pgvector_semantic_search(
+                query=query,
+                thread_id=_state_thread_id(),
+                source_type=source_type,
+                source_keys=source_keys,
+                include_other_threads=include_other_threads,
+                limit=limit,
+            )
+        except Exception as exc:
+            vector_warning = f"AlphaRavis pgvector source query failed cleanly: {exc}"
+            _log_exception(
+                "memory.source_query.pgvector_failed",
+                exc,
+                level=logging.WARNING,
+                dependency="pgvector",
+                source_type=source_type,
+                source_keys=source_keys,
+                include_other_threads=include_other_threads,
+                limit=limit,
+            )
+    elif PGVECTOR_IMPORT_ERROR:
+        vector_warning = f"AlphaRavis pgvector memory is unavailable: {PGVECTOR_IMPORT_ERROR}"
+    else:
+        vector_warning = "AlphaRavis pgvector memory is disabled."
+
+    rag_results = []
+    rag_warning = ""
+    rag_lookup_keys = _normalize_source_keys(rag_source_keys if rag_source_keys is not None else source_keys)
+    rag_allowed = source_type in {
+        "all",
+        "external_document",
+        "document",
+    } or rag_source_keys is not None
+    if _env_bool("ALPHARAVIS_ENABLE_RAG_FEDERATED_SEARCH", "true") and rag_allowed and rag_lookup_keys:
+        rag_results, rag_warning = await _rag_query_sources(query, rag_lookup_keys, limit)
+
+    memory_hits = [_vector_result_to_tool_hit(record) for record in vector_results[:limit]]
+    document_hits = rag_results[:limit]
+    warnings = [warning for warning in [vector_warning, rag_warning] if warning]
+    _log_event(
+        logging.INFO,
+        "memory.source_query.completed",
+        dependency="pgvector",
+        source_type=source_type,
+        source_keys=source_keys,
+        include_other_threads=include_other_threads,
+        limit=limit,
+        memory_hits=len(memory_hits),
+        document_hits=len(document_hits),
+        warnings=warnings,
+        elapsed_seconds=round(time.perf_counter() - started, 3),
+    )
+    return _json_tool_result(
+        {
+            "query": query,
+            "source_keys": source_keys,
+            "rag_source_keys": rag_lookup_keys,
+            "include_other_threads": include_other_threads,
+            "source_type_filter": source_type,
+            "retrieval_policy": (
+                "These hits are filtered to the requested source_key/file_id values. "
+                "Use chunk_text for grounded answers. For archive hits, call read_archive_record "
+                "only when exact raw archived turns are needed; do not load unrelated archives."
+            ),
+            "results": [*memory_hits, *document_hits],
+            "warnings": warnings,
+        }
+    )
+
+
+@tool
+async def query_source(
+    query: str,
+    source_key: str,
+    source_type: str = "all",
+    limit: int = 5,
+    include_other_threads: bool = False,
+):
+    """Search only one known AlphaRavis source_key or external RAG file_id for relevant chunks."""
+
+    return await _query_sources_impl(
+        query=query,
+        source_keys=_normalize_source_keys([], source_key=source_key),
+        source_type=source_type,
+        limit=limit,
+        include_other_threads=include_other_threads,
+    )
+
+
+@tool
+async def query_sources(
+    query: str,
+    source_keys: list[str],
+    source_type: str = "all",
+    limit: int = 5,
+    include_other_threads: bool = False,
+):
+    """Search a bounded list of known AlphaRavis source_key or external RAG file_id values."""
+
+    return await _query_sources_impl(
+        query=query,
+        source_keys=_normalize_source_keys(source_keys),
+        source_type=source_type,
+        limit=limit,
+        include_other_threads=include_other_threads,
+    )
+
+
+async def _rag_file_id_for_archive(archive_key: str) -> str:
+    if not archive_key or _prefer_rag_mirrors is None or not _prefer_rag_mirrors():
+        return ""
+    if get_store is None:
+        return ""
+    try:
+        store = get_store()
+    except Exception:
+        return ""
+
+    thread_id = _state_thread_id()
+    item = await _maybe_get(store, _thread_archive_ns(thread_id), archive_key)
+    if item is None:
+        item = await _maybe_get(store, ARCHIVE_INDEX_NS, archive_key)
+    if item is None:
+        return ""
+    value = _store_item_value(item)
+    if not isinstance(value, dict):
+        return ""
+    metadata = value.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    status = str(value.get("rag_index_status") or metadata.get("rag_index_status") or "").lower()
+    rag_file_id = str(value.get("rag_file_id") or metadata.get("rag_file_id") or "").strip()
+    if rag_file_id and status in {"indexed", "ready", "done", "mirrored"}:
+        return rag_file_id
+    return ""
+
+
+@tool
+async def query_archive(
+    query: str,
+    archive_key: str,
+    limit: int = 5,
+    include_other_threads: bool = False,
+):
+    """Search within one known archive key before optionally reading the raw archive record."""
+
+    return await _query_sources_impl(
+        query=query,
+        source_keys=_normalize_source_keys([], source_key=archive_key),
+        source_type="archive",
+        limit=limit,
+        include_other_threads=include_other_threads,
+        rag_source_keys=_normalize_source_keys([], source_key=await _rag_file_id_for_archive(archive_key)),
+    )
+
+
+async def _rag_file_ids_for_archives(source_keys: list[str]) -> list[str]:
+    rag_source_keys = []
+    for source_key in source_keys:
+        rag_file_id = await _rag_file_id_for_archive(source_key)
+        if rag_file_id:
+            rag_source_keys.append(rag_file_id)
+    return _normalize_source_keys(rag_source_keys)
+
+
+@tool
+async def agentic_rag_retrieve(
+    query: str,
+    source_keys: list[str],
+    source_type: str = "all",
+    limit: int = 5,
+    include_other_threads: bool = False,
+    allow_rewrite: bool = True,
+    max_context_chars: int = 0,
+):
+    """Retrieve, grade, optionally rewrite, and return a bounded grounded RAG context packet."""
+
+    started = time.perf_counter()
+    query = str(query or "").strip()
+    normalized_keys = _normalize_source_keys(source_keys)
+    if not query:
+        return _json_tool_result({"results": [], "warnings": ["query is required."]})
+    if not normalized_keys:
+        return _json_tool_result({"query": query, "results": [], "warnings": ["source_keys is required."]})
+    if _router_agentic_rag_retrieve is None:
+        return _json_tool_result(
+            {
+                "query": query,
+                "source_keys": normalized_keys,
+                "next_action": "unavailable",
+                "warnings": [f"retrieval_router unavailable: {RETRIEVAL_ROUTER_IMPORT_ERROR}"],
+            }
+        )
+
+    source_type_filter = str(source_type or "all").strip().lower()
+    rag_source_keys = None
+    if source_type_filter == "archive":
+        rag_source_keys = await _rag_file_ids_for_archives(normalized_keys)
+
+    payload = await _router_agentic_rag_retrieve(
+        query=query,
+        source_keys=normalized_keys,
+        source_type=source_type_filter,
+        limit=limit,
+        include_other_threads=include_other_threads,
+        thread_id=_state_thread_id(),
+        pgvector_search=_pgvector_semantic_search,
+        pgvector_available=_vector_memory_available(),
+        pgvector_import_error=PGVECTOR_IMPORT_ERROR,
+        rag_query_func=_rag_query_sources,
+        rag_source_keys=rag_source_keys,
+        allow_rewrite=allow_rewrite,
+        max_context_chars=max_context_chars or None,
+    )
+    _log_event(
+        logging.INFO,
+        "memory.agentic_rag_retrieve.completed",
+        dependency="retrieval_router",
+        source_type=source_type_filter,
+        source_keys=normalized_keys,
+        include_other_threads=include_other_threads,
+        limit=limit,
+        next_action=payload.get("next_action") if isinstance(payload, dict) else "",
+        chunk_count=((payload.get("context_packet") or {}).get("chunk_count") if isinstance(payload, dict) else 0),
+        elapsed_seconds=round(time.perf_counter() - started, 3),
+    )
+    return _json_tool_result(payload)
+
+
 @tool
 async def semantic_memory_search(
     query: str,
@@ -4804,6 +5171,8 @@ def _context_budget_snapshot(state: dict[str, Any] | None = None, *, messages: l
         default_ratio=0.50,
     )
     hard_limit = _hard_context_token_limit_for_context(context_length)
+    effective_active_limit = _effective_context_limit(active_limit, reserve)
+    effective_hard_limit = _effective_context_limit(hard_limit, reserve)
     return {
         "context_length": context_length,
         "detected_context_length": detected_context_length,
@@ -4815,10 +5184,14 @@ def _context_budget_snapshot(state: dict[str, Any] | None = None, *, messages: l
         "static_context_reserve_detail": _static_context_reserve_detail(state),
         "request_tokens": message_tokens + reserve,
         "active_limit": active_limit,
-        "effective_active_limit": _effective_context_limit(active_limit, reserve),
+        "effective_active_limit": effective_active_limit,
         "hard_limit": hard_limit,
-        "effective_hard_limit": _effective_context_limit(hard_limit, reserve),
-        "compression_needed": message_tokens > _effective_context_limit(active_limit, reserve),
+        "effective_hard_limit": effective_hard_limit,
+        "compression_summary_budget": {
+            **_summary_budget_snapshot(context_length),
+            "active_compression_token_limit": effective_active_limit,
+        },
+        "compression_needed": message_tokens > effective_active_limit,
         "hard_rescue_needed": hard_limit > 0 and message_tokens + reserve > hard_limit,
         "message_count": len(active_messages),
         "archived_context_count": len(list((state or {}).get("archived_context_keys") or [])),
@@ -5120,6 +5493,7 @@ def _vector_result_to_tool_hit(record: dict[str, Any]) -> dict[str, Any]:
     if len(preview) > preview_chars:
         preview = preview[:preview_chars].rstrip() + "\n[Vector result preview truncated.]"
     similarity = record.get("similarity")
+    distance = record.get("distance")
     child_archive_keys = metadata.get("child_archive_keys") or record.get("child_archive_keys") or []
     return {
         "source_type": record.get("source_type", "memory"),
@@ -5127,6 +5501,7 @@ def _vector_result_to_tool_hit(record: dict[str, Any]) -> dict[str, Any]:
         "title": record.get("title") or record.get("source_key") or "untitled",
         "score": similarity,
         "similarity": similarity,
+        "distance": distance,
         "preview_text": preview,
         "chunk_text": str(record.get("chunk_text") or record.get("content") or ""),
         "thread_id": record.get("thread_id") or "",
@@ -6391,22 +6766,87 @@ async def _store_compression_archive(
             "compression_stats": result.compression_stats,
         },
     }
+    ingest_result: dict[str, Any] = {}
+    if _router_ingest_source is not None:
+        try:
+            ingest_result = await _router_ingest_source(
+                source_type="archive",
+                source_key=archive_key,
+                title=title,
+                content=archive_record["content"],
+                thread_id=thread_id,
+                thread_key=thread_key,
+                scope="thread",
+                metadata=archive_record["metadata"],
+                preferred_backend="auto",
+                pgvector_index=_maybe_index_vector_memory,
+            )
+        except Exception as exc:
+            ingest_result = {
+                "index_status": "failed",
+                "indexed_backends": [],
+                "rag_file_id": _archive_rag_file_id(archive_key) if _archive_rag_file_id is not None else f"archive:{archive_key}",
+                "rag_index_status": "failed",
+                "errors": [{"stage": "retrieval_router", "error": str(exc)[:500]}],
+            }
+            _log_exception(
+                "memory.archive.ingest_router_failed",
+                exc,
+                level=logging.WARNING,
+                dependency="retrieval_router",
+                archive_key=archive_key,
+            )
+    else:
+        vector_result = await _maybe_index_vector_memory(
+            source_type="archive",
+            source_key=archive_key,
+            title=title,
+            content=archive_record["content"],
+            thread_id=thread_id,
+            thread_key=thread_key,
+            scope="thread",
+            metadata=archive_record["metadata"],
+        )
+        indexed_backends = ["alpharavis_pgvector"] if vector_result else []
+        ingest_result = {
+            "index_status": "indexed" if indexed_backends else "failed",
+            "indexed_backends": indexed_backends,
+            "backend_results": {"alpharavis_pgvector": vector_result},
+            "rag_file_id": _archive_rag_file_id(archive_key) if _archive_rag_file_id is not None else f"archive:{archive_key}",
+        }
+
+    archive_record["ingest_status"] = ingest_result.get("index_status", "")
+    archive_record["indexed_backends"] = list(ingest_result.get("indexed_backends") or [])
+    archive_record["rag_file_id"] = ingest_result.get("rag_file_id") or (
+        _archive_rag_file_id(archive_key) if _archive_rag_file_id is not None else f"archive:{archive_key}"
+    )
+    if ingest_result.get("rag_index_status"):
+        archive_record["rag_index_status"] = ingest_result.get("rag_index_status")
+    if ingest_result.get("rag_indexed_at"):
+        archive_record["rag_indexed_at"] = ingest_result.get("rag_indexed_at")
+    if ingest_result.get("errors"):
+        archive_record["ingest_errors"] = ingest_result.get("errors")
+        rag_errors = [item for item in ingest_result.get("errors", []) if isinstance(item, dict) and item.get("stage") == "rag_api"]
+        if rag_errors:
+            archive_record["rag_index_status"] = "failed"
+            archive_record["rag_index_error"] = str(rag_errors[0].get("error", ""))[:500]
+
+    archive_record["metadata"].update(
+        {
+            "rag_file_id": archive_record.get("rag_file_id"),
+            "rag_index_status": archive_record.get("rag_index_status", ""),
+            "rag_indexed_at": archive_record.get("rag_indexed_at"),
+            "indexed_backends": archive_record["indexed_backends"],
+            "ingest_status": archive_record.get("ingest_status", ""),
+            "ingest_errors": archive_record.get("ingest_errors", []),
+        }
+    )
     await _maybe_put(store, _thread_archive_ns(thread_id), archive_key, archive_record)
     await _maybe_put(
         store,
         ARCHIVE_INDEX_NS,
         archive_key,
         {key: value for key, value in archive_record.items() if key != "messages"},
-    )
-    await _maybe_index_vector_memory(
-        source_type="archive",
-        source_key=archive_key,
-        title=title,
-        content=archive_record["content"],
-        thread_id=thread_id,
-        thread_key=thread_key,
-        scope="thread",
-        metadata=archive_record["metadata"],
     )
     return archive_key, archive_record
 
@@ -6417,6 +6857,7 @@ async def _run_hermes_style_compression(
     runtime: Any | None,
     mode: str,
     token_limit: int,
+    summary_context_token_limit: int | None = None,
     force: bool = False,
     inject_messages: list[Any] | None = None,
 ) -> tuple[CompressionResult, str, dict[str, Any]]:
@@ -6441,12 +6882,17 @@ async def _run_hermes_style_compression(
         state.get("memory_kernel_context"),
         _memory_kernel_precompression_notes(raw_messages),
     )
+    if summary_context_token_limit is None:
+        summary_context_token_limit = int(
+            _context_budget_snapshot(state, messages=raw_messages).get("context_length") or _detected_context_length()
+        )
     result = await compress_messages(
         raw_messages,
         mode=mode,
         thread_id=thread_id,
         thread_key=thread_key,
         token_limit=token_limit,
+        summary_context_token_limit=summary_context_token_limit,
         previous_summary=previous_summary,
         current_task_brief=current_task_brief,
         latest_handoff_packet=latest_packet,
@@ -6456,6 +6902,7 @@ async def _run_hermes_style_compression(
         summarize_fn=_compression_summary_from_prompt,
         force=force,
         compression_stats=dict(state.get("compression_stats") or {}),
+        enable_chunked_summary=_env_bool("ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY", "false"),
     )
     if result.skipped:
         return result, "", {}
@@ -6633,6 +7080,50 @@ def _budget_met_for_messages(state: AlphaRavisState, *, messages: list[Any], tok
     return int(budget["message_tokens"]) <= token_limit and not bool(budget["hard_rescue_needed"])
 
 
+def _compression_debug_profile(result: CompressionResult | None, *, prefix: str, archive_key: str) -> dict[str, Any]:
+    if result is None:
+        return {}
+    metadata = dict(result.archive_metadata or {})
+    fields: dict[str, Any] = {
+        f"{prefix}_summary_failed": result.summary_failed,
+        f"{prefix}_summary_error": result.summary_error[:500],
+        f"{prefix}_middle_message_count": len(result.middle),
+        f"{prefix}_head_message_count": len(result.head),
+        f"{prefix}_tail_message_count": len(result.tail),
+        f"{prefix}_compression_token_limit": metadata.get("compression_token_limit"),
+        f"{prefix}_summary_context_token_limit": metadata.get("summary_context_token_limit"),
+        f"{prefix}_middle_token_estimate": metadata.get("middle_token_estimate"),
+        f"{prefix}_summary_prompt_pruned": metadata.get("summary_prompt_pruned"),
+        f"{prefix}_summary_prompt_original_tokens_estimate": metadata.get("summary_prompt_original_tokens_estimate"),
+        f"{prefix}_summary_prompt_tokens_estimate": metadata.get("summary_prompt_tokens_estimate"),
+        f"{prefix}_summary_prompt_token_limit": metadata.get("summary_prompt_token_limit"),
+        f"{prefix}_summary_prompt_payload_token_limit": metadata.get("summary_prompt_payload_token_limit"),
+        f"{prefix}_summary_prompt_overhead_tokens_estimate": metadata.get("summary_prompt_overhead_tokens_estimate"),
+        f"{prefix}_summary_prompt_original_chars": metadata.get("summary_prompt_original_chars"),
+        f"{prefix}_summary_prompt_chars": metadata.get("summary_prompt_chars"),
+        f"{prefix}_summary_prompt_omitted_chars": metadata.get("summary_prompt_omitted_chars"),
+        f"{prefix}_summary_chunking_used": metadata.get("summary_chunking_used"),
+        f"{prefix}_summary_chunk_count": metadata.get("summary_chunk_count"),
+        f"{prefix}_summary_chunk_chars": metadata.get("summary_chunk_chars"),
+        f"{prefix}_summary_chunk_prompt_token_limit": metadata.get("summary_chunk_prompt_token_limit"),
+        f"{prefix}_summary_chunk_payload_token_limit": metadata.get("summary_chunk_payload_token_limit"),
+        f"{prefix}_summary_chunk_prompt_overhead_tokens": metadata.get("summary_chunk_prompt_overhead_tokens"),
+        f"{prefix}_summary_chunk_overlap_chars": metadata.get("summary_chunk_overlap_chars"),
+        f"{prefix}_summary_chunk_max_chunks": metadata.get("summary_chunk_max_chunks"),
+        f"{prefix}_summary_chunk_omitted_chars": metadata.get("summary_chunk_omitted_chars"),
+        f"{prefix}_summary_chunk_output_tokens": metadata.get("summary_chunk_output_tokens"),
+        f"{prefix}_summary_chunk_summary_tokens_estimate": metadata.get("summary_chunk_summary_tokens_estimate"),
+        f"{prefix}_summary_chunk_synthesis_pruned": metadata.get("summary_chunk_synthesis_pruned"),
+        f"{prefix}_summary_chunk_synthesis_tokens_estimate": metadata.get("summary_chunk_synthesis_tokens_estimate"),
+        f"{prefix}_summary_chunk_synthesis_payload_token_limit": metadata.get("summary_chunk_synthesis_payload_token_limit"),
+        f"{prefix}_summary_chunk_synthesis_prompt_overhead_tokens": metadata.get("summary_chunk_synthesis_prompt_overhead_tokens"),
+        f"{prefix}_pruned_tool_count": metadata.get("pruned_tool_count"),
+        f"{prefix}_deduped_tool_count": metadata.get("deduped_tool_count"),
+        f"{prefix}_tool_args_truncated_count": metadata.get("tool_args_truncated_count"),
+    }
+    return {key: value for key, value in fields.items() if value not in (None, "")}
+
+
 async def pre_run_context_guard_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
     messages = _drop_previous_compaction_messages(list(state.get("messages", [])))
     if not messages:
@@ -6686,6 +7177,7 @@ async def pre_run_context_guard_node(state: AlphaRavisState, runtime: Any | None
                 runtime=runtime,
                 mode="pre_run",
                 token_limit=token_limit,
+                summary_context_token_limit=int(budget["context_length"]),
                 force=force_hard_rescue or force_compression or pass_index > 0,
             )
         except Exception as exc:
@@ -6774,6 +7266,11 @@ async def pre_run_context_guard_node(state: AlphaRavisState, runtime: Any | None
             pre_run_request_tokens=token_estimate + static_reserve,
             pre_run_request_tokens_after=tokens_after + static_reserve,
             pre_run_static_context_reserve_tokens=static_reserve,
+            pre_run_context_length=budget.get("context_length"),
+            pre_run_detected_context_length=budget.get("detected_context_length"),
+            pre_run_provider_reported_context_limit=budget.get("provider_reported_context_limit"),
+            pre_run_active_limit=budget.get("active_limit"),
+            pre_run_hard_limit=budget.get("hard_limit"),
             pre_run_effective_active_limit=effective_active_limit,
             pre_run_effective_hard_limit=effective_hard_limit,
             pre_run_compression_archive_key=archive_key,
@@ -6785,6 +7282,7 @@ async def pre_run_context_guard_node(state: AlphaRavisState, runtime: Any | None
             ),
             pre_run_compression_max_passes=max_passes,
             hard_context_rescued=force_hard_rescue,
+            **_compression_debug_profile(result, prefix="pre_run_compression", archive_key=archive_key),
         ),
     }
 
@@ -6887,6 +7385,7 @@ async def handoff_context_guard_node(state: AlphaRavisState, runtime: Any | None
             handoff_static_context_reserve_tokens=static_reserve,
             handoff_effective_context_limit=token_limit,
             handoff_context_archive_key=archive_key,
+            **_compression_debug_profile(result, prefix="handoff_context", archive_key=archive_key),
         ),
     }
 
@@ -6921,6 +7420,7 @@ async def final_budget_rescue_node(state: AlphaRavisState, runtime: Any | None =
                 runtime=runtime,
                 mode="pre_run",
                 token_limit=token_limit,
+                summary_context_token_limit=int(budget["context_length"]),
                 force=True,
             )
         except Exception as exc:
@@ -6997,6 +7497,7 @@ async def final_budget_rescue_node(state: AlphaRavisState, runtime: Any | None =
             final_budget_rescue_max_passes=max_passes,
             final_budget_rescue_archive_key=archive_key,
             final_context_budget=budget,
+            **_compression_debug_profile(result, prefix="final_budget_rescue", archive_key=archive_key),
         ),
     }
 
@@ -7672,6 +8173,7 @@ async def context_guard_node(state: AlphaRavisState, runtime: Any | None = None)
             post_run_static_context_reserve_tokens=static_reserve,
             post_run_effective_context_limit=token_limit,
             post_run_compression_archive_key=archive_key,
+            **_compression_debug_profile(result, prefix="post_run_compression", archive_key=archive_key),
         ),
     }
 
@@ -8053,6 +8555,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             search_curated_memory,
             record_curated_memory,
             semantic_memory_search,
+            query_source,
+            query_sources,
+            query_archive,
+            agentic_rag_retrieve,
             search_session_history,
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
@@ -8131,6 +8637,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             record_curated_memory,
             search_session_history,
             semantic_memory_search,
+            query_source,
+            query_sources,
+            agentic_rag_retrieve,
             semantic_media_search,
             inspect_embedding_queue_status,
             write_alpha_ravis_artifact,
@@ -8224,6 +8733,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             record_curated_memory,
             search_session_history,
             semantic_memory_search,
+            query_source,
+            query_sources,
+            agentic_rag_retrieve,
             semantic_media_search,
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
@@ -8323,6 +8835,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             record_curated_memory,
             search_session_history,
             semantic_memory_search,
+            query_source,
+            query_sources,
+            agentic_rag_retrieve,
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
             list_alpha_ravis_artifacts,
@@ -8362,6 +8877,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             record_curated_memory,
             search_session_history,
             semantic_memory_search,
+            query_source,
+            query_sources,
+            agentic_rag_retrieve,
             semantic_media_search,
             inspect_media_index_status,
             inspect_embedding_queue_status,
@@ -8413,6 +8931,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             read_archive_collection,
             search_session_history,
             semantic_memory_search,
+            query_source,
+            query_sources,
+            query_archive,
+            agentic_rag_retrieve,
             semantic_media_search,
             inspect_media_index_status,
             inspect_embedding_queue_status,
@@ -8461,6 +8983,12 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "only searches this thread plus global memories. If a hit is "
             "source_type=archive_collection, inspect child_archive_keys and load "
             "only the relevant raw archive records with read_archive_record. "
+            "When you already know the relevant source_key/file_id/archive_key, "
+            "prefer query_source, query_sources, or query_archive so retrieval "
+            "stays scoped to that source before loading raw archive records. "
+            "Use agentic_rag_retrieve when a source-scoped question needs the "
+            "retrieve/grade/rewrite loop and a bounded context_packet for a "
+            "grounded answer; do not inject full archives automatically. "
             "Use semantic_media_search "
             "for media references and timecoded frame hits when vision indexing is enabled. "
             "Use inspect_media_index_status to check whether a chat/media item has "
@@ -8511,6 +9039,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 search_curated_memory,
                 record_curated_memory,
                 semantic_memory_search,
+                query_source,
+                query_sources,
             ], [
                 transfer_to_generalist,
                 transfer_to_debugger,

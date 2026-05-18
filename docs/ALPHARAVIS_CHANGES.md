@@ -4,6 +4,433 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-18 - RAG Reference Checkout And LangChain-Native Router Plan
+
+Added a local helper checkout for RAG architecture research:
+
+```text
+helper-repos/awesome-rag
+helper-repos/langgraph-agentic-rag-template
+```
+
+`awesome-rag` is the `noworneverev/Awesome-RAG` catalogue. It is not runtime
+code and should not be imported by AlphaRavis. It is a reference map for
+comparing RAG-related projects and patterns such as LangChain, LlamaIndex, Dify,
+Flowise, Haystack, RAGFlow, Cognita, fastRAG, AutoRAG, FlashRAG, GraphRAG,
+vector stores, memory systems, evaluation frameworks, document parsers, and
+model-serving tools.
+
+`langgraph-agentic-rag-template` contains local copies of:
+
+```text
+https://docs.langchain.com/oss/python/langgraph/agentic-rag
+https://github.com/langchain-ai/langgraph/blob/main/examples/rag/langgraph_agentic_rag.ipynb
+```
+
+The current docs page is authoritative. The downloaded notebook is useful as a
+concrete code sample, but it marks itself archival. The reusable pattern for
+AlphaRavis is the graph loop: decide whether to retrieve, call the retriever
+tool, grade retrieved chunks, rewrite weak queries, and generate an answer from
+bounded context. The demo vector store, web loader, and hard-coded model choices
+should not be copied into runtime.
+
+The implementation direction recorded in the open tasks is now:
+
+- keep AlphaRavis as owner of archives, thread metadata, access checks, context
+  budgeting, and exact raw archive reads;
+- use LangChain/LangGraph primitives internally for loaders, splitters,
+  embeddings, vector stores, retrievers, contextual compression, and future
+  reranking where they fit;
+- preserve the useful `rag_api` design points already validated locally:
+  `file_id`/`file_ids`, LangChain splitter, batch embedding, digest metadata,
+  pgvector filtering, and optional distance threshold;
+- move backend selection into `retrieval_router.py` behind AlphaRavis APIs such
+  as `ingest_source(...)`, `query_source(...)`, `query_sources(...)`, and
+  `query_archive(...)`.
+
+This is a planning/reference change. No runtime behavior changes from the
+helper checkout alone.
+
+First implementation slice after the plan: `retrieval_router.py` now owns the
+source-key retrieval backend orchestration through
+`query_sources_with_backends(...)`. LangGraph tools in `agent_graph.py` still
+own user-facing tool signatures, archive-key mirror lookup, store access, and
+logging, but delegate source query execution to the router.
+
+The router currently:
+
+- normalizes source keys;
+- queries AlphaRavis pgvector through injected callbacks;
+- queries explicit `rag_api` file ids through the existing client wrapper;
+- returns normalized backend provenance and backend hit counts;
+- keeps archive-only `rag_api` retrieval passive unless an explicit mirror/file
+  id is supplied.
+
+Second implementation slice: `retrieval_router.py` now also exposes
+`ingest_source(...)` as the write-side router entrypoint. It validates source
+input, decides whether to call AlphaRavis pgvector, `rag_api`, or both, and
+returns normalized write metadata:
+
+```text
+rag_file_id
+rag_index_status
+indexed_backends
+index_status
+backend_results
+warnings
+errors
+```
+
+The first routing policy is conservative:
+
+- external documents, PDFs, uploaded documents, and large-paste style sources
+  mirror to `rag_api` by default;
+- archive sources stay in AlphaRavis pgvector by default, and only mirror to
+  `rag_api` when `ALPHARAVIS_ENABLE_RAG_ARCHIVE_MIRROR=true` or the caller
+  explicitly asks for `rag_api`/`both`;
+- small memory/catalog style sources stay AlphaRavis pgvector-owned;
+- `preferred_backend=both` exists for evaluation and smoke tests.
+
+This is still a router foundation. Existing product flows are not all migrated
+to `ingest_source(...)` yet; compression archive creation, large-paste ingest,
+and future document upload paths should move behind it next. After those call
+sites are behind the router, a direct LangChain retriever backend can be added
+without changing LangGraph tool code.
+
+First product call-site migration: compression archive creation now writes
+through `retrieval_router.ingest_source(...)`. The archive Store record keeps
+AlphaRavis archive ownership, raw content, redacted messages, thread lineage,
+and `read_archive_record(...)` semantics, while ingest/index metadata now comes
+from the router:
+
+```text
+ingest_status
+rag_file_id
+rag_index_status
+rag_indexed_at
+indexed_backends
+ingest_errors
+```
+
+This preserves the existing default behavior: archive pgvector indexing remains
+the normal path, and `rag_api` archive mirroring only happens when the existing
+mirror flag or explicit router preference enables it. The important structural
+change is that archive write-side backend selection is now centralized in the
+same router that query-side retrieval uses.
+
+Third implementation slice: `retrieval_router.agentic_rag_retrieve(...)` now
+implements the first router-level version of the LangGraph Agentic-RAG
+Schablone:
+
+```text
+retrieve
+grade_documents
+rewrite_question
+retrieve retry
+generate_answer context packet
+```
+
+This is not yet a full LangGraph subgraph and it does not call an LLM grader.
+It deliberately starts with deterministic local relevance scoring and query
+rewrite so the behavior is testable without model/network dependencies. The
+function returns:
+
+```text
+graph_trace
+grade
+context_packet
+next_action
+final_query
+rewritten_query
+```
+
+The generated `context_packet` is bounded by
+`ALPHARAVIS_AGENTIC_RAG_CONTEXT_MAX_CHARS` and includes instructions not to load
+raw archives unless exact old turns are required. It is now exposed from
+`agent_graph.py` as an explicit tool; optional structured-output LLM grading or
+reranking remains future work once latency/quality are measured.
+
+Follow-up implementation: `agent_graph.py` now exposes the router loop as the
+`agentic_rag_retrieve` tool. The tool returns the router payload, including
+`graph_trace`, `grade`, `context_packet`, `next_action`, `final_query`, and
+`rewritten_query`; it does not automatically inject archive content into the
+active model context. For `source_type="archive"`, the tool keeps AlphaRavis
+pgvector search scoped to the archive key and additionally queries an existing
+`rag_api` mirror only when archive metadata advertises a ready
+`archive:<archive_key>` file id. The tool is registered in the RAG/memory
+toolset and the context retrieval agent prompt now prefers it when a
+source-scoped question needs retrieve/grade/rewrite behavior.
+
+Added `docs/ALPHARAVIS_RAG_HANDOFF.md` as the explicit context-window handoff
+for this RAG effort. It records the user intent, local reference files,
+implemented router functions, current defaults, next steps, verification
+commands, and cautions.
+
+Verification:
+
+```text
+pytest -q tests/test_retrieval_router.py tests/test_source_scoped_retrieval.py tests/test_rag_api_client.py tests/test_agent_context_budget.py tests/test_bridge_test_ui.py tests/test_media_analysis.py
+PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile langgraph-app/retrieval_router.py langgraph-app/agent_graph.py langgraph-app/rag_api_client.py
+python -c "import json; json.load(open('helper-repos/langgraph-agentic-rag-template/langgraph_agentic_rag.ipynb')); print('notebook ok')"
+```
+
+## 2026-05-18 - Default-Off RAG API Archive Mirror Foundation
+
+Added the first implementation slice for hybrid archive/document retrieval.
+The existing AlphaRavis archive path remains the default. When
+`ALPHARAVIS_ENABLE_RAG_ARCHIVE_MIRROR=true`, newly created compression archives
+are also uploaded to `rag_api` through `/embed` with
+`file_id=archive:<archive_key>`. The raw archive remains in the
+MongoDB/LangGraph Store as the source of truth; the `rag_api` copy is only a
+retrieval index.
+
+New local modules:
+
+```text
+langgraph-app/rag_api_client.py
+langgraph-app/retrieval_router.py
+```
+
+`rag_api_client.py` wraps the existing `rag_api` HTTP surface instead of
+importing the FastAPI app into LangGraph. It supports `/embed`, `/query`, and
+`/query_multiple`, preserving the `rag_api` chunking, batching, embedding,
+distance-threshold, and LangChain/ExtendedPgVector behavior inside that service.
+
+Archive records can now carry mirror metadata:
+
+```text
+rag_file_id
+rag_index_status
+rag_indexed_at
+indexed_backends
+```
+
+`query_archive(...)` checks existing archive metadata and can query the
+`rag_api` mirror first when a ready `rag_file_id` exists. It still falls back to
+AlphaRavis pgvector source-key search, and `read_archive_record(...)` remains
+the explicit exact-history path.
+
+Verification:
+
+```text
+pytest -q tests/test_rag_api_client.py tests/test_bridge_test_ui.py tests/test_source_scoped_retrieval.py tests/test_alpharavis_toolsets.py
+PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile langgraph-app/test_ui_server.py langgraph-app/rag_api_client.py langgraph-app/retrieval_router.py langgraph-app/agent_graph.py langgraph-app/vector_memory.py langgraph-app/alpharavis_toolsets.py
+```
+
+Live smoke through the Bridge Test UI was added under Observer ->
+`Archive RAG Smoke`. It posts to `/api/archive-rag-smoke`, mirrors a small
+archive payload as `file_id=archive:<archive_key>`, then queries the same source.
+The endpoint returns structured acceptance fields and runtime errors instead of
+failing the page with HTTP 500.
+
+Current local live result on 2026-05-18:
+
+```text
+GET /observer: 200, Archive RAG Smoke panel present
+POST /api/archive-rag-smoke: 200, status=failed
+rag_file_id: archive:live_smoke_archive
+failure: LiteLLM memory-embed route cannot connect to 192.168.178.140:11434
+```
+
+This validates the wrapper/UI/control path and identifies the remaining runtime
+blocker as embedding backend availability, not the AlphaRavis retrieval wrapper.
+
+The Observer also now includes `Memory Embed Tester`. It calls a chosen
+embedding base URL directly, supports OpenAI-compatible `/v1/embeddings`,
+Ollama `/api/embed`, and Ollama `/api/embeddings`, and can probe text or an
+experimental vision payload. The probe doubles input size across bounded steps
+and reports latency, embedding dimensions, status code, max accepted chars, and
+whether it stopped because of rejection, error, or a slow-response threshold.
+This is a diagnostic surface only; it does not change the active memory backend.
+Live probe against `http://litellm:4000/v1`, model `memory-embed`, currently
+returns HTTP 500 because the downstream embedding backend is unreachable; the
+tester reports this as `status=failed`, `stop_reason=rejected`.
+
+Updated the default text embedding route to use Ollama-native LiteLLM model ids:
+
+```text
+EMBEDDING_LITELLM_MODEL=ollama/qwen3-embedding:4b
+EMBEDDING_FALLBACK_LITELLM_MODEL=ollama/bge-m3
+EMBEDDING_API_BASE=http://192.168.178.140:11434
+```
+
+Operators should run `ollama pull qwen3-embedding:4b` on the Ollama host before
+recreating LiteLLM. The OpenAI-compatible alternative remains supported by
+setting `EMBEDDING_LITELLM_MODEL=openai/<served-model>` and
+`EMBEDDING_API_BASE=http://<embedding-host>:<port>/v1`. Vision embeddings remain
+experimental and default-off through `ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY`.
+The Memory Embed Tester default max probe size was raised to about 32k rough
+tokens so it can validate the expected `qwen3-embedding:4b` context window.
+Live measurement through LiteLLM showed the route is functional with
+2560-dimensional vectors, but latency rises quickly on the current Ollama host:
+1024 chars took 10.3s, 2048 chars took 20.1s, 4096 chars took 41.7s, and
+8192 chars took 86.2s. Because of that, AlphaRavis pgvector defaults were tuned
+to smaller profile-specific chunks:
+
+```text
+ALPHARAVIS_PGVECTOR_CHARS_PER_TOKEN=4.0
+ALPHARAVIS_PGVECTOR_CHUNK_TOKENS=900
+ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_TOKENS=125
+ALPHARAVIS_PGVECTOR_CHAT_CHUNK_TOKENS=700
+ALPHARAVIS_PGVECTOR_CHAT_CHUNK_OVERLAP_TOKENS=100
+ALPHARAVIS_PGVECTOR_LOG_CHUNK_TOKENS=1200
+ALPHARAVIS_PGVECTOR_LOG_CHUNK_OVERLAP_TOKENS=75
+ALPHARAVIS_PGVECTOR_CODE_CHUNK_TOKENS=600
+ALPHARAVIS_PGVECTOR_CODE_CHUNK_OVERLAP_TOKENS=80
+ALPHARAVIS_PGVECTOR_EMBEDDING_TIMEOUT_SECONDS=45
+```
+
+Code/log/chat detection uses source type, filename/path metadata, Markdown
+fences, and common syntax/log-line signals. Code splitting is still heuristic;
+AST/Tree-sitter function/class chunking remains a follow-up.
+
+Treat 32k as model context capacity, not as a practical per-chunk ingest size on
+this backend.
+
+Additional Ollama embedding probes:
+
+```text
+aroxima/gte-qwen2-1.5b-instruct:
+  qwen2.context_length=131072
+  qwen2.embedding_length=1536
+  /api/embed result: HTTP 501, "this model does not support embeddings"
+
+qwen3-embedding:0.6b:
+  qwen3.context_length=32768
+  qwen3.embedding_length=1024
+  8192 chars  (~2048 rough tokens): 19.1s
+  16384 chars (~4096 rough tokens): 44.8s
+  32768 chars (~8192 rough tokens): 43.5s
+  65536 chars (~16384 rough tokens): 46.0s
+  131072 chars (~32768 rough tokens): 40.5s
+```
+
+The `0.6b` model is the current practical candidate if throughput matters more
+than vector dimension. It returns smaller 1024-dimensional vectors but is much
+faster than the 4b route on this host.
+
+## 2026-05-18 - Source-Scoped Retrieval Tools
+
+AlphaRavis now exposes `query_source`, `query_sources`, and `query_archive`
+beside the broad `semantic_memory_search` tool. These tools let agents search
+only known `source_key` values, archive keys, artifact keys, or external RAG
+`file_id` values when the relevant source is already known.
+
+The pgvector search path now accepts bounded `source_key` filters. For
+`external_document`/document-style searches, the same tools call the existing
+`rag_api` `/query` and `/query_multiple` endpoints directly instead of first
+listing every document id. Results keep the normal structured hit shape with
+chunk text, similarity/score, source metadata, and retrieval policy guidance.
+The local AlphaRavis pgvector query mirrors the `rag_api` retriever contract:
+single-source lookup behaves like `file_id $eq`, multi-source lookup behaves
+like `file_id $in`, and `ALPHARAVIS_PGVECTOR_DISTANCE_THRESHOLD` can apply a
+pgvector distance cutoff analogous to `rag_api`'s `RAG_DISTANCE_THRESHOLD`.
+
+Verification:
+
+```text
+pytest -q tests/test_source_scoped_retrieval.py
+```
+
+## 2026-05-18 - Bridge Test UI Chunking Lab
+
+The Bridge Test UI Observer now includes a local `Chunking Lab` panel for
+compression diagnostics. This is a test/observer feature only; the Bridge still
+does not perform active-context chunking in normal request handling. The panel
+starts a local diagnostic run through `POST /api/chunking/runs`, polls
+`GET /api/chunking/runs/{run_id}`, and renders running action logs, tool-pruning
+stats, chunk counts, prompt overhead/payload budgets, synthesis pruning, summary
+failure state, and acceptance checks.
+
+The diagnostic uses AlphaRavis's real `context_compressor.compress_messages`
+helper with chunked summary enabled, a large synthetic web-like corpus by
+default, generated tool-call/tool-output traces, and optional variable prompt
+load (`current_task_brief`, handoff packet, MemoryKernel context, and skill
+context). It is deterministic and does not fetch external internet text, so it
+can run in local Docker/offline developer environments while still exercising
+the static-plus-variable prompt overhead path.
+
+The lab now distinguishes summary backends explicitly. `summary_mode=stub` is a
+fast deterministic harness for UI/API/chunk-budget plumbing and does not call an
+LLM. `summary_mode=real_llm` calls an OpenAI-compatible `/chat/completions`
+summary model using `TEST_UI_CHUNKING_SUMMARY_*` settings, falling back to the
+normal `OPENAI_API_BASE`, `OPENAI_API_KEY`, and `ALPHARAVIS_MODEL` environment.
+Only `real_llm` runs should be treated as latency or quality evidence for
+promoting chunked summary compression.
+
+Each completed run now also exposes a collapsible Before/After comparison in
+the Observer: the prepared compression input before chunking and the final
+active summary after synthesis. The same data is returned in the run API under
+`result.comparison`, with browser/API capture capped by
+`TEST_UI_CHUNKING_TEXT_CAPTURE_CHARS` so very large diagnostic bodies do not
+make the page unusable.
+
+Verification:
+
+```text
+pytest -q tests/test_bridge_test_ui.py
+```
+
+## 2026-05-16 - LibreChat Video Upload Responses Patch
+
+`librechat.yaml` now lets the normal `AlphaRavis Responses` model spec accept
+video uploads on the existing `LangGraph Agent` endpoint. LibreChat v0.8.5 only
+serializes videos as `video_url` attachments for a small provider set by
+default, so the LibreChat container runs
+`scripts/patch_librechat_video_uploads.js` before startup. The patch makes the
+configured AlphaRavis endpoint video-capable without exposing a misleading
+OpenRouter/provider shim in the UI.
+
+The same startup patch also updates LibreChat's client upload menu/drag-drop
+bundle. Without that UI patch, LibreChat can still show only `Upload as Text`
+for videos even though the backend encoder is already able to emit `video_url`
+parts.
+
+LibreChat can store uploaded videos as normal local message attachments while
+still dropping them before the provider HTTP request. The startup patch now also
+updates LibreChat's prompt formatter so user-message `videos` and `audios`
+arrays are preserved alongside `image_urls` in the final message content sent
+to the AlphaRavis Bridge.
+
+For `useResponsesApi: true`, LibreChat also passes those formatted messages
+through `@librechat/agents` / LangChain's OpenAI Responses converter. LibreChat
+v0.8.5's converter only forwarded text, images, and files, so `video_url` parts
+were still dropped and the Bridge Observer showed only `input_text`. The startup
+patch now converts `video_url` to `input_video` and allows existing
+`input_video` parts through for the local Responses path.
+
+LibreChat's bundled PWA service worker can keep serving the old upload menu
+from Workbox cache. The patch therefore also replaces `registerSW.js` and
+`sw.js` with cache-clearing/unregistering scripts for the local stack, and
+rewrites compressed `.gz`/`.br` variants for patched browser assets.
+
+The model spec still sets `useResponsesApi: true`; text, video attachment, and
+assistant output remain on LibreChat's Responses path.
+
+```text
+endpoint: LangGraph Agent -> http://api-bridge:8123/v1
+model spec: AlphaRavis Responses
+useResponsesApi: true
+allowed MIME: video/*, image/*, application/octet-stream
+```
+
+Use this spec when sending videos through LibreChat. Do not use LibreChat's
+`Upload as Text` option for videos; that can still extract/base64-like text and
+consume the entire LibreChat agent context before AlphaRavis sees the request.
+The Bridge already mirrors incoming `video_url`/`input_video` parts into
+`media-gallery` and converts raw media to metadata markers before LangGraph
+context construction.
+
+Verification on 2026-05-16:
+
+- LibreChat stored `vitpose_00001.mp4` as a local `video/mp4` message
+  attachment, not as a text upload.
+- Before the prompt-formatter patch, the Bridge request still had only text
+  messages because LibreChat dropped `message.videos`.
+- After restart, `formatMessage()` preserves a test `video_url` content part,
+  and `@librechat/agents` converts it to Responses `input_video`.
+- `pytest -q tests/test_bridge_responses.py` passes.
+
 ## 2026-05-15 - Hermes-Style Tail And LangGraph-Owned Hard Context
 
 ### Summary
@@ -65,9 +492,25 @@ errors. When a smaller real limit is reported, the retry stores it in
 limit, and exposes the classification in `provider_context_error` /
 `run_profile`.
 
+The compression summarizer now has its own conservative prompt budget. Large
+middle sections are pruned head/tail before the summary-model call while exact
+raw messages remain in the archive. This fixes the observed live failure where
+the active request was rescued, but the summary model itself received a
+138k-token prompt against a 128k llama.cpp context and fell back to the
+reference-only fail-safe summary.
+
 The Bridge Test UI Observer now has a `Context Budget` strip so operators can
-see the latest message/reserve/request/limit numbers without digging through
-raw JSON.
+see message/reserve/request/limit numbers without digging through raw JSON. It
+also shows remaining budget, detected/provider context length, rescue pass
+counts, retry state, and whether pre-run/final rescue landed under budget. The
+Observer now also has a dedicated `Shrinking` section. It renders compression
+metadata as one card per scope, with before/after tokens, shrink percentage,
+request budget after rescue, pass counts, budget status, head/middle/tail
+counts, prompt-pruning status, chunking status, chunk omissions, chunk output
+budget, synthesis-pruning status, and archive key. The raw `Kompression` tab is
+still available for exact JSON when the visual cards point to a suspicious run.
+The Bridge records those budget/compression fields for non-streaming
+`runs.wait` calls too, not only event-stream update paths.
 
 Final LLM invocations now also emit a Hermes-style request-budget estimate.
 The estimate includes active messages plus model kwargs and bound DeepAgents
@@ -85,7 +528,46 @@ pytest -q tests/test_context_compressor.py tests/test_agent_context_budget.py te
 pytest -q tests/test_bridge_test_ui.py
 PYTHONPYCACHEPREFIX=/tmp/alpharavis-pyc python -m py_compile langgraph-app/agent_graph.py langgraph-app/model_metadata.py langgraph-app/context_compressor.py
 python scripts/alpharavis_setup.py bridge-smoke
+Live llama.cpp over-budget check on 2026-05-15: `/props` reported n_ctx=128000.
+A 61-message request with about 84.9k raw tokens produced
+LIVE_OVER_BUDGET_OK after pre-run compression. Observer record
+obs_23d3389c9d5f showed context_length=128000, request_tokens=23383,
+effective_active_limit=56300, pre_run_compression_passes=1, and
+pre_run_compression_budget_met=true.
+Follow-up after summary prompt budgeting: the same shape of request produced
+LIVE_SUMMARY_OK with summary_failed=false. The Compression tab showed
+summary_prompt_pruned=true, summary_prompt_original_tokens_estimate=69413,
+summary_prompt_tokens_estimate=21113, and archive_key=1b952224efdad5ef57d1fbb5.
 ```
+
+Added experimental opt-in chunked summary compression behind
+`ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=false`. When enabled, oversized
+summary windows are split into bounded overlapping chunks, each chunk is
+summarized, and a final synthesis pass builds the active reference-only summary.
+The raw middle is still archived, and Observer compression metadata now exposes
+`summary_chunking_used`, chunk counts, chunk omissions, chunk output budget, and
+synthesis-pruning stats. Chunk sizing now subtracts estimated summary prompt
+wrapper/protected-note overhead plus
+`ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_OVERHEAD_RESERVE_TOKENS` before deciding
+how much middle payload fits in each chunk, so the summary model is less likely
+to hit its own context limit. Summary output, summary prompt, and per-chunk
+summary output max settings now treat `0` as "no fixed absolute cap"; the
+ratio-derived budget then scales from the effective compression token limit,
+which in turn comes from discovered model context length such as llama.cpp
+`n_ctx`. `inspect_context_budget` now exposes those derived values under
+`compression_summary_budget`, so agents and operators can retrieve the runtime
+summary/prompt/chunk budgets from the same central snapshot instead of copying
+small static constants. `summary_chunk_omitted_chars` is intentionally surfaced
+because it is the first thing to check for quality bugs: it should stay at `0`
+in normal successful chunked runs; a positive value means the synthesis prompt
+now explicitly instructs the summary model to mention archive lookup for details
+beyond the configured max chunk count.
+
+Follow-up fix: the active-state compression target and the summary model
+context are now passed separately. A 128k llama.cpp server can use a 96k
+summary-prompt budget even when AlphaRavis is shrinking active messages under a
+64k effective active limit. Observer compression records expose both values as
+`compression_token_limit` and `summary_context_token_limit`.
 
 ## 2026-05-14 - Makefile Operator Reference
 

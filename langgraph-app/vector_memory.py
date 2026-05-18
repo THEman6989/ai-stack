@@ -122,14 +122,105 @@ def vision_is_enabled() -> bool:
     return is_enabled() and _env_bool("ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY", "false")
 
 
-def _chunk_max_chars() -> int:
-    return max(1000, int(os.getenv("ALPHARAVIS_PGVECTOR_CHUNK_MAX_CHARS", "6000")))
+def _chunk_chars_from_tokens(env_name: str, default_tokens: int) -> int:
+    token_count = max(100, int(os.getenv(env_name, str(default_tokens))))
+    chars_per_token = max(1.0, float(os.getenv("ALPHARAVIS_PGVECTOR_CHARS_PER_TOKEN", "4.0")))
+    return max(400, int(token_count * chars_per_token))
 
 
-def _chunk_overlap_chars() -> int:
-    max_chars = _chunk_max_chars()
-    overlap = max(0, int(os.getenv("ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_CHARS", "800")))
-    return min(overlap, max_chars // 2)
+def _chunk_overlap_chars_from_tokens(env_name: str, default_tokens: int, max_chars: int) -> int:
+    token_count = max(0, int(os.getenv(env_name, str(default_tokens))))
+    chars_per_token = max(1.0, float(os.getenv("ALPHARAVIS_PGVECTOR_CHARS_PER_TOKEN", "4.0")))
+    return min(max(0, int(token_count * chars_per_token)), max_chars // 2)
+
+
+def _legacy_chunk_max_chars() -> int | None:
+    raw = os.getenv("ALPHARAVIS_PGVECTOR_CHUNK_MAX_CHARS", "").strip()
+    return max(400, int(raw)) if raw else None
+
+
+def _legacy_chunk_overlap_chars(max_chars: int) -> int | None:
+    raw = os.getenv("ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_CHARS", "").strip()
+    return min(max(0, int(raw)), max_chars // 2) if raw else None
+
+
+def _chunk_profile(source_type: str = "", title: str = "", metadata: dict[str, Any] | None = None, text: str = "") -> str:
+    metadata = metadata or {}
+    explicit = str(metadata.get("chunk_profile") or os.getenv("ALPHARAVIS_PGVECTOR_CHUNK_PROFILE", "")).strip().lower()
+    if explicit in {"default", "chat", "archive", "log", "code"}:
+        return explicit
+
+    source = str(source_type or "").lower()
+    pathish = " ".join(
+        str(value or "")
+        for value in [
+            title,
+            metadata.get("path"),
+            metadata.get("file_path"),
+            metadata.get("filename"),
+            metadata.get("source_path"),
+            metadata.get("source_key"),
+        ]
+    ).lower()
+    code_ext = (
+        ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java", ".kt",
+        ".c", ".h", ".cpp", ".hpp", ".cs", ".php", ".rb", ".swift", ".scala",
+        ".sh", ".bash", ".zsh", ".ps1", ".sql", ".html", ".css", ".scss",
+        ".json", ".yaml", ".yml", ".toml", ".xml",
+    )
+    log_ext = (".log", ".out", ".err", ".trace")
+
+    if source in {"code", "source_code", "repo_file"} or any(pathish.endswith(ext) or ext in pathish for ext in code_ext):
+        return "code"
+    if source in {"log", "logs", "terminal", "command_output"} or any(pathish.endswith(ext) for ext in log_ext):
+        return "log"
+    if source in {"archive", "archive_collection", "session_turn", "chat", "conversation"}:
+        return "chat"
+
+    sample = text[:6000]
+    if "```" in sample or re.search(r"^\s*(?:async\s+def|def|class|function|import|from|const|let|var|SELECT|CREATE TABLE)\b", sample, re.MULTILINE):
+        return "code"
+    if re.search(r"^\s*(?:\d{4}-\d{2}-\d{2}|INFO|WARN|WARNING|ERROR|DEBUG|Traceback|Exception:)", sample, re.MULTILINE):
+        return "log"
+    return "default"
+
+
+def _chunk_max_chars(source_type: str = "", title: str = "", metadata: dict[str, Any] | None = None, text: str = "") -> int:
+    profile = _chunk_profile(source_type, title, metadata, text)
+    legacy = _legacy_chunk_max_chars()
+    if legacy is not None and profile == "default":
+        return legacy
+    defaults = {
+        "default": ("ALPHARAVIS_PGVECTOR_CHUNK_TOKENS", 900),
+        "chat": ("ALPHARAVIS_PGVECTOR_CHAT_CHUNK_TOKENS", 700),
+        "archive": ("ALPHARAVIS_PGVECTOR_CHAT_CHUNK_TOKENS", 700),
+        "log": ("ALPHARAVIS_PGVECTOR_LOG_CHUNK_TOKENS", 1200),
+        "code": ("ALPHARAVIS_PGVECTOR_CODE_CHUNK_TOKENS", 600),
+    }
+    env_name, default_tokens = defaults.get(profile, defaults["default"])
+    return _chunk_chars_from_tokens(env_name, default_tokens)
+
+
+def _chunk_overlap_chars(
+    max_chars: int,
+    source_type: str = "",
+    title: str = "",
+    metadata: dict[str, Any] | None = None,
+    text: str = "",
+) -> int:
+    profile = _chunk_profile(source_type, title, metadata, text)
+    legacy = _legacy_chunk_overlap_chars(max_chars)
+    if legacy is not None and profile == "default":
+        return legacy
+    defaults = {
+        "default": ("ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_TOKENS", 125),
+        "chat": ("ALPHARAVIS_PGVECTOR_CHAT_CHUNK_OVERLAP_TOKENS", 100),
+        "archive": ("ALPHARAVIS_PGVECTOR_CHAT_CHUNK_OVERLAP_TOKENS", 100),
+        "log": ("ALPHARAVIS_PGVECTOR_LOG_CHUNK_OVERLAP_TOKENS", 75),
+        "code": ("ALPHARAVIS_PGVECTOR_CODE_CHUNK_OVERLAP_TOKENS", 80),
+    }
+    env_name, default_tokens = defaults.get(profile, defaults["default"])
+    return _chunk_overlap_chars_from_tokens(env_name, default_tokens, max_chars)
 
 
 def _preview_chars() -> int:
@@ -165,6 +256,16 @@ def _vision_embedding_base_url() -> str:
 
 def _vector_literal(embedding: list[float]) -> str:
     return "[" + ",".join(f"{float(value):.9g}" for value in embedding) + "]"
+
+
+def _distance_threshold() -> float | None:
+    raw = os.getenv("ALPHARAVIS_PGVECTOR_DISTANCE_THRESHOLD", "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise VectorMemoryError(f"Invalid ALPHARAVIS_PGVECTOR_DISTANCE_THRESHOLD={raw!r}") from exc
 
 
 def _record_id(source_type: str, source_key: str, thread_id: str, scope: str, chunk_index: int) -> str:
@@ -332,13 +433,19 @@ def _split_large_section(section: str, max_chars: int, overlap: int) -> list[str
     return [chunk for chunk in chunks if chunk]
 
 
-def chunk_text(text: str) -> list[str]:
+def chunk_text(
+    text: str,
+    *,
+    source_type: str = "",
+    title: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> list[str]:
     text = (text or "").strip()
     if not text:
         return []
 
-    max_chars = _chunk_max_chars()
-    overlap = _chunk_overlap_chars()
+    max_chars = _chunk_max_chars(source_type=source_type, title=title, metadata=metadata, text=text)
+    overlap = _chunk_overlap_chars(max_chars, source_type=source_type, title=title, metadata=metadata, text=text)
     sections: list[str] = []
     for section in _semantic_sections(text):
         sections.extend(_split_large_section(section, max_chars, overlap))
@@ -372,7 +479,7 @@ async def _embed_text_with_model(text: str, model: str) -> EmbeddingResult:
         os.getenv("OPENAI_API_KEY", os.getenv("LITELLM_MASTER_KEY", "sk-local-dev")),
     )
     timeout = float(os.getenv("ALPHARAVIS_PGVECTOR_EMBEDDING_TIMEOUT_SECONDS", "20"))
-    payload = {"model": model, "input": text[:_chunk_max_chars()]}
+    payload = {"model": model, "input": text[:_chunk_max_chars(text=text)]}
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -950,7 +1057,7 @@ async def upsert_memory_record(
     if not source_key:
         raise VectorMemoryError("source_key is required for vector memory indexing.")
 
-    chunks = chunk_text(content) if _env_bool("ALPHARAVIS_PGVECTOR_STORE_FULL_CHUNKS", "true") else [
+    chunks = chunk_text(content, source_type=source_type, title=title, metadata=metadata) if _env_bool("ALPHARAVIS_PGVECTOR_STORE_FULL_CHUNKS", "true") else [
         content[:_preview_chars()].strip()
     ]
     if not chunks:
@@ -1536,12 +1643,14 @@ def _search_sync(
     namespace: str,
     thread_id: str,
     source_type: str,
+    source_keys: list[str],
     include_other_threads: bool,
     limit: int,
 ) -> list[dict[str, Any]]:
     _require_psycopg()
     table = _table_identifier()
     vector = _vector_literal(query_embedding)
+    distance_threshold = _distance_threshold()
     where = ["namespace = %s"]
     params: list[Any] = [namespace]
 
@@ -1553,14 +1662,23 @@ def _search_sync(
         where.append("source_type = %s")
         params.append(source_type)
 
-    params = [vector, *params, vector, limit]
+    if source_keys:
+        where.append("source_key IN (" + ", ".join(["%s"] * len(source_keys)) + ")")
+        params.extend(source_keys)
+
+    if distance_threshold is not None:
+        where.append("(embedding <=> %s::vector) <= %s")
+        params.extend([vector, distance_threshold])
+
+    params = [vector, vector, *params, vector, limit]
     query = sql.SQL(
         """
         SELECT
             id, scope, thread_id, thread_key, source_type, source_key,
             title, content, chunk_text, catalog_text, preview_text, chunk_index,
             chunk_count, is_catalog, embedding_model, metadata, created_at, updated_at,
-            1 - (embedding <=> %s::vector) AS similarity
+            1 - (embedding <=> %s::vector) AS similarity,
+            embedding <=> %s::vector AS distance
         FROM {table}
         WHERE {where_clause}
         ORDER BY embedding <=> %s::vector
@@ -1646,6 +1764,8 @@ async def semantic_search(
     query: str,
     thread_id: str = "",
     source_type: str = "all",
+    source_key: str = "",
+    source_keys: list[str] | None = None,
     include_other_threads: bool = False,
     limit: int = 5,
     namespace: str = "alpharavis",
@@ -1658,6 +1778,12 @@ async def semantic_search(
         raise VectorMemoryError("query is required for semantic vector search.")
 
     source_type = re.sub(r"[^a-zA-Z0-9_-]+", "_", source_type.strip().lower())[:80] or "all"
+    normalized_source_keys = [
+        str(item).strip()
+        for item in ([source_key] if source_key else []) + list(source_keys or [])
+        if str(item).strip()
+    ]
+    normalized_source_keys = list(dict.fromkeys(normalized_source_keys))[:50]
     query_embedding = await embed_text(query)
     return await asyncio.to_thread(
         _search_sync,
@@ -1665,6 +1791,7 @@ async def semantic_search(
         namespace=namespace,
         thread_id=thread_id,
         source_type=source_type,
+        source_keys=normalized_source_keys,
         include_other_threads=include_other_threads,
         limit=max(1, min(int(limit), int(os.getenv("ALPHARAVIS_PGVECTOR_SEARCH_LIMIT", "5")))),
     )

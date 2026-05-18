@@ -853,6 +853,17 @@ ALPHARAVIS_ENABLE_PROVIDER_CONTEXT_LIMIT_RETRY=true
 ALPHARAVIS_DYNAMIC_COMPRESSION_UNTIL_BUDGET=true
 ALPHARAVIS_DYNAMIC_COMPRESSION_MAX_PASSES=6
 ALPHARAVIS_DYNAMIC_COMPRESSION_HARD_MAX_PASSES=12
+ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_RATIO=0.75
+ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MIN_TOKENS=8192
+ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MAX_TOKENS=0
+ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_CHARS_PER_TOKEN=2.0
+ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_OVERHEAD_RESERVE_TOKENS=512
+ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=false
+ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_RATIO=0.03
+ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_MIN_TOKENS=300
+ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_MAX_TOKENS=0
+ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_OVERLAP_CHARS=1000
+ALPHARAVIS_COMPRESSION_SUMMARY_MAX_CHUNKS=12
 ```
 
 The bridge cutoff is disabled by default. LangGraph owns the normal hard
@@ -864,6 +875,68 @@ oversized requests before LangGraph can compact them.
 
 `ALPHARAVIS_ENABLE_STATIC_CONTEXT_RESERVE` makes pre-run compression reserve
 budget for the largest configured DeepAgents system prompt and tool schema.
+For summary sizing, `*_RATIO` values are computed from the active compression
+model context limit, not the smaller target that active messages must shrink
+under. A `*_MAX_TOKENS` value of `0` means "do not apply a fixed absolute cap;
+use the ratio-derived value." Set a positive max only when you intentionally
+want to pin a smaller operator safety cap for slow or expensive summary models.
+In the Observer Shrinking cards, `Compress Limit` is the active-state shrink
+target and `Summary Context` is the model context used to size the internal
+summary call.
+`ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY` is an experimental opt-in for
+very large compression windows: if the summary prompt would otherwise be
+pruned, LangGraph summarizes the middle in chunks and then synthesizes the chunk
+summaries. The default remains `false`; the existing bounded one-shot summary
+path stays active unless the flag is enabled.
+When testing chunking, watch the Observer `Shrinking` section:
+
+- `One-shot` means the normal bounded summary path was used.
+- `Chunking` means the summary input exceeded its own prompt budget and was
+  summarized chunk-by-chunk before synthesis.
+- `Prompt Pruned` tells you the one-shot summary input would have been clipped.
+- `Prompt Payload`, `Prompt Overhead`, `Chunk Payload`, and `Chunk Overhead`
+  show how much of the summary-model window was left for actual middle content
+  after wrapper/protected-note text was reserved.
+- `Chunk Count`, `Chunk Omitted`, `Chunk Output`, and `Synth Pruned` show
+  whether chunking covered the prepared middle cleanly.
+
+If `Chunk Omitted` is positive, exact raw context is still archived, but the
+active summary did not receive every prepared chunk. The synthesis prompt will
+tell the model to mention archive lookup for omitted middle details. Treat that
+as a tuning signal for `ALPHARAVIS_COMPRESSION_SUMMARY_MAX_CHUNKS` or the chunk
+sizing settings before making chunking a default.
+
+The Bridge Test UI Observer also has a `Chunking Lab` panel. It starts local
+diagnostic runs with `POST /api/chunking/runs` and exposes the same run through
+`GET /api/chunking/runs/{run_id}` so operators or agents can inspect the result
+without scraping the page. The lab uses AlphaRavis's real context compressor
+against a deterministic synthetic web-like corpus, generated tool traces, and
+optional variable prompt load. It does not mean the Bridge itself chunks normal
+requests. Treat a lab run as healthy when `summary_failed=false`,
+`summary_chunking_used=true`, `summary_chunk_omitted_chars=0`, and the rendered
+acceptance status is OK.
+
+Use the lab's `Summary Mode` selector carefully:
+
+- `Stub schnell` is a deterministic harness. It checks chunk splitting,
+  prompt-overhead accounting, tool pruning/deduplication, API status, and the
+  UI, but it does not call the summary LLM.
+- `Real LLM` calls an OpenAI-compatible `/chat/completions` summary model. This
+  is the mode to use for latency, quality, and promotion evidence.
+
+For `Real LLM`, the Test UI reads `TEST_UI_CHUNKING_SUMMARY_API_BASE`,
+`TEST_UI_CHUNKING_SUMMARY_API_KEY`, `TEST_UI_CHUNKING_SUMMARY_MODEL`, and
+`TEST_UI_CHUNKING_SUMMARY_TIMEOUT_SECONDS` when set. Otherwise it falls back to
+`OPENAI_API_BASE`, `OPENAI_API_KEY`, `ALPHARAVIS_MODEL`, and a 240 second
+per-summary-call timeout.
+
+After a lab run completes, open the collapsible Before/After panels to inspect
+the prepared compression input and the final synthesized summary side by side.
+The same content is available from the run API under `result.comparison`.
+`TEST_UI_CHUNKING_TEXT_CAPTURE_CHARS` controls how many characters are retained
+for browser/API display; the diagnostic can truncate the display capture even
+when the compressor processed the full chunking window.
+
 This mirrors Hermes' preflight estimate, where tool schemas are counted before
 the model call. Leave `ALPHARAVIS_STATIC_CONTEXT_RESERVE_TOKENS=0` for automatic
 reserve calculation; set a positive value only when you want to pin the reserve
@@ -885,7 +958,11 @@ until the request is under budget, bounded by
 `ALPHARAVIS_DYNAMIC_COMPRESSION_MAX_PASSES` and
 `ALPHARAVIS_DYNAMIC_COMPRESSION_HARD_MAX_PASSES`, before calling the model.
 Use the `inspect_context_budget` tool to inspect the same budget fields from
-inside an agent run.
+inside an agent run. The tool also returns `compression_summary_budget`, which
+contains the dynamic summary output, summary prompt, and chunk output token
+budgets derived from the currently detected context length and effective active
+limit. Use those fields instead of hardcoding small summary limits in agents or
+tools.
 
 `ALPHARAVIS_ENABLE_PROVIDER_OVERFLOW_RETRY` adds one rescue-and-retry path
 around the Swarm model invocation if the provider still reports
@@ -895,7 +972,24 @@ provider error text for the real context window and recomputes the rescue budget
 from that smaller limit.
 
 The Bridge Test UI Observer (`/observer`) includes a `Context Budget` strip for
-each observed request when budget data is available.
+each observed request when budget data is available. It shows the assembled
+request budget, effective active/hard limits, remaining budget, detected and
+provider-reported context length, rescue pass counts, retry status, and whether
+pre-run/final rescue reached budget. Directly below that, `Shrinking` shows
+compression cards for pre-run, final rescue, post-run, and handoff scopes when
+those scopes exist. Use it to check:
+
+- how much the active state shrank (`Before`, `After`, `Shrink`)
+- whether multi-pass compression stopped under budget (`Passes`, `Budget OK`)
+- which part was summarized (`Head/Middle/Tail`, `Middle Tokens`)
+- whether the summary prompt was pruned or chunked
+- whether the archive key exists for exact recall
+
+The `Kompression` detail tab still shows the same data as JSON, including
+archive keys, before/after tokens, summary status/errors, prompt-pruning
+metrics, chunking metrics, and tool-pruning counters. Non-streaming Bridge
+requests now record the same final budget and compression snapshots as
+streaming update paths.
 
 ## File Safety
 
@@ -1043,19 +1137,73 @@ ALPHARAVIS_PGVECTOR_EMBEDDING_MODEL=memory-embed
 ALPHARAVIS_PGVECTOR_FALLBACK_EMBEDDING_MODEL=memory-embed-fallback
 ```
 
-`memory-embed` is a LiteLLM route. The default example routes to an
-OpenAI-compatible Ollama embedding model such as
-`Q78KG/gte-Qwen2-1.5B-instruct`. The fallback route points to `bge-m3`.
+`memory-embed` is a LiteLLM route. The default example now routes to Ollama's
+native embedding API with `ollama/qwen3-embedding:4b`; pull it on the Ollama
+host first:
+
+```bash
+ollama pull qwen3-embedding:4b
+```
+
+The fallback route points to `ollama/bge-m3`. For a future OpenAI-compatible
+embedding backend such as llama.cpp or LM Studio, set
+`EMBEDDING_LITELLM_MODEL=openai/<served-model>` and
+`EMBEDDING_API_BASE=http://<embedding-host>:<port>/v1`, then keep AlphaRavis
+itself pointed at LiteLLM's `memory-embed` route.
+`qwen3-embedding:4b` is expected to support roughly a 32k-token embedding
+context. Use the Bridge Test UI `Memory Embed Tester` to confirm the real
+accepted size and latency on the running server; its default max probe size is
+set near 32k rough tokens.
+On the current Ollama host, the tested route returns 2560-dimensional vectors
+but becomes slow well before 32k. The practical AlphaRavis pgvector defaults are
+therefore smaller and profile-specific:
+
+```text
+ALPHARAVIS_PGVECTOR_CHARS_PER_TOKEN=4.0
+ALPHARAVIS_PGVECTOR_CHUNK_TOKENS=900
+ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_TOKENS=125
+ALPHARAVIS_PGVECTOR_CHAT_CHUNK_TOKENS=700
+ALPHARAVIS_PGVECTOR_CHAT_CHUNK_OVERLAP_TOKENS=100
+ALPHARAVIS_PGVECTOR_LOG_CHUNK_TOKENS=1200
+ALPHARAVIS_PGVECTOR_LOG_CHUNK_OVERLAP_TOKENS=75
+ALPHARAVIS_PGVECTOR_CODE_CHUNK_TOKENS=600
+ALPHARAVIS_PGVECTOR_CODE_CHUNK_OVERLAP_TOKENS=80
+ALPHARAVIS_PGVECTOR_EMBEDDING_TIMEOUT_SECONDS=45
+```
+
+AlphaRavis chooses the chunk profile from `source_type`, filename/path metadata,
+Markdown code fences, and common code/log syntax. Code detection is intentionally
+heuristic for now; a later Tree-sitter/AST splitter can cut by function/class
+boundaries more precisely.
+
+Use the 32k context window for capability testing and exceptional large-query
+cases, not as the normal archive/memory chunk size.
 
 Agents can call:
 
 ```text
 semantic_memory_search
+query_source
+query_sources
+query_archive
+agentic_rag_retrieve
 ```
 
 It searches the current thread plus global memories by default and also queries
 the existing RAG API for external documents. It searches other AlphaRavis
 threads only when `include_other_threads=true` is explicitly requested.
+Use `query_source` / `query_sources` when the agent already has a source key,
+archive key, artifact key, or external RAG `file_id` and should retrieve only
+relevant chunks from that known source. Use `query_archive` for a known archive
+key before deciding whether the raw `read_archive_record` payload is needed.
+Use `agentic_rag_retrieve` when the known-source question needs a
+retrieve/grade/rewrite pass and a bounded `context_packet` for a grounded
+answer. It stays tool-only; it does not automatically load complete archives
+into active context.
+If weak pgvector hits are too noisy, set
+`ALPHARAVIS_PGVECTOR_DISTANCE_THRESHOLD` for AlphaRavis's own pgvector table.
+This is separate from `rag_api`'s `RAG_DISTANCE_THRESHOLD`, but uses the same
+distance-cutoff idea: lower pgvector distance means a stronger match.
 After enabling pgvector memory, new records are indexed automatically. Old
 MongoDB/store history is not bulk-backfilled by default, to avoid a surprise
 embedding job over many chats.
@@ -1069,6 +1217,33 @@ ALPHARAVIS_EMBEDDING_JOB_BATCH_SIZE=10
 ```
 
 The Power Management Agent can drain that queue with `run_embedding_memory_jobs`.
+
+Archive mirroring into `rag_api` is prepared but off by default:
+
+```text
+ALPHARAVIS_ENABLE_RAG_ARCHIVE_MIRROR=false
+ALPHARAVIS_RETRIEVAL_PREFER_RAG_MIRRORS=true
+ALPHARAVIS_RAG_ENTITY_ID=alpharavis
+```
+
+When enabled, newly created compression archives are still stored normally in
+MongoDB/LangGraph Store, but AlphaRavis also uploads the archive text to
+`rag_api` as `file_id=archive:<archive_key>`. `query_archive(...)` can then use
+the `rag_api` mirror for bounded chunk retrieval and fall back to AlphaRavis
+pgvector if the mirror is missing or unavailable. `read_archive_record(...)`
+remains the explicit raw-history tool and is not the normal first retrieval
+step.
+
+The Bridge Test UI Observer has an `Archive RAG Smoke` panel for this path. It
+creates a small archive-shaped payload, sends it to `rag_api`, queries it back,
+and reports acceptance checks plus runtime errors. A failed smoke with
+`memory-embed` connection errors means the wrapper reached LiteLLM but the
+configured embedding backend is not available.
+The same Observer page has `Memory Embed Tester` for bringing that backend up:
+enter the target base URL/IP, model name, OpenAI-compatible or Ollama mode,
+choose text or experimental vision input, then run the probe. It reports
+embedding dimensions, latency per input size, max accepted chars/tokens, and
+whether the backend rejected or became too slow.
 It is allowed when the big llama.cpp server is active or the system has been
 idle long enough, depending on `ALPHARAVIS_EMBEDDING_LOAD_POLICY`.
 
@@ -1366,6 +1541,22 @@ not rewritten by this Bridge step. Use `register_media_asset` to save other
 URL/file-id media manually. Registration is metadata-only by default; set the
 tool's `index=true` only when you explicitly want immediate vision indexing.
 
+For LibreChat video uploads, use the normal `AlphaRavis Responses` model spec.
+The LibreChat container applies `scripts/patch_librechat_video_uploads.js` at
+startup so the `LangGraph Agent` endpoint sends videos as `video_url`
+attachments to the AlphaRavis Bridge while still using `useResponsesApi: true`.
+The patch covers both the backend video encoder and the browser upload
+menu/drag-drop bundle, plus LibreChat's prompt formatter that otherwise keeps
+`image_urls` but drops `videos` before the provider HTTP request. In Responses
+mode it also patches LibreChat's OpenAI Responses converter so `video_url` parts
+become `input_video` instead of being filtered out after formatting. If the
+browser still shows only `Upload as Text` after a restart, reload the LibreChat
+page once so the local service worker unregisters and clears Workbox caches,
+then reload once more so the patched client bundle is loaded.
+Do not choose LibreChat's `Upload as Text` option for videos; LibreChat can parse
+the video bytes as huge text, hit its own agent-context pruning limit, and fail
+before the Bridge receives the request.
+
 When the user explicitly asks to analyze, inspect, describe, summarize,
 transcribe, compare, or index a video, AlphaRavis can use
 `prepare_media_for_model`. That tool decides between `register_only`,
@@ -1435,9 +1626,13 @@ ALPHARAVIS_MEDIA_INDEX_VERSION=2026-05-12-v1
 ALPHARAVIS_MEDIA_VISION_EMBEDDING_MODEL_CARD=vision-embed
 ```
 
-Vision embeddings can use either the normal LiteLLM route or a dedicated
-external OpenAI-compatible server. For a separate llama.cpp vision embedding
-server, set the direct model URL:
+Vision embeddings are experimental and remain off by default. Do not enable
+them for the normal memory/RAG bring-up path; first get the text
+`memory-embed` route green. Later, vision embeddings can use either the normal
+LiteLLM route or a dedicated external OpenAI-compatible server, but only after
+the Memory Embed Tester proves the selected endpoint accepts the vision payload
+and returns vectors. For a separate llama.cpp vision embedding server, set the
+direct model URL:
 
 ```bash
 make media-vision VISION_ENABLED=true \

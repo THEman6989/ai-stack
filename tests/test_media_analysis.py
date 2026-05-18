@@ -86,3 +86,25 @@ def test_vision_embedding_base_url_falls_back_to_litellm_backend_env(monkeypatch
     monkeypatch.setenv("VISION_EMBEDDING_API_BASE", "http://vision-backend:11434/v1")
 
     assert vector_memory._vision_embedding_base_url() == "http://vision-backend:11434/v1"
+
+
+def test_vector_chunk_profile_detects_code_and_chat(monkeypatch) -> None:
+    monkeypatch.delenv("ALPHARAVIS_PGVECTOR_CHUNK_MAX_CHARS", raising=False)
+    monkeypatch.delenv("ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_CHARS", raising=False)
+
+    assert vector_memory._chunk_profile("artifact", "app.py", {}, "def run():\n    return 1") == "code"
+    assert vector_memory._chunk_profile("archive", "chat archive", {}, "user: hello\nassistant: hi") == "chat"
+    assert vector_memory._chunk_max_chars(source_type="archive") == 2800
+    assert vector_memory._chunk_max_chars(source_type="artifact", title="app.py", text="def run():\n    return 1") == 2400
+
+
+def test_vector_chunk_text_accepts_profile_metadata(monkeypatch) -> None:
+    monkeypatch.delenv("ALPHARAVIS_PGVECTOR_CHUNK_MAX_CHARS", raising=False)
+    monkeypatch.delenv("ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_CHARS", raising=False)
+    monkeypatch.setenv("ALPHARAVIS_PGVECTOR_CODE_CHUNK_TOKENS", "300")
+    text = "\n".join(f"def fn_{index}():\n    return {index}" for index in range(120))
+
+    chunks = vector_memory.chunk_text(text, source_type="artifact", title="module.py")
+
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 1300 for chunk in chunks)

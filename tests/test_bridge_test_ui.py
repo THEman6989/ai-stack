@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 from importlib.machinery import ModuleSpec
 import json
@@ -225,6 +226,7 @@ def test_observer_page_is_full_table_view() -> None:
     assert "<table>" in test_ui_server.OBSERVER_HTML
     assert "Senden" in test_ui_server.OBSERVER_HTML
     assert "Empfang" in test_ui_server.OBSERVER_HTML
+    assert "Kompression" in test_ui_server.OBSERVER_HTML
     assert "Nur Kontext" in test_ui_server.OBSERVER_HTML
     assert "Vollansicht" in test_ui_server.OBSERVER_HTML
     assert "model_context_messages" in test_ui_server.OBSERVER_HTML
@@ -232,5 +234,234 @@ def test_observer_page_is_full_table_view() -> None:
     assert "Context Budget" in test_ui_server.OBSERVER_HTML
     assert "budgetOf(record)" in test_ui_server.OBSERVER_HTML
     assert "context_budget" in test_ui_server.OBSERVER_HTML
+    assert "provider_reported_context_limit" in test_ui_server.OBSERVER_HTML
+    assert "final_budget_rescue_budget_met" in test_ui_server.OBSERVER_HTML
+    assert "Restbudget" in test_ui_server.OBSERVER_HTML
+    assert "Provider Ctx" in test_ui_server.OBSERVER_HTML
+    assert "Compression Shrinking" in test_ui_server.OBSERVER_HTML
+    assert "function renderShrinking()" in test_ui_server.OBSERVER_HTML
+    assert "function shrinkSummary(record)" in test_ui_server.OBSERVER_HTML
+    assert "summary_chunking_used" in test_ui_server.OBSERVER_HTML
+    assert "summary_prompt_pruned" in test_ui_server.OBSERVER_HTML
+    assert "Chunk Count" in test_ui_server.OBSERVER_HTML
+    assert "Chunk Payload" in test_ui_server.OBSERVER_HTML
+    assert "Prompt Overhead" in test_ui_server.OBSERVER_HTML
+    assert "Synth Payload" in test_ui_server.OBSERVER_HTML
+    assert "Compress Limit" in test_ui_server.OBSERVER_HTML
+    assert "Summary Context" in test_ui_server.OBSERVER_HTML
+    assert "Head/Middle/Tail" in test_ui_server.OBSERVER_HTML
+    assert "receive.compression" in test_ui_server.OBSERVER_HTML
+    assert "compressionTab" in test_ui_server.OBSERVER_HTML
+    assert "Chunking Lab" in test_ui_server.OBSERVER_HTML
+    assert "runChunking" in test_ui_server.OBSERVER_HTML
+    assert "/api/chunking/runs" in test_ui_server.OBSERVER_HTML
+    assert "summary_chunk_omitted_chars_zero" in test_ui_server.OBSERVER_HTML
+    assert "Tool-Spuren" in test_ui_server.OBSERVER_HTML
+    assert "Prompt-Last" in test_ui_server.OBSERVER_HTML
+    assert "chunkSummaryMode" in test_ui_server.OBSERVER_HTML
+    assert "Real LLM" in test_ui_server.OBSERVER_HTML
+    assert "Summary Mode" in test_ui_server.OBSERVER_HTML
+    assert "chunkingCompare" in test_ui_server.OBSERVER_HTML
+    assert "Vorher: Prepared Compression Input" in test_ui_server.OBSERVER_HTML
+    assert "Nachher: Finale Summary" in test_ui_server.OBSERVER_HTML
+    assert "comparison_stats" in test_ui_server.OBSERVER_HTML
     assert "langgraph_state_profile" in test_ui_server.OBSERVER_HTML
+    assert "Archive RAG Smoke" in test_ui_server.OBSERVER_HTML
+    assert "runArchiveRagSmoke" in test_ui_server.OBSERVER_HTML
+    assert "/api/archive-rag-smoke" in test_ui_server.OBSERVER_HTML
+    assert "archiveRagRaw" in test_ui_server.OBSERVER_HTML
+    assert "runtime prüfen" in test_ui_server.OBSERVER_HTML
+    assert "no_runtime_errors" in test_ui_server.OBSERVER_HTML
+    assert "Memory Embed Tester" in test_ui_server.OBSERVER_HTML
+    assert "runMemoryEmbedProbe" in test_ui_server.OBSERVER_HTML
+    assert "/api/memory-embed-probe" in test_ui_server.OBSERVER_HTML
+    assert "Ollama /api/embed" in test_ui_server.OBSERVER_HTML
+    assert "OpenAI /v1" in test_ui_server.OBSERVER_HTML
     assert "window.setInterval" in test_ui_server.OBSERVER_HTML
+
+
+def test_chunking_diagnostic_uses_real_compressor_with_tool_and_prompt_load() -> None:
+    request = test_ui_server.ChunkingRunRequest(
+        approx_tokens=60000,
+        token_limit=12000,
+        summary_context_token_limit=16000,
+        max_chunks=32,
+        include_tools=True,
+        variable_prompt_load=True,
+        summary_mode="stub",
+    )
+
+    result = asyncio.run(test_ui_server._run_chunking_diagnostic(request))
+    metadata = result["archive_metadata"]
+
+    assert result["summary_call_count"] > 1
+    assert metadata["summary_chunking_used"] is True
+    assert metadata["summary_chunk_count"] > 1
+    assert metadata["summary_chunk_omitted_chars"] == 0
+    assert metadata["summary_chunk_payload_token_limit"] < metadata["summary_chunk_prompt_token_limit"]
+    assert metadata["summary_chunk_prompt_overhead_tokens"] > 0
+    assert result["tool_stats"]["pruned_tool_count"] > 0
+    assert result["tool_stats"]["deduped_tool_count"] > 0
+    assert result["acceptance"]["summary_failed_false"] is True
+    assert result["acceptance"]["summary_chunking_used_true"] is True
+    assert result["acceptance"]["summary_chunk_omitted_chars_zero"] is True
+    assert result["config"]["summary_mode"] == "stub"
+    assert result["config"]["summary_model"] == "stub"
+    assert all(call["summary_mode"] == "stub" for call in result["summary_calls"])
+    comparison = result["comparison"]
+    assert comparison["before_prepared_summary_input"]["text"]
+    assert comparison["after_summary"]["text"]
+    assert comparison["before_tokens_estimate"] > comparison["after_tokens_estimate"]
+    assert comparison["active_shrink_ratio"] > 0
+
+
+def test_archive_rag_smoke_mirrors_then_queries_rag_api(monkeypatch) -> None:
+    calls: list[tuple[str, object]] = []
+
+    async def fake_mirror_text(**kwargs):
+        calls.append(("mirror", kwargs))
+        return {"status": True, "file_id": kwargs["file_id"]}
+
+    async def fake_query_sources(query, file_ids, *, limit):
+        calls.append(("query", {"query": query, "file_ids": file_ids, "limit": limit}))
+        return [
+            {
+                "source_key": file_ids[0],
+                "chunk_text": "query_archive should retrieve bounded chunks from a rag_api mirror.",
+                "metadata": {"file_id": file_ids[0]},
+            }
+        ]
+
+    monkeypatch.setattr(test_ui_server, "rag_api_mirror_text", fake_mirror_text)
+    monkeypatch.setattr(test_ui_server, "rag_api_query_sources", fake_query_sources)
+
+    result = asyncio.run(
+        test_ui_server._run_archive_rag_smoke(
+            test_ui_server.ArchiveRagSmokeRequest(
+                archive_key="archive-test",
+                archive_text="Decision: query_archive should retrieve bounded chunks.",
+                query="Welche Entscheidung?",
+                limit=3,
+            )
+        )
+    )
+
+    assert calls[0][0] == "mirror"
+    assert calls[0][1]["file_id"] == "archive:archive-test"
+    assert calls[1] == ("query", {"query": "Welche Entscheidung?", "file_ids": ["archive:archive-test"], "limit": 3})
+    assert result["rag_file_id"] == "archive:archive-test"
+    assert result["acceptance_ok"] is True
+    assert result["acceptance"]["query_returned_hits"] is True
+    assert result["acceptance"]["no_runtime_errors"] is True
+
+
+def test_archive_rag_smoke_reports_query_runtime_error(monkeypatch) -> None:
+    async def fake_mirror_text(**kwargs):
+        return {"status": True, "file_id": kwargs["file_id"]}
+
+    async def fake_query_sources(query, file_ids, *, limit):
+        raise test_ui_server.RagApiClientError("embedding backend refused connection")
+
+    monkeypatch.setattr(test_ui_server, "rag_api_mirror_text", fake_mirror_text)
+    monkeypatch.setattr(test_ui_server, "rag_api_query_sources", fake_query_sources)
+
+    result = asyncio.run(
+        test_ui_server._run_archive_rag_smoke(
+            test_ui_server.ArchiveRagSmokeRequest(archive_key="archive-test", query="Was steht drin?")
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert result["acceptance_ok"] is False
+    assert result["acceptance"]["no_runtime_errors"] is False
+    assert result["errors"] == [{"stage": "query", "error": "embedding backend refused connection"}]
+    assert result["actions"][-1]["event"] == "query.failed"
+
+
+def test_memory_embed_probe_openai_compatible(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeResponse:
+        status_code = 200
+        text = "{}"
+
+        def json(self):
+            return {"data": [{"embedding": [0.1, 0.2, 0.3]}]}
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, endpoint, *, json, headers):
+            calls.append({"endpoint": endpoint, "json": json, "headers": headers, "timeout": self.timeout})
+            return FakeResponse()
+
+    monkeypatch.setattr(test_ui_server.httpx, "AsyncClient", FakeClient)
+
+    result = asyncio.run(
+        test_ui_server._run_memory_embed_probe(
+            test_ui_server.MemoryEmbedProbeRequest(
+                base_url="http://embed-box:8080/v1",
+                model="memory-embed",
+                api_key="sk-test",
+                backend="openai",
+                start_chars=8,
+                max_chars=16,
+                max_steps=2,
+            )
+        )
+    )
+
+    assert result["status"] == "passed"
+    assert result["max_accepted_chars"] == 16
+    assert result["results"][0]["embedding_dimensions"] == 3
+    assert calls[0]["endpoint"] == "http://embed-box:8080/v1/embeddings"
+    assert calls[0]["headers"] == {"Authorization": "Bearer sk-test"}
+    assert calls[0]["json"]["model"] == "memory-embed"
+
+
+def test_memory_embed_probe_reports_rejection(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 413
+        text = "context too large"
+
+        def json(self):
+            return {}
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, endpoint, *, json, headers):
+            return FakeResponse()
+
+    monkeypatch.setattr(test_ui_server.httpx, "AsyncClient", FakeClient)
+
+    result = asyncio.run(
+        test_ui_server._run_memory_embed_probe(
+            test_ui_server.MemoryEmbedProbeRequest(
+                base_url="http://ollama-box:11434",
+                model="bge-m3",
+                backend="ollama_embed",
+                start_chars=128,
+                max_chars=512,
+            )
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert result["stop_reason"] == "rejected"
+    assert result["results"][0]["status_code"] == 413
+    assert "context too large" in result["results"][0]["error"]

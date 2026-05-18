@@ -50,6 +50,8 @@ TOOLSETS: dict[str, Toolset] = {
             "reload_repo_ai_skills",
             "search_session_history",
             "semantic_memory_search",
+            "query_source",
+            "query_sources",
         ),
     ),
     "coding/write": Toolset(
@@ -115,13 +117,17 @@ TOOLSETS: dict[str, Toolset] = {
     "rag/documents": Toolset(
         "rag/documents",
         "Search existing document RAG and normalize external-document hits without duplicating docs into AlphaRavis.",
-        tools=("ask_documents", "semantic_memory_search", "check_external_service"),
+        tools=("ask_documents", "semantic_memory_search", "query_source", "query_sources", "check_external_service"),
     ),
     "rag/memory": Toolset(
         "rag/memory",
         "Search and update thread/global memories, archives, artifacts, sessions, and pgvector chunks.",
         tools=(
             "semantic_memory_search",
+            "query_source",
+            "query_sources",
+            "query_archive",
+            "agentic_rag_retrieve",
             "inspect_embedding_queue_status",
             "search_archived_context",
             "read_archive_record",

@@ -775,8 +775,11 @@ def _budget_profile_from_run_profile(profile: dict[str, Any]) -> dict[str, Any]:
     budget = profile.get("final_context_budget") if isinstance(profile.get("final_context_budget"), dict) else {}
     result = dict(budget)
     mapping = {
-        "message_tokens": ("token_estimate", "pre_run_compression_tokens_after", "post_run_compression_tokens_after"),
-        "request_tokens": ("request_token_estimate", "pre_run_request_tokens_after", "post_run_request_tokens_after"),
+        "context_length": ("pre_run_context_length", "context_length"),
+        "detected_context_length": ("pre_run_detected_context_length", "detected_context_length"),
+        "provider_reported_context_limit": ("pre_run_provider_reported_context_limit", "provider_reported_context_limit"),
+        "message_tokens": ("pre_run_compression_tokens_after", "post_run_compression_tokens_after", "token_estimate"),
+        "request_tokens": ("pre_run_request_tokens_after", "post_run_request_tokens_after", "request_token_estimate"),
         "static_context_reserve_tokens": (
             "static_context_reserve_tokens",
             "pre_run_static_context_reserve_tokens",
@@ -789,7 +792,8 @@ def _budget_profile_from_run_profile(profile: dict[str, Any]) -> dict[str, Any]:
             "handoff_effective_context_limit",
         ),
         "effective_hard_limit": ("pre_run_effective_hard_limit",),
-        "hard_limit": ("hard_context_limit",),
+        "active_limit": ("pre_run_active_limit",),
+        "hard_limit": ("pre_run_hard_limit", "hard_context_limit"),
     }
     for target, keys in mapping.items():
         if result.get(target) is not None:
@@ -801,28 +805,113 @@ def _budget_profile_from_run_profile(profile: dict[str, Any]) -> dict[str, Any]:
     for key in (
         "final_budget_rescue_used",
         "final_budget_rescue_passes",
+        "final_budget_rescue_max_passes",
+        "final_budget_rescue_budget_met",
         "final_budget_rescue_archive_key",
         "hard_context_trim_used",
         "hard_context_rescued",
         "pre_run_compression_used",
+        "pre_run_compression_passes",
+        "pre_run_compression_max_passes",
+        "pre_run_compression_budget_met",
         "post_run_compression_used",
         "handoff_context_guard_used",
+        "provider_reported_context_limit",
+        "provider_context_overflow_retry_used",
     ):
         if profile.get(key) is not None:
             result[key] = profile.get(key)
+    classification = profile.get("provider_context_overflow_retry_classification")
+    if isinstance(classification, dict):
+        result["provider_context_overflow_retry_classification"] = classification
+        if result.get("provider_reported_context_limit") is None and classification.get("provider_reported_context_limit"):
+            result["provider_reported_context_limit"] = classification.get("provider_reported_context_limit")
+    return result
+
+
+def _compression_profile_from_run_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(profile, dict):
+        return {}
+    prefixes = (
+        "pre_run_compression",
+        "final_budget_rescue",
+        "post_run_compression",
+        "handoff_context",
+    )
+    result: dict[str, Any] = {}
+    suffixes = (
+        "used",
+        "tokens",
+        "tokens_after",
+        "request_tokens",
+        "request_tokens_after",
+        "passes",
+        "max_passes",
+        "budget_met",
+        "archive_key",
+        "summary_failed",
+        "summary_error",
+        "middle_message_count",
+        "head_message_count",
+        "tail_message_count",
+        "compression_token_limit",
+        "summary_context_token_limit",
+        "middle_token_estimate",
+        "summary_prompt_pruned",
+        "summary_prompt_original_tokens_estimate",
+        "summary_prompt_tokens_estimate",
+        "summary_prompt_token_limit",
+        "summary_prompt_payload_token_limit",
+        "summary_prompt_overhead_tokens_estimate",
+        "summary_prompt_original_chars",
+        "summary_prompt_chars",
+        "summary_prompt_omitted_chars",
+        "summary_chunking_used",
+        "summary_chunk_count",
+        "summary_chunk_chars",
+        "summary_chunk_prompt_token_limit",
+        "summary_chunk_payload_token_limit",
+        "summary_chunk_prompt_overhead_tokens",
+        "summary_chunk_overlap_chars",
+        "summary_chunk_max_chunks",
+        "summary_chunk_omitted_chars",
+        "summary_chunk_output_tokens",
+        "summary_chunk_summary_tokens_estimate",
+        "summary_chunk_synthesis_pruned",
+        "summary_chunk_synthesis_tokens_estimate",
+        "summary_chunk_synthesis_payload_token_limit",
+        "summary_chunk_synthesis_prompt_overhead_tokens",
+        "pruned_tool_count",
+        "deduped_tool_count",
+        "tool_args_truncated_count",
+    )
+    for prefix in prefixes:
+        item = {suffix: profile.get(f"{prefix}_{suffix}") for suffix in suffixes if profile.get(f"{prefix}_{suffix}") is not None}
+        if item:
+            result[prefix] = item
+    for key in ("compression_stats", "final_context_budget"):
+        if isinstance(profile.get(key), dict):
+            result[key] = profile[key]
     return result
 
 
 def _observer_note_budget(observation_id: str, *, node_name: str, profile: dict[str, Any]) -> None:
     budget = _budget_profile_from_run_profile(profile)
-    if not budget:
+    compression = _compression_profile_from_run_profile(profile)
+    if not budget and not compression:
         return
-    budget["node"] = node_name
+    if budget:
+        budget["node"] = node_name
+    if compression:
+        compression["node"] = node_name
     for record in _BRIDGE_OBSERVATIONS:
         if record.get("id") == observation_id:
             receive = record.setdefault("receive", {})
             if isinstance(receive, dict):
-                receive["context_budget"] = _observer_safe(budget)
+                if budget:
+                    receive["context_budget"] = _observer_safe(budget)
+                if compression:
+                    receive["compression"] = _observer_safe(compression)
             return
 
 
@@ -2223,6 +2312,7 @@ async def _run_wait_content(
     *,
     trace: dict[str, Any] | None = None,
     request_started: float | None = None,
+    observation_id: str | None = None,
 ) -> str:
     wait_kwargs = {"multitask_strategy": "interrupt"}
     if "command" in run_payload:
@@ -2246,6 +2336,10 @@ async def _run_wait_content(
             request_started=trace_started,
             graph_offset_seconds=graph_offset_seconds,
         )
+        values = _state_values(state)
+        profile = values.get("run_profile") if isinstance(values, dict) and isinstance(values.get("run_profile"), dict) else {}
+        if observation_id and profile:
+            _observer_note_budget(observation_id, node_name="run_wait", profile=profile)
         _trace_step(
             trace,
             "bridge.langgraph.wait.completed",
@@ -3585,7 +3679,14 @@ async def responses(request: Request):
         content = str(run_payload["direct_response"])
         _trace_step(trace, "bridge.direct_response.used", started)
     else:
-        content = await _run_wait_content(client, thread_id, run_payload, trace=trace, request_started=started)
+        content = await _run_wait_content(
+            client,
+            thread_id,
+            run_payload,
+            trace=trace,
+            request_started=started,
+            observation_id=observation_id,
+        )
 
     _trace_step(trace, "bridge.response_object.created", started, output_chars=len(content))
     _attach_trace_metadata(body, trace)
@@ -3756,7 +3857,14 @@ async def chat_completions(request: Request):
         content = str(run_payload["direct_response"])
         _trace_step(trace, "bridge.direct_response.used", started)
     else:
-        content = await _run_wait_content(client, thread_id, run_payload, trace=trace, request_started=started)
+        content = await _run_wait_content(
+            client,
+            thread_id,
+            run_payload,
+            trace=trace,
+            request_started=started,
+            observation_id=observation_id,
+        )
 
     _trace_step(trace, "bridge.chat.response.created", started, output_chars=len(content))
     _log_event(

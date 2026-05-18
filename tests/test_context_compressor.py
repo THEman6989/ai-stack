@@ -11,7 +11,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "langgraph-app"))
 
 from context_compressor import (  # noqa: E402
+    _summary_chunk_output_token_limit,
     _truncate_tool_call_args_json,
+    _truncate_summary_input_to_budget,
+    _summary_prompt_token_limit,
+    _summary_token_limit,
     build_summary_message_content,
     compress_messages,
     estimate_tokens_rough,
@@ -54,6 +58,166 @@ def test_parse_context_limit_from_provider_errors() -> None:
     assert parse_context_limit_from_error("maximum context length is 32768 tokens") == 32768
     assert parse_context_limit_from_error("llama.cpp n_ctx_slot = 131072, prompt is too long") == 131072
     assert parse_context_limit_from_error("input 250000 tokens > 200000 maximum") == 200000
+
+
+def test_summary_prompt_input_is_pruned_to_own_budget(monkeypatch) -> None:
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MAX_TOKENS", "1200")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MIN_TOKENS", "1000")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_CHARS_PER_TOKEN", "2")
+    text = "middle evidence " * 1000
+
+    pruned, stats = _truncate_summary_input_to_budget(text, token_limit=8000)
+
+    assert stats["summary_prompt_pruned"] is True
+    assert len(pruned) < len(text)
+    assert stats["summary_prompt_token_limit"] == 2048
+    assert stats["summary_prompt_chars"] <= 4096
+    assert "summary input pruned" in pruned
+
+
+def test_summary_limits_can_be_context_ratio_without_static_cap(monkeypatch) -> None:
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_RATIO", "0.20")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_MAX_TOKENS", "0")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_RATIO", "0.75")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MAX_TOKENS", "0")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_RATIO", "0.03")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_MAX_TOKENS", "0")
+
+    assert _summary_token_limit(128000) == 25600
+    assert _summary_prompt_token_limit(128000) == 96000
+    assert _summary_chunk_output_token_limit(128000) == 3840
+
+
+def test_compression_target_and_summary_model_context_are_separate(monkeypatch) -> None:
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_RATIO", "0.20")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_MAX_TOKENS", "0")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_RATIO", "0.75")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MAX_TOKENS", "0")
+
+    max_tokens_seen: list[int] = []
+
+    async def summary(prompt: str, max_tokens: int) -> str:
+        max_tokens_seen.append(max_tokens)
+        assert "middle evidence" in prompt
+        return "## Active Task\n- compact\n\n## Archive References\n- source_type=archive"
+
+    messages = [{"role": "user", "content": f"head {index}"} for index in range(3)]
+    messages.extend({"role": "assistant", "content": f"middle evidence {index}"} for index in range(8))
+    messages.extend({"role": "assistant", "content": f"tail {index}"} for index in range(3))
+
+    result = asyncio.run(
+        compress_messages(
+            messages,
+            mode="post_run",
+            thread_id="thread",
+            thread_key="thread",
+            token_limit=100,
+            summary_context_token_limit=128000,
+            previous_summary=None,
+            summarize_fn=summary,
+            force=True,
+        )
+    )
+
+    assert result.archive_metadata["compression_token_limit"] == 100
+    assert result.archive_metadata["summary_context_token_limit"] == 128000
+    assert result.archive_metadata["summary_prompt_token_limit"] == 96000
+    assert max_tokens_seen == [25600]
+
+
+def test_chunked_summary_is_opt_in_for_pruned_summary_prompt(monkeypatch) -> None:
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MAX_TOKENS", "1200")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MIN_TOKENS", "1000")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_CHARS_PER_TOKEN", "1")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_OVERLAP_CHARS", "0")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_MAX_CHUNKS", "20")
+
+    calls: list[str] = []
+
+    async def chunk_summary(prompt: str, _max_tokens: int) -> str:
+        calls.append(prompt)
+        if "mode: post_run_chunked_synthesis" in prompt:
+            assert "Intermediate chunk summaries" in prompt
+            return "## Active Task\n- final synthesis\n\n## Archive References\n- source_type=archive"
+        assert "mode: post_run_chunk_" in prompt
+        return "## Active Task\n- chunk evidence\n\n## Archive References\n- source_type=archive"
+
+    messages = [
+        {"role": "user", "content": f"protected head {index}"}
+        for index in range(3)
+    ]
+    messages.extend(
+        {"role": "assistant", "content": f"middle evidence {index} " + ("x " * 1500)}
+        for index in range(6)
+    )
+    messages.extend({"role": "assistant", "content": f"tail {index}"} for index in range(3))
+
+    result = asyncio.run(
+        compress_messages(
+            messages,
+            mode="post_run",
+            thread_id="thread",
+            thread_key="thread",
+            token_limit=100,
+            previous_summary=None,
+            summarize_fn=chunk_summary,
+            force=True,
+            enable_chunked_summary=True,
+        )
+    )
+
+    assert not result.summary_failed
+    assert "final synthesis" in result.summary
+    assert result.archive_metadata["summary_prompt_pruned"] is True
+    assert result.archive_metadata["summary_chunking_used"] is True
+    assert result.archive_metadata["summary_chunk_count"] > 1
+    assert len(calls) == result.archive_metadata["summary_chunk_count"] + 1
+
+
+def test_chunked_summary_reports_and_prompts_for_max_chunk_omissions(monkeypatch) -> None:
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MAX_TOKENS", "1200")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MIN_TOKENS", "1000")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_CHARS_PER_TOKEN", "1")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_OVERLAP_CHARS", "0")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_MAX_CHUNKS", "2")
+
+    synthesis_prompts: list[str] = []
+
+    async def chunk_summary(prompt: str, _max_tokens: int) -> str:
+        if "mode: post_run_chunked_synthesis" in prompt:
+            synthesis_prompts.append(prompt)
+            return "## Active Task\n- final synthesis\n\n## Archive References\n- source_type=archive"
+        return "## Active Task\n- chunk evidence\n\n## Archive References\n- source_type=archive"
+
+    messages = [{"role": "user", "content": f"protected head {index}"} for index in range(3)]
+    messages.extend(
+        {"role": "assistant", "content": f"middle evidence {index} " + ("x " * 2500)}
+        for index in range(12)
+    )
+    messages.extend({"role": "assistant", "content": f"tail {index}"} for index in range(3))
+
+    result = asyncio.run(
+        compress_messages(
+            messages,
+            mode="post_run",
+            thread_id="thread",
+            thread_key="thread",
+            token_limit=100,
+            previous_summary=None,
+            summarize_fn=chunk_summary,
+            force=True,
+            enable_chunked_summary=True,
+        )
+    )
+
+    assert not result.summary_failed
+    assert result.archive_metadata["summary_chunking_used"] is True
+    assert result.archive_metadata["summary_chunk_count"] == 2
+    assert result.archive_metadata["summary_chunk_omitted_chars"] > 0
+    assert result.archive_metadata["summary_chunk_payload_token_limit"] < result.archive_metadata["summary_chunk_prompt_token_limit"]
+    assert synthesis_prompts
+    assert "AlphaRavis chunking note" in synthesis_prompts[0]
+    assert "archive lookup" in synthesis_prompts[0]
 
 
 def test_reasoning_blocks_do_not_count_as_active_context() -> None:
