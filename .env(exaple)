@@ -1026,6 +1026,13 @@ ALPHARAVIS_PGVECTOR_CATALOG_ENABLED=true
 # code, logs, and artifacts are split into overlapping chunks; each chunk gets
 # its own vector. AlphaRavis estimates chars from tokens with
 # ALPHARAVIS_PGVECTOR_CHARS_PER_TOKEN.
+# Splitter mode:
+# - auto: use LangChain RecursiveCharacterTextSplitter for explicit documents
+#   and large-paste sources when available; keep AlphaRavis splitter for
+#   chat/archive/code/log profiles.
+# - langchain: force LangChain splitter for all pgvector text sources.
+# - alpharavis: force the local AlphaRavis splitter.
+ALPHARAVIS_PGVECTOR_SPLITTER=auto
 ALPHARAVIS_PGVECTOR_CHARS_PER_TOKEN=4.0
 ALPHARAVIS_PGVECTOR_CHUNK_TOKENS=900
 ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_TOKENS=125
@@ -1039,6 +1046,12 @@ ALPHARAVIS_PGVECTOR_CODE_CHUNK_OVERLAP_TOKENS=80
 ALPHARAVIS_PGVECTOR_CHUNK_MAX_CHARS=
 ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_CHARS=
 ALPHARAVIS_PGVECTOR_PREVIEW_CHARS=900
+ALPHARAVIS_SOURCE_READ_MAX_CHUNKS=20
+ALPHARAVIS_SOURCE_READ_MAX_CHARS=30000
+ALPHARAVIS_ENABLE_RAG_RERANKING=false
+# Server-local document files may only be read for ingest from this root.
+# Leave empty/default in runtime to use the AlphaRavis workspace.
+ALPHARAVIS_DOCUMENT_INGEST_ROOT=
 
 # Number of completed chat turns used for one session-turn vector window.
 # 2 means Turn 1+2, then Turn 2+3, which preserves pronoun/context links.

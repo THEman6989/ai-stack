@@ -68,6 +68,7 @@ try:
         queue_stats as _pgvector_queue_stats,
         media_index_status as _pgvector_media_index_status,
         run_embedding_jobs as _pgvector_run_embedding_jobs,
+        read_source_chunks as _pgvector_read_source_chunks,
         semantic_media_search as _pgvector_semantic_media_search,
         semantic_search as _pgvector_semantic_search,
         upsert_media_record as _pgvector_upsert_media_record,
@@ -82,6 +83,7 @@ except Exception as exc:  # pragma: no cover - optional local module/deps
     _pgvector_media_queue_status = None
     _pgvector_memory_enabled = None
     _pgvector_queue_stats = None
+    _pgvector_read_source_chunks = None
     _pgvector_run_embedding_jobs = None
     _pgvector_semantic_media_search = None
     _pgvector_semantic_search = None
@@ -115,6 +117,14 @@ except Exception as exc:  # pragma: no cover - optional local module/deps
     RETRIEVAL_ROUTER_IMPORT_ERROR: Exception | None = exc
 else:
     RETRIEVAL_ROUTER_IMPORT_ERROR = None
+
+try:
+    from document_ingest import load_document_file as _document_load_file
+except Exception as exc:  # pragma: no cover - optional local helper/deps
+    _document_load_file = None
+    DOCUMENT_INGEST_IMPORT_ERROR: Exception | None = exc
+else:
+    DOCUMENT_INGEST_IMPORT_ERROR = None
 
 try:
     from media_analysis import prepare_media_for_model as _prepare_media_for_model
@@ -422,6 +432,7 @@ ARCHIVE_POLICY_MESSAGE_ID = "alpharavis_archived_context_policy"
 CURATED_MEMORY_INDEX_NS = ("alpharavis", "curated_memory_index")
 SESSION_TURN_INDEX_NS = ("alpharavis", "session_turn_index")
 ARTIFACT_INDEX_NS = ("alpharavis", "artifact_index")
+RAG_THREAD_PINS_KEY = "active_rag_sources"
 MANUAL_COMPRESSION_PATTERNS = [
     "archive diesen abschnitt",
     "archiviere diesen abschnitt",
@@ -3599,6 +3610,138 @@ async def query_sources(
     )
 
 
+@tool
+async def ingest_document_file(
+    path: str,
+    source_key: str = "",
+    title: str = "",
+    source_type: str = "uploaded_document",
+    preferred_backend: str = "auto",
+    pin_active: bool = True,
+):
+    """Load one allowed server-local document file and index it through AlphaRavis RAG."""
+
+    if _document_load_file is None:
+        return _json_tool_result(
+            {
+                "ok": False,
+                "path": path,
+                "index_status": "failed",
+                "error": f"document ingest helper unavailable: {DOCUMENT_INGEST_IMPORT_ERROR}",
+            }
+        )
+    if _router_ingest_source is None:
+        return _json_tool_result(
+            {
+                "ok": False,
+                "path": path,
+                "index_status": "failed",
+                "error": f"retrieval router unavailable: {RETRIEVAL_ROUTER_IMPORT_ERROR}",
+            }
+        )
+
+    ingest_root = Path(os.getenv("ALPHARAVIS_DOCUMENT_INGEST_ROOT", _workspace_root())).expanduser().resolve()
+    resolved_path = Path(path).expanduser().resolve()
+    safety_error = _check_read_path(resolved_path, allowed_root=ingest_root)
+    if safety_error:
+        return _json_tool_result(
+            {
+                "ok": False,
+                "path": str(resolved_path),
+                "ingest_root": str(ingest_root),
+                "index_status": "blocked",
+                "error": safety_error,
+            }
+        )
+
+    loaded = _document_load_file(resolved_path)
+    if not loaded.get("ok"):
+        return _json_tool_result(
+            {
+                "ok": False,
+                "path": loaded.get("path", str(resolved_path)),
+                "ingest_root": str(ingest_root),
+                "index_status": "failed",
+                "loader": loaded,
+                "error": loaded.get("error", "document loader returned no text"),
+            }
+        )
+
+    text = str(loaded.get("text") or "")
+    filename = str((loaded.get("metadata") or {}).get("filename") or resolved_path.name)
+    digest = hashlib.sha256(f"{filename}\0{text}".encode("utf-8", errors="ignore")).hexdigest()[:16]
+    normalized_source_key = str(source_key or "").strip() or f"document:{digest}"
+    normalized_title = str(title or loaded.get("title") or filename or normalized_source_key).strip()
+    thread_id = _state_thread_id()
+    metadata = {
+        **(loaded.get("metadata") if isinstance(loaded.get("metadata"), dict) else {}),
+        "origin": "agent_document_file_ingest",
+        "document_ingest_path": str(resolved_path),
+        "document_ingest_root": str(ingest_root),
+        "content_chars": len(text),
+    }
+
+    try:
+        ingest = await _router_ingest_source(
+            source_type=source_type,
+            source_key=normalized_source_key,
+            title=normalized_title,
+            content=text,
+            thread_id=thread_id,
+            thread_key=thread_id,
+            scope="thread",
+            metadata=metadata,
+            preferred_backend=preferred_backend,
+            pgvector_index=_maybe_index_vector_memory,
+        )
+    except Exception as exc:
+        return _json_tool_result(
+            {
+                "ok": False,
+                "path": str(resolved_path),
+                "source_key": normalized_source_key,
+                "index_status": "failed",
+                "error": str(exc)[:500],
+            }
+        )
+
+    pins: dict[str, Any] = {}
+    pin_warning = ""
+    if pin_active and ingest.get("rag_active"):
+        try:
+            existing = await _load_thread_rag_pins(thread_id)
+            pins = {
+                "rag_active": True,
+                "active_source_keys": _merge_unique_strings(
+                    existing.get("active_source_keys"),
+                    ingest.get("active_source_keys") or normalized_source_key,
+                ),
+                "active_rag_file_ids": _merge_unique_strings(
+                    existing.get("active_rag_file_ids"),
+                    ingest.get("active_rag_file_ids"),
+                ),
+                "archive_rag_mode": str(existing.get("archive_rag_mode") or "tool_only"),
+                "updated_at": int(time.time()),
+            }
+            await _write_thread_rag_pins(thread_id, pins)
+        except Exception as exc:
+            pin_warning = f"document indexed but active RAG pin was not persisted: {exc}"
+
+    return _json_tool_result(
+        {
+            "ok": ingest.get("index_status") in {"indexed", "queued", "partial"},
+            "path": str(resolved_path),
+            "source_key": normalized_source_key,
+            "title": normalized_title,
+            "loaded_chars": loaded.get("text_chars", len(text)),
+            "loader_metadata": loaded.get("metadata", {}),
+            "ingest": ingest,
+            "pinned": pins,
+            "pin_warning": pin_warning,
+        }
+    )
+
+
 async def _rag_file_id_for_archive(archive_key: str) -> str:
     if not archive_key or _prefer_rag_mirrors is None or not _prefer_rag_mirrors():
         return ""
@@ -3717,6 +3860,127 @@ async def agentic_rag_retrieve(
         chunk_count=((payload.get("context_packet") or {}).get("chunk_count") if isinstance(payload, dict) else 0),
         elapsed_seconds=round(time.perf_counter() - started, 3),
     )
+    return _json_tool_result(payload)
+
+
+async def _load_thread_rag_pins(thread_id: str) -> dict[str, Any]:
+    if get_store is None:
+        return {}
+    try:
+        store = get_store()
+    except Exception:
+        return {}
+    item = await _maybe_get(store, _thread_rag_config_ns(thread_id), RAG_THREAD_PINS_KEY)
+    value = _store_item_value(item)
+    return value if isinstance(value, dict) else {}
+
+
+async def _write_thread_rag_pins(thread_id: str, value: dict[str, Any]) -> None:
+    if get_store is None:
+        raise RuntimeError("LangGraph Store is unavailable; cannot persist RAG pins.")
+    store = get_store()
+    await _maybe_put(store, _thread_rag_config_ns(thread_id), RAG_THREAD_PINS_KEY, value)
+
+
+@tool
+async def inspect_active_rag_sources():
+    """Inspect manually pinned active RAG sources for the current thread."""
+
+    thread_id = _state_thread_id()
+    pins = await _load_thread_rag_pins(thread_id)
+    return _json_tool_result(
+        {
+            "thread_id": thread_id,
+            "rag_active": bool(pins.get("rag_active")),
+            "active_source_keys": _merge_unique_strings(pins.get("active_source_keys")),
+            "active_rag_file_ids": _merge_unique_strings(pins.get("active_rag_file_ids")),
+            "archive_rag_mode": str(pins.get("archive_rag_mode") or "tool_only"),
+            "updated_at": pins.get("updated_at"),
+        }
+    )
+
+
+@tool
+async def pin_active_rag_sources(
+    source_keys: list[str],
+    rag_file_ids: list[str] | None = None,
+    archive_rag_mode: str = "tool_only",
+):
+    """Pin source keys/file ids as active RAG context for this thread."""
+
+    thread_id = _state_thread_id()
+    existing = await _load_thread_rag_pins(thread_id)
+    active_source_keys = _merge_unique_strings(existing.get("active_source_keys"), source_keys)
+    active_rag_file_ids = _merge_unique_strings(existing.get("active_rag_file_ids"), rag_file_ids or [])
+    value = {
+        "rag_active": bool(active_source_keys or active_rag_file_ids),
+        "active_source_keys": active_source_keys,
+        "active_rag_file_ids": active_rag_file_ids,
+        "archive_rag_mode": str(archive_rag_mode or existing.get("archive_rag_mode") or "tool_only"),
+        "updated_at": int(time.time()),
+    }
+    await _write_thread_rag_pins(thread_id, value)
+    return _json_tool_result({"thread_id": thread_id, "status": "pinned", **value})
+
+
+@tool
+async def unpin_active_rag_sources(
+    source_keys: list[str] | None = None,
+    rag_file_ids: list[str] | None = None,
+    clear_all: bool = False,
+):
+    """Unpin active RAG source keys/file ids for this thread."""
+
+    thread_id = _state_thread_id()
+    existing = await _load_thread_rag_pins(thread_id)
+    if clear_all:
+        active_source_keys: list[str] = []
+        active_rag_file_ids: list[str] = []
+    else:
+        remove_sources = set(_merge_unique_strings(source_keys or []))
+        remove_files = set(_merge_unique_strings(rag_file_ids or []))
+        active_source_keys = [item for item in _merge_unique_strings(existing.get("active_source_keys")) if item not in remove_sources]
+        active_rag_file_ids = [item for item in _merge_unique_strings(existing.get("active_rag_file_ids")) if item not in remove_files]
+    value = {
+        "rag_active": bool(active_source_keys or active_rag_file_ids),
+        "active_source_keys": active_source_keys,
+        "active_rag_file_ids": active_rag_file_ids,
+        "archive_rag_mode": str(existing.get("archive_rag_mode") or "tool_only"),
+        "updated_at": int(time.time()),
+    }
+    await _write_thread_rag_pins(thread_id, value)
+    return _json_tool_result({"thread_id": thread_id, "status": "unpinned", **value})
+
+
+@tool
+async def read_source_chunks(
+    source_key: str,
+    source_type: str = "all",
+    max_chunks: int = 8,
+    max_chars: int = 12000,
+    include_other_threads: bool = False,
+):
+    """Read bounded ordered chunks for a known AlphaRavis pgvector source key."""
+
+    if _pgvector_read_source_chunks is None:
+        return _json_tool_result(
+            {
+                "source_key": source_key,
+                "chunks": [],
+                "warning": f"pgvector source chunk reader unavailable: {PGVECTOR_IMPORT_ERROR}",
+            }
+        )
+    try:
+        payload = await _pgvector_read_source_chunks(
+            source_key=source_key,
+            source_type=source_type,
+            thread_id=_state_thread_id(),
+            include_other_threads=include_other_threads,
+            max_chunks=max_chunks,
+            max_chars=max_chars,
+        )
+    except Exception as exc:
+        return _json_tool_result({"source_key": source_key, "chunks": [], "error": str(exc)[:500]})
     return _json_tool_result(payload)
 
 
@@ -5588,6 +5852,10 @@ def _thread_artifact_ns(thread_id: str) -> tuple[str, ...]:
     return ("alpharavis", "threads", thread_id, "artifacts")
 
 
+def _thread_rag_config_ns(thread_id: str) -> tuple[str, ...]:
+    return ("alpharavis", "threads", thread_id, "rag")
+
+
 def _split_csv_env(value: str, default: list[str]) -> list[str]:
     parts = [part.strip() for part in value.split(",") if part.strip()]
     return parts or list(default)
@@ -6144,15 +6412,18 @@ def _large_paste_marker(
     content: str,
     paste_intent: str = "document",
     classification: dict[str, Any] | None = None,
+    index_status: str = "indexed",
 ) -> str:
     preview_chars = max(0, int(os.getenv("ALPHARAVIS_LARGE_PASTE_RAG_MARKER_PREVIEW_CHARS", "900")))
     preview = content[:preview_chars].strip() if preview_chars else ""
     classification = classification if isinstance(classification, dict) else {}
+    status_phrase = "queued for bounded RAG retrieval" if str(index_status or "").lower() == "queued" else "indexed for bounded RAG retrieval"
+    lookup_phrase = "queued for exact lookup" if str(index_status or "").lower() == "queued" else "indexed for exact lookup"
     if paste_intent == "instruction":
         brief = _large_paste_instruction_brief(content)
         return "\n\n".join(
             [
-                f"[Large paste classified as instruction-like and indexed for exact lookup: source_key={source_key}; title={title}]",
+                f"[Large paste classified as instruction-like and {lookup_phrase}: source_key={source_key}; title={title}]",
                 "Follow the condensed instruction brief below as the active user instruction. "
                 "Use query_source against this source only when exact omitted instruction text is needed.",
                 f"Classification: intent=instruction; confidence={classification.get('confidence', '')}.",
@@ -6162,14 +6433,14 @@ def _large_paste_marker(
     if paste_intent == "mixed":
         brief = _large_paste_instruction_brief(content)
         lines = [
-            f"[Large paste classified as mixed instructions plus document/data and indexed for bounded RAG retrieval: source_key={source_key}; rag_file_id={rag_file_id}; title={title}]",
+            f"[Large paste classified as mixed instructions plus document/data and {status_phrase}: source_key={source_key}; rag_file_id={rag_file_id}; title={title}]",
             "Follow the condensed instruction brief below. Use active RAG/query_source against this source for document/data details.",
             f"Classification: intent=mixed; confidence={classification.get('confidence', '')}.",
             f"Condensed instruction brief:\n{brief}",
         ]
         return "\n\n".join(lines)
     lines = [
-        f"[Large paste indexed for bounded RAG retrieval: source_key={source_key}; rag_file_id={rag_file_id}; title={title}]",
+        f"[Large paste {status_phrase}: source_key={source_key}; rag_file_id={rag_file_id}; title={title}]",
         "Use agentic_rag_retrieve or query_source against this source when details from the pasted text are needed.",
     ]
     if paste_intent == "unknown":
@@ -6302,6 +6573,7 @@ async def _ingest_large_paste_messages(
                 "source_key": source_key,
                 "status": ingest_result.get("index_status", ""),
                 "indexed_backends": list(ingest_result.get("indexed_backends") or []),
+                "queued_backends": list(ingest_result.get("queued_backends") or []),
                 "rag_active": bool(ingest_result.get("rag_active")),
             }
         )
@@ -6316,6 +6588,7 @@ async def _ingest_large_paste_messages(
             "rag_file_id": ingest_result.get("rag_file_id", ""),
             "index_status": ingest_result.get("index_status", ""),
             "indexed_backends": list(ingest_result.get("indexed_backends") or []),
+            "queued_backends": list(ingest_result.get("queued_backends") or []),
             "rag_active": bool(ingest_result.get("rag_active")),
             "content_chars": len(body),
             "indexed_content_chars": len(ingest_content),
@@ -6325,7 +6598,7 @@ async def _ingest_large_paste_messages(
             **auto_budget,
         }
         local_rag_update = _rag_state_update_from_ingest({**state, **rag_update}, ingest_result)
-        if ingest_result.get("index_status") in {"indexed", "partial"} and (
+        if ingest_result.get("index_status") in {"indexed", "partial", "queued"} and (
             ingest_result.get("rag_active") or paste_intent == "instruction"
         ):
             replacement = _large_paste_marker(
@@ -6335,6 +6608,7 @@ async def _ingest_large_paste_messages(
                 content=body,
                 paste_intent=paste_intent,
                 classification=classification,
+                index_status=str(ingest_result.get("index_status") or ""),
             )
             return replacement, ingest_record, local_rag_update
         return None, ingest_record, local_rag_update
@@ -8620,16 +8894,21 @@ def _format_active_rag_context_packet(packet: dict[str, Any]) -> str:
 
 
 async def active_rag_prefetch_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
-    if not _active_rag_prefetch_enabled() or not state.get("rag_active"):
+    if not _active_rag_prefetch_enabled():
         return {"run_profile": _profile_update(state, active_rag_prefetch_status="disabled_or_inactive")}
     if _router_agentic_rag_retrieve is None:
         return {"run_profile": _profile_update(state, active_rag_prefetch_status="router_unavailable")}
 
-    source_keys = _merge_unique_strings(state.get("active_source_keys"))
-    rag_file_ids = _merge_unique_strings(state.get("active_rag_file_ids"))
+    pinned = await _load_thread_rag_pins(_state_thread_id(state))
+    source_keys = _merge_unique_strings(state.get("active_source_keys"), pinned.get("active_source_keys"))
+    rag_file_ids = _merge_unique_strings(state.get("active_rag_file_ids"), pinned.get("active_rag_file_ids"))
+    rag_active = bool(state.get("rag_active") or pinned.get("rag_active") or source_keys or rag_file_ids)
+    archive_rag_mode = str(pinned.get("archive_rag_mode") or state.get("archive_rag_mode") or "tool_only")
+    if not rag_active:
+        return {"run_profile": _profile_update(state, active_rag_prefetch_status="disabled_or_inactive")}
     if not source_keys and not rag_file_ids:
         return {"run_profile": _profile_update(state, active_rag_prefetch_status="no_active_sources")}
-    if str(state.get("archive_rag_mode") or "tool_only") == "tool_only" and not source_keys:
+    if archive_rag_mode == "tool_only" and not source_keys:
         return {"run_profile": _profile_update(state, active_rag_prefetch_status="archive_tool_only")}
 
     query = _latest_user_query(list(state.get("messages", []))).strip()
@@ -9254,8 +9533,13 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             semantic_memory_search,
             query_source,
             query_sources,
+            ingest_document_file,
             query_archive,
             agentic_rag_retrieve,
+            inspect_active_rag_sources,
+            pin_active_rag_sources,
+            unpin_active_rag_sources,
+            read_source_chunks,
             search_session_history,
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
@@ -9336,6 +9620,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             semantic_memory_search,
             query_source,
             query_sources,
+            ingest_document_file,
             agentic_rag_retrieve,
             semantic_media_search,
             inspect_embedding_queue_status,
@@ -9432,6 +9717,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             semantic_memory_search,
             query_source,
             query_sources,
+            ingest_document_file,
             agentic_rag_retrieve,
             semantic_media_search,
             write_alpha_ravis_artifact,
@@ -9534,7 +9820,12 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             semantic_memory_search,
             query_source,
             query_sources,
+            ingest_document_file,
             agentic_rag_retrieve,
+            inspect_active_rag_sources,
+            pin_active_rag_sources,
+            unpin_active_rag_sources,
+            read_source_chunks,
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
             list_alpha_ravis_artifacts,
@@ -9576,6 +9867,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             semantic_memory_search,
             query_source,
             query_sources,
+            ingest_document_file,
             agentic_rag_retrieve,
             semantic_media_search,
             inspect_media_index_status,
@@ -9630,8 +9922,13 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             semantic_memory_search,
             query_source,
             query_sources,
+            ingest_document_file,
             query_archive,
             agentic_rag_retrieve,
+            inspect_active_rag_sources,
+            pin_active_rag_sources,
+            unpin_active_rag_sources,
+            read_source_chunks,
             semantic_media_search,
             inspect_media_index_status,
             inspect_embedding_queue_status,
@@ -9738,6 +10035,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 semantic_memory_search,
                 query_source,
                 query_sources,
+                ingest_document_file,
             ], [
                 transfer_to_generalist,
                 transfer_to_debugger,

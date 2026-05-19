@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -108,3 +109,123 @@ def test_vector_chunk_text_accepts_profile_metadata(monkeypatch) -> None:
 
     assert len(chunks) > 1
     assert all(len(chunk) <= 1300 for chunk in chunks)
+
+
+def test_vector_chunk_text_uses_langchain_splitter_for_large_paste(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeRecursiveCharacterTextSplitter:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def split_text(self, text):
+            return ["langchain chunk one", "langchain chunk two"]
+
+    monkeypatch.delenv("ALPHARAVIS_PGVECTOR_SPLITTER", raising=False)
+    monkeypatch.delenv("ALPHARAVIS_PGVECTOR_CHUNK_MAX_CHARS", raising=False)
+    monkeypatch.delenv("ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_CHARS", raising=False)
+    monkeypatch.setenv("ALPHARAVIS_PGVECTOR_CHUNK_TOKENS", "150")
+    monkeypatch.setenv("ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_TOKENS", "25")
+    monkeypatch.setattr(vector_memory, "RecursiveCharacterTextSplitter", FakeRecursiveCharacterTextSplitter)
+
+    chunks = vector_memory.chunk_text(
+        "Document:\n\n" + ("large paste content " * 100),
+        source_type="large_paste",
+    )
+
+    assert chunks == ["langchain chunk one", "langchain chunk two"]
+    assert calls[0]["chunk_size"] == 600
+    assert calls[0]["chunk_overlap"] == 100
+
+
+def test_vector_chunk_text_can_force_alpharavis_splitter(monkeypatch) -> None:
+    class FailingRecursiveCharacterTextSplitter:
+        def __init__(self, **kwargs):
+            raise AssertionError("LangChain splitter should not be constructed")
+
+    monkeypatch.setenv("ALPHARAVIS_PGVECTOR_SPLITTER", "alpharavis")
+    monkeypatch.setenv("ALPHARAVIS_PGVECTOR_CHUNK_TOKENS", "100")
+    monkeypatch.setenv("ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_TOKENS", "10")
+    monkeypatch.setattr(vector_memory, "RecursiveCharacterTextSplitter", FailingRecursiveCharacterTextSplitter)
+
+    chunks = vector_memory.chunk_text(
+        "\n\n".join(f"Paragraph {index}. " + ("x" * 40) for index in range(30)),
+        source_type="large_paste",
+    )
+
+    assert len(chunks) > 1
+    assert all("Paragraph" in chunk for chunk in chunks)
+
+
+def test_upsert_memory_record_adds_source_and_chunk_digests(monkeypatch) -> None:
+    inserted: list[dict[str, object]] = []
+
+    @dataclass
+    class FakeEmbedding:
+        vector: list[float]
+        model: str = "fake-embed"
+
+    async def fake_embed_text(text):
+        return FakeEmbedding([0.1, 0.2, 0.3])
+
+    async def immediate_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(vector_memory, "is_enabled", lambda: True)
+    monkeypatch.setattr(vector_memory, "chunk_text", lambda *args, **kwargs: ["chunk one", "chunk two"])
+    monkeypatch.setattr(vector_memory, "embed_text", fake_embed_text)
+    monkeypatch.setattr(vector_memory.asyncio, "to_thread", immediate_to_thread)
+    monkeypatch.setattr(vector_memory, "_ensure_schema_sync", lambda dimensions: None)
+    monkeypatch.setattr(vector_memory, "_delete_source_sync", lambda **kwargs: None)
+    monkeypatch.setattr(vector_memory, "_catalog_enabled", lambda: True)
+    monkeypatch.setattr(vector_memory, "_insert_chunk_sync", lambda **kwargs: inserted.append(kwargs))
+
+    result = asyncio.run(
+        vector_memory.upsert_memory_record(
+            source_type="large_paste",
+            source_key="source-1",
+            title="Source One",
+            content="chunk one\n\nchunk two",
+            thread_id="thread-1",
+            metadata={"origin": "test"},
+        )
+    )
+
+    assert result == "large_paste:source-1:2"
+    catalog = inserted[0]["metadata"]
+    first_chunk = inserted[1]["metadata"]
+    second_chunk = inserted[2]["metadata"]
+    assert catalog["source_digest"] == vector_memory._content_digest("chunk one\n\nchunk two")
+    assert catalog["source_digest_algorithm"] == "sha256-normalized-text"
+    assert first_chunk["source_digest"] == catalog["source_digest"]
+    assert first_chunk["chunk_digest"] == vector_memory._content_digest("chunk one")
+    assert second_chunk["chunk_digest"] == vector_memory._content_digest("chunk two")
+    assert first_chunk["digest_algorithm"] == "sha256-normalized-text"
+
+
+def test_read_source_chunks_clamps_bounds(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def immediate_to_thread(func, *args, **kwargs):
+        calls.update(kwargs)
+        return {"source_key": kwargs["source_key"], "chunks": []}
+
+    monkeypatch.setattr(vector_memory, "is_enabled", lambda: True)
+    monkeypatch.setattr(vector_memory.asyncio, "to_thread", immediate_to_thread)
+    monkeypatch.setenv("ALPHARAVIS_SOURCE_READ_MAX_CHUNKS", "3")
+    monkeypatch.setenv("ALPHARAVIS_SOURCE_READ_MAX_CHARS", "1000")
+
+    result = asyncio.run(
+        vector_memory.read_source_chunks(
+            source_key="source-1",
+            source_type="large_paste",
+            thread_id="thread-1",
+            max_chunks=99,
+            max_chars=99999,
+        )
+    )
+
+    assert result["source_key"] == "source-1"
+    assert calls["max_chunks"] == 3
+    assert calls["max_chars"] == 1000
+    assert calls["thread_id"] == "thread-1"

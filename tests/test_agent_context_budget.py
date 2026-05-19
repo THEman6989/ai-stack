@@ -306,6 +306,48 @@ def test_run_profile_start_skips_auto_large_paste_when_context_margin_is_large(m
     ]
 
 
+def test_run_profile_start_replaces_queued_large_paste_with_source_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_ingest_source(**kwargs):
+        return {
+            "source_key": kwargs["source_key"],
+            "rag_file_id": kwargs["source_key"],
+            "index_status": "queued",
+            "indexed_backends": [],
+            "queued_backends": ["alpharavis_pgvector"],
+            "rag_active": True,
+            "active_source_keys": [kwargs["source_key"]],
+            "active_rag_file_ids": [],
+            "rag_activation_reason": "large_paste",
+            "archive_rag_mode": "tool_only",
+        }
+
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "20")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS", "999999")
+    monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
+    monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", object())
+
+    content = "Document:\n" + ("queued native pgvector source " * 10)
+    updates = asyncio.run(
+        agent_graph.run_profile_start_node(
+            {
+                "messages": [{"role": "human", "content": content, "id": "msg-1"}],
+                "thread_id": "thread-1",
+                "thread_key": "thread-key",
+            }
+        )
+    )
+
+    ingest_record = updates["run_profile"]["large_paste_ingests"][0]
+    assert ingest_record["index_status"] == "queued"
+    assert ingest_record["queued_backends"] == ["alpharavis_pgvector"]
+    assert ingest_record["events"][-1]["status"] == "queued"
+    assert ingest_record["events"][-1]["queued_backends"] == ["alpharavis_pgvector"]
+    assert updates["rag_active"] is True
+    replacement_text = updates["messages"][1]["content"]
+    assert "Large paste queued for bounded RAG retrieval" in replacement_text
+    assert content not in replacement_text
+
+
 def test_run_profile_start_manual_rag_block_forces_ingest(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: dict[str, object] = {}
 
@@ -563,6 +605,169 @@ def test_active_rag_prefetch_injects_bounded_context(monkeypatch: pytest.MonkeyP
     assert updates["run_profile"]["active_rag_prefetch_status"] == "injected"
     assert updates["messages"][0].id == agent_graph.ACTIVE_RAG_CONTEXT_MESSAGE_ID
     assert "The grounded document detail." in updates["messages"][0].content
+
+
+def test_rag_pin_tools_persist_thread_active_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeStore:
+        def __init__(self):
+            self.records = {}
+
+        def put(self, namespace, key, value):
+            self.records[(tuple(namespace), key)] = value
+
+        def get(self, namespace, key):
+            return self.records.get((tuple(namespace), key))
+
+    store = FakeStore()
+    monkeypatch.setattr(agent_graph, "get_store", lambda: store)
+    monkeypatch.setattr(agent_graph, "_thread_id_from_config", lambda: "thread-1")
+
+    pinned = asyncio.run(agent_graph.pin_active_rag_sources(["doc-1"], ["file-1"]))
+    inspected = asyncio.run(agent_graph.inspect_active_rag_sources())
+    unpinned = asyncio.run(agent_graph.unpin_active_rag_sources(["doc-1"], ["file-1"]))
+
+    assert '"status": "pinned"' in pinned
+    assert '"active_source_keys": [\n    "doc-1"\n  ]' in inspected
+    assert '"active_rag_file_ids": [\n    "file-1"\n  ]' in inspected
+    assert '"rag_active": false' in unpinned
+
+
+def test_active_rag_prefetch_uses_pinned_sources_without_state_rag_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeStore:
+        def get(self, namespace, key):
+            return {
+                "rag_active": True,
+                "active_source_keys": ["pinned-doc"],
+                "active_rag_file_ids": [],
+                "archive_rag_mode": "tool_only",
+            }
+
+    calls: dict[str, object] = {}
+
+    async def fake_agentic_rag_retrieve(**kwargs):
+        calls.update(kwargs)
+        return {
+            "context_packet": {
+                "query": kwargs["query"],
+                "chunk_count": 1,
+                "chunks": [
+                    {
+                        "rank": 1,
+                        "source_key": "pinned-doc",
+                        "retrieval_backend": "alpharavis_pgvector",
+                        "relevance_score": 0.8,
+                        "chunk_text": "Pinned source detail.",
+                    }
+                ],
+            },
+            "graph_trace": [],
+        }
+
+    monkeypatch.setattr(agent_graph, "get_store", lambda: FakeStore())
+    monkeypatch.setattr(agent_graph, "_router_agentic_rag_retrieve", fake_agentic_rag_retrieve)
+
+    updates = asyncio.run(
+        agent_graph.active_rag_prefetch_node(
+            {
+                "messages": [{"role": "human", "content": "Welche Details stehen im gepinnten Dokument?"}],
+                "thread_id": "thread-1",
+                "rag_active": False,
+            }
+        )
+    )
+
+    assert calls["source_keys"] == ["pinned-doc"]
+    assert updates["run_profile"]["active_rag_prefetch_status"] == "injected"
+    assert "Pinned source detail." in updates["messages"][0].content
+
+
+def test_read_source_chunks_tool_uses_current_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_read_source_chunks(**kwargs):
+        calls.update(kwargs)
+        return {"source_key": kwargs["source_key"], "chunks": [{"chunk_text": "bounded"}]}
+
+    monkeypatch.setattr(agent_graph, "_pgvector_read_source_chunks", fake_read_source_chunks)
+    monkeypatch.setattr(agent_graph, "_thread_id_from_config", lambda: "thread-1")
+
+    result = asyncio.run(agent_graph.read_source_chunks("source-1", max_chunks=2, max_chars=500))
+
+    assert calls["source_key"] == "source-1"
+    assert calls["thread_id"] == "thread-1"
+    assert calls["max_chunks"] == 2
+    assert calls["max_chars"] == 500
+    assert '"chunk_text": "bounded"' in result
+
+
+def test_ingest_document_file_loads_and_pins_allowed_file(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "doc.md"
+    source.write_text("# ignored by fake loader", encoding="utf-8")
+    calls: dict[str, object] = {}
+    writes: list[tuple[tuple[str, ...], str, dict[str, object]]] = []
+
+    def fake_load_document_file(path):
+        assert Path(path) == source.resolve()
+        return {
+            "ok": True,
+            "path": str(path),
+            "title": "Doc Title",
+            "text": "Grounded loaded document.",
+            "text_chars": 25,
+            "metadata": {"filename": "doc.md", "extension": ".md"},
+            "error": "",
+        }
+
+    async def fake_ingest_source(**kwargs):
+        calls.update(kwargs)
+        return {
+            "index_status": "indexed",
+            "source_key": kwargs["source_key"],
+            "rag_file_id": kwargs["source_key"],
+            "rag_active": True,
+            "active_source_keys": [kwargs["source_key"]],
+            "active_rag_file_ids": [],
+            "indexed_backends": ["alpharavis_pgvector"],
+            "queued_backends": [],
+            "warnings": [],
+            "errors": [],
+        }
+
+    async def fake_put(store, namespace, key, value):
+        writes.append((namespace, key, value))
+
+    monkeypatch.setenv("ALPHARAVIS_DOCUMENT_INGEST_ROOT", str(tmp_path))
+    monkeypatch.setattr(agent_graph, "_document_load_file", fake_load_document_file)
+    monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
+    monkeypatch.setattr(agent_graph, "_thread_id_from_config", lambda: "thread-1")
+    monkeypatch.setattr(agent_graph, "get_store", lambda: object())
+    monkeypatch.setattr(agent_graph, "_maybe_put", fake_put)
+
+    result = asyncio.run(agent_graph.ingest_document_file(str(source), source_key="doc-1"))
+
+    assert calls["source_type"] == "uploaded_document"
+    assert calls["source_key"] == "doc-1"
+    assert calls["content"] == "Grounded loaded document."
+    assert calls["metadata"]["origin"] == "agent_document_file_ingest"
+    assert writes[-1][2]["active_source_keys"] == ["doc-1"]
+    assert '"ok": true' in result
+    assert '"source_key": "doc-1"' in result
+
+
+def test_ingest_document_file_blocks_outside_ingest_root(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    source = outside / "doc.md"
+    source.write_text("outside", encoding="utf-8")
+
+    monkeypatch.setenv("ALPHARAVIS_DOCUMENT_INGEST_ROOT", str(allowed))
+
+    result = asyncio.run(agent_graph.ingest_document_file(str(source)))
+
+    assert '"index_status": "blocked"' in result
+    assert "outside the allowed root" in result
 
 
 def test_active_rag_prefetch_uses_pgvector_only_sources_without_rag_file_ids(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -279,7 +279,61 @@ Still needed:
 
 - Route future document/PDF/DOCX upload paths through `ingest_source(...)`.
   File uploads are explicit documents and should be ingested even when normal
-  pasted text would still fit in context.
+  pasted text would still fit in context. Partially implemented:
+  `ingest_document_file` gives agents/operators a guarded server-local path
+  ingest tool that loads via LangChain document loaders and routes the text
+  through `ingest_source(...)`. Remaining follow-up: connect the actual
+  LibreChat upload handoff once the bridge has the trusted server-side file
+  path, not just `file_id` metadata.
+- Partially implemented: LangChain document-loader normalization for file-like
+  sources now exists in `langgraph-app/document_ingest.py`. PDF, DOCX, HTML,
+  Markdown, plain text, CSV/JSON/YAML/log files can be loaded into normalized
+  document text plus source metadata before reaching `ingest_source(...)`.
+- Add an optional LangChain PGVector / retriever evaluation path without
+  replacing AlphaRavis pgvector as the default source of truth. The evaluation
+  must compare metadata fidelity, thread scoping, archive ownership, catalog
+  rows, queue behavior, and retrieval quality before any migration.
+- Implemented first slice: add a LangChain-style retriever adapter around
+  AlphaRavis source-scoped retrieval. `AlphaRavisSourceRetriever` exposes
+  async `aget_relevant_documents` / `ainvoke` and returns LangChain `Document`
+  objects when `langchain_core.documents` is available, otherwise a compatible
+  local document shape. Follow-up: wire this adapter into future graph nodes
+  where a Retriever interface is cleaner than router payloads.
+- Implemented first slice: optional deterministic reranking behind the router,
+  default-off with `ALPHARAVIS_ENABLE_RAG_RERANKING=false`. It blends lexical
+  query/chunk overlap with backend vector score and annotates hits with
+  `rerank_score`; external model rerankers remain future work.
+- Add optional LLM structured-output grading after deterministic grading is
+  proven in live use.
+- Add streaming ingest progress for large documents/pastes. Run-profile
+  start/completion/failure/skip events exist, but long-running jobs do not yet
+  emit live `large_ingest.chunk_indexed` status to LibreChat/Observer.
+- Partially implemented: add queue-only large document ingest for very large
+  sources, with progress and a source handle returned before all chunks are
+  embedded. The retrieval router now distinguishes queued pgvector work with
+  `index_status=queued` and `queued_backends=["alpharavis_pgvector"]`, and
+  Large Paste replacement markers can return a source handle while embeddings
+  are still queued. Live chunk-level progress remains open.
+- Partially implemented: add chunk digest/dedup metadata for repeated pasted
+  text and repeated archive chunks. Source and chunk digests are now stored in
+  AlphaRavis pgvector metadata; digest-based skip/reuse policy remains open.
+- Implemented: guarded source chunk read for known source keys when bounded
+  semantic retrieval is not enough. `read_source_chunks` returns ordered
+  pgvector chunks for a known `source_key`, scoped to the current thread by
+  default, and capped by `ALPHARAVIS_SOURCE_READ_MAX_CHUNKS` /
+  `ALPHARAVIS_SOURCE_READ_MAX_CHARS`. Remaining follow-up: add a richer
+  full-source reconstruction/export path only if the guarded chunk reader is
+  not enough.
+- Implemented: user/operator RAG pin/unpin controls for thread-level active
+  source sets. `pin_active_rag_sources`, `unpin_active_rag_sources`, and
+  `inspect_active_rag_sources` persist per-thread active source/file ids in the
+  LangGraph Store, and `active_rag_prefetch_node` merges those pins with
+  state-derived active RAG metadata. Remaining follow-up: add a user-facing UI
+  surface for pins if needed.
+- Add code-aware LangChain/Tree-sitter splitter options for source-code
+  profiles. Code/log/archive profiles currently keep the AlphaRavis splitter.
+- Rebuild/recreate the LangGraph container and live-test the new
+  `langchain-text-splitters` dependency in the running stack.
 - Tune large-paste runtime performance for very large real chat runs. A previous
   live two-turn large-paste test reached
   embedding, but a 27-chunk embedding batch and the later chat-model call hit
@@ -299,7 +353,8 @@ Still needed:
 - Add optional archive `auto_on_intent` behavior after live quality/latency is
   measured. Keep archive-only threads passive unless this mode is explicitly
   enabled.
-- Add optional reranking behind the router, default-off until measured.
+- Add external/model reranking behind the router after the deterministic
+  default-off reranking slice is measured.
 - Add optional LLM structured-output grading after deterministic grading is
   proven in live use.
 
@@ -1411,11 +1466,14 @@ External context-management learnings to evaluate:
     service, while AlphaRavis pgvector is the agent-memory/archive/artifact
     retrieval layer. They are conceptually similar, but ownership and source of
     truth differ.
-- Planned: evaluate improvements to port from `rag_api` into AlphaRavis
+- Partially implemented: evaluate improvements to port from `rag_api` into AlphaRavis
   pgvector where useful:
-  - configurable splitter profile per source type, including a LangChain
-    `RecursiveCharacterTextSplitter` option for generic prose/PDF/document
-    sources;
+  - Implemented: configurable splitter profile per source type now includes
+    `ALPHARAVIS_PGVECTOR_SPLITTER=auto|langchain|alpharavis`. In `auto`,
+    explicit document and large-paste sources use LangChain
+    `RecursiveCharacterTextSplitter` when available, while chat/archive/code/log
+    profiles keep the AlphaRavis splitter. Chunk size and overlap still use the
+    existing AlphaRavis ENV profile knobs.
   - `file_id`/`source_key`-scoped targeted search for big-message ingest;
   - chunk digest/dedup metadata for repeated pasted text and repeated archive
     chunks;

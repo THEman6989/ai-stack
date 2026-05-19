@@ -4,11 +4,23 @@ import os
 import re
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from rag_api_client import RagApiClientError
 from rag_api_client import mirror_text as _rag_mirror_text
 from rag_api_client import query_sources as _rag_query_sources
+
+try:
+    from langchain_core.documents import Document as LangChainDocument
+except Exception:  # pragma: no cover - optional in lean local test envs.
+    LangChainDocument = None  # type: ignore[assignment]
+
+
+@dataclass
+class AlphaRavisDocument:
+    page_content: str
+    metadata: dict[str, Any]
 
 
 def env_bool(name: str, default: str = "false") -> bool:
@@ -259,6 +271,33 @@ def grade_retrieval_hits(
     }
 
 
+def rerank_retrieval_hits(
+    *,
+    query: str,
+    hits: list[dict[str, Any]],
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    reranked = []
+    for index, hit in enumerate(hits):
+        rerank_score = score_retrieval_hit(query, hit)
+        backend_score = hit.get("similarity")
+        if not isinstance(backend_score, (int, float)):
+            backend_score = hit.get("score")
+        combined_score = rerank_score
+        if isinstance(backend_score, (int, float)):
+            combined_score = max(combined_score, min(1.0, max(0.0, float(backend_score))) * 0.8)
+        reranked.append(
+            {
+                **hit,
+                "rerank_score": round(float(combined_score), 4),
+                "rerank_original_rank": index + 1,
+                "rerank_strategy": "deterministic_lexical_vector_blend",
+            }
+        )
+    reranked.sort(key=lambda item: (float(item.get("rerank_score") or 0.0), -int(item.get("rerank_original_rank") or 0)), reverse=True)
+    return reranked[: max(1, int(limit))] if limit is not None else reranked
+
+
 def rewrite_retrieval_query(query: str, *, source_keys: list[str] | None = None) -> str:
     text = str(query or "").strip()
     replacements = [
@@ -326,6 +365,82 @@ def build_grounded_context_packet(
             "call read_archive_record(...) for the specific relevant archive key only."
         ),
     }
+
+
+def retrieval_hits_to_documents(hits: list[dict[str, Any]]) -> list[Any]:
+    documents = []
+    document_cls = LangChainDocument or AlphaRavisDocument
+    for hit in hits:
+        if not isinstance(hit, dict):
+            continue
+        text = str(hit.get("chunk_text") or hit.get("preview_text") or "").strip()
+        if not text:
+            continue
+        metadata = {
+            "source_type": hit.get("source_type", ""),
+            "source_key": hit.get("source_key", ""),
+            "title": hit.get("title", ""),
+            "retrieval_backend": hit.get("retrieval_backend", ""),
+            "score": hit.get("score"),
+            "similarity": hit.get("similarity"),
+            "distance": hit.get("distance"),
+            "relevance_score": hit.get("relevance_score"),
+            "rerank_score": hit.get("rerank_score"),
+            "chunk_index": hit.get("chunk_index"),
+            "chunk_count": hit.get("chunk_count"),
+            **(hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}),
+        }
+        documents.append(document_cls(page_content=text, metadata=metadata))
+    return documents
+
+
+class AlphaRavisSourceRetriever:
+    """Small LangChain-compatible async retriever adapter over AlphaRavis router callbacks."""
+
+    def __init__(
+        self,
+        *,
+        source_keys: list[str],
+        source_type: str = "all",
+        limit: int = 5,
+        include_other_threads: bool = False,
+        thread_id: str = "",
+        pgvector_search: Callable[..., Awaitable[list[dict[str, Any]]]] | None = None,
+        pgvector_available: bool = False,
+        pgvector_import_error: Exception | None = None,
+        rag_query_func: Callable[..., Awaitable[tuple[list[dict[str, Any]], str]]] | None = None,
+        rag_source_keys: list[str] | None = None,
+    ) -> None:
+        self.source_keys = normalize_source_keys(source_keys)
+        self.source_type = source_type
+        self.limit = limit
+        self.include_other_threads = include_other_threads
+        self.thread_id = thread_id
+        self.pgvector_search = pgvector_search
+        self.pgvector_available = pgvector_available
+        self.pgvector_import_error = pgvector_import_error
+        self.rag_query_func = rag_query_func
+        self.rag_source_keys = rag_source_keys
+
+    async def aget_relevant_documents(self, query: str) -> list[Any]:
+        payload = await query_sources_with_backends(
+            query=query,
+            source_keys=self.source_keys,
+            source_type=self.source_type,
+            limit=self.limit,
+            include_other_threads=self.include_other_threads,
+            thread_id=self.thread_id,
+            pgvector_search=self.pgvector_search,
+            pgvector_available=self.pgvector_available,
+            pgvector_import_error=self.pgvector_import_error,
+            rag_query_func=self.rag_query_func,
+            rag_source_keys=self.rag_source_keys,
+        )
+        grade = grade_retrieval_hits(query=query, hits=list(payload.get("results", [])), max_hits=self.limit)
+        return retrieval_hits_to_documents(list(grade.get("relevant_hits", [])))
+
+    async def ainvoke(self, query: str, *args: Any, **kwargs: Any) -> list[Any]:
+        return await self.aget_relevant_documents(query)
 
 
 def rag_file_id_for_source(source_type: str, source_key: str, metadata: dict[str, Any] | None = None) -> str:
@@ -451,6 +566,11 @@ def _backend_result_is_success(value: Any) -> bool:
     return not any(marker in text for marker in ("failed", "unavailable", "disabled"))
 
 
+def _backend_result_is_queued(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return text.startswith("queued:") or text in {"scheduled", "queue disabled"}
+
+
 async def ingest_source(
     *,
     source_type: str,
@@ -482,6 +602,7 @@ async def ingest_source(
     warnings: list[str] = []
     errors: list[dict[str, str]] = []
     indexed_backends: list[str] = []
+    queued_backends: list[str] = []
     backend_results: dict[str, Any] = {}
     rag_file_id = rag_file_id_for_source(source_type, source_key, metadata)
 
@@ -523,7 +644,10 @@ async def ingest_source(
                 )
                 backend_results["alpharavis_pgvector"] = pgvector_result
                 if _backend_result_is_success(pgvector_result):
-                    indexed_backends.append("alpharavis_pgvector")
+                    if _backend_result_is_queued(pgvector_result):
+                        queued_backends.append("alpharavis_pgvector")
+                    else:
+                        indexed_backends.append("alpharavis_pgvector")
                 else:
                     warnings.append(str(pgvector_result or "AlphaRavis pgvector indexing returned no result."))
             except Exception as exc:
@@ -555,7 +679,15 @@ async def ingest_source(
         rag_indexed_at = None
 
     indexed_backends = list(dict.fromkeys(indexed_backends))
-    index_status = "indexed" if indexed_backends and not errors else "partial" if indexed_backends else "failed"
+    queued_backends = list(dict.fromkeys(queued_backends))
+    if indexed_backends and not errors and not queued_backends:
+        index_status = "indexed"
+    elif queued_backends and not errors and not indexed_backends:
+        index_status = "queued"
+    elif indexed_backends or queued_backends:
+        index_status = "partial"
+    else:
+        index_status = "failed"
     activation = rag_activation_metadata(
         source_type=source_type,
         source_key=source_key,
@@ -574,6 +706,7 @@ async def ingest_source(
         ) else metadata.get("rag_index_status", ""),
         "rag_indexed_at": rag_indexed_at or metadata.get("rag_indexed_at"),
         "indexed_backends": indexed_backends,
+        "queued_backends": queued_backends,
         **activation,
     }
     return {
@@ -587,6 +720,7 @@ async def ingest_source(
         "rag_index_status": result_metadata.get("rag_index_status"),
         "rag_indexed_at": result_metadata.get("rag_indexed_at"),
         "indexed_backends": indexed_backends,
+        "queued_backends": queued_backends,
         "index_status": index_status,
         **activation,
         "backend_results": backend_results,
@@ -655,6 +789,10 @@ async def query_sources_with_backends(
 
     memory_hits = [vector_result_to_tool_hit(record) for record in vector_results[:limit]]
     document_hits = rag_results[:limit]
+    results = [*memory_hits, *document_hits]
+    reranking_enabled = env_bool("ALPHARAVIS_ENABLE_RAG_RERANKING", "false")
+    if reranking_enabled:
+        results = rerank_retrieval_hits(query=query, hits=results, limit=limit)
     warnings = [warning for warning in [vector_warning, rag_warning] if warning]
     return {
         "query": query,
@@ -667,7 +805,11 @@ async def query_sources_with_backends(
             "Use chunk_text for grounded answers. For archive hits, call read_archive_record "
             "only when exact raw archived turns are needed; do not load unrelated archives."
         ),
-        "results": [*memory_hits, *document_hits],
+        "results": results,
+        "reranking": {
+            "enabled": reranking_enabled,
+            "strategy": "deterministic_lexical_vector_blend" if reranking_enabled else "",
+        },
         "warnings": warnings,
         "backend_counts": {
             "alpharavis_pgvector": len(memory_hits),

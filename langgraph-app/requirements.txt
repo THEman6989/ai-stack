@@ -18,6 +18,8 @@ psycopg[binary]>=3.1
 pymongo>=4.6
 beautifulsoup4
 html2text
+pypdf
+docx2txt
 tavily-python
 langmem
 langchain-mcp-adapters
@@ -25,6 +27,7 @@ langchain==1.2.18
 langchain-community>=0.2.0
 langchain-core==1.3.3
 langchain-openai==1.2.1
+langchain-text-splitters>=1.1.0
 openai==2.36.0
 # --- VISUALISIERUNG & DEBUGGING (Awesome LangGraph) ---
 langgraphics

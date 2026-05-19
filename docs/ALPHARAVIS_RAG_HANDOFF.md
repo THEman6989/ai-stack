@@ -27,6 +27,16 @@ Latest local follow-up in this working tree:
   later UI progress plumbing: `large_ingest.started`,
   `large_ingest.completed`, `large_ingest.failed`, or
   `large_ingest.skipped`.
+- queued pgvector ingest is now represented explicitly as
+  `index_status=queued` with `queued_backends=["alpharavis_pgvector"]`.
+  Large Paste can still replace the active text with a source handle while the
+  embedding queue is pending, but retrieval will only return chunks after the
+  queue is drained.
+- explicit server-local document ingest now has an Agent tool:
+  `ingest_document_file`. It reads only under
+  `ALPHARAVIS_DOCUMENT_INGEST_ROOT`, loads through LangChain document loaders,
+  routes through `ingest_source(...)`, and can pin the resulting active RAG
+  source for the current thread.
 - when a huge newest paste cannot stay protected in the recent tail, compression
   may move it into the compressible middle. In that oversized-tail rescue path,
   chunked summary compression is forced if the summary prompt would otherwise
@@ -38,6 +48,7 @@ Latest local follow-up in this working tree:
 Most recent commits:
 
 ```text
+4fae3a2 Harden large context RAG and media handling
 a57017c Add native document RAG smoke
 d7d5c85 Default document RAG to AlphaRavis pgvector
 86c15f6 Isolate LiteLLM proxy database
@@ -58,6 +69,9 @@ ALPHARAVIS_COMPRESSION_REBALANCE_OVERSIZED_TAIL=true
 ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_RATIO=0.60
 ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_FORCE_MIDDLE_RATIO=0.80
 ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=false
+ALPHARAVIS_PGVECTOR_SPLITTER=auto
+ALPHARAVIS_DOCUMENT_INGEST_ROOT=
+ALPHARAVIS_ENABLE_RAG_RERANKING=false
 ```
 
 Live verification after the latest slice:
@@ -71,6 +85,9 @@ Live verification after the latest slice:
   `active_source_key_recorded=true`, and two bounded pgvector hits.
 - Focused tests passed: `42 passed` across Bridge Test UI, retrieval router,
   context budget, and `rag_api_client` tests.
+- Current focused local RAG/Memory/Loader tests passed: `65 passed` across
+  document ingest, context budget, retrieval router, media analysis, and
+  source-scoped retrieval tests.
 - `bridge-test-ui` is running on `127.0.0.1:8140`.
 
 ## User Intent
@@ -148,6 +165,7 @@ New / important files:
 
 - `langgraph-app/rag_api_client.py`
 - `langgraph-app/retrieval_router.py`
+- `langgraph-app/document_ingest.py`
 - `langgraph-app/test_ui_server.py` native/document RAG smoke surface
 - `tests/test_rag_api_client.py`
 - `tests/test_retrieval_router.py`
@@ -162,8 +180,12 @@ Implemented retrieval APIs/tools:
 - `query_source(...)`
 - `query_sources(...)`
 - `query_archive(...)`
+- `ingest_document_file(...)`
 - `agentic_rag_retrieve(...)` as an AlphaRavis tool backed by the router-level
   retrieve/grade/rewrite/context-packet loop
+- `pin_active_rag_sources(...)`, `unpin_active_rag_sources(...)`, and
+  `inspect_active_rag_sources(...)`
+- `read_source_chunks(...)`
 
 Implemented router functions:
 
@@ -205,6 +227,10 @@ External document / PDF / large paste default:
 
 - route toward AlphaRavis-owned pgvector by default through `ingest_source(...)`
   with `ALPHARAVIS_DOCUMENT_RAG_BACKEND=alpharavis_pgvector`
+- explicit server-local files can be loaded with `ingest_document_file(...)`;
+  supported loader profiles include PDF, DOCX, HTML, Markdown, plain text,
+  CSV/JSON/YAML, and logs. The tool is guarded by
+  `ALPHARAVIS_DOCUMENT_INGEST_ROOT` and does not read arbitrary server paths.
 - use `ALPHARAVIS_DOCUMENT_RAG_BACKEND=rag_api` for the current external
   adapter, or `both` for evaluation/dual indexing
 - return thread-activation metadata with `rag_active=true`,
@@ -309,6 +335,14 @@ Live findings:
 
 Current chunking direction:
 
+- splitter mode: `ALPHARAVIS_PGVECTOR_SPLITTER=auto`
+  - explicit documents and large-paste sources use LangChain
+    `RecursiveCharacterTextSplitter` when `langchain-text-splitters` is
+    available
+  - chat/archive/code/log profiles keep the AlphaRavis splitter unless the
+    operator sets `ALPHARAVIS_PGVECTOR_SPLITTER=langchain`
+  - set `ALPHARAVIS_PGVECTOR_SPLITTER=alpharavis` to force the local fallback
+    everywhere
 - standard: 900 tokens / 125 overlap
 - chat/archive: 700 / 100
 - logs: 1200 / 75
@@ -328,10 +362,13 @@ follow-up.
    from `alpharavis_pgvector`, and `rag_api` is not called unless explicitly
    configured.
 
-2. Route future document/PDF upload paths through `ingest_source(...)`.
+2. Connect the actual LibreChat document/PDF upload handoff to
+   `ingest_document_file(...)` / `ingest_source(...)`.
 
-   Keep the AlphaRavis pgvector backend as the default and treat `rag_api` as an
-   adapter/reference path unless explicitly requested.
+   The explicit server-local file tool is implemented. Remaining work is the
+   bridge/upload contract: pass a trusted server-side path, not only `file_id`
+   metadata. Keep the AlphaRavis pgvector backend as the default and treat
+   `rag_api` as an adapter/reference path unless explicitly requested.
 
 3. Stream ingest progress events for large document/paste work.
 
@@ -364,7 +401,7 @@ Reranking should be default-off until measured in the Test UI.
 Use focused tests first:
 
 ```bash
-pytest -q tests/test_retrieval_router.py tests/test_source_scoped_retrieval.py tests/test_rag_api_client.py tests/test_agent_context_budget.py
+pytest -q tests/test_document_ingest.py tests/test_agent_context_budget.py tests/test_retrieval_router.py tests/test_media_analysis.py tests/test_source_scoped_retrieval.py
 ```
 
 Broader current RAG-related smoke:
@@ -382,7 +419,7 @@ python -c "import httpx,json; payload={'source_key':'native_doc_live_smoke','sou
 Syntax check:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile langgraph-app/retrieval_router.py langgraph-app/agent_graph.py langgraph-app/rag_api_client.py langgraph-app/test_ui_server.py
+PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile langgraph-app/document_ingest.py langgraph-app/vector_memory.py langgraph-app/retrieval_router.py langgraph-app/agent_graph.py
 ```
 
 Notebook reference check:

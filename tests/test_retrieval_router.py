@@ -99,6 +99,87 @@ def test_query_sources_with_backends_keeps_archive_rag_passive_by_default(monkey
     assert payload["backend_counts"] == {"alpharavis_pgvector": 0, "rag_api": 0}
 
 
+def test_query_sources_with_backends_can_rerank_results(monkeypatch) -> None:
+    async def fake_pgvector_search(**kwargs):
+        return [
+            {
+                "source_type": "document",
+                "source_key": "doc-1",
+                "title": "Weak vector hit",
+                "chunk_text": "unrelated coffee notes",
+                "similarity": 0.9,
+            },
+            {
+                "source_type": "document",
+                "source_key": "doc-1",
+                "title": "Strong lexical hit",
+                "chunk_text": "AlphaRavis pgvector large paste retrieval rule",
+                "similarity": 0.2,
+            },
+        ]
+
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_RAG_RERANKING", "true")
+    payload = asyncio.run(
+        retrieval_router.query_sources_with_backends(
+            query="AlphaRavis large paste retrieval",
+            source_keys=["doc-1"],
+            source_type="document",
+            limit=2,
+            pgvector_search=fake_pgvector_search,
+            pgvector_available=True,
+        )
+    )
+
+    assert payload["reranking"]["enabled"] is True
+    assert payload["results"][0]["title"] == "Strong lexical hit"
+    assert payload["results"][0]["rerank_score"] > 0
+
+
+def test_retrieval_hits_to_documents_returns_langchain_shaped_documents() -> None:
+    docs = retrieval_router.retrieval_hits_to_documents(
+        [
+            {
+                "source_type": "document",
+                "source_key": "doc-1",
+                "title": "Doc One",
+                "chunk_text": "Grounded document chunk.",
+                "retrieval_backend": "alpharavis_pgvector",
+                "metadata": {"filename": "doc.txt"},
+            }
+        ]
+    )
+
+    assert docs[0].page_content == "Grounded document chunk."
+    assert docs[0].metadata["source_key"] == "doc-1"
+    assert docs[0].metadata["filename"] == "doc.txt"
+
+
+def test_alpha_ravis_source_retriever_returns_documents(monkeypatch) -> None:
+    async def fake_pgvector_search(**kwargs):
+        return [
+            {
+                "source_type": "document",
+                "source_key": "doc-1",
+                "title": "Doc One",
+                "chunk_text": "AlphaRavis source retriever detail.",
+                "similarity": 0.95,
+            }
+        ]
+
+    retriever = retrieval_router.AlphaRavisSourceRetriever(
+        source_keys=["doc-1"],
+        source_type="document",
+        pgvector_search=fake_pgvector_search,
+        pgvector_available=True,
+    )
+
+    docs = asyncio.run(retriever.ainvoke("AlphaRavis retriever"))
+
+    assert len(docs) == 1
+    assert "retriever detail" in docs[0].page_content
+    assert docs[0].metadata["source_key"] == "doc-1"
+
+
 def test_ingest_source_routes_external_document_to_alpharavis_pgvector_by_default(monkeypatch) -> None:
     calls: dict[str, object] = {}
 
@@ -133,6 +214,30 @@ def test_ingest_source_routes_external_document_to_alpharavis_pgvector_by_defaul
     assert result["active_rag_file_ids"] == []
     assert result["active_source_keys"] == ["doc-1"]
     assert result["rag_activation_reason"] == "document_ingest"
+
+
+def test_ingest_source_reports_queued_pgvector_source(monkeypatch) -> None:
+    async def fake_pgvector_index(**kwargs):
+        return "queued:job-1"
+
+    monkeypatch.delenv("ALPHARAVIS_DOCUMENT_RAG_BACKEND", raising=False)
+    result = asyncio.run(
+        retrieval_router.ingest_source(
+            source_type="large_paste",
+            source_key="paste-1",
+            title="Paste One",
+            content="large pasted document body",
+            thread_id="thread-1",
+            pgvector_index=fake_pgvector_index,
+        )
+    )
+
+    assert result["index_status"] == "queued"
+    assert result["indexed_backends"] == []
+    assert result["queued_backends"] == ["alpharavis_pgvector"]
+    assert result["metadata"]["queued_backends"] == ["alpharavis_pgvector"]
+    assert result["rag_active"] is True
+    assert result["active_source_keys"] == ["paste-1"]
 
 
 def test_ingest_source_can_route_external_document_to_rag_api(monkeypatch) -> None:
@@ -196,7 +301,9 @@ def test_ingest_source_indexes_archive_pgvector_without_rag_when_mirror_disabled
     assert calls["pgvector"]["metadata"]["rag_file_id"] == "archive:archive-1"
     assert "rag" not in calls
     assert result["rag_file_id"] == "archive:archive-1"
-    assert result["indexed_backends"] == ["alpharavis_pgvector"]
+    assert result["index_status"] == "queued"
+    assert result["indexed_backends"] == []
+    assert result["queued_backends"] == ["alpharavis_pgvector"]
     assert result["rag_active"] is False
     assert result["active_rag_file_ids"] == []
     assert result["active_source_keys"] == []

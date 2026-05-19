@@ -10,6 +10,14 @@ from typing import Any
 import httpx
 
 try:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+except Exception as exc:  # pragma: no cover - optional dependency during local tests.
+    RecursiveCharacterTextSplitter = None  # type: ignore[assignment]
+    LANGCHAIN_TEXT_SPLITTERS_IMPORT_ERROR: Exception | None = exc
+else:
+    LANGCHAIN_TEXT_SPLITTERS_IMPORT_ERROR = None
+
+try:
     import psycopg
     from psycopg import sql
     from psycopg.types.json import Jsonb
@@ -227,6 +235,66 @@ def _preview_chars() -> int:
     return max(200, int(os.getenv("ALPHARAVIS_PGVECTOR_PREVIEW_CHARS", "900")))
 
 
+def _splitter_mode(metadata: dict[str, Any] | None = None) -> str:
+    metadata = metadata or {}
+    raw = str(metadata.get("splitter") or metadata.get("chunk_splitter") or os.getenv("ALPHARAVIS_PGVECTOR_SPLITTER", "auto")).strip().lower()
+    aliases = {
+        "": "auto",
+        "default": "auto",
+        "native": "alpharavis",
+        "internal": "alpharavis",
+        "legacy": "alpharavis",
+        "own": "alpharavis",
+        "recursive": "langchain",
+        "recursive_character": "langchain",
+        "recursive_character_text_splitter": "langchain",
+    }
+    return aliases.get(raw, raw if raw in {"auto", "langchain", "alpharavis"} else "auto")
+
+
+def _langchain_splitter_source_default(source_type: str, profile: str) -> bool:
+    normalized = str(source_type or "").strip().lower().replace("-", "_")
+    return profile == "default" and normalized in {
+        "external_document",
+        "document",
+        "pdf",
+        "uploaded_document",
+        "artifact_document",
+        "large_paste",
+        "large_ingest",
+    }
+
+
+def _should_use_langchain_splitter(
+    *,
+    source_type: str = "",
+    title: str = "",
+    metadata: dict[str, Any] | None = None,
+    text: str = "",
+) -> bool:
+    mode = _splitter_mode(metadata)
+    if mode == "alpharavis":
+        return False
+    if RecursiveCharacterTextSplitter is None:
+        return False
+    if mode == "langchain":
+        return True
+    profile = _chunk_profile(source_type, title, metadata, text)
+    return _langchain_splitter_source_default(source_type, profile)
+
+
+def _langchain_chunk_text(text: str, *, max_chars: int, overlap: int) -> list[str]:
+    if RecursiveCharacterTextSplitter is None:
+        return []
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=max_chars,
+        chunk_overlap=overlap,
+        keep_separator=True,
+        separators=["\n\n", "\n", " ", ""],
+    )
+    return [chunk.strip() for chunk in splitter.split_text(text) if chunk.strip()]
+
+
 def _embedding_models() -> list[str]:
     models = [os.getenv("ALPHARAVIS_PGVECTOR_EMBEDDING_MODEL", "memory-embed").strip()]
     fallback = os.getenv("ALPHARAVIS_PGVECTOR_FALLBACK_EMBEDDING_MODEL", "memory-embed-fallback").strip()
@@ -271,6 +339,11 @@ def _distance_threshold() -> float | None:
 def _record_id(source_type: str, source_key: str, thread_id: str, scope: str, chunk_index: int) -> str:
     raw = f"{source_type}:{source_key}:{thread_id}:{scope}:{chunk_index}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def _content_digest(text: str) -> str:
+    normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _catalog_enabled() -> bool:
@@ -446,6 +519,15 @@ def chunk_text(
 
     max_chars = _chunk_max_chars(source_type=source_type, title=title, metadata=metadata, text=text)
     overlap = _chunk_overlap_chars(max_chars, source_type=source_type, title=title, metadata=metadata, text=text)
+    if _should_use_langchain_splitter(source_type=source_type, title=title, metadata=metadata, text=text):
+        try:
+            chunks = _langchain_chunk_text(text, max_chars=max_chars, overlap=overlap)
+        except Exception as exc:
+            print(f"WARNING: LangChain text splitter failed; falling back to AlphaRavis splitter: {exc}")
+        else:
+            if chunks:
+                return chunks
+
     sections: list[str] = []
     for section in _semantic_sections(text):
         sections.extend(_split_large_section(section, max_chars, overlap))
@@ -1077,6 +1159,7 @@ async def upsert_memory_record(
 
     chunk_count = len(chunks)
     metadata = metadata or {}
+    source_digest = _content_digest(content)
     catalog_text = build_catalog_text(
         source_type=source_type,
         source_key=source_key,
@@ -1112,7 +1195,14 @@ async def upsert_memory_record(
             chunk_count=chunk_count,
             is_catalog=True,
             embedding_model=catalog_embedding.model,
-            metadata={**metadata, "is_catalog": True, "chunk_count": chunk_count, "source_text_chars": len(content)},
+            metadata={
+                **metadata,
+                "is_catalog": True,
+                "chunk_count": chunk_count,
+                "source_text_chars": len(content),
+                "source_digest": source_digest,
+                "source_digest_algorithm": "sha256-normalized-text",
+            },
             embedding=catalog_embedding.vector,
         )
 
@@ -1128,6 +1218,9 @@ async def upsert_memory_record(
             "chunk_index": index,
             "chunk_count": chunk_count,
             "source_text_chars": len(content),
+            "source_digest": source_digest,
+            "chunk_digest": _content_digest(chunk),
+            "digest_algorithm": "sha256-normalized-text",
         }
         await asyncio.to_thread(
             _insert_chunk_sync,
@@ -1794,6 +1887,107 @@ async def semantic_search(
         source_keys=normalized_source_keys,
         include_other_threads=include_other_threads,
         limit=max(1, min(int(limit), int(os.getenv("ALPHARAVIS_PGVECTOR_SEARCH_LIMIT", "5")))),
+    )
+
+
+def _read_source_chunks_sync(
+    *,
+    namespace: str,
+    thread_id: str,
+    source_type: str,
+    source_key: str,
+    include_other_threads: bool,
+    max_chunks: int,
+    max_chars: int,
+) -> dict[str, Any]:
+    _require_psycopg()
+    table = _table_identifier()
+    where = ["namespace = %s", "source_key = %s", "is_catalog = false"]
+    params: list[Any] = [namespace, source_key]
+    if source_type and source_type != "all":
+        where.append("source_type = %s")
+        params.append(source_type)
+    if not include_other_threads:
+        where.append("(thread_id = %s OR thread_id = '' OR thread_id IS NULL)")
+        params.append(thread_id or "")
+    params.append(max_chunks)
+    query = sql.SQL(
+        """
+        SELECT id, scope, thread_id, thread_key, source_type, source_key, title,
+               chunk_text, preview_text, chunk_index, chunk_count, metadata,
+               created_at, updated_at
+        FROM {table}
+        WHERE {where_clause}
+        ORDER BY chunk_index ASC
+        LIMIT %s
+        """
+    ).format(table=table, where_clause=sql.SQL(" AND ").join(sql.SQL(item) for item in where))
+    with psycopg.connect(_database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            columns = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
+
+    records = []
+    used_chars = 0
+    truncated = False
+    for row in rows:
+        record = dict(zip(columns, row))
+        text = str(record.get("chunk_text") or record.get("preview_text") or "")
+        remaining = max_chars - used_chars
+        if remaining <= 0:
+            truncated = True
+            break
+        if len(text) > remaining:
+            text = text[:remaining].rstrip()
+            truncated = True
+        used_chars += len(text)
+        if hasattr(record.get("created_at"), "isoformat"):
+            record["created_at"] = record["created_at"].isoformat()
+        if hasattr(record.get("updated_at"), "isoformat"):
+            record["updated_at"] = record["updated_at"].isoformat()
+        record["chunk_text"] = text
+        records.append(record)
+        if truncated:
+            break
+    return {
+        "source_key": source_key,
+        "source_type": source_type,
+        "thread_id": thread_id,
+        "chunk_count_returned": len(records),
+        "max_chunks": max_chunks,
+        "max_chars": max_chars,
+        "returned_chars": used_chars,
+        "truncated": truncated or len(rows) > len(records),
+        "chunks": records,
+    }
+
+
+async def read_source_chunks(
+    *,
+    source_key: str,
+    thread_id: str = "",
+    source_type: str = "all",
+    include_other_threads: bool = False,
+    max_chunks: int = 8,
+    max_chars: int = 12000,
+    namespace: str = "alpharavis",
+) -> dict[str, Any]:
+    if not is_enabled():
+        return {"source_key": source_key, "chunks": [], "warning": "pgvector memory is disabled"}
+    source_key = str(source_key or "").strip()
+    if not source_key:
+        raise VectorMemoryError("source_key is required for source chunk reads.")
+    source_type = re.sub(r"[^a-zA-Z0-9_-]+", "_", source_type.strip().lower())[:80] or "all"
+    return await asyncio.to_thread(
+        _read_source_chunks_sync,
+        namespace=namespace,
+        thread_id=thread_id,
+        source_type=source_type,
+        source_key=source_key,
+        include_other_threads=include_other_threads,
+        max_chunks=max(1, min(int(max_chunks), int(os.getenv("ALPHARAVIS_SOURCE_READ_MAX_CHUNKS", "20")))),
+        max_chars=max(200, min(int(max_chars), int(os.getenv("ALPHARAVIS_SOURCE_READ_MAX_CHARS", "30000")))),
     )
 
 

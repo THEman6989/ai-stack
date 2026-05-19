@@ -1201,6 +1201,7 @@ Keep them separate. LiteLLM runs Prisma migrations at startup; sharing the
 `rag_api` database can remove or invalidate LangChain PGVector tables.
 
 ```text
+ALPHARAVIS_PGVECTOR_SPLITTER=auto
 ALPHARAVIS_PGVECTOR_CHARS_PER_TOKEN=4.0
 ALPHARAVIS_PGVECTOR_CHUNK_TOKENS=900
 ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_TOKENS=125
@@ -1211,12 +1212,35 @@ ALPHARAVIS_PGVECTOR_LOG_CHUNK_OVERLAP_TOKENS=75
 ALPHARAVIS_PGVECTOR_CODE_CHUNK_TOKENS=600
 ALPHARAVIS_PGVECTOR_CODE_CHUNK_OVERLAP_TOKENS=80
 ALPHARAVIS_PGVECTOR_EMBEDDING_TIMEOUT_SECONDS=45
+ALPHARAVIS_SOURCE_READ_MAX_CHUNKS=20
+ALPHARAVIS_SOURCE_READ_MAX_CHARS=30000
+ALPHARAVIS_ENABLE_RAG_RERANKING=false
+ALPHARAVIS_DOCUMENT_INGEST_ROOT=
 ```
 
 AlphaRavis chooses the chunk profile from `source_type`, filename/path metadata,
 Markdown code fences, and common code/log syntax. Code detection is intentionally
 heuristic for now; a later Tree-sitter/AST splitter can cut by function/class
-boundaries more precisely.
+boundaries more precisely. With `ALPHARAVIS_PGVECTOR_SPLITTER=auto`, explicit
+document and large-paste sources use LangChain's
+`RecursiveCharacterTextSplitter` when the runtime package is available, while
+chat/archive/code/log profiles keep the AlphaRavis splitter. Use
+`ALPHARAVIS_PGVECTOR_SPLITTER=langchain` to force LangChain splitting, or
+`alpharavis` to force the local fallback.
+Optional router reranking is default-off. When
+`ALPHARAVIS_ENABLE_RAG_RERANKING=true`, AlphaRavis reorders source-scoped hits
+with a deterministic lexical/vector score blend before grading and context
+packet construction.
+
+File-like RAG ingest has an internal LangChain loader helper in
+`langgraph-app/document_ingest.py`. It normalizes PDF, DOCX, HTML, Markdown,
+plain text, CSV/JSON/YAML, and log files into text plus per-document metadata
+before the content is handed to `ingest_source(...)`. Agents/operators can use
+`ingest_document_file` for explicit server-local files; it reads only under
+`ALPHARAVIS_DOCUMENT_INGEST_ROOT` and then pins the resulting active RAG source
+for the current thread by default. The real LibreChat upload path is not yet
+auto-routed through this helper because the bridge still needs a trusted
+server-side file-path handoff.
 
 Use the 32k context window for capability testing and exceptional large-query
 cases, not as the normal archive/memory chunk size.
@@ -1229,6 +1253,10 @@ query_source
 query_sources
 query_archive
 agentic_rag_retrieve
+pin_active_rag_sources
+unpin_active_rag_sources
+inspect_active_rag_sources
+read_source_chunks
 ```
 
 It searches the current thread plus global memories by default and also queries

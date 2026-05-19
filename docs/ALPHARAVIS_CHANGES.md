@@ -460,6 +460,7 @@ Earlier live measurement through LiteLLM showed the 4b route is functional with
 to smaller profile-specific chunks:
 
 ```text
+ALPHARAVIS_PGVECTOR_SPLITTER=auto
 ALPHARAVIS_PGVECTOR_CHARS_PER_TOKEN=4.0
 ALPHARAVIS_PGVECTOR_CHUNK_TOKENS=900
 ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_TOKENS=125
@@ -475,6 +476,76 @@ ALPHARAVIS_PGVECTOR_EMBEDDING_TIMEOUT_SECONDS=45
 Code/log/chat detection uses source type, filename/path metadata, Markdown
 fences, and common syntax/log-line signals. Code splitting is still heuristic;
 AST/Tree-sitter function/class chunking remains a follow-up.
+
+Follow-up: `ALPHARAVIS_PGVECTOR_SPLITTER=auto` now uses LangChain's
+`RecursiveCharacterTextSplitter` for explicit document and large-paste sources
+when `langchain-text-splitters` is installed. Chunk size and overlap still come
+from the AlphaRavis ENV profile knobs above. Set
+`ALPHARAVIS_PGVECTOR_SPLITTER=langchain` to force LangChain splitting, or
+`alpharavis` to force the local fallback.
+
+Follow-up: AlphaRavis pgvector chunk metadata now records stable normalized-text
+digests. Catalog rows include `source_digest` and
+`source_digest_algorithm=sha256-normalized-text`; chunk rows include
+`source_digest`, `chunk_digest`, and `digest_algorithm`. This is the first step
+toward repeated paste/archive chunk deduplication. The retrieval/storage policy
+still keeps all chunks for now; digest-based skip/reuse behavior remains a
+follow-up.
+
+Follow-up: the retrieval router now distinguishes queued pgvector ingest from
+completed indexing. A pgvector result such as `queued:<job_id>` returns
+`index_status=queued`, leaves `indexed_backends` empty, and records
+`queued_backends=["alpharavis_pgvector"]`. Large Paste replacement still returns
+a source handle in this state, but the marker says the source is queued rather
+than already indexed. Retrieval may return no chunks until the embedding queue
+is drained.
+
+Follow-up: RAG active-source pins are now tool-accessible and store-backed per
+thread. `pin_active_rag_sources`, `unpin_active_rag_sources`, and
+`inspect_active_rag_sources` let an agent/operator persist active source keys
+and optional `rag_api` file ids in the LangGraph Store. `active_rag_prefetch`
+merges those pins with state-derived document/large-paste activation metadata,
+so pinned sources can trigger bounded prefetch even when the current graph state
+does not already carry `rag_active=true`.
+
+Follow-up: `read_source_chunks` provides a guarded exact-source read path for
+known AlphaRavis pgvector `source_key` values. It reads ordered non-catalog
+chunks scoped to the current thread by default and caps output with
+`ALPHARAVIS_SOURCE_READ_MAX_CHUNKS` and `ALPHARAVIS_SOURCE_READ_MAX_CHARS`.
+This gives agents a controlled fallback when semantic retrieval finds the right
+source but a few exact adjacent chunks are needed.
+
+Follow-up: the retrieval router now has a LangChain-style document/retriever
+adapter. `retrieval_hits_to_documents(...)` converts AlphaRavis hits into
+LangChain `Document` objects when available, and `AlphaRavisSourceRetriever`
+exposes async `aget_relevant_documents` / `ainvoke` over
+`query_sources_with_backends(...)`. This keeps AlphaRavis ownership, thread
+scope, and metadata while letting future graph nodes consume a Retriever-like
+interface.
+
+Follow-up: optional deterministic reranking is available behind
+`ALPHARAVIS_ENABLE_RAG_RERANKING=false`. When enabled, router results are
+annotated with `rerank_score`, `rerank_original_rank`, and
+`rerank_strategy=deterministic_lexical_vector_blend`, then sorted before
+grading/context-packet construction. External reranker model calls remain
+future work.
+
+Follow-up: `langgraph-app/document_ingest.py` adds the first LangChain-native
+document loader layer for file-like RAG sources. It selects `PyPDFLoader`,
+`Docx2txtLoader`, `BSHTMLLoader`, or `TextLoader` by extension, returns
+normalized text with document-part markers, and preserves per-part metadata for
+later `ingest_source(...)` calls. The runtime requirements now include `pypdf`
+and `docx2txt` for PDF/DOCX loader support. This helper is internal foundation;
+the live upload path still needs an explicit file-location handoff before it
+can be wired safely.
+
+Follow-up: `ingest_document_file` is now available as a guarded Agent RAG tool.
+It reads only under `ALPHARAVIS_DOCUMENT_INGEST_ROOT` (defaulting to the
+AlphaRavis workspace), loads the file through `document_ingest.py`, indexes it
+through `ingest_source(...)` with AlphaRavis pgvector callbacks, and optionally
+persists the resulting active source pin for the current thread. This covers
+explicit server-local PDF/DOCX/HTML/Markdown/text ingest while keeping the
+LibreChat upload auto-routing follow-up separate.
 
 Treat 32k as model context capacity, not as a practical per-chunk ingest size on
 this backend.
