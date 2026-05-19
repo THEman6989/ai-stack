@@ -25,7 +25,7 @@ model_list:
 
   # Text embedding route for AlphaRavis pgvector memory and rag_api mirrors.
   # Default env uses Ollama-native LiteLLM model ids, for example
-  # EMBEDDING_LITELLM_MODEL=ollama/qwen3-embedding:4b with
+  # EMBEDDING_LITELLM_MODEL=ollama/qwen3-embedding:0.6b with
   # EMBEDDING_API_BASE=http://<ollama-host>:11434. For a future
   # OpenAI-compatible embedding server, set model=openai/<served-model> and
   # api_base=http://<host>:<port>/v1.
@@ -68,7 +68,3 @@ model_list:
 litellm_settings:
   num_retries: 0
   request_timeout: 180
-  # LangChain/OpenAIEmbeddings sends encoding_format for some clients, but
-  # Ollama embedding routes do not support it. Let LiteLLM drop unsupported
-  # optional params so rag_api can share the same memory-embed route.
-  drop_params: true

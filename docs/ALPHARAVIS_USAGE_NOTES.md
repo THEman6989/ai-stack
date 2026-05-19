@@ -1138,11 +1138,11 @@ ALPHARAVIS_PGVECTOR_FALLBACK_EMBEDDING_MODEL=memory-embed-fallback
 ```
 
 `memory-embed` is a LiteLLM route. The default example now routes to Ollama's
-native embedding API with `ollama/qwen3-embedding:4b`; pull it on the Ollama
+native embedding API with `ollama/qwen3-embedding:0.6b`; pull it on the Ollama
 host first:
 
 ```bash
-ollama pull qwen3-embedding:4b
+ollama pull qwen3-embedding:0.6b
 ```
 
 The fallback route points to `ollama/bge-m3`. For a future OpenAI-compatible
@@ -1150,17 +1150,25 @@ embedding backend such as llama.cpp or LM Studio, set
 `EMBEDDING_LITELLM_MODEL=openai/<served-model>` and
 `EMBEDDING_API_BASE=http://<embedding-host>:<port>/v1`, then keep AlphaRavis
 itself pointed at LiteLLM's `memory-embed` route.
-`litellm-config/config.yaml` enables `litellm_settings.drop_params=true` so
-LangChain/OpenAIEmbeddings clients can share the same route even when they send
-optional OpenAI parameters, such as `encoding_format`, that Ollama embedding
-routes do not support.
-`qwen3-embedding:4b` is expected to support roughly a 32k-token embedding
+`scripts/render_litellm_config.py` renders the LiteLLM config at container
+startup. It enables `drop_params=true` only on routes whose resolved model id
+starts with `ollama/`, so LangChain/OpenAIEmbeddings can use the local Ollama
+embedding route even when it sends optional OpenAI parameters such as
+`encoding_format`. If the route is changed to `openai/<served-model>` for
+llama.cpp, LM Studio, or another OpenAI-compatible embedding server, the
+renderer leaves parameter dropping disabled for that route.
+`qwen3-embedding:0.6b` is expected to support roughly a 32k-token embedding
 context. Use the Bridge Test UI `Memory Embed Tester` to confirm the real
 accepted size and latency on the running server; its default max probe size is
 set near 32k rough tokens.
-On the current Ollama host, the tested route returns 2560-dimensional vectors
-but becomes slow well before 32k. The practical AlphaRavis pgvector defaults are
-therefore smaller and profile-specific:
+On the current Ollama host, the previous 4b route returned 2560-dimensional
+vectors but became slow well before 32k. The 0.6b default returns
+1024-dimensional vectors and is the practical throughput choice; AlphaRavis
+pgvector chunking remains smaller and profile-specific:
+
+When changing embedding dimensions, use a new `rag_api` collection. The default
+is now `RAG_COLLECTION_NAME=alpharavis_qwen06` so old 4b vectors do not mix with
+new 0.6b vectors in LangChain PGVector searches.
 
 ```text
 ALPHARAVIS_PGVECTOR_CHARS_PER_TOKEN=4.0

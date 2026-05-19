@@ -238,9 +238,11 @@ Implemented:
   message. Archive-only state with `archive_rag_mode=tool_only` remains
   passive.
 - Live runtime check on 2026-05-19: LiteLLM now drops unsupported optional
-  embedding params, so LangChain/OpenAIEmbeddings through `rag_api` no longer
-  fails on `encoding_format=base64`. `Archive RAG Smoke` passed with
-  `acceptance_ok=true` and returned a bounded `rag_api` hit.
+  embedding params only for Ollama-backed routes, so LangChain/OpenAIEmbeddings
+  through `rag_api` no longer fails on `encoding_format=base64` when
+  `memory-embed` uses Ollama. OpenAI-compatible/llama.cpp routes keep parameter
+  dropping disabled. `Archive RAG Smoke` passed with `acceptance_ok=true` and
+  returned a bounded `rag_api` hit.
 
 Still needed:
 
@@ -248,10 +250,12 @@ Still needed:
 - Tune large-paste runtime performance. A live two-turn large-paste test reached
   `rag_api` embedding, but a 27-chunk embedding batch and the later chat-model
   call hit the current 180s runtime timeouts. Candidate fixes: smaller
-  `rag_api` embedding batches, faster `memory-embed` model such as the tested
-  `qwen3-embedding:0.6b`, shorter large-paste chunks, queue-only ingest with
-  progress, or a larger Bridge/LangGraph timeout only after backend throughput is
-  understood.
+  `rag_api` embedding batches, shorter large-paste chunks, queue-only ingest
+  with progress, or a larger Bridge/LangGraph timeout only after backend
+  throughput is understood. The default `memory-embed` route has been switched
+  from the slower 4b model to `qwen3-embedding:0.6b`, with a new
+  `RAG_COLLECTION_NAME=alpharavis_qwen06` collection to avoid vector-dimension
+  collisions with old 4b rows.
 - Add optional archive `auto_on_intent` behavior after live quality/latency is
   measured. Keep archive-only threads passive unless this mode is explicitly
   enabled.
@@ -1609,11 +1613,11 @@ External context-management learnings to evaluate:
     into AlphaRavis pgvector and the optional `rag_api` archive mirror.
     Decision: use a normal text embedding model first via Ollama behind
     LiteLLM. Default config now targets
-    `EMBEDDING_LITELLM_MODEL=ollama/qwen3-embedding:4b` and
+    `EMBEDDING_LITELLM_MODEL=ollama/qwen3-embedding:0.6b` and
     `EMBEDDING_API_BASE=http://<ollama-host>:11434`. The operator must pull
-    `qwen3-embedding:4b` on the Ollama host, then recreate LiteLLM and rerun the
-    Memory Embed Tester. Treat 32k tokens as the expected context target for
-    `qwen3-embedding:4b`, but validate the actual accepted input size and
+    `qwen3-embedding:0.6b` on the Ollama host, then recreate LiteLLM and rerun
+    the Memory Embed Tester. Treat 32k tokens as the expected context target for
+    `qwen3-embedding:0.6b`, but validate the actual accepted input size and
     latency with the tester because Ollama/server limits may differ. Keep the
     OpenAI-compatible path documented for future llama.cpp/LM Studio embedding
     backends by setting
@@ -1625,16 +1629,15 @@ External context-management learnings to evaluate:
     700 / 100, logs 1200 / 75, code 600 / 80, with
     `ALPHARAVIS_PGVECTOR_CHARS_PER_TOKEN=4.0` and 45s embedding timeout.
     Follow-up: decide whether to keep this throughput, use smaller queue
-    batches, switch to `qwen3-embedding:0.6b`, or move embeddings to a faster
-    OpenAI-compatible backend.
+    batches, or move embeddings to a faster OpenAI-compatible backend.
     Additional probe: `qwen3-embedding:0.6b` works through Ollama `/api/embed`,
     returns 1024-dim vectors, reports a 32768-token context, and completed a
     131072-char / ~32768-rough-token probe in ~40.5s. `aroxima/gte-qwen2-1.5b-
     instruct` reports 131072 context and 1536 embedding length in metadata, but
     Ollama rejects `/api/embed` with HTTP 501, so it is not usable as an Ollama
-    embedding backend in this setup. Follow-up decision: switch `memory-embed`
-    from `qwen3-embedding:4b` to `qwen3-embedding:0.6b` if speed is more
-    important than vector dimensionality.
+    embedding backend in this setup. Decision: switch `memory-embed` from
+    `qwen3-embedding:4b` to `qwen3-embedding:0.6b` because speed is more
+    important than vector dimensionality for the current local RAG flow.
   - Planned: add real vision-embedding backend support after the text
     `memory-embed` route is proven. Test whether the target llama.cpp/OpenAI-
     compatible server accepts the intended vision payload and returns vectors;

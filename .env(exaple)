@@ -178,10 +178,10 @@ EDGE_GEMMA_STREAM_TIMEOUT_SECONDS=15
 # Optional text embedding models used only when pgvector semantic memory is
 # enabled. Default route is Ollama-native through LiteLLM.
 # Primary:
-#   ollama pull qwen3-embedding:4b
+#   ollama pull qwen3-embedding:0.6b
 # Fallback:
 #   ollama pull bge-m3
-# `qwen3-embedding:4b` is expected to support roughly a 32k-token embedding
+# `qwen3-embedding:0.6b` is expected to support roughly a 32k-token embedding
 # context; verify the real accepted size with the Bridge Test UI Memory Embed
 # Tester because server/runtime limits can still be lower.
 #
@@ -189,10 +189,13 @@ EDGE_GEMMA_STREAM_TIMEOUT_SECONDS=15
 # set for example:
 #   EMBEDDING_LITELLM_MODEL=openai/<served-embedding-model>
 #   EMBEDDING_API_BASE=http://<embedding-host>:<port>/v1
-EMBEDDING_LITELLM_MODEL=ollama/qwen3-embedding:4b
+EMBEDDING_LITELLM_MODEL=ollama/qwen3-embedding:0.6b
 EMBEDDING_FALLBACK_LITELLM_MODEL=ollama/bge-m3
 EMBEDDING_API_BASE=http://192.168.178.140:11434
 EMBEDDING_TIMEOUT_SECONDS=30
+# rag_api collection name. Keep model/dimension changes in a new collection so
+# old vectors from a previous embedding dimension do not break similarity search.
+RAG_COLLECTION_NAME=alpharavis_qwen06
 
 # Experimental optional vision embedding route. Startup/default operation keeps
 # vision vector memory disabled; enable it only with the explicit
@@ -488,7 +491,7 @@ ALPHARAVIS_MODEL_IDLE_SECONDS=600
 ALPHARAVIS_EMBEDDING_LOAD_POLICY=idle_or_big_llm_active
 ALPHARAVIS_OLLAMA_BASE_URL=http://192.168.178.140:11434
 ALPHARAVIS_OLLAMA_CHAT_MODEL=gemma4:e2b
-ALPHARAVIS_OLLAMA_EMBED_MODEL=qwen3-embedding:4b
+ALPHARAVIS_OLLAMA_EMBED_MODEL=qwen3-embedding:0.6b
 ALPHARAVIS_OLLAMA_EMBED_FALLBACK_MODEL=bge-m3
 
 # Hard graph-level cutoff. If the active LangGraph context is above this

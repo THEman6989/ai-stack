@@ -6,15 +6,22 @@ can tell which patches are intentional and which ones can be removed.
 
 ## 2026-05-19 - LiteLLM Embedding Param Compatibility For rag_api
 
-LiteLLM now sets `litellm_settings.drop_params: true` in
-`litellm-config/config.yaml`.
+LiteLLM config is now rendered at container startup by
+`scripts/render_litellm_config.py`. The base `litellm-config/config.yaml` keeps
+`drop_params` unset globally; the renderer adds `drop_params: true` only to
+routes whose resolved model id starts with `ollama/`.
 
 Rationale: `rag_api` uses LangChain/OpenAIEmbeddings, and the current client
 sends `encoding_format=base64` on embedding requests. Ollama-backed LiteLLM
 embedding routes reject that optional OpenAI parameter unless LiteLLM is allowed
-to drop unsupported provider params. AlphaRavis' own `vector_memory.py` did not
-send this parameter, so the failure only appeared through the `rag_api` mirror
-and query path.
+to drop unsupported provider params for that Ollama route. AlphaRavis' own
+`vector_memory.py` did not send this parameter, so the failure only appeared
+through the `rag_api` mirror and query path.
+
+The compatibility setting is deliberately route-scoped. If
+`EMBEDDING_LITELLM_MODEL=openai/<served-model>` points to a llama.cpp, LM Studio,
+or other OpenAI-compatible embedding server that accepts OpenAI embedding
+parameters, the renderer does not enable `drop_params` for that route.
 
 Live verification on the local stack:
 
@@ -325,19 +332,19 @@ tester reports this as `status=failed`, `stop_reason=rejected`.
 Updated the default text embedding route to use Ollama-native LiteLLM model ids:
 
 ```text
-EMBEDDING_LITELLM_MODEL=ollama/qwen3-embedding:4b
+EMBEDDING_LITELLM_MODEL=ollama/qwen3-embedding:0.6b
 EMBEDDING_FALLBACK_LITELLM_MODEL=ollama/bge-m3
 EMBEDDING_API_BASE=http://192.168.178.140:11434
 ```
 
-Operators should run `ollama pull qwen3-embedding:4b` on the Ollama host before
+Operators should run `ollama pull qwen3-embedding:0.6b` on the Ollama host before
 recreating LiteLLM. The OpenAI-compatible alternative remains supported by
 setting `EMBEDDING_LITELLM_MODEL=openai/<served-model>` and
 `EMBEDDING_API_BASE=http://<embedding-host>:<port>/v1`. Vision embeddings remain
 experimental and default-off through `ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY`.
 The Memory Embed Tester default max probe size was raised to about 32k rough
-tokens so it can validate the expected `qwen3-embedding:4b` context window.
-Live measurement through LiteLLM showed the route is functional with
+tokens so it can validate the expected `qwen3-embedding:0.6b` context window.
+Earlier live measurement through LiteLLM showed the 4b route is functional with
 2560-dimensional vectors, but latency rises quickly on the current Ollama host:
 1024 chars took 10.3s, 2048 chars took 20.1s, 4096 chars took 41.7s, and
 8192 chars took 86.2s. Because of that, AlphaRavis pgvector defaults were tuned
@@ -381,9 +388,14 @@ qwen3-embedding:0.6b:
   131072 chars (~32768 rough tokens): 40.5s
 ```
 
-The `0.6b` model is the current practical candidate if throughput matters more
-than vector dimension. It returns smaller 1024-dimensional vectors but is much
-faster than the 4b route on this host.
+The `0.6b` model is now the default because throughput matters more than vector
+dimension for the current local RAG flow. It returns smaller 1024-dimensional
+vectors but is much faster than the 4b route on this host.
+
+The `rag_api` collection default was moved to `RAG_COLLECTION_NAME=alpharavis_qwen06`
+at the same time. This avoids mixing old 2560-dimensional qwen3-embedding:4b
+rows with new 1024-dimensional qwen3-embedding:0.6b rows in the same LangChain
+PGVector collection.
 
 ## 2026-05-18 - Source-Scoped Retrieval Tools
 

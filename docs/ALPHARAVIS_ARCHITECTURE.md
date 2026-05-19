@@ -1726,7 +1726,7 @@ ALPHARAVIS_MEDIA_VISION_EMBEDDING_MODEL_CARD=vision-embed
 - Optional vision embeddings are experimental and written only when
   `ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=true`. The normal memory/RAG bring-up
   path uses text embeddings only through LiteLLM `memory-embed`, defaulting to
-  an Ollama-native `ollama/qwen3-embedding:4b` route.
+  an Ollama-native `ollama/qwen3-embedding:0.6b` route.
 - The vision embedding client prefers a direct external model URL when
   configured:
 

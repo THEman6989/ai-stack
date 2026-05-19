@@ -55,7 +55,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@vectordb:5432/rag_api
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-local-dev}
-      - EMBEDDING_LITELLM_MODEL=${EMBEDDING_LITELLM_MODEL:-ollama/qwen3-embedding:4b}
+      - EMBEDDING_LITELLM_MODEL=${EMBEDDING_LITELLM_MODEL:-ollama/qwen3-embedding:0.6b}
       - EMBEDDING_FALLBACK_LITELLM_MODEL=${EMBEDDING_FALLBACK_LITELLM_MODEL:-ollama/bge-m3}
       - EMBEDDING_API_BASE=${EMBEDDING_API_BASE:-http://192.168.178.140:11434}
       - EMBEDDING_TIMEOUT_SECONDS=${EMBEDDING_TIMEOUT_SECONDS:-30}
@@ -66,9 +66,12 @@ services:
       - .env
     volumes:
       - ./litellm-config/config.yaml:/app/config.yaml
+      - ./scripts/render_litellm_config.py:/app/render_litellm_config.py:ro
     ports:
       - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:4000:4000"
-    command: [ "--config", "/app/config.yaml", "--port", "4000" ]
+    entrypoint: [ "/bin/sh", "-c" ]
+    command:
+      - "python /app/render_litellm_config.py /app/config.yaml /tmp/alpharavis-litellm-config.yaml && exec litellm --config /tmp/alpharavis-litellm-config.yaml --port 4000"
     restart: always
 
   rag_api:
@@ -86,6 +89,7 @@ services:
       - RAG_OPENAI_API_KEY=${RAG_OPENAI_API_KEY:-sk-local-dev}
       - RAG_OPENAI_BASEURL=http://litellm:4000
       - EMBEDDINGS_MODEL=${RAG_EMBEDDINGS_MODEL:-memory-embed}
+      - COLLECTION_NAME=${RAG_COLLECTION_NAME:-alpharavis_qwen06}
     depends_on:
       - vectordb
       - litellm

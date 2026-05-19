@@ -177,7 +177,7 @@ Vision embeddings are default-off and experimental.
 Text embedding current config targets Ollama/LiteLLM:
 
 ```text
-EMBEDDING_LITELLM_MODEL=ollama/qwen3-embedding:4b
+EMBEDDING_LITELLM_MODEL=ollama/qwen3-embedding:0.6b
 EMBEDDING_API_BASE=http://192.168.178.140:11434
 ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=false
 ```
@@ -185,18 +185,25 @@ ALPHARAVIS_ENABLE_VISION_VECTOR_MEMORY=false
 Live findings:
 
 - `qwen3-embedding:4b`: works, 2560-dim, but slow for large chunks
-- `qwen3-embedding:0.6b`: works, 1024-dim, much faster, good candidate if speed
-  matters more than vector dimension
+- `qwen3-embedding:0.6b`: current default; works, 1024-dim, much faster when
+  speed matters more than vector dimension
 - `aroxima/gte-qwen2-1.5b-instruct`: reports embedding metadata but Ollama
   rejects `/api/embed` with HTTP 501 in this setup
-- LiteLLM must keep `litellm_settings.drop_params=true` when `rag_api` uses
+- LiteLLM must drop unsupported params when `rag_api` uses
   LangChain/OpenAIEmbeddings against an Ollama-backed `memory-embed` route,
   because that client sends `encoding_format=base64` and Ollama does not accept
-  it.
+  it. Keep this route-scoped: `scripts/render_litellm_config.py` adds
+  `drop_params=true` only when the resolved LiteLLM model id starts with
+  `ollama/`, so llama.cpp/OpenAI-compatible embedding routes keep their normal
+  request parameters.
 - Archive RAG smoke passed after the LiteLLM param-drop fix and LangChain
   PGVector table initialization. Large-paste live testing still hits runtime
   timeouts with the current 4b embedding route when a paste expands to many
   chunks.
+- The `rag_api` collection default is `RAG_COLLECTION_NAME=alpharavis_qwen06`
+  after switching the default embedding model to 0.6b. Do not mix old 2560-dim
+  qwen3-embedding:4b rows and new 1024-dim qwen3-embedding:0.6b rows in one
+  LangChain PGVector collection.
 
 Current chunking direction:
 
