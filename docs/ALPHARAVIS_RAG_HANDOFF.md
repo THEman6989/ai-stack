@@ -133,13 +133,15 @@ Archive default:
 
 External document / PDF / large paste default:
 
-- route toward `rag_api` by default through `ingest_source(...)`
-- do not also index in AlphaRavis pgvector unless
-  `ALPHARAVIS_INGEST_INDEX_DOCUMENTS_IN_PGVECTOR=true` or
-  `preferred_backend=both`
+- route toward AlphaRavis-owned pgvector by default through `ingest_source(...)`
+  with `ALPHARAVIS_DOCUMENT_RAG_BACKEND=alpharavis_pgvector`
+- use `ALPHARAVIS_DOCUMENT_RAG_BACKEND=rag_api` for the current external
+  adapter, or `both` for evaluation/dual indexing
 - return thread-activation metadata with `rag_active=true`,
-  `active_source_keys`, `active_rag_file_ids`, and
+  `active_source_keys`, optional `active_rag_file_ids`, and
   `rag_activation_reason=document_ingest|large_paste`
+- when only AlphaRavis pgvector indexed the source, keep `active_rag_file_ids`
+  empty so active prefetch does not call `rag_api`
 - large human messages are now detected in `run_profile_start_node`; after
   successful `ingest_source(source_type="large_paste")`, the active chat context
   gets a compact retrieval marker instead of the full pasted text
@@ -222,6 +224,9 @@ follow-up.
 ## Next Best Steps
 
 1. Route future document/PDF upload paths through `ingest_source(...)`.
+
+   Keep the AlphaRavis pgvector backend as the default and treat `rag_api` as an
+   adapter/reference path unless explicitly requested.
 
 2. Add optional archive auto-on-intent behavior. Keep compression archives
    passive by default; only enable archive auto-retrieval when

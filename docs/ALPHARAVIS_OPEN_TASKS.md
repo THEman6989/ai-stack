@@ -1397,12 +1397,13 @@ External context-management learnings to evaluate:
     metadata, environment flags, and `preferred_backend`, returns normalized
     `rag_file_id`, `rag_index_status`, `indexed_backends`, `index_status`,
     backend results, warnings, and errors. Current routing rules keep external
-    documents/large pastes on `rag_api` by default, keep archives in AlphaRavis
-    pgvector unless `ALPHARAVIS_ENABLE_RAG_ARCHIVE_MIRROR=true` or the caller
-    explicitly requests `rag_api`, and allow `preferred_backend=both` for
-    evaluation. Follow-up: wire compression archives, large-paste ingest, and
-    future document upload flows through this function instead of direct backend
-    calls.
+    documents/large pastes on AlphaRavis pgvector by default
+    (`ALPHARAVIS_DOCUMENT_RAG_BACKEND=alpharavis_pgvector`), keep archives in
+    AlphaRavis pgvector unless `ALPHARAVIS_ENABLE_RAG_ARCHIVE_MIRROR=true` or
+    the caller explicitly requests `rag_api`, and allow
+    `ALPHARAVIS_DOCUMENT_RAG_BACKEND=rag_api|both` / `preferred_backend=both`
+    for adapter comparison. Follow-up: wire future document upload flows through
+    this function instead of direct backend calls.
     Implemented first product call-site: compression archive creation now calls
     `ingest_source(source_type="archive", preferred_backend="auto")` instead of
     directly mirroring to `rag_api` and separately indexing pgvector. The archive
@@ -1503,9 +1504,11 @@ External context-management learnings to evaluate:
     artifacts, skills, and thread-scoped retrieval because it already stores
     `source_type`, `source_key`, `thread_id`, `thread_key`, catalog rows, chunk
     maps, and archive-specific metadata.
-  - Use `rag_api` as the primary backend for external documents and large pasted
-    document ingests where `file_id`-scoped document search, LangChain loaders,
-    and generic document chunking are a better fit.
+  - Use AlphaRavis pgvector as the default backend for external documents and
+    large pasted document ingests, so the product continues toward the native
+    implementation. Keep `rag_api` selectable as an adapter/reference backend
+    for `file_id`-scoped document search, LangChain loaders, and generic
+    document chunking comparisons.
   - Consider optionally mirroring archive text into `rag_api` only as a secondary
     federated index, with `file_id=archive:<archive_key>` and clear ownership
     metadata. Do not make `rag_api` the only archive source unless it can preserve

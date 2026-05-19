@@ -522,7 +522,8 @@ Handles deeper research.
 Capabilities:
 
 - Tavily-based deeper web search.
-- Local document search through the RAG API.
+- Local document search through AlphaRavis pgvector by default, with `rag_api`
+  still available as an adapter/reference backend.
 - Handoff to general, debugger, or context retrieval.
 
 ### Debugger Agent
@@ -646,6 +647,10 @@ catalog and full retrieval chunks to pgvector for newly saved memories, session
 turns, archives, archive collections, artifacts, debugging lessons, and skill
 candidates. MongoDB/store/artifact files remain the source of truth, while
 pgvector is the searchable Inhaltsverzeichnis and chunk index.
+Document and large-paste RAG uses this AlphaRavis-owned pgvector backend by
+default through `ALPHARAVIS_DOCUMENT_RAG_BACKEND=alpharavis_pgvector`; `rag_api`
+is a selectable adapter for compatibility and comparison, not the primary
+source of truth.
 
 Relevant settings:
 

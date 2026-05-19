@@ -307,6 +307,32 @@ def test_active_rag_prefetch_injects_bounded_context(monkeypatch: pytest.MonkeyP
     assert "The grounded document detail." in updates["messages"][0].content
 
 
+def test_active_rag_prefetch_uses_pgvector_only_sources_without_rag_file_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_agentic_rag_retrieve(**kwargs):
+        calls.update(kwargs)
+        return {"context_packet": {"query": kwargs["query"], "chunk_count": 0, "chunks": []}, "graph_trace": []}
+
+    monkeypatch.setattr(agent_graph, "_router_agentic_rag_retrieve", fake_agentic_rag_retrieve)
+
+    asyncio.run(
+        agent_graph.active_rag_prefetch_node(
+            {
+                "messages": [{"role": "human", "content": "Welche Details stehen im Dokument?"}],
+                "thread_id": "thread-1",
+                "rag_active": True,
+                "active_source_keys": ["doc-1"],
+                "active_rag_file_ids": [],
+                "archive_rag_mode": "tool_only",
+            }
+        )
+    )
+
+    assert calls["source_keys"] == ["doc-1"]
+    assert calls["rag_source_keys"] is None
+
+
 def test_active_rag_prefetch_stays_inactive_for_archive_only() -> None:
     updates = asyncio.run(
         agent_graph.active_rag_prefetch_node(

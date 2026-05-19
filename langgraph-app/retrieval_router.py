@@ -42,6 +42,30 @@ _LARGE_PASTE_RAG_SOURCE_TYPES = {
     "large_paste",
     "large_ingest",
 }
+_DOCUMENT_BACKEND_ALIASES = {
+    "alpha": "alpharavis_pgvector",
+    "alpharavis": "alpharavis_pgvector",
+    "alpharavis_pgvector": "alpharavis_pgvector",
+    "internal": "alpharavis_pgvector",
+    "pgvector": "alpharavis_pgvector",
+    "vector": "alpharavis_pgvector",
+    "rag": "rag_api",
+    "rag_api": "rag_api",
+    "rag-api": "rag_api",
+    "external": "rag_api",
+    "both": "both",
+    "dual": "both",
+}
+
+
+def document_rag_backend() -> str:
+    raw = os.getenv("ALPHARAVIS_DOCUMENT_RAG_BACKEND", "alpharavis_pgvector").strip().lower()
+    return _DOCUMENT_BACKEND_ALIASES.get(raw, "alpharavis_pgvector")
+
+
+def _is_document_rag_source(source_type: str) -> bool:
+    normalized_type = _source_type_key(source_type)
+    return normalized_type in _DOCUMENT_RAG_SOURCE_TYPES or normalized_type in _LARGE_PASTE_RAG_SOURCE_TYPES
 
 
 def normalize_source_keys(source_keys: Any, *, source_key: str = "") -> list[str]:
@@ -387,16 +411,8 @@ def should_mirror_to_rag(
     normalized_type = _source_type_key(source_type)
     if normalized_type == "archive":
         return rag_archive_mirror_enabled()
-    if normalized_type in {
-        "external_document",
-        "document",
-        "pdf",
-        "large_paste",
-        "large_ingest",
-        "uploaded_document",
-        "artifact_document",
-    }:
-        return True
+    if _is_document_rag_source(normalized_type):
+        return document_rag_backend() in {"rag_api", "both"}
 
     min_chars = int(os.getenv("ALPHARAVIS_RAG_AUTO_MIRROR_MIN_CHARS", "20000"))
     return normalized_type not in {"memory", "agent_memory", "catalog"} and len(content or "") >= max(1, min_chars)
@@ -418,7 +434,10 @@ def should_index_pgvector(
         return False
 
     normalized_type = _source_type_key(source_type)
-    if normalized_type in {"external_document", "document", "pdf", "large_paste", "large_ingest", "uploaded_document"}:
+    if _is_document_rag_source(normalized_type):
+        backend = document_rag_backend()
+        if backend in {"alpharavis_pgvector", "both"}:
+            return True
         return env_bool("ALPHARAVIS_INGEST_INDEX_DOCUMENTS_IN_PGVECTOR", "false")
     return True
 
@@ -543,6 +562,8 @@ async def ingest_source(
         rag_file_id=rag_file_id,
         metadata=metadata,
     )
+    if "rag_api" not in indexed_backends and not normalize_source_keys(metadata.get("active_rag_file_ids")):
+        activation = {**activation, "active_rag_file_ids": []}
     result_metadata = {
         **metadata,
         "source_type": source_type,

@@ -99,7 +99,7 @@ def test_query_sources_with_backends_keeps_archive_rag_passive_by_default(monkey
     assert payload["backend_counts"] == {"alpharavis_pgvector": 0, "rag_api": 0}
 
 
-def test_ingest_source_routes_external_document_to_rag_by_default(monkeypatch) -> None:
+def test_ingest_source_routes_external_document_to_alpharavis_pgvector_by_default(monkeypatch) -> None:
     calls: dict[str, object] = {}
 
     async def fake_pgvector_index(**kwargs):
@@ -110,6 +110,43 @@ def test_ingest_source_routes_external_document_to_rag_by_default(monkeypatch) -
         calls["rag"] = kwargs
         return {"status": True, "file_id": kwargs["file_id"]}
 
+    monkeypatch.delenv("ALPHARAVIS_INGEST_INDEX_DOCUMENTS_IN_PGVECTOR", raising=False)
+    monkeypatch.delenv("ALPHARAVIS_DOCUMENT_RAG_BACKEND", raising=False)
+    result = asyncio.run(
+        retrieval_router.ingest_source(
+            source_type="external_document",
+            source_key="doc-1",
+            title="Doc One",
+            content="document body",
+            thread_id="thread-1",
+            pgvector_index=fake_pgvector_index,
+            rag_mirror_func=fake_rag_mirror,
+        )
+    )
+
+    assert calls["pgvector"]["source_key"] == "doc-1"
+    assert "rag" not in calls
+    assert result["index_status"] == "indexed"
+    assert result["indexed_backends"] == ["alpharavis_pgvector"]
+    assert result["metadata"]["rag_file_id"] == "doc-1"
+    assert result["rag_active"] is True
+    assert result["active_rag_file_ids"] == []
+    assert result["active_source_keys"] == ["doc-1"]
+    assert result["rag_activation_reason"] == "document_ingest"
+
+
+def test_ingest_source_can_route_external_document_to_rag_api(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_pgvector_index(**kwargs):
+        calls["pgvector"] = kwargs
+        return "indexed"
+
+    async def fake_rag_mirror(**kwargs):
+        calls["rag"] = kwargs
+        return {"status": True, "file_id": kwargs["file_id"]}
+
+    monkeypatch.setenv("ALPHARAVIS_DOCUMENT_RAG_BACKEND", "rag_api")
     monkeypatch.delenv("ALPHARAVIS_INGEST_INDEX_DOCUMENTS_IN_PGVECTOR", raising=False)
     result = asyncio.run(
         retrieval_router.ingest_source(
@@ -128,11 +165,7 @@ def test_ingest_source_routes_external_document_to_rag_by_default(monkeypatch) -
     assert calls["rag"]["filename"] == "Doc One.txt"
     assert result["index_status"] == "indexed"
     assert result["indexed_backends"] == ["rag_api"]
-    assert result["metadata"]["rag_file_id"] == "doc-1"
-    assert result["rag_active"] is True
     assert result["active_rag_file_ids"] == ["doc-1"]
-    assert result["active_source_keys"] == ["doc-1"]
-    assert result["rag_activation_reason"] == "document_ingest"
 
 
 def test_ingest_source_indexes_archive_pgvector_without_rag_when_mirror_disabled(monkeypatch) -> None:

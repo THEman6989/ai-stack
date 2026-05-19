@@ -6,6 +6,22 @@ can tell which patches are intentional and which ones can be removed.
 
 ## 2026-05-19 - LiteLLM Embedding Param Compatibility For rag_api
 
+Document and large-paste ingest now defaults to the AlphaRavis-owned pgvector
+backend:
+
+```text
+ALPHARAVIS_DOCUMENT_RAG_BACKEND=alpharavis_pgvector
+```
+
+`rag_api` remains available as an adapter with
+`ALPHARAVIS_DOCUMENT_RAG_BACKEND=rag_api`, or as a dual-indexing comparison path
+with `both`, but it is no longer the default document/large-paste destination.
+This keeps the current work moving toward the AlphaRavis-native RAG
+implementation rather than making `rag_api` the product. For pgvector-only
+document ingests, active thread state keeps `active_source_keys` and leaves
+`active_rag_file_ids` empty, so automatic active-RAG prefetch does not call
+`rag_api` unless the source was actually mirrored there.
+
 LiteLLM now uses its own Postgres database:
 
 ```text

@@ -1055,6 +1055,7 @@ ALPHARAVIS_PGVECTOR_PREFETCH_MAX_CHARS=1800
 # Allowed values: true, false
 ALPHARAVIS_ENABLE_RAG_FEDERATED_SEARCH=true
 ALPHARAVIS_RAG_API_URL=http://rag_api:8000
+ALPHARAVIS_DOCUMENT_RAG_BACKEND=alpharavis_pgvector
 ALPHARAVIS_RAG_API_BEARER_TOKEN=
 # Optional explicit JWT secret for rag_api calls. When empty, AlphaRavis uses
 # JWT_SECRET from the shared stack environment if present.

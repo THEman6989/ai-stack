@@ -1224,12 +1224,25 @@ retrieve/grade/rewrite pass and a bounded `context_packet` for a grounded
 answer. It stays tool-only; it does not automatically load complete archives
 into active context.
 For newly ingested explicit documents or large pastes, AlphaRavis records
-thread-level RAG metadata (`rag_active`, active source/file ids, and activation
-reason) so a later auto-retrieval node can use bounded chunks. Compression
-archives remain passive by default with `archive_rag_mode=tool_only`.
+thread-level RAG metadata (`rag_active`, active source keys, optional external
+file ids, and activation reason) so a later auto-retrieval node can use bounded
+chunks. Compression archives remain passive by default with
+`archive_rag_mode=tool_only`.
 Large pasted messages above `ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS` are indexed
 first; after successful indexing, the model sees a compact retrieval marker
 instead of the entire paste.
+Document and large-paste ingest now defaults to the AlphaRavis-owned pgvector
+backend, not `rag_api`:
+
+```text
+ALPHARAVIS_DOCUMENT_RAG_BACKEND=alpharavis_pgvector
+```
+
+Set it to `rag_api` to use the current external adapter for comparison, or
+`both` for dual indexing during evaluation. When AlphaRavis pgvector is the only
+document backend, active threads keep `active_source_keys` but do not add
+`active_rag_file_ids`, so automatic prefetch does not call `rag_api` unless the
+source was actually mirrored there.
 When `ALPHARAVIS_ENABLE_ACTIVE_RAG_PREFETCH=true`, active document/large-paste
 threads automatically prefetch bounded chunks into `<active-rag-context>`.
 Archive-only threads remain tool-only unless a future `auto_on_intent` archive
