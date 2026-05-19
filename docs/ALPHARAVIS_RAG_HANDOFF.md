@@ -5,6 +5,39 @@ Date: 2026-05-19
 This handoff captures the intent behind the current RAG work so a new context
 window can continue without re-deriving the design.
 
+## Current Snapshot
+
+The current direction is AlphaRavis-native RAG first. `rag_api` is no longer the
+default document/large-paste backend; it is kept as an adapter/reference path
+for comparison and compatibility.
+
+Most recent commits:
+
+```text
+a57017c Add native document RAG smoke
+d7d5c85 Default document RAG to AlphaRavis pgvector
+86c15f6 Isolate LiteLLM proxy database
+77dc70c Scope LiteLLM embedding params and default to qwen 0.6b
+```
+
+Current defaults:
+
+```text
+ALPHARAVIS_DOCUMENT_RAG_BACKEND=alpharavis_pgvector
+EMBEDDING_LITELLM_MODEL=ollama/qwen3-embedding:0.6b
+RAG_COLLECTION_NAME=alpharavis_qwen06
+```
+
+Live verification after the latest slice:
+
+- Bridge Test UI serves `Native Document RAG Smoke`.
+- `POST /api/native-document-rag-smoke` passed live with
+  `acceptance_ok=true`, `hit_count=2`, `pgvector_backend_selected=true`, and
+  `rag_api_not_used=true`.
+- Focused tests passed: `42 passed` across Bridge Test UI, retrieval router,
+  context budget, and `rag_api_client` tests.
+- `bridge-test-ui` is running on `127.0.0.1:8140`.
+
 ## User Intent
 
 The goal is not to blindly replace AlphaRavis memory with `rag_api`, and not to
@@ -80,9 +113,11 @@ New / important files:
 
 - `langgraph-app/rag_api_client.py`
 - `langgraph-app/retrieval_router.py`
+- `langgraph-app/test_ui_server.py` native/document RAG smoke surface
 - `tests/test_rag_api_client.py`
 - `tests/test_retrieval_router.py`
 - `tests/test_source_scoped_retrieval.py`
+- `tests/test_bridge_test_ui.py`
 - `docs/ALPHARAVIS_RAG_HANDOFF.md`
 - `helper-repos/langgraph-agentic-rag-template/`
 - `helper-repos/awesome-rag/`
@@ -167,7 +202,8 @@ Active document / large-paste RAG:
 
 - `active_rag_prefetch_node` runs after memory prefetch and before skill/handoff
   preparation when `rag_active=true`
-- it retrieves from `active_source_keys` / `active_rag_file_ids` with bounded
+- it retrieves from `active_source_keys` and, only when a source was mirrored to
+  an external adapter, `active_rag_file_ids`, with bounded
   `agentic_rag_retrieve(...)`
 - it injects only a compact `<active-rag-context>` system message
 - archive-only state with `archive_rag_mode=tool_only` stays passive
@@ -201,9 +237,14 @@ Live findings:
   `ollama/`, so llama.cpp/OpenAI-compatible embedding routes keep their normal
   request parameters.
 - Archive RAG smoke passed after the LiteLLM param-drop fix and LangChain
-  PGVector table initialization. Large-paste live testing still hits runtime
-  timeouts with the current 4b embedding route when a paste expands to many
-  chunks.
+  PGVector table initialization.
+- Native Document RAG smoke passed through AlphaRavis pgvector without `rag_api`
+  after switching document/large-paste default routing to
+  `ALPHARAVIS_DOCUMENT_RAG_BACKEND=alpharavis_pgvector`.
+- A previous large-paste live test hit 180s timeouts while routing through
+  `rag_api` embedding batches. Treat that as historical evidence for why the
+  next live test should use the native AlphaRavis pgvector route and queue/
+  progress controls.
 - The `rag_api` collection default is `RAG_COLLECTION_NAME=alpharavis_qwen06`
   after switching the default embedding model to 0.6b. Do not mix old 2560-dim
   qwen3-embedding:4b rows and new 1024-dim qwen3-embedding:0.6b rows in one
@@ -225,16 +266,31 @@ follow-up.
 
 ## Next Best Steps
 
-1. Route future document/PDF upload paths through `ingest_source(...)`.
+1. Run a true Bridge/LibreChat large-paste E2E against native AlphaRavis
+   pgvector.
+
+   Acceptance: first turn with a large pasted source gets replaced by the
+   compact retrieval marker, the next user question triggers
+   `<active-rag-context>` from `active_source_keys`, the returned chunks come
+   from `alpharavis_pgvector`, and `rag_api` is not called unless explicitly
+   configured.
+
+2. Route future document/PDF upload paths through `ingest_source(...)`.
 
    Keep the AlphaRavis pgvector backend as the default and treat `rag_api` as an
    adapter/reference path unless explicitly requested.
 
-2. Add optional archive auto-on-intent behavior. Keep compression archives
+3. Add ingest progress events for large document/paste work.
+
+   Desired events: `large_ingest.started`, `large_ingest.chunk_indexed`, and
+   `large_ingest.completed`, visible in Observer/Test UI before considering
+   larger Bridge timeouts.
+
+4. Add optional archive auto-on-intent behavior. Keep compression archives
    passive by default; only enable archive auto-retrieval when
    `archive_rag_mode=auto_on_intent` and intent heuristics are proven.
 
-3. Add optional reranking behind the router.
+5. Add optional reranking behind the router.
    Desired flow:
 
 ```text
@@ -246,7 +302,7 @@ pgvector/rag_api top 20-50
 
 Reranking should be default-off until measured in the Test UI.
 
-4. Later add optional LLM structured-output grading for `grade_documents`.
+6. Later add optional LLM structured-output grading for `grade_documents`.
    Current deterministic grader is intentional because it is fast and testable.
 
 ## Verification Commands
@@ -263,10 +319,16 @@ Broader current RAG-related smoke:
 pytest -q tests/test_retrieval_router.py tests/test_source_scoped_retrieval.py tests/test_rag_api_client.py tests/test_agent_context_budget.py tests/test_bridge_test_ui.py tests/test_media_analysis.py
 ```
 
+Native Document RAG live smoke:
+
+```bash
+python -c "import httpx,json; payload={'source_key':'native_doc_live_smoke','source_type':'large_paste','document_text':'Runtime marker: NATIVE_PGVECTOR_RAG_SMOKE. Decision: explicit documents and large pasted sources should use AlphaRavis-owned pgvector by default. rag_api remains only an adapter or comparison backend.','query':'Welche native AlphaRavis-RAG-Regel steht im Dokument?','limit':3}; r=httpx.post('http://127.0.0.1:8140/api/native-document-rag-smoke',json=payload,timeout=180); print(r.status_code); data=r.json(); print(json.dumps({'status':data.get('status'),'acceptance_ok':data.get('acceptance_ok'),'errors':data.get('errors'),'hit_count':data.get('hit_count'),'acceptance':data.get('acceptance')},ensure_ascii=False,indent=2))"
+```
+
 Syntax check:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile langgraph-app/retrieval_router.py langgraph-app/agent_graph.py langgraph-app/rag_api_client.py
+PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile langgraph-app/retrieval_router.py langgraph-app/agent_graph.py langgraph-app/rag_api_client.py langgraph-app/test_ui_server.py
 ```
 
 Notebook reference check:
