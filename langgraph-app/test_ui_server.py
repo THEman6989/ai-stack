@@ -18,7 +18,21 @@ from context_compressor import compress_messages, estimate_tokens_rough, prepare
 from rag_api_client import RagApiClientError
 from rag_api_client import mirror_text as rag_api_mirror_text
 from rag_api_client import query_sources as rag_api_query_sources
+from retrieval_router import agentic_rag_retrieve as router_agentic_rag_retrieve
 from retrieval_router import archive_rag_file_id
+from retrieval_router import ingest_source as router_ingest_source
+
+try:
+    from vector_memory import is_enabled as pgvector_memory_enabled
+    from vector_memory import semantic_search as pgvector_semantic_search
+    from vector_memory import upsert_memory_record as pgvector_upsert_memory_record
+except Exception as exc:  # pragma: no cover - depends on optional runtime deps
+    PGVECTOR_IMPORT_ERROR: Exception | None = exc
+    pgvector_memory_enabled = None
+    pgvector_semantic_search = None
+    pgvector_upsert_memory_record = None
+else:
+    PGVECTOR_IMPORT_ERROR = None
 
 
 BRIDGE_BASE_URL = os.getenv("TEST_UI_BRIDGE_BASE_URL", "http://api-bridge:8123/v1").rstrip("/")
@@ -54,6 +68,15 @@ class ArchiveRagSmokeRequest(BaseModel):
     archive_key: str = ""
     archive_text: str = ""
     query: str = "Welche Retrieval-Entscheidung steht im Archiv?"
+    limit: int = 4
+
+
+class NativeDocumentRagSmokeRequest(BaseModel):
+    source_key: str = ""
+    source_type: str = "large_paste"
+    title: str = "AlphaRavis Native RAG Smoke"
+    document_text: str = ""
+    query: str = "Welche native AlphaRavis-RAG-Regel steht im Dokument?"
     limit: int = 4
 
 
@@ -621,6 +644,19 @@ def _default_archive_smoke_text(archive_key: str) -> str:
     )
 
 
+def _default_native_document_smoke_text(source_key: str) -> str:
+    return (
+        f"AlphaRavis native document RAG smoke source {source_key}.\n\n"
+        "Runtime marker: NATIVE_PGVECTOR_RAG_SMOKE.\n"
+        "Decision: explicit documents and large pasted sources should be indexed "
+        "through AlphaRavis-owned pgvector by default, not through rag_api. "
+        "Important retrieval rule: active document threads keep active_source_keys "
+        "and should retrieve bounded chunks from vector_memory.py before answering.\n"
+        "Adapter rule: rag_api remains selectable only as an adapter or comparison "
+        "backend, not as the default product implementation.\n"
+    )
+
+
 def _rag_smoke_payload_ok(payload: dict[str, Any]) -> bool:
     status = payload.get("status", True)
     if isinstance(status, bool):
@@ -628,6 +664,131 @@ def _rag_smoke_payload_ok(payload: dict[str, Any]) -> bool:
     if isinstance(status, str):
         return status.strip().lower() not in {"false", "failed", "error"}
     return bool(payload)
+
+
+async def _native_pgvector_index(**kwargs: Any) -> str | None:
+    if pgvector_upsert_memory_record is None:
+        raise RuntimeError(f"AlphaRavis pgvector memory unavailable: {PGVECTOR_IMPORT_ERROR}")
+    return await pgvector_upsert_memory_record(**kwargs)
+
+
+async def _run_native_document_rag_smoke(request: NativeDocumentRagSmokeRequest) -> dict[str, Any]:
+    started = time.perf_counter()
+    source_key = re.sub(r"[^a-zA-Z0-9_.:-]+", "_", str(request.source_key or "").strip())[:120]
+    if not source_key:
+        source_key = f"native_doc_smoke:{uuid.uuid4().hex[:10]}"
+    source_type = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(request.source_type or "large_paste").strip().lower())[:80] or "large_paste"
+    title = str(request.title or source_key).strip()[:200] or source_key
+    text = str(request.document_text or "").strip() or _default_native_document_smoke_text(source_key)
+    query = str(request.query or "").strip() or "Welche native AlphaRavis-RAG-Regel steht im Dokument?"
+    limit = _bounded_int(request.limit, minimum=1, maximum=20, default=4)
+    thread_id = f"bridge-test-ui-native-rag-{uuid.uuid4().hex[:10]}"
+    thread_key = "bridge-test-ui-native-rag"
+
+    actions: list[dict[str, Any]] = []
+
+    def log(event: str, **details: Any) -> None:
+        actions.append({"t": round(time.perf_counter() - started, 3), "event": event, **details})
+
+    errors: list[dict[str, Any]] = []
+    ingest: dict[str, Any] = {}
+    retrieval: dict[str, Any] = {}
+
+    if pgvector_memory_enabled is None or pgvector_upsert_memory_record is None or pgvector_semantic_search is None:
+        errors.append({"stage": "pgvector", "error": f"AlphaRavis pgvector memory unavailable: {PGVECTOR_IMPORT_ERROR}"})
+        log("pgvector.unavailable", error=str(PGVECTOR_IMPORT_ERROR)[:500])
+    elif not pgvector_memory_enabled():
+        errors.append({"stage": "pgvector", "error": "AlphaRavis pgvector memory is disabled."})
+        log("pgvector.disabled")
+    else:
+        log("ingest.started", backend="alpharavis_pgvector", source_key=source_key, chars=len(text))
+        try:
+            ingest = await router_ingest_source(
+                source_type=source_type,
+                source_key=source_key,
+                title=title,
+                content=text,
+                thread_id=thread_id,
+                thread_key=thread_key,
+                scope="thread",
+                metadata={
+                    "origin": "bridge_test_ui_native_rag_smoke",
+                    "rag_activation_reason": "large_paste" if source_type in {"large_paste", "large_ingest"} else "document_ingest",
+                    "runtime_marker": "NATIVE_PGVECTOR_RAG_SMOKE",
+                },
+                preferred_backend="pgvector",
+                pgvector_index=_native_pgvector_index,
+                rag_mirror_func=None,
+            )
+            log(
+                "ingest.completed",
+                status=ingest.get("index_status"),
+                indexed_backends=ingest.get("indexed_backends", []),
+            )
+        except Exception as exc:
+            errors.append({"stage": "ingest", "error": f"{type(exc).__name__}: {exc}"})
+            log("ingest.failed", error=f"{type(exc).__name__}: {exc}"[:500])
+
+        if ingest and not errors:
+            log("retrieve.started", source_key=source_key, limit=limit)
+            try:
+                retrieval = await router_agentic_rag_retrieve(
+                    query=query,
+                    source_keys=[source_key],
+                    source_type=source_type,
+                    limit=limit,
+                    include_other_threads=False,
+                    thread_id=thread_id,
+                    pgvector_search=pgvector_semantic_search,
+                    pgvector_available=True,
+                    pgvector_import_error=PGVECTOR_IMPORT_ERROR,
+                    rag_query_func=None,
+                    rag_source_keys=None,
+                    allow_rewrite=True,
+                    max_context_chars=4000,
+                )
+                packet = retrieval.get("context_packet") if isinstance(retrieval, dict) else {}
+                log(
+                    "retrieve.completed",
+                    chunk_count=packet.get("chunk_count", 0) if isinstance(packet, dict) else 0,
+                    next_action=retrieval.get("next_action", "") if isinstance(retrieval, dict) else "",
+                )
+            except Exception as exc:
+                errors.append({"stage": "retrieve", "error": f"{type(exc).__name__}: {exc}"})
+                log("retrieve.failed", error=f"{type(exc).__name__}: {exc}"[:500])
+
+    packet = retrieval.get("context_packet") if isinstance(retrieval, dict) else {}
+    chunks = packet.get("chunks") if isinstance(packet, dict) else []
+    chunks = chunks if isinstance(chunks, list) else []
+    context_text = "\n".join(str(chunk.get("chunk_text") or "") for chunk in chunks if isinstance(chunk, dict))
+    indexed_backends = list(ingest.get("indexed_backends") or []) if isinstance(ingest, dict) else []
+    active_rag_file_ids = list(ingest.get("active_rag_file_ids") or []) if isinstance(ingest, dict) else []
+    active_source_keys = list(ingest.get("active_source_keys") or []) if isinstance(ingest, dict) else []
+    acceptance = {
+        "pgvector_backend_selected": indexed_backends == ["alpharavis_pgvector"],
+        "rag_api_not_used": "rag_api" not in indexed_backends and not active_rag_file_ids,
+        "active_source_key_recorded": source_key in active_source_keys,
+        "retrieval_returned_context": len(chunks) > 0,
+        "retrieved_expected_marker": "NATIVE_PGVECTOR_RAG_SMOKE" in context_text or "AlphaRavis-owned pgvector" in context_text,
+        "no_runtime_errors": not errors,
+    }
+    return {
+        "source_key": source_key,
+        "source_type": source_type,
+        "thread_id": thread_id,
+        "query": query,
+        "text_chars": len(text),
+        "status": "passed" if all(acceptance.values()) else "failed",
+        "errors": errors,
+        "ingest": ingest,
+        "retrieval": retrieval,
+        "context_packet": packet if isinstance(packet, dict) else {},
+        "hit_count": len(chunks),
+        "actions": actions,
+        "acceptance": acceptance,
+        "acceptance_ok": all(acceptance.values()),
+        "elapsed_seconds": round(time.perf_counter() - started, 3),
+    }
 
 
 async def _run_archive_rag_smoke(request: ArchiveRagSmokeRequest) -> dict[str, Any]:
@@ -972,6 +1133,11 @@ async def archive_rag_smoke(request: ArchiveRagSmokeRequest) -> JSONResponse:
     return JSONResponse(await _run_archive_rag_smoke(request))
 
 
+@app.post("/api/native-document-rag-smoke")
+async def native_document_rag_smoke(request: NativeDocumentRagSmokeRequest) -> JSONResponse:
+    return JSONResponse(await _run_native_document_rag_smoke(request))
+
+
 @app.post("/api/memory-embed-probe")
 async def memory_embed_probe(request: MemoryEmbedProbeRequest) -> JSONResponse:
     return JSONResponse(await _run_memory_embed_probe(request))
@@ -1303,6 +1469,39 @@ OBSERVER_HTML = """<!doctype html>
       <div id="archiveRagActions" class="chunk-actions"></div>
       <pre id="archiveRagRaw" class="chunk-raw">{}</pre>
     </section>
+    <section class="chunk-lab" aria-label="Native Document RAG Smoke">
+      <div class="chunk-lab-head">
+        <h2>Native Document RAG Smoke</h2>
+        <span id="nativeRagStatus" class="status">bereit</span>
+      </div>
+      <div class="chunk-form archive-rag-form">
+        <label>Source Key
+          <input id="nativeRagSourceKey" type="text" value="native_doc_smoke">
+        </label>
+        <label>Source Type
+          <select id="nativeRagSourceType">
+            <option value="large_paste">Large Paste</option>
+            <option value="external_document">External Document</option>
+            <option value="artifact_document">Artifact Document</option>
+          </select>
+        </label>
+        <label>Query
+          <input id="nativeRagQuery" type="text" value="Welche native AlphaRavis-RAG-Regel steht im Dokument?">
+        </label>
+        <label>Limit
+          <input id="nativeRagLimit" type="number" min="1" max="20" step="1" value="4">
+        </label>
+        <button id="runNativeRagSmoke" class="run" type="button">Native Smoke</button>
+      </div>
+      <div class="chunk-form archive-rag-form">
+        <label style="grid-column: 1 / -1;">Document Text
+          <textarea id="nativeRagText">Runtime marker: NATIVE_PGVECTOR_RAG_SMOKE. Decision: explicit documents and large pasted sources should use AlphaRavis-owned pgvector by default. rag_api remains only an adapter or comparison backend.</textarea>
+        </label>
+      </div>
+      <div id="nativeRagStats" class="chunk-stats"></div>
+      <div id="nativeRagActions" class="chunk-actions"></div>
+      <pre id="nativeRagRaw" class="chunk-raw">{}</pre>
+    </section>
     <section class="chunk-lab" aria-label="Memory Embed Probe">
       <div class="chunk-lab-head">
         <h2>Memory Embed Tester</h2>
@@ -1407,6 +1606,16 @@ OBSERVER_HTML = """<!doctype html>
     const archiveRagStats = document.getElementById('archiveRagStats');
     const archiveRagActions = document.getElementById('archiveRagActions');
     const archiveRagRaw = document.getElementById('archiveRagRaw');
+    const nativeRagStatus = document.getElementById('nativeRagStatus');
+    const nativeRagSourceKey = document.getElementById('nativeRagSourceKey');
+    const nativeRagSourceType = document.getElementById('nativeRagSourceType');
+    const nativeRagQuery = document.getElementById('nativeRagQuery');
+    const nativeRagLimit = document.getElementById('nativeRagLimit');
+    const nativeRagText = document.getElementById('nativeRagText');
+    const runNativeRagSmoke = document.getElementById('runNativeRagSmoke');
+    const nativeRagStats = document.getElementById('nativeRagStats');
+    const nativeRagActions = document.getElementById('nativeRagActions');
+    const nativeRagRaw = document.getElementById('nativeRagRaw');
     const memoryEmbedStatus = document.getElementById('memoryEmbedStatus');
     const memoryEmbedBaseUrl = document.getElementById('memoryEmbedBaseUrl');
     const memoryEmbedModel = document.getElementById('memoryEmbedModel');
@@ -1773,6 +1982,64 @@ OBSERVER_HTML = """<!doctype html>
         runArchiveRagSmoke.disabled = false;
       }
     }
+    function renderNativeRagSmoke(result) {
+      const hasErrors = Array.isArray(result.errors) && result.errors.length > 0;
+      nativeRagStatus.textContent = result.acceptance_ok ? `ok in ${result.elapsed_seconds || 0}s` : (hasErrors ? 'runtime prüfen' : 'prüfen');
+      nativeRagStatus.className = `status ${result.acceptance_ok ? 'ok' : (hasErrors ? 'hard' : 'warn')}`;
+      nativeRagStats.innerHTML = '';
+      [
+        ['Source Key', result.source_key || ''],
+        ['Backend', result.acceptance?.pgvector_backend_selected ? 'pgvector' : 'prüfen', result.acceptance?.pgvector_backend_selected ? 'ok' : 'warn'],
+        ['rag_api', result.acceptance?.rag_api_not_used ? 'nicht benutzt' : 'prüfen', result.acceptance?.rag_api_not_used ? 'ok' : 'warn'],
+        ['Active Source', result.acceptance?.active_source_key_recorded ? 'ja' : 'nein', result.acceptance?.active_source_key_recorded ? 'ok' : 'warn'],
+        ['Chunks', fmtNumber(result.hit_count || 0), Number(result.hit_count || 0) > 0 ? 'ok' : 'hard'],
+        ['Marker', result.acceptance?.retrieved_expected_marker ? 'ja' : 'nein', result.acceptance?.retrieved_expected_marker ? 'ok' : 'warn'],
+        ['Runtime', result.acceptance?.no_runtime_errors ? 'ok' : 'Fehler', result.acceptance?.no_runtime_errors ? 'ok' : 'hard'],
+      ].forEach(([label, value, className]) => nativeRagStats.appendChild(chunkMetric(label, value, className || '')));
+      nativeRagActions.innerHTML = '';
+      for (const action of (result.actions || [])) {
+        const row = document.createElement('div');
+        const time = document.createElement('span');
+        time.className = 'muted';
+        time.textContent = `${Number(action.t || 0).toFixed(3)}s`;
+        const event = document.createElement('span');
+        event.textContent = action.event || '';
+        const detail = document.createElement('span');
+        detail.className = 'muted';
+        detail.textContent = Object.entries(action)
+          .filter(([key]) => !['t', 'event'].includes(key))
+          .map(([key, value]) => `${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`)
+          .join(' ');
+        row.append(time, event, detail);
+        nativeRagActions.appendChild(row);
+      }
+      nativeRagRaw.textContent = pretty(result);
+    }
+    async function startNativeRagSmoke() {
+      runNativeRagSmoke.disabled = true;
+      nativeRagStatus.textContent = 'starte...';
+      nativeRagStatus.className = 'status warn';
+      try {
+        const response = await fetch('/api/native-document-rag-smoke', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            source_key: nativeRagSourceKey.value || '',
+            source_type: nativeRagSourceType.value || 'large_paste',
+            document_text: nativeRagText.value || '',
+            query: nativeRagQuery.value || '',
+            limit: Number(nativeRagLimit.value || 4),
+          }),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        renderNativeRagSmoke(await response.json());
+      } catch (error) {
+        nativeRagStatus.textContent = error.message;
+        nativeRagStatus.className = 'status hard';
+      } finally {
+        runNativeRagSmoke.disabled = false;
+      }
+    }
     function renderMemoryEmbedProbe(result) {
       const passed = result.status === 'passed';
       const partial = result.status === 'partial';
@@ -2027,6 +2294,7 @@ OBSERVER_HTML = """<!doctype html>
     fullMode.addEventListener('click', () => setMode('full'));
     runChunking.addEventListener('click', () => startChunkingRun());
     runArchiveRagSmoke.addEventListener('click', () => startArchiveRagSmoke());
+    runNativeRagSmoke.addEventListener('click', () => startNativeRagSmoke());
     runMemoryEmbedProbe.addEventListener('click', () => startMemoryEmbedProbe());
     loadRecords().catch((error) => { statusEl.textContent = error.message; });
     window.setInterval(() => loadRecords().catch(() => {}), 2500);

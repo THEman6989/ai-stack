@@ -272,6 +272,11 @@ def test_observer_page_is_full_table_view() -> None:
     assert "archiveRagRaw" in test_ui_server.OBSERVER_HTML
     assert "runtime prüfen" in test_ui_server.OBSERVER_HTML
     assert "no_runtime_errors" in test_ui_server.OBSERVER_HTML
+    assert "Native Document RAG Smoke" in test_ui_server.OBSERVER_HTML
+    assert "runNativeRagSmoke" in test_ui_server.OBSERVER_HTML
+    assert "/api/native-document-rag-smoke" in test_ui_server.OBSERVER_HTML
+    assert "nativeRagRaw" in test_ui_server.OBSERVER_HTML
+    assert "NATIVE_PGVECTOR_RAG_SMOKE" in test_ui_server.OBSERVER_HTML
     assert "Memory Embed Tester" in test_ui_server.OBSERVER_HTML
     assert "runMemoryEmbedProbe" in test_ui_server.OBSERVER_HTML
     assert "/api/memory-embed-probe" in test_ui_server.OBSERVER_HTML
@@ -376,6 +381,74 @@ def test_archive_rag_smoke_reports_query_runtime_error(monkeypatch) -> None:
     assert result["acceptance"]["no_runtime_errors"] is False
     assert result["errors"] == [{"stage": "query", "error": "embedding backend refused connection"}]
     assert result["actions"][-1]["event"] == "query.failed"
+
+
+def test_native_document_rag_smoke_uses_alpharavis_pgvector_only(monkeypatch) -> None:
+    calls: list[tuple[str, object]] = []
+
+    async def fake_upsert(**kwargs):
+        return "large_paste:native-doc:1"
+
+    async def fake_ingest_source(**kwargs):
+        calls.append(("ingest", kwargs))
+        return {
+            "source_key": kwargs["source_key"],
+            "source_type": kwargs["source_type"],
+            "index_status": "indexed",
+            "indexed_backends": ["alpharavis_pgvector"],
+            "rag_active": True,
+            "active_source_keys": [kwargs["source_key"]],
+            "active_rag_file_ids": [],
+            "metadata": {
+                "source_key": kwargs["source_key"],
+                "rag_active": True,
+                "active_source_keys": [kwargs["source_key"]],
+                "active_rag_file_ids": [],
+            },
+        }
+
+    async def fake_agentic_rag_retrieve(**kwargs):
+        calls.append(("retrieve", kwargs))
+        return {
+            "next_action": "generate_answer",
+            "context_packet": {
+                "chunk_count": 1,
+                "chunks": [
+                    {
+                        "source_key": kwargs["source_keys"][0],
+                        "retrieval_backend": "alpharavis_pgvector",
+                        "chunk_text": "Runtime marker: NATIVE_PGVECTOR_RAG_SMOKE. AlphaRavis-owned pgvector is the default.",
+                    }
+                ],
+            },
+            "graph_trace": [{"node": "retrieve"}],
+        }
+
+    monkeypatch.setattr(test_ui_server, "pgvector_memory_enabled", lambda: True)
+    monkeypatch.setattr(test_ui_server, "pgvector_upsert_memory_record", fake_upsert)
+    monkeypatch.setattr(test_ui_server, "pgvector_semantic_search", object())
+    monkeypatch.setattr(test_ui_server, "router_ingest_source", fake_ingest_source)
+    monkeypatch.setattr(test_ui_server, "router_agentic_rag_retrieve", fake_agentic_rag_retrieve)
+
+    result = asyncio.run(
+        test_ui_server._run_native_document_rag_smoke(
+            test_ui_server.NativeDocumentRagSmokeRequest(
+                source_key="native-doc",
+                document_text="Runtime marker: NATIVE_PGVECTOR_RAG_SMOKE.",
+                query="Welche Regel?",
+            )
+        )
+    )
+
+    assert calls[0][0] == "ingest"
+    assert calls[0][1]["preferred_backend"] == "pgvector"
+    assert calls[0][1]["rag_mirror_func"] is None
+    assert calls[1][0] == "retrieve"
+    assert calls[1][1]["rag_query_func"] is None
+    assert calls[1][1]["rag_source_keys"] is None
+    assert result["acceptance_ok"] is True
+    assert result["acceptance"]["pgvector_backend_selected"] is True
+    assert result["acceptance"]["rag_api_not_used"] is True
 
 
 def test_memory_embed_probe_openai_compatible(monkeypatch) -> None:

@@ -205,8 +205,9 @@ Still needed:
 
 Status: hybrid retrieval router foundation implemented; explicit Agentic-RAG
 tool exposed; thread activation metadata and large-paste context replacement
-implemented; automatic upload ingest is still planned and live large-paste
-latency needs tuning.
+implemented; native AlphaRavis pgvector is now the default document/large-paste
+backend; automatic upload ingest is still planned and live large-paste latency
+needs tuning.
 
 Implemented:
 
@@ -215,8 +216,8 @@ Implemented:
 - Compression archives remain owned by AlphaRavis and are indexed in pgvector by
   default; `rag_api` archive mirroring stays default-off unless explicitly
   enabled.
-- External document / large-ingest style sources route toward `rag_api` by
-  default through `ingest_source(...)`.
+- External document / large-ingest style sources route toward AlphaRavis
+  pgvector by default through `ingest_source(...)`.
 - `query_source`, `query_sources`, and `query_archive` search known source keys
   without loading full archives.
 - `agentic_rag_retrieve` is exposed from `agent_graph.py` as an explicit tool.
@@ -224,7 +225,7 @@ Implemented:
   returns a bounded `context_packet` plus `graph_trace`.
 - `ingest_source(...)` returns thread-aware RAG activation metadata. External
   documents and large-paste style sources set `rag_active=true` with
-  `active_source_keys`, `active_rag_file_ids`, and
+  `active_source_keys`, optional `active_rag_file_ids`, and
   `rag_activation_reason=document_ingest|large_paste`. Compression archives set
   `rag_active=false` and `archive_rag_mode=tool_only`.
 - `AlphaRavisState` can carry `rag_active`, `active_rag_file_ids`,
@@ -247,17 +248,25 @@ Implemented:
   database. `rag_api` keeps the `rag_api` database for LangChain PGVector
   tables, so LiteLLM Prisma startup migrations no longer touch
   `langchain_pg_collection` / `langchain_pg_embedding`.
+- `ALPHARAVIS_DOCUMENT_RAG_BACKEND=alpharavis_pgvector` is the default for
+  document/large-paste ingest. `rag_api` remains selectable with
+  `ALPHARAVIS_DOCUMENT_RAG_BACKEND=rag_api` or `both`, but is no longer the
+  product default.
+- Bridge Test UI now includes `Native Document RAG Smoke`, which indexes a
+  document/large-paste source through AlphaRavis pgvector and retrieves bounded
+  chunks without calling `rag_api`.
 
 Still needed:
 
 - Route future document/PDF upload paths through `ingest_source(...)`.
 - Tune large-paste runtime performance. A live two-turn large-paste test reached
-  `rag_api` embedding, but a 27-chunk embedding batch and the later chat-model
-  call hit the current 180s runtime timeouts. Candidate fixes: smaller
-  `rag_api` embedding batches, shorter large-paste chunks, queue-only ingest
-  with progress, or a larger Bridge/LangGraph timeout only after backend
-  throughput is understood. The default `memory-embed` route has been switched
-  from the slower 4b model to `qwen3-embedding:0.6b`, with a new
+  embedding, but a 27-chunk embedding batch and the later chat-model call hit
+  the current 180s runtime timeouts before the document backend default moved to
+  AlphaRavis pgvector. Candidate fixes: shorter large-paste chunks, queue-only
+  ingest with progress, smaller backend batches, or a larger Bridge/LangGraph
+  timeout only after backend throughput is understood. The default
+  `memory-embed` route has been switched from the slower 4b model to
+  `qwen3-embedding:0.6b`, with a new
   `RAG_COLLECTION_NAME=alpharavis_qwen06` collection to avoid vector-dimension
   collisions with old 4b rows.
 - Add optional archive `auto_on_intent` behavior after live quality/latency is
@@ -1409,9 +1418,9 @@ External context-management learnings to evaluate:
     directly mirroring to `rag_api` and separately indexing pgvector. The archive
     record stores the router's normalized `ingest_status`, `rag_file_id`,
     `rag_index_status`, `rag_indexed_at`, `indexed_backends`, and
-    `ingest_errors`. Remaining call-sites to migrate: large-paste ingest,
-    explicit document/PDF upload, artifacts, and any future manual `/ingest`
-    command.
+    `ingest_errors`. Large-paste ingest now also uses the router. Remaining
+    call-sites to migrate: explicit document/PDF upload, artifacts, and any
+    future manual `/ingest` command.
   - Move backend selection out of `agent_graph.py` and into
     `retrieval_router.py`, so LangGraph nodes/tools call one AlphaRavis API
     instead of knowing about `rag_api`, pgvector, mirrors, and fallback rules.
@@ -1548,8 +1557,9 @@ External context-management learnings to evaluate:
     `indexed_backends`. Failures are recorded without invalidating the archive.
   - Make `query_archive(...)`, `query_source(...)`, and `query_sources(...)`
     route through a retrieval wrapper:
-    - prefer `rag_api /query` or `/query_multiple` when a `rag_file_id` mirror
-      exists or the source type is an external/big document;
+    - prefer AlphaRavis pgvector for external/big documents by default, and use
+      `rag_api /query` or `/query_multiple` only when a `rag_file_id` mirror
+      exists or the document backend is explicitly set to `rag_api` / `both`;
     - fall back to AlphaRavis `vector_memory.py` source-key search when no
       mirror exists, the source is agent-memory/catalog/media, or `rag_api` is
       unavailable;
@@ -1580,11 +1590,11 @@ External context-management learnings to evaluate:
     the right time instead of always injecting vector hits. The routing rule
     should distinguish user-ingested documents from passive archives:
     - If the user adds a PDF, pasted document, artifact, or other explicit
-      non-archive source to a thread and it is indexed in `rag_api`, mark the
-      thread as RAG-active. Future LLM calls in that thread should automatically
-      run source-scoped retrieval against the indexed document(s) and inject
-      only bounded top chunks, because the user intentionally gave the thread a
-      document context.
+      non-archive source to a thread and it is indexed in the configured
+      document RAG backend, mark the thread as RAG-active. Future LLM calls in
+      that thread should automatically run source-scoped retrieval against the
+      indexed document(s) and inject only bounded top chunks, because the user
+      intentionally gave the thread a document context.
     - If the thread only has compression archives, keep RAG passive by default.
       Do not automatically search every archive on every turn. Instead expose
       `query_archive(...)` / `search_archive(...)` as the model-facing tool and
@@ -1771,14 +1781,11 @@ External context-management learnings to evaluate:
     it, split the large body into archived chunks, index it for retrieval, and
     replace the active user message with the user's actual question plus a small
     manifest/source handle.
-  - Preferred backend: use the existing `rag_api` document index for large pasted
-    documents where possible. The current stack already exposes `/embed`,
-    `/embed-upload`, `/query`, `/query_multiple`, `/documents/{id}/context`, and
-    federated AlphaRavis search via `semantic_memory_search` with
-    `source_type=external_document`. The Bridge ingest layer should create a
-    stable `file_id` / source key, send the text as a temporary text file or add a
-    narrow text-body embed endpoint, then keep only the manifest and user question
-    in active context.
+  - Preferred backend: use AlphaRavis pgvector for large pasted documents by
+    default, through the same `ingest_source(...)` router used by LangGraph.
+    Keep `rag_api` selectable as an adapter/reference path for comparison. The
+    Bridge ingest layer should create a stable source key, index the text through
+    the router, then keep only the manifest and user question in active context.
   - Archive relationship: do not duplicate the full document into both RAG and
     AlphaRavis active archives by default. Store a small AlphaRavis manifest
     archive with the RAG `file_id`, source title, chunk/index stats, and raw-text

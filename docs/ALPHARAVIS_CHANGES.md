@@ -21,6 +21,10 @@ implementation rather than making `rag_api` the product. For pgvector-only
 document ingests, active thread state keeps `active_source_keys` and leaves
 `active_rag_file_ids` empty, so automatic active-RAG prefetch does not call
 `rag_api` unless the source was actually mirrored there.
+Bridge Test UI now includes `Native Document RAG Smoke`
+(`/api/native-document-rag-smoke`) to validate this path directly: it indexes a
+document/large-paste source through AlphaRavis pgvector, retrieves bounded
+chunks through the router, and checks that `rag_api` was not used.
 
 LiteLLM now uses its own Postgres database:
 
@@ -151,20 +155,22 @@ warnings
 errors
 ```
 
-The first routing policy is conservative:
+The current routing policy is conservative:
 
 - external documents, PDFs, uploaded documents, and large-paste style sources
-  mirror to `rag_api` by default;
+  index into AlphaRavis pgvector by default;
 - archive sources stay in AlphaRavis pgvector by default, and only mirror to
   `rag_api` when `ALPHARAVIS_ENABLE_RAG_ARCHIVE_MIRROR=true` or the caller
   explicitly asks for `rag_api`/`both`;
 - small memory/catalog style sources stay AlphaRavis pgvector-owned;
-- `preferred_backend=both` exists for evaluation and smoke tests.
+- `ALPHARAVIS_DOCUMENT_RAG_BACKEND=rag_api|both` and `preferred_backend=both`
+  exist for adapter comparison and smoke tests.
 
 This is still a router foundation. Existing product flows are not all migrated
-to `ingest_source(...)` yet; compression archive creation, large-paste ingest,
-and future document upload paths should move behind it next. After those call
-sites are behind the router, a direct LangChain retriever backend can be added
+to `ingest_source(...)` yet; compression archive creation and large-paste ingest
+are behind the router, while future document upload paths still need to move
+behind it next. After those call sites are behind the router, a direct LangChain
+retriever backend can be added
 without changing LangGraph tool code.
 
 First product call-site migration: compression archive creation now writes

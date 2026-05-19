@@ -1286,6 +1286,10 @@ creates a small archive-shaped payload, sends it to `rag_api`, queries it back,
 and reports acceptance checks plus runtime errors. A failed smoke with
 `memory-embed` connection errors means the wrapper reached LiteLLM but the
 configured embedding backend is not available.
+The same Observer page has `Native Document RAG Smoke` for the AlphaRavis-owned
+path. It indexes a document/large-paste source through AlphaRavis pgvector,
+retrieves bounded chunks through the router, and verifies that `rag_api` was not
+used.
 The same Observer page has `Memory Embed Tester` for bringing that backend up:
 enter the target base URL/IP, model name, OpenAI-compatible or Ollama mode,
 choose text or experimental vision input, then run the probe. It reports

@@ -171,6 +171,8 @@ Active document / large-paste RAG:
   `agentic_rag_retrieve(...)`
 - it injects only a compact `<active-rag-context>` system message
 - archive-only state with `archive_rag_mode=tool_only` stays passive
+- Bridge Test UI exposes `Native Document RAG Smoke` to validate the
+  AlphaRavis-owned pgvector path without `rag_api`.
 
 ## Embedding / Chunking Decisions
 
