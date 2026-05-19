@@ -189,6 +189,14 @@ Live findings:
   matters more than vector dimension
 - `aroxima/gte-qwen2-1.5b-instruct`: reports embedding metadata but Ollama
   rejects `/api/embed` with HTTP 501 in this setup
+- LiteLLM must keep `litellm_settings.drop_params=true` when `rag_api` uses
+  LangChain/OpenAIEmbeddings against an Ollama-backed `memory-embed` route,
+  because that client sends `encoding_format=base64` and Ollama does not accept
+  it.
+- Archive RAG smoke passed after the LiteLLM param-drop fix and LangChain
+  PGVector table initialization. Large-paste live testing still hits runtime
+  timeouts with the current 4b embedding route when a paste expands to many
+  chunks.
 
 Current chunking direction:
 

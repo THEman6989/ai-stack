@@ -1150,6 +1150,10 @@ embedding backend such as llama.cpp or LM Studio, set
 `EMBEDDING_LITELLM_MODEL=openai/<served-model>` and
 `EMBEDDING_API_BASE=http://<embedding-host>:<port>/v1`, then keep AlphaRavis
 itself pointed at LiteLLM's `memory-embed` route.
+`litellm-config/config.yaml` enables `litellm_settings.drop_params=true` so
+LangChain/OpenAIEmbeddings clients can share the same route even when they send
+optional OpenAI parameters, such as `encoding_format`, that Ollama embedding
+routes do not support.
 `qwen3-embedding:4b` is expected to support roughly a 32k-token embedding
 context. Use the Bridge Test UI `Memory Embed Tester` to confirm the real
 accepted size and latency on the running server; its default max probe size is

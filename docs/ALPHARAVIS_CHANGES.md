@@ -4,6 +4,38 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-19 - LiteLLM Embedding Param Compatibility For rag_api
+
+LiteLLM now sets `litellm_settings.drop_params: true` in
+`litellm-config/config.yaml`.
+
+Rationale: `rag_api` uses LangChain/OpenAIEmbeddings, and the current client
+sends `encoding_format=base64` on embedding requests. Ollama-backed LiteLLM
+embedding routes reject that optional OpenAI parameter unless LiteLLM is allowed
+to drop unsupported provider params. AlphaRavis' own `vector_memory.py` did not
+send this parameter, so the failure only appeared through the `rag_api` mirror
+and query path.
+
+Live verification on the local stack:
+
+```text
+POST /v1/embeddings model=memory-embed encoding_format=base64 -> 200
+POST /api/archive-rag-smoke -> status=passed, acceptance_ok=true
+```
+
+The first Archive RAG smoke after fixing LiteLLM exposed a one-time
+initialization issue where `langchain_pg_collection` did not exist yet. Importing
+`rag_api`'s vector store initialized the LangChain PGVector tables in Postgres;
+the next Archive RAG smoke mirrored and queried a bounded archive chunk
+successfully.
+
+Large-paste live follow-up still needs performance work. A two-turn test with a
+large pasted source reached `rag_api` embedding for 27 chunks, but the embedding
+batch hit 180s LiteLLM timeouts and the later chat-model path also timed out at
+the Bridge/LangGraph 180s boundary. This validates the compatibility fix, but
+not a fast end-to-end large-paste user workflow on the current embedding/model
+host.
+
 ## 2026-05-18 - RAG Reference Checkout And LangChain-Native Router Plan
 
 Added a local helper checkout for RAG architecture research:

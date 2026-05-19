@@ -204,8 +204,9 @@ Still needed:
 ## RAG / Retrieval Router
 
 Status: hybrid retrieval router foundation implemented; explicit Agentic-RAG
-tool exposed; thread activation metadata implemented; automatic upload ingest
-and auto-retrieval use are still planned.
+tool exposed; thread activation metadata and large-paste context replacement
+implemented; automatic upload ingest is still planned and live large-paste
+latency needs tuning.
 
 Implemented:
 
@@ -236,10 +237,21 @@ Implemented:
   after memory prefetch and injects only a bounded `<active-rag-context>` system
   message. Archive-only state with `archive_rag_mode=tool_only` remains
   passive.
+- Live runtime check on 2026-05-19: LiteLLM now drops unsupported optional
+  embedding params, so LangChain/OpenAIEmbeddings through `rag_api` no longer
+  fails on `encoding_format=base64`. `Archive RAG Smoke` passed with
+  `acceptance_ok=true` and returned a bounded `rag_api` hit.
 
 Still needed:
 
 - Route future document/PDF upload paths through `ingest_source(...)`.
+- Tune large-paste runtime performance. A live two-turn large-paste test reached
+  `rag_api` embedding, but a 27-chunk embedding batch and the later chat-model
+  call hit the current 180s runtime timeouts. Candidate fixes: smaller
+  `rag_api` embedding batches, faster `memory-embed` model such as the tested
+  `qwen3-embedding:0.6b`, shorter large-paste chunks, queue-only ingest with
+  progress, or a larger Bridge/LangGraph timeout only after backend throughput is
+  understood.
 - Add optional archive `auto_on_intent` behavior after live quality/latency is
   measured. Keep archive-only threads passive unless this mode is explicitly
   enabled.

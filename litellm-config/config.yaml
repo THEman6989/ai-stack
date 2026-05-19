@@ -68,3 +68,7 @@ model_list:
 litellm_settings:
   num_retries: 0
   request_timeout: 180
+  # LangChain/OpenAIEmbeddings sends encoding_format for some clients, but
+  # Ollama embedding routes do not support it. Let LiteLLM drop unsupported
+  # optional params so rag_api can share the same memory-embed route.
+  drop_params: true
