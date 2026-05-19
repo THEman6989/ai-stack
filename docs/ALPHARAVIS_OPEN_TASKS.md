@@ -243,6 +243,10 @@ Implemented:
   `memory-embed` uses Ollama. OpenAI-compatible/llama.cpp routes keep parameter
   dropping disabled. `Archive RAG Smoke` passed with `acceptance_ok=true` and
   returned a bounded `rag_api` hit.
+- LiteLLM's proxy metadata is isolated into a separate `litellm` Postgres
+  database. `rag_api` keeps the `rag_api` database for LangChain PGVector
+  tables, so LiteLLM Prisma startup migrations no longer touch
+  `langchain_pg_collection` / `langchain_pg_embedding`.
 
 Still needed:
 

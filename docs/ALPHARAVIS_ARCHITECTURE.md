@@ -30,7 +30,9 @@ The current Docker architecture is split into these main roles:
 - `alpharavis_acp_adapter.py`: optional AionUi bridge. Runs as a JSON-RPC-over-stdio
   custom ACP agent and maps LangGraph streams to AionUi text chunks, toolcards,
   plan updates, and permission requests.
-- `litellm`: model gateway. Routes AlphaRavis model calls to configured backends such as llama.cpp or Ollama.
+- `litellm`: model gateway. Routes AlphaRavis model calls to configured
+  backends such as llama.cpp or Ollama. Its proxy metadata lives in the
+  `litellm` Postgres database.
 - `mongodb`: LangGraph checkpointing and long-term store backing.
 - `vectordb`: Postgres with pgvector. It can act as an optional semantic
   search sidecar for AlphaRavis memory; it does not replace MongoDB.
@@ -39,7 +41,8 @@ The current Docker architecture is split into these main roles:
 - `service-dashboard`: lightweight local redirector UI on port `8090` that
   lists host and Docker URLs for the stack services.
 - `librechat`: the normal chat UI for the user.
-- `rag_api`: local document search backend when available.
+- `rag_api`: local document search backend when available. Its LangChain
+  PGVector tables live in the separate `rag_api` Postgres database.
 - Pixelle/MCP services: image generation and Pixelle tool integration when available.
 - `hermes-agent`: optional external coding/system agent reached through its
   OpenAI-compatible API on the host.

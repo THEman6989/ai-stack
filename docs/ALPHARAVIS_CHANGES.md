@@ -6,6 +6,21 @@ can tell which patches are intentional and which ones can be removed.
 
 ## 2026-05-19 - LiteLLM Embedding Param Compatibility For rag_api
 
+LiteLLM now uses its own Postgres database:
+
+```text
+DATABASE_URL=postgresql://postgres:<password>@vectordb:5432/litellm
+```
+
+`rag_api` remains on the `rag_api` database for LangChain PGVector tables. Fresh
+Postgres volumes create the extra LiteLLM database via
+`docker-initdb/010-create-litellm-db.sql`. This prevents LiteLLM's Prisma
+migrations and post-migration sanity diff from modifying or dropping
+`rag_api`'s `langchain_pg_collection` / `langchain_pg_embedding` tables.
+Verified by force-recreating `litellm`, confirming its live `DATABASE_URL`
+points at `/litellm`, confirming the `rag_api` LangChain tables still exist,
+and rerunning `Archive RAG Smoke` successfully after the restart.
+
 LiteLLM config is now rendered at container startup by
 `scripts/render_litellm_config.py`. The base `litellm-config/config.yaml` keeps
 `drop_params` unset globally; the renderer adds `drop_params: true` only to

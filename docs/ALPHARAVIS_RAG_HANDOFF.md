@@ -204,6 +204,10 @@ Live findings:
   after switching the default embedding model to 0.6b. Do not mix old 2560-dim
   qwen3-embedding:4b rows and new 1024-dim qwen3-embedding:0.6b rows in one
   LangChain PGVector collection.
+- LiteLLM and `rag_api` must not share the same Postgres database. LiteLLM uses
+  the `litellm` database for Prisma proxy metadata; `rag_api` uses the `rag_api`
+  database for LangChain PGVector. Sharing them caused LiteLLM startup sanity
+  migrations to remove or invalidate `langchain_pg_collection`.
 
 Current chunking direction:
 

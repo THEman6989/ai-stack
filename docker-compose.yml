@@ -44,6 +44,7 @@ services:
       - "5432:5432"
     volumes:
       - ./data/pgdata:/var/lib/postgresql/data
+      - ./docker-initdb:/docker-entrypoint-initdb.d:ro
     env_file:
       - .env
     restart: always
@@ -53,7 +54,7 @@ services:
     image: ghcr.io/berriai/litellm:main-latest
     container_name: litellm
     environment:
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@vectordb:5432/rag_api
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@vectordb:5432/litellm
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-local-dev}
       - EMBEDDING_LITELLM_MODEL=${EMBEDDING_LITELLM_MODEL:-ollama/qwen3-embedding:0.6b}
       - EMBEDDING_FALLBACK_LITELLM_MODEL=${EMBEDDING_FALLBACK_LITELLM_MODEL:-ollama/bge-m3}

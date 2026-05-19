@@ -1170,6 +1170,17 @@ When changing embedding dimensions, use a new `rag_api` collection. The default
 is now `RAG_COLLECTION_NAME=alpharavis_qwen06` so old 4b vectors do not mix with
 new 0.6b vectors in LangChain PGVector searches.
 
+LiteLLM and `rag_api` intentionally use separate Postgres databases on the same
+`vectordb` server:
+
+```text
+litellm -> litellm
+rag_api -> rag_api
+```
+
+Keep them separate. LiteLLM runs Prisma migrations at startup; sharing the
+`rag_api` database can remove or invalidate LangChain PGVector tables.
+
 ```text
 ALPHARAVIS_PGVECTOR_CHARS_PER_TOKEN=4.0
 ALPHARAVIS_PGVECTOR_CHUNK_TOKENS=900
