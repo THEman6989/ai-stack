@@ -931,6 +931,18 @@ What happens:
    huge tail after the minimum is already satisfied. Like Hermes, the latest
    user/human message is always anchored into the tail so the active request is
    never compressed into a reference-only summary.
+   If the resulting protected tail still exceeds
+   `ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_RATIO` of the compression budget,
+   default 60 percent, AlphaRavis rebalances it: older tail messages move back
+   into the compressible middle while the latest user message remains anchored
+   by default. This keeps "last three messages" protection from making a huge
+   uncompressible tail.
+   If the tail is critically oversized above
+   `ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_FORCE_MIDDLE_RATIO`, default 80
+   percent, the latest user-message anchor is released too and the huge active
+   request can be archived/compressed. This is a last-resort pressure rule; for
+   huge pasted documents, the preferred path is still Large-Paste RAG before
+   compression.
 3. The middle is summarized. Tool outputs are pruned into informative previews
    before the summary call, repeated old tool outputs are deduplicated by hash,
    tool-call JSON arguments are shortened without breaking JSON, and secrets are
@@ -1102,13 +1114,17 @@ in `inspect_context_budget` under `compression_summary_budget` so downstream
 agents can see `summary_prompt_tokens`, `summary_output_tokens`, and
 `summary_chunk_output_tokens` without duplicating the math.
 
-Chunked summary compression is experimental and off by default. It exists for
-the case where normal active compression selected a large middle section, but
-the summary-model prompt budget would otherwise force a blunt head/tail prune.
-The default path remains the simpler bounded one-shot summary because it is
-faster and easier to reason about for ordinary over-budget runs.
+Chunked summary compression is experimental and off by default for ordinary
+over-budget runs. It exists for the case where normal active compression
+selected a large middle section, but the summary-model prompt budget would
+otherwise force a blunt head/tail prune. The compressor may still force chunked
+summary when oversized-tail rescue moves the latest user message into the
+compressible middle, because that is the "otherwise cannot fit" path for a
+huge pasted file/request. The default path remains the simpler bounded one-shot
+summary when no oversized-tail rescue is involved.
 
-When `ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=true` and the summary input
+When `ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=true`, or oversized-tail
+rescue forces the latest user message into compression, and the summary input
 exceeds `ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_*`, AlphaRavis changes only the
 summary-generation step:
 
@@ -1380,10 +1396,25 @@ sources so later graph nodes can auto-retrieve bounded chunks from those
 sources. Compression archives set `rag_active=false` and
 `archive_rag_mode=tool_only`, preserving the rule that archives are searched
 only through explicit retrieval intent or tools.
-For large pasted human messages, `run_profile_start_node` calls
-`ingest_source(source_type="large_paste")` before pre-run context compression.
-If indexing succeeds, the full pasted text is replaced in active context by a
-small retrieval marker with the source id and preview.
+For large pasted human messages, `run_profile_start_node` checks context budget
+before pre-run context compression. Automatic paste-to-RAG only calls
+`ingest_source(source_type="large_paste")` when the estimated active context is
+within `ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS` tokens of the
+compression trigger, default `5000`; otherwise the paste stays active and
+compression can handle it normally later. Operators can force source indexing
+with paired `/rag ... /rag` blocks. If indexing succeeds, the full pasted text
+or marked block is replaced in active context by a small retrieval marker with
+the source id and preview.
+Before ingest, AlphaRavis classifies the large paste as `document`,
+`instruction`, `mixed`, or `unknown` using deterministic markers and heuristics
+instead of a second model call. Instruction-like pastes are indexed as
+`large_instruction` in AlphaRavis pgvector for exact lookup but do not activate
+automatic document RAG; the replacement message contains a condensed
+instruction brief. Mixed pastes keep active document RAG, include the condensed
+instruction brief beside the source handle, and strip obvious instruction text
+from the indexed document body when a document/data section can be separated.
+This prevents prompt instructions from becoming ordinary search material while
+still keeping the important source content retrievable by source key.
 `active_rag_prefetch_node` later consumes the active source/file ids and injects
 only bounded retrieved chunks in an `<active-rag-context>` system message.
 Archive-only state remains passive while `archive_rag_mode=tool_only`.
@@ -1692,19 +1723,22 @@ Media is safe-by-default:
 
 - LibreChat/OpenWebUI media blocks are reduced to URL/file-id/type metadata by
   the bridge unless `BRIDGE_ALLOW_RAW_MEDIA_CONTEXT=true`.
-- Incoming video media blocks are mirrored through `media-gallery` first when
+- Incoming image/video media blocks are mirrored through `media-gallery` first
+  when `BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_IMAGES=true` and
   `BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS=true`. The Bridge rewrites only
   the AlphaRavis-facing media marker to the stable gallery URL; LibreChat's
   visible attachment record and original upload storage stay unchanged.
 - Pixelle output URLs are registered with `media-gallery`.
 - The gallery downloads/stores returned assets under `media-data` and records
   metadata in MongoDB.
-- `media-gallery` accepts normal HTTP(S) video URLs and inline `data:` video
-  blocks. Inline payloads are written to disk but not copied back into MongoDB
-  asset metadata.
+- `media-gallery` accepts normal HTTP(S) image/video URLs and inline `data:`
+  image/video blocks. Inline payloads are written to disk but not copied back
+  into MongoDB asset metadata.
 - The media-gallery service stores optional original/processed derivation
   fields and exposes `/gallery?view=all|original|processed` for grouped
-  operator inspection with copyable stable media URLs.
+  operator inspection with copyable stable media URLs. Gallery/API listing can
+  filter by `thread_id`, `thread_key`, or `group_id`, sort by date/name/type,
+  and group by day+group, thread, group, date, or media type.
 - Media-gallery Mongo state is split conceptually:
   - `assets`: one row per file/media asset
   - `references`: where that asset appeared in chat/tool context

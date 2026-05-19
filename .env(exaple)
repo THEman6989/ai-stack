@@ -627,9 +627,10 @@ BRIDGE_RESPONSES_ALLOW_CLIENT_TOOLS=false
 # false until the target LangGraph/model path is explicitly vision-capable.
 BRIDGE_ALLOW_RAW_MEDIA_CONTEXT=false
 BRIDGE_MEDIA_CONTEXT_MODE=metadata
-# Incoming video parts are copied into media-gallery before metadata-only Bridge
-# context is built. LibreChat's own attachment record/file remains untouched;
-# AlphaRavis sees the stable media-gallery URL.
+# Incoming image/video parts are copied into media-gallery before metadata-only
+# Bridge context is built. LibreChat's own attachment record/file remains
+# untouched; AlphaRavis sees the stable media-gallery URL.
+BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_IMAGES=true
 BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS=true
 BRIDGE_MEDIA_GALLERY_TIMEOUT_SECONDS=45
 
@@ -773,6 +774,14 @@ ALPHARAVIS_COMPRESSION_PROTECT_FIRST_MESSAGES=3
 ALPHARAVIS_COMPRESSION_PROTECT_LAST_MESSAGES=3
 ALPHARAVIS_COMPRESSION_TAIL_TOKEN_RATIO=0.20
 ALPHARAVIS_COMPRESSION_TAIL_SOFT_CEILING_RATIO=1.5
+# If the protected recent tail itself becomes too large, move older tail
+# messages back into the compressible middle. The latest user message remains
+# anchored by default so the active request is not lost.
+ALPHARAVIS_COMPRESSION_REBALANCE_OVERSIZED_TAIL=true
+ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_RATIO=0.60
+ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_FORCE_MIDDLE_RATIO=0.80
+ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_MIN_MESSAGES=1
+ALPHARAVIS_COMPRESSION_KEEP_LATEST_USER_WHEN_REBALANCING_TAIL=true
 ALPHARAVIS_PRE_RUN_COMPRESSION_MAX_PASSES=3
 ALPHARAVIS_DYNAMIC_COMPRESSION_UNTIL_BUDGET=true
 ALPHARAVIS_DYNAMIC_COMPRESSION_MAX_PASSES=6
@@ -785,6 +794,9 @@ ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MIN_TOKENS=8192
 ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MAX_TOKENS=0
 ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_CHARS_PER_TOKEN=2.0
 ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_OVERHEAD_RESERVE_TOKENS=512
+# Default false keeps ordinary over-budget runs on the cheaper one-shot summary.
+# The compressor can still force chunked summary for oversized latest-tail
+# rescue when the protected tail must be moved into compression.
 ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=false
 ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_RATIO=0.03
 ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_MIN_TOKENS=300
@@ -1066,6 +1078,18 @@ ALPHARAVIS_RAG_FEDERATED_TIMEOUT_SECONDS=20
 ALPHARAVIS_RAG_FEDERATED_MAX_FILE_IDS=200
 ALPHARAVIS_RAG_RESULT_PREVIEW_CHARS=1400
 ALPHARAVIS_RETRIEVAL_PREFER_RAG_MIRRORS=true
+
+# Large chat-paste ingest. Plain long pasted messages are only auto-indexed
+# when the active context is close to compression pressure. Use paired
+# `/rag ... /rag` markers to force indexing a block immediately.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_LARGE_PASTE_RAG_INGEST=true
+ALPHARAVIS_ENABLE_LARGE_PASTE_INTENT_CLASSIFIER=true
+ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS=20000
+ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS=5000
+ALPHARAVIS_LARGE_PASTE_RAG_MARKER_PREVIEW_CHARS=900
+ALPHARAVIS_LARGE_PASTE_INSTRUCTION_BRIEF_CHARS=5000
+
 # Experimental: keep normal archive storage unchanged, but also mirror newly
 # created compression archives into rag_api as file_id=archive:<archive_key>.
 # Allowed values: true, false

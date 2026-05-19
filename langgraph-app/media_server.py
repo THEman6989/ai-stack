@@ -9,7 +9,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote_to_bytes, urlparse
+from urllib.parse import urlencode, unquote_to_bytes, urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -36,6 +36,8 @@ MONGO_COLLECTION = os.getenv("ALPHARAVIS_MEDIA_MONGO_COLLECTION", "assets")
 MONGO_REFERENCES_COLLECTION = os.getenv("ALPHARAVIS_MEDIA_MONGO_REFERENCES_COLLECTION", "references")
 DOWNLOAD_ENABLED = os.getenv("ALPHARAVIS_MEDIA_DOWNLOAD_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 MAX_DOWNLOAD_BYTES = int(os.getenv("ALPHARAVIS_MEDIA_MAX_DOWNLOAD_BYTES", str(2 * 1024 * 1024 * 1024)))
+ASSET_SORT_FIELDS = {"created_at", "title", "media_type", "asset_kind", "thread_key", "group_id"}
+GALLERY_GROUP_BY = {"day_group", "thread", "group", "day", "media_type"}
 
 app = FastAPI(title="AlphaRavis Media Gallery", openapi_version="3.1.0")
 ensure_write_allowed(MEDIA_ROOT, allowed_root=MEDIA_ROOT)
@@ -178,6 +180,50 @@ def _public_url(relative_path: str) -> str:
     return f"{PUBLIC_BASE_URL}/media/{relative_path.replace(os.sep, '/')}"
 
 
+def _sort_spec(sort: str, order: str) -> tuple[str, int]:
+    field = sort if sort in ASSET_SORT_FIELDS else "created_at"
+    direction = 1 if (order or "").lower() == "asc" else -1
+    return field, direction
+
+
+def _asset_query(
+    *,
+    media_type: str = "all",
+    thread_id: str = "",
+    thread_key: str = "",
+    group_id: str = "",
+    asset_kind: str = "all",
+) -> dict[str, Any]:
+    query: dict[str, Any] = {}
+    if media_type and media_type != "all":
+        query["media_type"] = media_type
+    if thread_id:
+        query["thread_id"] = thread_id
+    if thread_key:
+        query["thread_key"] = thread_key
+    if group_id:
+        query["$or"] = [{"group_id": group_id}, {"derivation_group_id": group_id}]
+    if asset_kind and asset_kind != "all":
+        query["asset_kind"] = asset_kind
+    return query
+
+
+def _gallery_group_key(row: dict[str, Any], group_by: str) -> str:
+    day = time.strftime("%Y-%m-%d", time.localtime(int(row.get("created_at") or 0)))
+    thread = str(row.get("thread_key") or row.get("thread_id") or "no-thread")
+    group = str(row.get("derivation_group_id") or row.get("group_id") or "ungrouped")
+    media_type = str(row.get("media_type") or "unknown")
+    if group_by == "thread":
+        return thread
+    if group_by == "group":
+        return group
+    if group_by == "day":
+        return day
+    if group_by == "media_type":
+        return media_type
+    return f"{day} / {group}"
+
+
 def _asset_kind_from_request(request: MediaRegisterRequest) -> str:
     value = (request.asset_kind or "").strip().lower()
     if value in {"original", "processed", "reference", "unknown"}:
@@ -312,15 +358,25 @@ async def register_asset(request: MediaRegisterRequest):
 
 
 @app.get("/assets")
-async def list_assets(limit: int = 200, media_type: str = "all", thread_id: str = "", asset_kind: str = "all"):
-    query: dict[str, Any] = {}
-    if media_type and media_type != "all":
-        query["media_type"] = media_type
-    if thread_id:
-        query["thread_id"] = thread_id
-    if asset_kind and asset_kind != "all":
-        query["asset_kind"] = asset_kind
-    rows = list(_collection().find(query).sort("created_at", -1).limit(max(1, min(limit, 1000))))
+async def list_assets(
+    limit: int = 200,
+    media_type: str = "all",
+    thread_id: str = "",
+    thread_key: str = "",
+    group_id: str = "",
+    asset_kind: str = "all",
+    sort: str = "created_at",
+    order: str = "desc",
+):
+    query = _asset_query(
+        media_type=media_type,
+        thread_id=thread_id,
+        thread_key=thread_key,
+        group_id=group_id,
+        asset_kind=asset_kind,
+    )
+    sort_field, sort_direction = _sort_spec(sort, order)
+    rows = list(_collection().find(query).sort(sort_field, sort_direction).limit(max(1, min(limit, 1000))))
     for row in rows:
         row["_id"] = str(row["_id"])
     return {"assets": rows}
@@ -349,19 +405,42 @@ async def resolve_asset(url: str = "", source_key: str = "", asset_id: str = "")
 
 
 @app.get("/gallery", response_class=HTMLResponse)
-async def gallery(limit: int = 300, view: str = "all", media_type: str = "all"):
-    query: dict[str, Any] = {}
+async def gallery(
+    limit: int = 300,
+    view: str = "all",
+    media_type: str = "all",
+    thread_id: str = "",
+    thread_key: str = "",
+    group_id: str = "",
+    group_by: str = "day_group",
+    sort: str = "created_at",
+    order: str = "desc",
+):
     view = view if view in {"all", "original", "processed"} else "all"
-    if view != "all":
-        query["asset_kind"] = view
-    if media_type and media_type != "all":
-        query["media_type"] = media_type
-    rows = list(_collection().find(query).sort("created_at", -1).limit(max(1, min(limit, 1000))))
+    group_by = group_by if group_by in GALLERY_GROUP_BY else "day_group"
+    query = _asset_query(
+        media_type=media_type,
+        thread_id=thread_id,
+        thread_key=thread_key,
+        group_id=group_id,
+        asset_kind=view,
+    )
+    sort_field, sort_direction = _sort_spec(sort, order)
+    rows = list(_collection().find(query).sort(sort_field, sort_direction).limit(max(1, min(limit, 1000))))
     groups: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        day = time.strftime("%Y-%m-%d", time.localtime(int(row.get("created_at") or 0)))
-        key = f"{day} / {row.get('derivation_group_id') or row.get('group_id', 'ungrouped')}"
+        key = _gallery_group_key(row, group_by)
         groups.setdefault(key, []).append(row)
+    common_params = {
+        "media_type": media_type,
+        "limit": str(limit),
+        "thread_id": thread_id,
+        "thread_key": thread_key,
+        "group_id": group_id,
+        "group_by": group_by,
+        "sort": sort_field,
+        "order": "asc" if sort_direction == 1 else "desc",
+    }
 
     body = [
         "<!doctype html><html><head><meta charset='utf-8'><title>AlphaRavis Media Gallery</title>",
@@ -369,14 +448,17 @@ async def gallery(limit: int = 300, view: str = "all", media_type: str = "all"):
         "body{font-family:system-ui;margin:0;background:#101214;color:#eee}"
         "header{position:sticky;top:0;background:#101214;padding:18px 24px;border-bottom:1px solid #2b3036;z-index:2}"
         "main{padding:18px 24px}.tabs{display:flex;gap:8px;flex-wrap:wrap}.tabs a{color:#ddd;text-decoration:none;border:1px solid #343a42;border-radius:7px;padding:7px 11px}.tabs a.active{background:#e8eef8;color:#111;border-color:#e8eef8}"
+        ".filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-top:12px;max-width:920px}.filters input,.filters select{background:#181b1f;color:#eee;border:1px solid #343a42;border-radius:6px;padding:7px}.filters button{background:#e8eef8;color:#111;border:1px solid #e8eef8;border-radius:6px;padding:7px 11px;cursor:pointer}"
         "details{margin:16px 0;border-top:1px solid #333;padding-top:12px}summary{cursor:pointer;font-weight:700}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}.card{position:relative;background:#181b1f;border:1px solid #2b3036;border-radius:8px;padding:10px;min-height:180px}img,video{width:100%;aspect-ratio:16/9;object-fit:contain;border-radius:6px;background:#000}.meta{font-size:12px;color:#aaa;word-break:break-word}.badge{display:inline-block;font-size:11px;text-transform:uppercase;letter-spacing:.04em;border:1px solid #46515d;border-radius:6px;padding:2px 6px;color:#cdd7e1}.actions{position:absolute;right:10px;bottom:10px;display:flex;gap:6px}.actions button,.actions a{font-size:12px;background:#222831;color:#eee;border:1px solid #3a434d;border-radius:6px;padding:5px 7px;text-decoration:none;cursor:pointer}h3{font-size:15px;margin:8px 0;line-height:1.25}"
         "</style>",
         "<script>function copyLink(url){navigator.clipboard&&navigator.clipboard.writeText(url)}</script>",
         "</head><body><header><h1>AlphaRavis Media Gallery</h1><nav class='tabs'>",
-        _tab_link("All", "all", view, media_type, limit),
-        _tab_link("Original", "original", view, media_type, limit),
-        _tab_link("Processed", "processed", view, media_type, limit),
-        "</nav></header><main>",
+        _tab_link("All", "all", view, common_params),
+        _tab_link("Original", "original", view, common_params),
+        _tab_link("Processed", "processed", view, common_params),
+        "</nav>",
+        _filter_form(view, common_params),
+        "</header><main>",
     ]
     for group, assets in groups.items():
         body.append(f"<details open><summary>{html.escape(group)} ({len(assets)})</summary><div class='grid'>")
@@ -420,7 +502,37 @@ async def gallery(limit: int = 300, view: str = "all", media_type: str = "all"):
     return "\n".join(body)
 
 
-def _tab_link(label: str, value: str, current: str, media_type: str, limit: int) -> str:
+def _tab_link(label: str, value: str, current: str, params: dict[str, str]) -> str:
     active = " active" if value == current else ""
-    href = f"/gallery?view={value}&media_type={html.escape(media_type)}&limit={int(limit)}"
+    query = dict(params)
+    query["view"] = value
+    href = f"/gallery?{urlencode({key: value for key, value in query.items() if value})}"
     return f"<a class='{active}' href='{href}'>{html.escape(label)}</a>"
+
+
+def _select(name: str, current: str, values: list[tuple[str, str]]) -> str:
+    options = []
+    for value, label in values:
+        selected = " selected" if value == current else ""
+        options.append(f"<option value='{html.escape(value)}'{selected}>{html.escape(label)}</option>")
+    return f"<select name='{html.escape(name)}'>{''.join(options)}</select>"
+
+
+def _filter_form(view: str, params: dict[str, str]) -> str:
+    media_type = params.get("media_type", "all")
+    group_by = params.get("group_by", "day_group")
+    sort = params.get("sort", "created_at")
+    order = params.get("order", "desc")
+    return (
+        "<form class='filters' method='get' action='/gallery'>"
+        f"<input type='hidden' name='view' value='{html.escape(view)}'>"
+        f"{_select('media_type', media_type, [('all', 'All media'), ('image', 'Images'), ('video', 'Videos'), ('audio', 'Audio'), ('document', 'Documents')])}"
+        f"{_select('group_by', group_by, [('day_group', 'Day + group'), ('thread', 'Thread'), ('group', 'Group'), ('day', 'Date'), ('media_type', 'Type')])}"
+        f"{_select('sort', sort, [('created_at', 'Date'), ('title', 'Name'), ('media_type', 'Type'), ('asset_kind', 'Kind'), ('thread_key', 'Thread'), ('group_id', 'Group')])}"
+        f"{_select('order', order, [('desc', 'Descending'), ('asc', 'Ascending')])}"
+        f"<input name='thread_key' placeholder='Thread key' value='{html.escape(params.get('thread_key', ''))}'>"
+        f"<input name='group_id' placeholder='Group id' value='{html.escape(params.get('group_id', ''))}'>"
+        f"<input name='limit' inputmode='numeric' value='{html.escape(params.get('limit', '300'))}'>"
+        "<button type='submit'>Apply</button>"
+        "</form>"
+    )

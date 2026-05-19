@@ -220,6 +220,52 @@ def test_chunked_summary_reports_and_prompts_for_max_chunk_omissions(monkeypatch
     assert "archive lookup" in synthesis_prompts[0]
 
 
+def test_oversized_tail_forces_chunked_summary_when_prompt_is_pruned(monkeypatch) -> None:
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY", "false")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MAX_TOKENS", "1200")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MIN_TOKENS", "1000")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_CHARS_PER_TOKEN", "1")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_OVERLAP_CHARS", "0")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_MAX_CHUNKS", "20")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_RATIO", "0.60")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_FORCE_MIDDLE_RATIO", "0.80")
+
+    calls: list[str] = []
+
+    async def chunk_summary(prompt: str, _max_tokens: int) -> str:
+        calls.append(prompt)
+        if "mode: pre_run_chunked_synthesis" in prompt:
+            return "## Active Task\n- synthesized oversized latest user paste\n\n## Archive References\n- source_type=archive"
+        assert "mode: pre_run_chunk_" in prompt
+        return "## Active Task\n- oversized latest user paste chunk\n\n## Archive References\n- source_type=archive"
+
+    messages = [{"role": "system", "content": f"head {index}"} for index in range(3)]
+    messages.extend({"role": "assistant", "content": f"old middle {index}"} for index in range(2))
+    messages.append({"role": "user", "content": "latest pasted file " + ("x " * 12000)})
+
+    result = asyncio.run(
+        compress_messages(
+            messages,
+            mode="pre_run",
+            thread_id="thread",
+            thread_key="thread",
+            token_limit=100,
+            previous_summary=None,
+            summarize_fn=chunk_summary,
+            force=True,
+            enable_chunked_summary=False,
+        )
+    )
+
+    assert not result.summary_failed
+    assert result.archive_metadata["oversized_tail_force_latest_user_to_middle"] is True
+    assert result.archive_metadata["summary_prompt_pruned"] is True
+    assert result.archive_metadata["summary_chunking_forced_by_oversized_tail"] is True
+    assert result.archive_metadata["summary_chunking_used"] is True
+    assert result.archive_metadata["summary_chunk_count"] > 1
+    assert len(calls) == result.archive_metadata["summary_chunk_count"] + 1
+
+
 def test_reasoning_blocks_do_not_count_as_active_context() -> None:
     message = {
         "role": "assistant",
@@ -324,12 +370,14 @@ def test_tail_protection_anchors_latest_user_message_like_hermes() -> None:
             "ALPHARAVIS_COMPRESSION_PROTECT_LAST_MESSAGES",
             "ALPHARAVIS_COMPRESSION_TAIL_TOKEN_RATIO",
             "ALPHARAVIS_COMPRESSION_TAIL_SOFT_CEILING_RATIO",
+            "ALPHARAVIS_COMPRESSION_REBALANCE_OVERSIZED_TAIL",
         )
     }
     try:
         os.environ["ALPHARAVIS_COMPRESSION_PROTECT_LAST_MESSAGES"] = "3"
         os.environ["ALPHARAVIS_COMPRESSION_TAIL_TOKEN_RATIO"] = "0.05"
         os.environ["ALPHARAVIS_COMPRESSION_TAIL_SOFT_CEILING_RATIO"] = "1.0"
+        os.environ["ALPHARAVIS_COMPRESSION_REBALANCE_OVERSIZED_TAIL"] = "false"
         messages = [{"id": f"m{i}", "role": "assistant", "content": f"assistant {i} " + ("x" * 80)} for i in range(30)]
         messages[20] = {"id": "latest-user", "role": "user", "content": "current active request"}
 
@@ -344,6 +392,44 @@ def test_tail_protection_anchors_latest_user_message_like_hermes() -> None:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def test_oversized_tail_rebalance_moves_old_tail_messages_to_middle_but_keeps_latest_user(monkeypatch) -> None:
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_REBALANCE_OVERSIZED_TAIL", "true")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_RATIO", "0.60")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_FORCE_MIDDLE_RATIO", "0.99")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_PROTECT_LAST_MESSAGES", "3")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_TAIL_TOKEN_RATIO", "0.05")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_TAIL_SOFT_CEILING_RATIO", "1.0")
+    messages = [{"id": f"m{i}", "role": "assistant", "content": f"assistant {i} " + ("x " * 60)} for i in range(30)]
+    messages[20] = {"id": "latest-user", "role": "user", "content": "current active request"}
+
+    selection = select_head_middle_tail(messages, token_limit=500, protected_message_ids=set())
+
+    assert selection.oversized_tail_rebalanced is True
+    assert selection.oversized_tail_tokens_before > selection.oversized_tail_token_target
+    assert selection.oversized_tail_moved_indexes
+    assert 20 in selection.tail_indexes
+    assert any(index in selection.middle_indexes for index in range(21, 30))
+
+
+def test_critical_oversized_tail_can_move_latest_user_to_middle(monkeypatch) -> None:
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_REBALANCE_OVERSIZED_TAIL", "true")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_RATIO", "0.60")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_FORCE_MIDDLE_RATIO", "0.80")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_PROTECT_LAST_MESSAGES", "3")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_TAIL_TOKEN_RATIO", "0.05")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_TAIL_SOFT_CEILING_RATIO", "1.0")
+    messages = [{"id": f"m{i}", "role": "assistant", "content": f"assistant {i}"} for i in range(6)]
+    messages.append({"id": "huge-latest-user", "role": "user", "content": "huge active request " + ("x " * 500)})
+
+    selection = select_head_middle_tail(messages, token_limit=100, protected_message_ids=set())
+
+    assert selection.oversized_tail_rebalanced is True
+    assert selection.oversized_tail_force_latest_user_to_middle is True
+    assert selection.oversized_tail_force_middle_target == 80
+    assert 6 in selection.middle_indexes
+    assert 6 not in selection.tail_indexes
 
 
 def test_anti_thrashing_blocks_auto_and_force_ignores_it() -> None:

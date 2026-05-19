@@ -80,6 +80,10 @@ BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS = _env_bool(
     "BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS",
     "true",
 )
+BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_IMAGES = _env_bool(
+    "BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_IMAGES",
+    "true",
+)
 BRIDGE_MEDIA_GALLERY_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_MEDIA_GALLERY_TIMEOUT_SECONDS", "45"))
 ALPHARAVIS_MEDIA_GALLERY_URL = os.getenv(
     "ALPHARAVIS_MEDIA_GALLERY_URL",
@@ -96,6 +100,7 @@ MEDIA_BLOCK_TYPES = {
     "input_file",
 }
 VIDEO_MEDIA_BLOCK_TYPES = {"video_url", "input_video"}
+IMAGE_MEDIA_BLOCK_TYPES = {"image_url", "input_image"}
 BRIDGE_LLM_HEALTH_URL = os.getenv("BRIDGE_LLM_HEALTH_URL", "http://litellm:4000/v1").rstrip("/")
 BRIDGE_LLM_HEALTH_API_KEY = os.getenv("BRIDGE_LLM_HEALTH_API_KEY", os.getenv("OPENAI_API_KEY", "sk-local-dev"))
 BRIDGE_LLM_HEALTH_MODEL = os.getenv("BRIDGE_LLM_HEALTH_MODEL", "big-boss")
@@ -362,7 +367,7 @@ def _media_part_title(part: dict[str, Any]) -> str:
 
 def _media_part_mime_type(part: dict[str, Any]) -> str:
     explicit = str(part.get("mime_type") or part.get("media_type") or "")
-    if explicit.startswith("video/"):
+    if explicit.startswith(("image/", "video/", "audio/")):
         return explicit
     source_url = _media_part_source_url(part)
     if source_url.startswith("data:"):
@@ -376,10 +381,29 @@ def _is_video_media_part(part: dict[str, Any]) -> bool:
     if block_type in VIDEO_MEDIA_BLOCK_TYPES:
         return True
     mime_type = _media_part_mime_type(part)
-    if mime_type.startswith("video/"):
+    if mime_type == "video" or mime_type.startswith("video/"):
         return True
     source_url = _media_part_source_url(part).lower().split("?", 1)[0].split("#", 1)[0]
     return source_url.endswith((".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"))
+
+
+def _is_image_media_part(part: dict[str, Any]) -> bool:
+    block_type = str(part.get("type") or "")
+    if block_type in IMAGE_MEDIA_BLOCK_TYPES:
+        return True
+    mime_type = _media_part_mime_type(part)
+    if mime_type == "image" or mime_type.startswith("image/"):
+        return True
+    source_url = _media_part_source_url(part).lower().split("?", 1)[0].split("#", 1)[0]
+    return source_url.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif"))
+
+
+def _media_gallery_type_for_part(part: dict[str, Any]) -> str:
+    if _is_video_media_part(part):
+        return "video"
+    if _is_image_media_part(part):
+        return "image"
+    return ""
 
 
 def _replace_media_part_source_url(part: dict[str, Any], public_url: str) -> None:
@@ -396,33 +420,37 @@ def _replace_media_part_source_url(part: dict[str, Any], public_url: str) -> Non
     if isinstance(part.get("file_data"), str):
         part["url"] = public_url
         return
-    part["video_url"] = {"url": public_url}
+    block_type = str(part.get("type") or "")
+    part["image_url" if block_type in IMAGE_MEDIA_BLOCK_TYPES else "video_url"] = {"url": public_url}
 
 
-def _bridge_media_source_key(part: dict[str, Any], source_url: str) -> str:
+def _bridge_media_source_key(part: dict[str, Any], source_url: str, media_type: str) -> str:
     file_id = str(part.get("file_id") or part.get("id") or "").strip()
     if file_id:
         return f"librechat:{file_id}"
     digest = hashlib.sha256(source_url.encode("utf-8")).hexdigest()[:24]
-    return f"librechat-video-url:{digest}"
+    return f"librechat-{media_type or 'media'}-url:{digest}"
 
 
-async def _mirror_video_part_to_media_gallery(
+async def _mirror_media_part_to_media_gallery(
     part: dict[str, Any],
     *,
     thread_id: str,
     thread_key: str,
 ) -> dict[str, Any] | None:
-    if (
-        not BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS
-        or part.get("alpharavis_media_gallery_url")
-        or not _is_video_media_part(part)
-    ):
+    if part.get("alpharavis_media_gallery_url"):
+        return None
+    media_type = _media_gallery_type_for_part(part)
+    if media_type == "video" and not BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS:
+        return None
+    if media_type == "image" and not BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_IMAGES:
+        return None
+    if media_type not in {"image", "video"}:
         return None
     source_url = _media_part_source_url(part)
     if not source_url:
         return None
-    source_key = _bridge_media_source_key(part, source_url)
+    source_key = _bridge_media_source_key(part, source_url, media_type)
     title = _media_part_title(part) or source_key
     librechat_owned = bool(part.get("file_id") or part.get("id")) or source_url.startswith("data:") or any(
         marker in source_url for marker in ("librechat", "/api/files/", "/uploads/")
@@ -437,7 +465,7 @@ async def _mirror_video_part_to_media_gallery(
         "role": "input",
         "asset_kind": "original",
         "origin": "librechat_upload" if librechat_owned else "chat_url",
-        "media_type": "video",
+        "media_type": media_type,
         "mime_type": _media_part_mime_type(part),
         "title": title,
         "download": True,
@@ -456,6 +484,7 @@ async def _mirror_video_part_to_media_gallery(
                 "bridge.media_gallery.register_failed",
                 status_code=response.status_code,
                 source_key=source_key,
+                media_type=media_type,
                 thread_id=thread_id,
             )
             return None
@@ -466,6 +495,7 @@ async def _mirror_video_part_to_media_gallery(
             exc,
             level=logging.WARNING,
             source_key=source_key,
+            media_type=media_type,
             thread_id=thread_id,
         )
         return None
@@ -481,6 +511,15 @@ async def _mirror_video_part_to_media_gallery(
     return record if isinstance(record, dict) else None
 
 
+async def _mirror_video_part_to_media_gallery(
+    part: dict[str, Any],
+    *,
+    thread_id: str,
+    thread_key: str,
+) -> dict[str, Any] | None:
+    return await _mirror_media_part_to_media_gallery(part, thread_id=thread_id, thread_key=thread_key)
+
+
 async def _mirror_video_parts_in_messages(
     messages: list[dict[str, Any]],
     *,
@@ -493,7 +532,7 @@ async def _mirror_video_parts_in_messages(
             continue
         for part in content:
             if isinstance(part, dict):
-                await _mirror_video_part_to_media_gallery(part, thread_id=thread_id, thread_key=thread_key)
+                await _mirror_media_part_to_media_gallery(part, thread_id=thread_id, thread_key=thread_key)
     return messages
 
 

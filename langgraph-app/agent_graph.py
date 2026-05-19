@@ -5931,13 +5931,249 @@ def _large_paste_min_chars() -> int:
     return max(1, int(os.getenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "20000")))
 
 
-def _large_paste_marker(*, source_key: str, rag_file_id: str, title: str, content: str) -> str:
+def _large_paste_auto_margin_tokens() -> int:
+    return max(0, int(os.getenv("ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS", "5000")))
+
+
+def _large_paste_auto_should_ingest(state: dict[str, Any], messages: list[Any]) -> tuple[bool, dict[str, Any]]:
+    budget = _context_budget_snapshot(state, messages=messages)
+    margin = int(budget.get("effective_active_limit") or 0) - int(budget.get("message_tokens") or 0)
+    threshold = _large_paste_auto_margin_tokens()
+    return margin <= threshold, {
+        "message_tokens": int(budget.get("message_tokens") or 0),
+        "effective_active_limit": int(budget.get("effective_active_limit") or 0),
+        "tokens_until_compression": margin,
+        "auto_margin_tokens": threshold,
+        "compression_needed": bool(budget.get("compression_needed")),
+    }
+
+
+_LARGE_PASTE_INSTRUCTION_PATTERNS = (
+    r"\b(system|developer|assistant)\s+prompt\b",
+    r"\byou\s+are\s+(an?|the)\b",
+    r"\bfollow\s+(these|the)\s+(instructions|rules|steps)\b",
+    r"\b(do\s+not|don't|never|always|must|shall|required|requirements?)\b",
+    r"\bacceptance\s+criteria\b",
+    r"\b(output|response)\s+format\b",
+    r"\bworkflow\b",
+    r"\brole\s*:",
+    r"\btask\s*:",
+    r"\binstructions?\s*:",
+    r"\brules?\s*:",
+    r"\bconstraints?\s*:",
+    r"\bpolicy\s*:",
+    r"\banweisungen?\s*:",
+    r"\bregeln?\s*:",
+    r"\bvorgaben?\s*:",
+    r"\bdu\s+(bist|sollst|musst|darfst)\b",
+    r"\bbefolge\b",
+    r"\bniemals\b",
+    r"\bimmer\b",
+)
+
+_LARGE_PASTE_DOCUMENT_PATTERNS = (
+    r"\b(article|paper|document|transcript|dataset|data|logs?|dump|source|report)\b",
+    r"\b(analy[sz]e|summari[sz]e|extract|review)\s+(this|the|following)\b",
+    r"\b(here is|the following is)\s+(a|the)?\s*(document|text|log|data|source)\b",
+    r"\b(dokument|quelle|daten|protokoll|mitschnitt|bericht|log)\b",
+    r"\b(analysiere|fasse|extrahiere|pruefe|prüfe)\s+(dies|diese|den|das)\b",
+)
+
+
+_LARGE_PASTE_MANUAL_BLOCK_RE = re.compile(
+    r"(?im)^[ \t]*/(?:rag|rake|index|ingest)(?:[ \t]+[^\n]*)?[ \t]*$"
+)
+
+
+def _large_paste_intent_classifier_enabled() -> bool:
+    return _env_bool("ALPHARAVIS_ENABLE_LARGE_PASTE_INTENT_CLASSIFIER", "true")
+
+
+def _classify_large_paste_intent(content: str) -> dict[str, Any]:
+    text = str(content or "")
+    lowered = text.lower()
+    instruction_hits: list[str] = []
+    document_hits: list[str] = []
+
+    for pattern in _LARGE_PASTE_INSTRUCTION_PATTERNS:
+        if re.search(pattern, lowered, flags=re.IGNORECASE | re.MULTILINE):
+            instruction_hits.append(pattern)
+    for pattern in _LARGE_PASTE_DOCUMENT_PATTERNS:
+        if re.search(pattern, lowered, flags=re.IGNORECASE | re.MULTILINE):
+            document_hits.append(pattern)
+
+    heading_instruction_count = len(
+        re.findall(
+            r"(?im)^\s{0,4}(#{1,6}\s*)?(system prompt|developer prompt|instructions?|rules?|requirements?|constraints?|workflow|policy|prompt|anweisungen?|regeln?|vorgaben?)\s*[:#-]?",
+            text,
+        )
+    )
+    heading_document_count = len(
+        re.findall(
+            r"(?im)^\s{0,4}(#{1,6}\s*)?(document|source|context|data|logs?|transcript|article|paper|input|text|dokument|quelle|daten|kontext|protokoll)\s*[:#-]?",
+            text,
+        )
+    )
+    directive_count = len(
+        re.findall(
+            r"(?i)\b(must|shall|required|always|never|do not|don't|befolge|musst|sollst|niemals|immer)\b",
+            text,
+        )
+    )
+    fenced_blocks = len(re.findall(r"(?m)^```", text)) // 2
+    instruction_score = len(instruction_hits) + heading_instruction_count * 2 + min(directive_count, 12) * 0.35
+    document_score = len(document_hits) + heading_document_count * 2 + min(fenced_blocks, 4) * 0.5
+
+    if re.search(r"<\s*(instructions?|system-prompt|developer-prompt)\b", text, flags=re.IGNORECASE | re.DOTALL):
+        instruction_score += 4
+    if re.search(
+        r"<\s*(big-context|document|source|data)\b|^\s*/(ingest|big-context)\b",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    ):
+        document_score += 4
+
+    if instruction_score >= 3.0 and document_score >= 3.0:
+        intent = "mixed"
+    elif instruction_score >= 3.0 and instruction_score >= max(1.0, document_score) * 1.15:
+        intent = "instruction"
+    elif document_score >= 2.0:
+        intent = "document"
+    else:
+        intent = "unknown"
+
+    confidence = 0.0
+    total = instruction_score + document_score
+    if total > 0:
+        confidence = abs(instruction_score - document_score) / total
+        if intent == "mixed":
+            confidence = min(instruction_score, document_score) / max(instruction_score, document_score)
+    return {
+        "intent": intent,
+        "instruction_score": round(instruction_score, 3),
+        "document_score": round(document_score, 3),
+        "confidence": round(min(1.0, confidence), 3),
+        "instruction_markers": instruction_hits[:8],
+        "document_markers": document_hits[:8],
+    }
+
+
+def _large_paste_instruction_brief(content: str) -> str:
+    max_chars = max(500, int(os.getenv("ALPHARAVIS_LARGE_PASTE_INSTRUCTION_BRIEF_CHARS", "5000")))
+    lines = [line.rstrip() for line in str(content or "").splitlines()]
+    selected: list[str] = []
+    directive_re = re.compile(
+        r"(?i)(must|shall|required|always|never|do not|don't|acceptance|criteria|output format|response format|"
+        r"instruction|rule|constraint|policy|workflow|befolge|musst|sollst|niemals|immer|vorgabe|regel)"
+    )
+
+    for line in lines[:80]:
+        stripped = line.strip()
+        if stripped:
+            selected.append(stripped)
+        if sum(len(item) + 1 for item in selected) >= max_chars // 2:
+            break
+
+    for line in lines[80:]:
+        stripped = line.strip()
+        if not stripped or stripped in selected:
+            continue
+        if directive_re.search(stripped):
+            selected.append(stripped)
+        if sum(len(item) + 1 for item in selected) >= max_chars:
+            break
+
+    brief = "\n".join(selected).strip()
+    if len(brief) > max_chars:
+        brief = brief[:max_chars].rstrip() + "\n[Instruction brief truncated; query the indexed source for exact omitted rules.]"
+    return brief or str(content or "")[:max_chars].strip()
+
+
+def _large_paste_document_body_for_index(content: str, paste_intent: str) -> str:
+    text = str(content or "")
+    if paste_intent != "mixed":
+        return text
+    document_heading = re.search(
+        r"(?im)^\s{0,4}(#{1,6}\s*)?(document|source|context|data|input|text|dokument|quelle|daten|kontext)\s*[:#-]?\s*$",
+        text,
+    )
+    if document_heading:
+        body = text[document_heading.end() :].strip()
+        if len(body) >= 200:
+            return body
+    lines = []
+    directive_re = re.compile(
+        r"(?i)(system prompt|developer prompt|instructions?|rules?|constraints?|policy|"
+        r"you are|must|shall|required|always|never|do not|don't|"
+        r"anweisungen?|regeln?|vorgaben?|du bist|du sollst|du musst|niemals|immer|befolge)"
+    )
+    for line in text.splitlines():
+        stripped = line.strip()
+        if directive_re.search(stripped):
+            continue
+        lines.append(line)
+    body = "\n".join(lines).strip()
+    return body if len(body) >= 200 else text
+
+
+def _manual_large_paste_blocks(content: str) -> list[dict[str, Any]]:
+    text = str(content or "")
+    markers = list(_LARGE_PASTE_MANUAL_BLOCK_RE.finditer(text))
+    blocks: list[dict[str, Any]] = []
+    for start_marker, end_marker in zip(markers[0::2], markers[1::2]):
+        body_start = start_marker.end()
+        body_end = end_marker.start()
+        body = text[body_start:body_end].strip("\n")
+        if body.strip():
+            blocks.append(
+                {
+                    "start": start_marker.start(),
+                    "end": end_marker.end(),
+                    "body": body,
+                    "marker": start_marker.group(0).strip(),
+                }
+            )
+    return blocks
+
+
+def _large_paste_marker(
+    *,
+    source_key: str,
+    rag_file_id: str,
+    title: str,
+    content: str,
+    paste_intent: str = "document",
+    classification: dict[str, Any] | None = None,
+) -> str:
     preview_chars = max(0, int(os.getenv("ALPHARAVIS_LARGE_PASTE_RAG_MARKER_PREVIEW_CHARS", "900")))
     preview = content[:preview_chars].strip() if preview_chars else ""
+    classification = classification if isinstance(classification, dict) else {}
+    if paste_intent == "instruction":
+        brief = _large_paste_instruction_brief(content)
+        return "\n\n".join(
+            [
+                f"[Large paste classified as instruction-like and indexed for exact lookup: source_key={source_key}; title={title}]",
+                "Follow the condensed instruction brief below as the active user instruction. "
+                "Use query_source against this source only when exact omitted instruction text is needed.",
+                f"Classification: intent=instruction; confidence={classification.get('confidence', '')}.",
+                f"Condensed instruction brief:\n{brief}",
+            ]
+        )
+    if paste_intent == "mixed":
+        brief = _large_paste_instruction_brief(content)
+        lines = [
+            f"[Large paste classified as mixed instructions plus document/data and indexed for bounded RAG retrieval: source_key={source_key}; rag_file_id={rag_file_id}; title={title}]",
+            "Follow the condensed instruction brief below. Use active RAG/query_source against this source for document/data details.",
+            f"Classification: intent=mixed; confidence={classification.get('confidence', '')}.",
+            f"Condensed instruction brief:\n{brief}",
+        ]
+        return "\n\n".join(lines)
     lines = [
         f"[Large paste indexed for bounded RAG retrieval: source_key={source_key}; rag_file_id={rag_file_id}; title={title}]",
         "Use agentic_rag_retrieve or query_source against this source when details from the pasted text are needed.",
     ]
+    if paste_intent == "unknown":
+        lines.append("Classification: intent=unknown; treated as document-style RAG for backward-compatible large-paste handling.")
     if preview:
         lines.append(f"Paste preview:\n{preview}")
     return "\n\n".join(lines)
@@ -5967,71 +6203,212 @@ async def _ingest_large_paste_messages(
         return messages, [], {}
 
     min_chars = _large_paste_min_chars()
+    auto_should_ingest, auto_budget = _large_paste_auto_should_ingest(state, messages)
     thread_id = _state_thread_id(state)
     thread_key = _state_thread_key(state)
     output: list[Any] = []
     ingests: list[dict[str, Any]] = []
     rag_update: dict[str, Any] = {}
-    for index, message in enumerate(messages):
-        role = _message_role_name(message)
-        content = _message_content_text(message)
-        if role not in {"human", "user"} or len(content) < min_chars:
-            output.append(message)
-            continue
 
-        digest = hashlib.sha256(f"{thread_id}:{index}:{content}".encode("utf-8")).hexdigest()[:16]
-        source_key = f"large_paste:{thread_id}:{digest}"
-        title = f"Large paste {digest}"
+    async def ingest_one(
+        *,
+        body: str,
+        message_index: int,
+        manual: bool,
+        block_index: int = 0,
+    ) -> tuple[str | None, dict[str, Any] | None, dict[str, Any]]:
+        classification = (
+            _classify_large_paste_intent(body)
+            if _large_paste_intent_classifier_enabled()
+            else {"intent": "document", "confidence": 1.0, "instruction_score": 0.0, "document_score": 0.0}
+        )
+        paste_intent = str(classification.get("intent") or "unknown")
+        source_type = "large_instruction" if paste_intent == "instruction" else "large_paste"
+        digest = hashlib.sha256(f"{thread_id}:{message_index}:{block_index}:{body}".encode("utf-8")).hexdigest()[:16]
+        source_key = f"{source_type}:{thread_id}:{digest}"
+        title = "Large instruction paste " + digest if paste_intent == "instruction" else f"Large paste {digest}"
+        preferred_backend = "alpharavis_pgvector" if paste_intent == "instruction" else "auto"
+        ingest_content = _large_paste_document_body_for_index(body, paste_intent)
+        ingest_started = time.perf_counter()
+        ingest_events: list[dict[str, Any]] = [
+            {
+                "event": "large_ingest.started",
+                "t": 0.0,
+                "source_key": source_key,
+                "source_type": source_type,
+                "manual_rag_block": manual,
+                "paste_intent": paste_intent,
+                "content_chars": len(body),
+                "indexed_content_chars": len(ingest_content),
+            }
+        ]
         try:
             ingest_result = await _router_ingest_source(
-                source_type="large_paste",
+                source_type=source_type,
                 source_key=source_key,
                 title=title,
-                content=content,
+                content=ingest_content,
                 thread_id=thread_id,
                 thread_key=thread_key,
                 scope="thread",
                 metadata={
-                    "source_type": "large_paste",
+                    "source_type": source_type,
                     "source_key": source_key,
                     "rag_activation_reason": "large_paste",
-                    "origin": "chat_large_paste",
-                    "message_index": index,
-                    "content_chars": len(content),
+                    "origin": "chat_large_paste_manual" if manual else "chat_large_paste_auto",
+                    "manual_rag_block": manual,
+                    "paste_intent": paste_intent,
+                    "paste_intent_confidence": classification.get("confidence"),
+                    "paste_intent_instruction_score": classification.get("instruction_score"),
+                    "paste_intent_document_score": classification.get("document_score"),
+                    "message_index": message_index,
+                    "block_index": block_index,
+                    "content_chars": len(body),
+                    "indexed_content_chars": len(ingest_content),
+                    "instruction_text_stripped_from_index": paste_intent == "mixed" and ingest_content != body,
+                    **auto_budget,
                 },
-                preferred_backend="auto",
+                preferred_backend=preferred_backend,
                 pgvector_index=_maybe_index_vector_memory,
             )
         except Exception as exc:
-            ingests.append({"source_key": source_key, "index_status": "failed", "error": str(exc)[:500]})
+            elapsed = round(time.perf_counter() - ingest_started, 3)
+            ingest_events.append(
+                {
+                    "event": "large_ingest.failed",
+                    "t": elapsed,
+                    "source_key": source_key,
+                    "error": str(exc)[:500],
+                }
+            )
+            ingest_record = {
+                "source_key": source_key,
+                "source_type": source_type,
+                "manual_rag_block": manual,
+                "paste_intent": paste_intent,
+                "index_status": "failed",
+                "error": str(exc)[:500],
+                "elapsed_seconds": elapsed,
+                "events": ingest_events,
+                **auto_budget,
+            }
+            return None, ingest_record, {}
+
+        elapsed = round(time.perf_counter() - ingest_started, 3)
+        ingest_events.append(
+            {
+                "event": "large_ingest.completed",
+                "t": elapsed,
+                "source_key": source_key,
+                "status": ingest_result.get("index_status", ""),
+                "indexed_backends": list(ingest_result.get("indexed_backends") or []),
+                "rag_active": bool(ingest_result.get("rag_active")),
+            }
+        )
+        ingest_record = {
+            "source_key": source_key,
+            "source_type": source_type,
+            "manual_rag_block": manual,
+            "paste_intent": paste_intent,
+            "paste_intent_confidence": classification.get("confidence"),
+            "paste_intent_instruction_score": classification.get("instruction_score"),
+            "paste_intent_document_score": classification.get("document_score"),
+            "rag_file_id": ingest_result.get("rag_file_id", ""),
+            "index_status": ingest_result.get("index_status", ""),
+            "indexed_backends": list(ingest_result.get("indexed_backends") or []),
+            "rag_active": bool(ingest_result.get("rag_active")),
+            "content_chars": len(body),
+            "indexed_content_chars": len(ingest_content),
+            "instruction_text_stripped_from_index": paste_intent == "mixed" and ingest_content != body,
+            "elapsed_seconds": elapsed,
+            "events": ingest_events,
+            **auto_budget,
+        }
+        local_rag_update = _rag_state_update_from_ingest({**state, **rag_update}, ingest_result)
+        if ingest_result.get("index_status") in {"indexed", "partial"} and (
+            ingest_result.get("rag_active") or paste_intent == "instruction"
+        ):
+            replacement = _large_paste_marker(
+                source_key=source_key,
+                rag_file_id=str(ingest_result.get("rag_file_id") or source_key),
+                title=title,
+                content=body,
+                paste_intent=paste_intent,
+                classification=classification,
+            )
+            return replacement, ingest_record, local_rag_update
+        return None, ingest_record, local_rag_update
+
+    for index, message in enumerate(messages):
+        role = _message_role_name(message)
+        content = _message_content_text(message)
+        if role not in {"human", "user"}:
             output.append(message)
             continue
 
-        ingests.append(
-            {
-                "source_key": source_key,
-                "rag_file_id": ingest_result.get("rag_file_id", ""),
-                "index_status": ingest_result.get("index_status", ""),
-                "indexed_backends": list(ingest_result.get("indexed_backends") or []),
-                "rag_active": bool(ingest_result.get("rag_active")),
-                "content_chars": len(content),
-            }
-        )
-        rag_update.update(_rag_state_update_from_ingest({**state, **rag_update}, ingest_result))
-        if ingest_result.get("index_status") in {"indexed", "partial"} and ingest_result.get("rag_active"):
-            output.append(
-                _replace_message_content(
-                    message,
-                    _large_paste_marker(
-                        source_key=source_key,
-                        rag_file_id=str(ingest_result.get("rag_file_id") or source_key),
-                        title=title,
-                        content=content,
-                    ),
+        manual_blocks = _manual_large_paste_blocks(content)
+        if manual_blocks:
+            replaced = []
+            cursor = 0
+            any_replacement = False
+            for block_index, block in enumerate(manual_blocks):
+                replaced.append(content[cursor : int(block["start"])])
+                replacement, ingest_record, local_rag_update = await ingest_one(
+                    body=str(block["body"]),
+                    message_index=index,
+                    manual=True,
+                    block_index=block_index,
                 )
-            )
-        else:
+                if ingest_record:
+                    ingest_record["message_replaced"] = bool(replacement)
+                    ingests.append(ingest_record)
+                rag_update.update(local_rag_update)
+                if replacement:
+                    replaced.append(replacement)
+                    any_replacement = True
+                else:
+                    replaced.append(content[int(block["start"]) : int(block["end"])])
+                cursor = int(block["end"])
+            replaced.append(content[cursor:])
+            output.append(_replace_message_content(message, "".join(replaced)) if any_replacement else message)
+            continue
+
+        if len(content) < min_chars:
             output.append(message)
+            continue
+
+        if not auto_should_ingest:
+            output.append(message)
+            skip_reason = "context_margin_above_auto_rag_threshold"
+            ingests.append(
+                {
+                    "index_status": "skipped",
+                    "skip_reason": skip_reason,
+                    "message_replaced": False,
+                    "content_chars": len(content),
+                    "events": [
+                        {
+                            "event": "large_ingest.skipped",
+                            "t": 0.0,
+                            "reason": skip_reason,
+                            "content_chars": len(content),
+                        }
+                    ],
+                    **auto_budget,
+                }
+            )
+            continue
+
+        replacement, ingest_record, local_rag_update = await ingest_one(
+            body=content,
+            message_index=index,
+            manual=False,
+        )
+        if ingest_record:
+            ingest_record["message_replaced"] = bool(replacement)
+            ingests.append(ingest_record)
+        rag_update.update(local_rag_update)
+        output.append(_replace_message_content(message, replacement) if replacement else message)
 
     return output, ingests, rag_update
 
@@ -6233,7 +6610,7 @@ async def run_profile_start_node(state: AlphaRavisState, runtime: Any | None = N
         ],
         **rag_update,
     }
-    if large_paste_ingests:
+    if any(bool(item.get("message_replaced")) for item in large_paste_ingests):
         updates["messages"] = [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages]
     return updates
 
@@ -7318,6 +7695,12 @@ def _compression_debug_profile(result: CompressionResult | None, *, prefix: str,
         f"{prefix}_summary_chunk_synthesis_tokens_estimate": metadata.get("summary_chunk_synthesis_tokens_estimate"),
         f"{prefix}_summary_chunk_synthesis_payload_token_limit": metadata.get("summary_chunk_synthesis_payload_token_limit"),
         f"{prefix}_summary_chunk_synthesis_prompt_overhead_tokens": metadata.get("summary_chunk_synthesis_prompt_overhead_tokens"),
+        f"{prefix}_oversized_tail_rebalanced": metadata.get("oversized_tail_rebalanced"),
+        f"{prefix}_oversized_tail_tokens_before": metadata.get("oversized_tail_tokens_before"),
+        f"{prefix}_oversized_tail_token_target": metadata.get("oversized_tail_token_target"),
+        f"{prefix}_oversized_tail_moved_indexes": metadata.get("oversized_tail_moved_indexes"),
+        f"{prefix}_oversized_tail_force_latest_user_to_middle": metadata.get("oversized_tail_force_latest_user_to_middle"),
+        f"{prefix}_oversized_tail_force_middle_target": metadata.get("oversized_tail_force_middle_target"),
         f"{prefix}_pruned_tool_count": metadata.get("pruned_tool_count"),
         f"{prefix}_deduped_tool_count": metadata.get("deduped_tool_count"),
         f"{prefix}_tool_args_truncated_count": metadata.get("tool_args_truncated_count"),

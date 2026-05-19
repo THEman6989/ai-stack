@@ -234,6 +234,7 @@ def test_run_profile_start_ingests_large_paste_and_replaces_active_context(monke
         }
 
     monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "20")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS", "999999")
     monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MARKER_PREVIEW_CHARS", "8")
     monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
     monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", object())
@@ -259,7 +260,264 @@ def test_run_profile_start_ingests_large_paste_and_replaces_active_context(monke
     replacement_text = replacement_messages[1]["content"]
     assert "Large paste indexed for bounded RAG retrieval" in replacement_text
     assert content not in replacement_text
-    assert updates["run_profile"]["large_paste_ingests"][0]["index_status"] == "indexed"
+    ingest_record = updates["run_profile"]["large_paste_ingests"][0]
+    assert ingest_record["index_status"] == "indexed"
+    assert ingest_record["events"][0]["event"] == "large_ingest.started"
+    assert ingest_record["events"][-1]["event"] == "large_ingest.completed"
+    assert ingest_record["events"][-1]["status"] == "indexed"
+
+
+def test_run_profile_start_skips_auto_large_paste_when_context_margin_is_large(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_ingest_source(**kwargs):
+        calls["ingest"] = kwargs
+        return {}
+
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "20")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS", "5")
+    monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
+    monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", object())
+
+    content = "Document:\n" + ("runtime marker with enough content " * 20)
+    updates = asyncio.run(
+        agent_graph.run_profile_start_node(
+            {
+                "messages": [{"role": "human", "content": content, "id": "msg-1"}],
+                "thread_id": "thread-1",
+                "thread_key": "thread-key",
+            }
+        )
+    )
+
+    assert calls == {}
+    assert "messages" not in updates
+    ingest_record = updates["run_profile"]["large_paste_ingests"][0]
+    assert ingest_record["index_status"] == "skipped"
+    assert ingest_record["skip_reason"] == "context_margin_above_auto_rag_threshold"
+    assert ingest_record["tokens_until_compression"] > ingest_record["auto_margin_tokens"]
+    assert ingest_record["events"] == [
+        {
+            "event": "large_ingest.skipped",
+            "t": 0.0,
+            "reason": "context_margin_above_auto_rag_threshold",
+            "content_chars": len(content),
+        }
+    ]
+
+
+def test_run_profile_start_manual_rag_block_forces_ingest(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_ingest_source(**kwargs):
+        calls["ingest"] = kwargs
+        return {
+            "source_key": kwargs["source_key"],
+            "rag_file_id": kwargs["source_key"],
+            "index_status": "indexed",
+            "indexed_backends": ["alpharavis_pgvector"],
+            "rag_active": True,
+            "active_source_keys": [kwargs["source_key"]],
+            "active_rag_file_ids": [],
+            "rag_activation_reason": "large_paste",
+            "archive_rag_mode": "tool_only",
+            "metadata": {
+                "source_key": kwargs["source_key"],
+                "rag_file_id": kwargs["source_key"],
+                "rag_active": True,
+                "active_source_keys": [kwargs["source_key"]],
+                "active_rag_file_ids": [],
+                "rag_activation_reason": "large_paste",
+                "archive_rag_mode": "tool_only",
+            },
+        }
+
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "999999")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS", "0")
+    monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
+    monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", object())
+
+    content = "\n".join(
+        [
+            "Bitte merke dieses Dokument.",
+            "/rag",
+            "Document:",
+            "Runtime marker: MANUAL_RAG_BLOCK. This block must be indexed.",
+            "/rag",
+            "Was steht im Marker?",
+        ]
+    )
+    updates = asyncio.run(
+        agent_graph.run_profile_start_node(
+            {
+                "messages": [{"role": "human", "content": content, "id": "msg-1"}],
+                "thread_id": "thread-1",
+                "thread_key": "thread-key",
+            }
+        )
+    )
+
+    assert calls["ingest"]["metadata"]["manual_rag_block"] is True
+    assert "MANUAL_RAG_BLOCK" in calls["ingest"]["content"]
+    assert updates["rag_active"] is True
+    ingest_record = updates["run_profile"]["large_paste_ingests"][0]
+    assert ingest_record["events"][0]["event"] == "large_ingest.started"
+    assert ingest_record["events"][-1]["indexed_backends"] == ["alpharavis_pgvector"]
+    replacement_text = updates["messages"][1]["content"]
+    assert "/rag" not in replacement_text
+    assert "Large paste indexed for bounded RAG retrieval" in replacement_text
+    assert "Was steht im Marker?" in replacement_text
+
+
+def test_large_paste_intent_classifier_detects_instruction_and_mixed() -> None:
+    instruction = """
+System prompt:
+You are a coding agent.
+Always follow the repository instructions.
+Never expose hidden memory.
+Output format: concise final answer.
+"""
+    mixed = """
+Instructions:
+You must extract only supported facts.
+
+Document:
+Runtime marker: ABC. This report contains deployment data and logs.
+"""
+
+    instruction_result = agent_graph._classify_large_paste_intent(instruction)
+    mixed_result = agent_graph._classify_large_paste_intent(mixed)
+
+    assert instruction_result["intent"] == "instruction"
+    assert instruction_result["instruction_score"] > instruction_result["document_score"]
+    assert mixed_result["intent"] == "mixed"
+
+
+def test_run_profile_start_indexes_instruction_paste_without_rag_activation(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_ingest_source(**kwargs):
+        calls["ingest"] = kwargs
+        return {
+            "source_key": kwargs["source_key"],
+            "rag_file_id": kwargs["source_key"],
+            "index_status": "indexed",
+            "indexed_backends": ["alpharavis_pgvector"],
+            "rag_active": False,
+            "active_source_keys": [],
+            "active_rag_file_ids": [],
+            "archive_rag_mode": "",
+            "metadata": {
+                "source_key": kwargs["source_key"],
+                "rag_file_id": kwargs["source_key"],
+                "rag_active": False,
+                "active_source_keys": [],
+                "active_rag_file_ids": [],
+            },
+        }
+
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "20")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS", "999999")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_INSTRUCTION_BRIEF_CHARS", "500")
+    monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
+    monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", object())
+
+    content = "\n".join(
+        [
+            "System prompt:",
+            "You are a strict local coding agent.",
+            "Always follow AGENTS.md.",
+            "Never expose hidden memory.",
+            "Output format: concise engineering answer.",
+            *[f"UNIMPORTANT TRAILING DETAIL {index}" for index in range(80)],
+        ]
+    )
+    updates = asyncio.run(
+        agent_graph.run_profile_start_node(
+            {
+                "messages": [{"role": "human", "content": content, "id": "msg-1"}],
+                "thread_id": "thread-1",
+                "thread_key": "thread-key",
+            }
+        )
+    )
+
+    assert calls["ingest"]["source_type"] == "large_instruction"
+    assert calls["ingest"]["preferred_backend"] == "alpharavis_pgvector"
+    assert calls["ingest"]["metadata"]["paste_intent"] == "instruction"
+    assert updates.get("rag_active") is not True
+    assert updates["run_profile"]["rag_active"] is False
+    ingest_record = updates["run_profile"]["large_paste_ingests"][0]
+    assert ingest_record["paste_intent"] == "instruction"
+    assert ingest_record["rag_active"] is False
+    replacement_text = updates["messages"][1]["content"]
+    assert "classified as instruction-like" in replacement_text
+    assert "Follow the condensed instruction brief" in replacement_text
+    assert "UNIMPORTANT TRAILING DETAIL 79" not in replacement_text
+
+
+def test_run_profile_start_keeps_mixed_paste_rag_active_with_instruction_brief(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_ingest_source(**kwargs):
+        calls["ingest"] = kwargs
+        return {
+            "source_key": kwargs["source_key"],
+            "rag_file_id": kwargs["source_key"],
+            "index_status": "indexed",
+            "indexed_backends": ["alpharavis_pgvector"],
+            "rag_active": True,
+            "active_source_keys": [kwargs["source_key"]],
+            "active_rag_file_ids": [],
+            "rag_activation_reason": "large_paste",
+            "archive_rag_mode": "tool_only",
+            "metadata": {
+                "source_key": kwargs["source_key"],
+                "rag_file_id": kwargs["source_key"],
+                "rag_active": True,
+                "active_source_keys": [kwargs["source_key"]],
+                "active_rag_file_ids": [],
+                "rag_activation_reason": "large_paste",
+                "archive_rag_mode": "tool_only",
+            },
+        }
+
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "20")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS", "999999")
+    monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
+    monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", object())
+
+    content = "\n".join(
+        [
+            "Instructions:",
+            "You must answer only from the provided document.",
+            "Never invent facts.",
+            "",
+            "Document:",
+            "Runtime marker: MIXED_NATIVE_RAG. The deployment uses AlphaRavis pgvector.",
+            *[f"log line {index}: deployment data" for index in range(20)],
+        ]
+    )
+    updates = asyncio.run(
+        agent_graph.run_profile_start_node(
+            {
+                "messages": [{"role": "human", "content": content, "id": "msg-1"}],
+                "thread_id": "thread-1",
+                "thread_key": "thread-key",
+            }
+        )
+    )
+
+    assert calls["ingest"]["source_type"] == "large_paste"
+    assert calls["ingest"]["metadata"]["paste_intent"] == "mixed"
+    assert "You must answer only" not in calls["ingest"]["content"]
+    assert "Runtime marker: MIXED_NATIVE_RAG" in calls["ingest"]["content"]
+    assert calls["ingest"]["metadata"]["instruction_text_stripped_from_index"] is True
+    assert updates["rag_active"] is True
+    assert updates["active_source_keys"] == [calls["ingest"]["source_key"]]
+    replacement_text = updates["messages"][1]["content"]
+    assert "classified as mixed instructions plus document/data" in replacement_text
+    assert "Use active RAG/query_source" in replacement_text
 
 
 def test_active_rag_prefetch_injects_bounded_context(monkeypatch: pytest.MonkeyPatch) -> None:

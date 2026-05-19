@@ -28,6 +28,12 @@ class CompressionSelection:
     head_indexes: list[int] = field(default_factory=list)
     middle_indexes: list[int] = field(default_factory=list)
     tail_indexes: list[int] = field(default_factory=list)
+    oversized_tail_rebalanced: bool = False
+    oversized_tail_tokens_before: int = 0
+    oversized_tail_token_target: int = 0
+    oversized_tail_moved_indexes: list[int] = field(default_factory=list)
+    oversized_tail_force_latest_user_to_middle: bool = False
+    oversized_tail_force_middle_target: int = 0
 
 
 @dataclass(frozen=True)
@@ -575,6 +581,78 @@ def _latest_user_message_index(messages: list[Any], head_indexes: set[int]) -> i
     return -1
 
 
+def _tail_token_estimate(messages: list[Any], indexes: set[int]) -> int:
+    if not indexes:
+        return 0
+    return estimate_tokens_rough([messages[index] for index in sorted(indexes)])
+
+
+def _rebalance_oversized_tail(
+    *,
+    messages: list[Any],
+    tail_indexes: set[int],
+    head_indexes: set[int],
+    token_limit: int,
+    latest_user_index: int,
+) -> tuple[set[int], dict[str, Any]]:
+    if not _env_bool("ALPHARAVIS_COMPRESSION_REBALANCE_OVERSIZED_TAIL", "true"):
+        return tail_indexes, {}
+    if not tail_indexes:
+        return tail_indexes, {}
+
+    ratio = max(0.10, min(_env_float("ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_RATIO", 0.60), 0.95))
+    target = max(1, int(token_limit * ratio))
+    tokens_before = _tail_token_estimate(messages, tail_indexes)
+    if tokens_before <= target:
+        return tail_indexes, {}
+
+    force_ratio = max(
+        ratio,
+        min(_env_float("ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_FORCE_MIDDLE_RATIO", 0.80), 0.99),
+    )
+    force_target = max(1, int(token_limit * force_ratio))
+    force_latest_user_to_middle = tokens_before > force_target
+    keep_latest_user = (
+        _env_bool("ALPHARAVIS_COMPRESSION_KEEP_LATEST_USER_WHEN_REBALANCING_TAIL", "true")
+        and not force_latest_user_to_middle
+    )
+    keep_indexes: set[int] = set()
+    if keep_latest_user and latest_user_index >= 0 and latest_user_index not in head_indexes:
+        keep_indexes.add(latest_user_index)
+
+    min_tail_messages = max(1, _env_int("ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_MIN_MESSAGES", 1))
+    if force_latest_user_to_middle:
+        min_tail_messages = 0
+    rebalanced = set(tail_indexes)
+    moved: list[int] = []
+    candidates = [index for index in sorted(tail_indexes) if index not in keep_indexes]
+    for index in candidates:
+        if len(rebalanced) <= len(keep_indexes) + min_tail_messages:
+            break
+        if _tail_token_estimate(messages, rebalanced) <= target:
+            break
+        rebalanced.remove(index)
+        moved.append(index)
+
+    if not moved:
+        return tail_indexes, {
+            "oversized_tail_rebalanced": False,
+            "oversized_tail_tokens_before": tokens_before,
+            "oversized_tail_token_target": target,
+            "oversized_tail_moved_indexes": [],
+            "oversized_tail_force_latest_user_to_middle": force_latest_user_to_middle,
+            "oversized_tail_force_middle_target": force_target,
+        }
+    return rebalanced, {
+        "oversized_tail_rebalanced": True,
+        "oversized_tail_tokens_before": tokens_before,
+        "oversized_tail_token_target": target,
+        "oversized_tail_moved_indexes": moved,
+        "oversized_tail_force_latest_user_to_middle": force_latest_user_to_middle,
+        "oversized_tail_force_middle_target": force_target,
+    }
+
+
 def select_head_middle_tail(
     messages: list[Any],
     *,
@@ -613,6 +691,13 @@ def select_head_middle_tail(
 
     tail_indexes = _expand_for_tool_pairs(tail_indexes, messages, head_indexes)
     tail_indexes -= head_indexes
+    tail_indexes, oversized_tail_stats = _rebalance_oversized_tail(
+        messages=messages,
+        tail_indexes=tail_indexes,
+        head_indexes=head_indexes,
+        token_limit=token_limit,
+        latest_user_index=latest_user_index,
+    )
 
     middle_indexes = set(range(len(messages))) - head_indexes - tail_indexes
     return CompressionSelection(
@@ -622,6 +707,14 @@ def select_head_middle_tail(
         head_indexes=sorted(head_indexes),
         middle_indexes=sorted(middle_indexes),
         tail_indexes=sorted(tail_indexes),
+        oversized_tail_rebalanced=bool(oversized_tail_stats.get("oversized_tail_rebalanced")),
+        oversized_tail_tokens_before=int(oversized_tail_stats.get("oversized_tail_tokens_before") or 0),
+        oversized_tail_token_target=int(oversized_tail_stats.get("oversized_tail_token_target") or 0),
+        oversized_tail_moved_indexes=list(oversized_tail_stats.get("oversized_tail_moved_indexes") or []),
+        oversized_tail_force_latest_user_to_middle=bool(
+            oversized_tail_stats.get("oversized_tail_force_latest_user_to_middle")
+        ),
+        oversized_tail_force_middle_target=int(oversized_tail_stats.get("oversized_tail_force_middle_target") or 0),
     )
 
 
@@ -1334,6 +1427,8 @@ async def compress_messages(
         if enable_chunked_summary is None
         else bool(enable_chunked_summary)
     )
+    chunking_forced_by_oversized_tail = bool(selection.oversized_tail_force_latest_user_to_middle)
+    chunking_enabled = chunking_enabled or chunking_forced_by_oversized_tail
 
     summary_failed = False
     summary_error = ""
@@ -1424,9 +1519,16 @@ async def compress_messages(
         "head_indexes": selection.head_indexes,
         "middle_indexes": selection.middle_indexes,
         "tail_indexes": selection.tail_indexes,
+        "oversized_tail_rebalanced": selection.oversized_tail_rebalanced,
+        "oversized_tail_tokens_before": selection.oversized_tail_tokens_before,
+        "oversized_tail_token_target": selection.oversized_tail_token_target,
+        "oversized_tail_moved_indexes": selection.oversized_tail_moved_indexes,
+        "oversized_tail_force_latest_user_to_middle": selection.oversized_tail_force_latest_user_to_middle,
+        "oversized_tail_force_middle_target": selection.oversized_tail_force_middle_target,
         "summary_failed": summary_failed,
         "summary_error": summary_error[:500],
         **summary_prompt_stats,
+        "summary_chunking_forced_by_oversized_tail": chunking_forced_by_oversized_tail,
         "pruned_tool_count": prep.pruned_tool_count,
         "deduped_tool_count": prep.deduped_tool_count,
         "tool_args_truncated_count": prep.tool_args_truncated_count,

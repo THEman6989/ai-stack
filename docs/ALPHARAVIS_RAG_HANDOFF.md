@@ -11,6 +11,30 @@ The current direction is AlphaRavis-native RAG first. `rag_api` is no longer the
 default document/large-paste backend; it is kept as an adapter/reference path
 for comparison and compatibility.
 
+Latest local follow-up in this working tree:
+
+- large pasted user content is not automatically indexed on every long paste
+  anymore. Auto-ingest waits until the active context is within
+  `ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS` tokens of compression
+  pressure, default `5000`.
+- paired `/rag ... /rag`, `/rake ... /rake`, `/index ... /index`, or
+  `/ingest ... /ingest` blocks still force immediate source indexing.
+- large-paste intent is classified locally as `document`, `instruction`,
+  `mixed`, or `unknown` before ingest. Instruction-like pastes become
+  `large_instruction` sources and the active message keeps a condensed
+  instruction brief instead of treating the whole prompt as a document.
+- large-paste ingest now records a run-profile event timeline for Observer and
+  later UI progress plumbing: `large_ingest.started`,
+  `large_ingest.completed`, `large_ingest.failed`, or
+  `large_ingest.skipped`.
+- when a huge newest paste cannot stay protected in the recent tail, compression
+  may move it into the compressible middle. In that oversized-tail rescue path,
+  chunked summary compression is forced if the summary prompt would otherwise
+  be pruned, even while the global chunking flag stays default-off.
+- the exact raw compressed middle still goes into the AlphaRavis compression
+  archive, so the active summary is bounded but exact text remains retrievable
+  through archive/RAG tooling.
+
 Most recent commits:
 
 ```text
@@ -26,6 +50,14 @@ Current defaults:
 ALPHARAVIS_DOCUMENT_RAG_BACKEND=alpharavis_pgvector
 EMBEDDING_LITELLM_MODEL=ollama/qwen3-embedding:0.6b
 RAG_COLLECTION_NAME=alpharavis_qwen06
+ALPHARAVIS_ENABLE_LARGE_PASTE_RAG_INGEST=true
+ALPHARAVIS_ENABLE_LARGE_PASTE_INTENT_CLASSIFIER=true
+ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS=20000
+ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS=5000
+ALPHARAVIS_COMPRESSION_REBALANCE_OVERSIZED_TAIL=true
+ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_RATIO=0.60
+ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_FORCE_MIDDLE_RATIO=0.80
+ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=false
 ```
 
 Live verification after the latest slice:
@@ -34,6 +66,9 @@ Live verification after the latest slice:
 - `POST /api/native-document-rag-smoke` passed live with
   `acceptance_ok=true`, `hit_count=2`, `pgvector_backend_selected=true`, and
   `rag_api_not_used=true`.
+- A follow-up `source_type=large_paste` native smoke passed live in about
+  `3.0 s` with `acceptance_ok=true`, `rag_api_not_used=true`,
+  `active_source_key_recorded=true`, and two bounded pgvector hits.
 - Focused tests passed: `42 passed` across Bridge Test UI, retrieval router,
   context budget, and `rag_api_client` tests.
 - `bridge-test-ui` is running on `127.0.0.1:8140`.
@@ -177,9 +212,18 @@ External document / PDF / large paste default:
   `rag_activation_reason=document_ingest|large_paste`
 - when only AlphaRavis pgvector indexed the source, keep `active_rag_file_ids`
   empty so active prefetch does not call `rag_api`
-- large human messages are now detected in `run_profile_start_node`; after
-  successful `ingest_source(source_type="large_paste")`, the active chat context
-  gets a compact retrieval marker instead of the full pasted text
+- large human messages are now detected in `run_profile_start_node`, but
+  automatic paste-to-RAG waits until the active context is within
+  `ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS` tokens of compression
+  pressure, default `5000`. Paired `/rag ... /rag` blocks force source indexing
+  regardless of current context margin. After successful ingest, the active chat
+  context gets a compact retrieval marker instead of the full pasted text/block.
+- large-paste intent is classified before ingest as `document`, `instruction`,
+  `mixed`, or `unknown` without an extra model call. Instruction-like pastes are
+  indexed as `large_instruction` for exact lookup but do not auto-activate
+  document RAG; the replacement marker carries a condensed instruction brief.
+  Mixed pastes keep active RAG, carry the instruction brief, and strip obvious
+  instruction text from the indexed document body when separable.
 
 Archive / compression default:
 
@@ -187,6 +231,15 @@ Archive / compression default:
 - `archive_rag_mode=tool_only`
 - archive chunks stay available through explicit tools such as
   `query_archive(...)` and `agentic_rag_retrieve(...)`
+- pre-run compression runs after large-paste auto-ingest, so a huge paste that
+  crossed the 5000-token margin should already have a source/RAG marker before
+  the compressor shrinks the active messages.
+- oversized-tail rebalancing keeps ordinary recent messages protected, but if
+  the protected tail itself exceeds the force threshold, the latest user message
+  may be compressed and archived rather than blocking the model run.
+- chunked summary remains globally default-off for ordinary compression, but is
+  forced for the oversized latest-tail rescue path when the selected middle is
+  too large for a one-shot summary prompt.
 
 Agentic-RAG router slice:
 
@@ -280,11 +333,12 @@ follow-up.
    Keep the AlphaRavis pgvector backend as the default and treat `rag_api` as an
    adapter/reference path unless explicitly requested.
 
-3. Add ingest progress events for large document/paste work.
+3. Stream ingest progress events for large document/paste work.
 
-   Desired events: `large_ingest.started`, `large_ingest.chunk_indexed`, and
-   `large_ingest.completed`, visible in Observer/Test UI before considering
-   larger Bridge timeouts.
+   Run-profile events for start/completion/failure/skip are now recorded for
+   Large Paste and visible through Observer metadata. Remaining work is to emit
+   live status/progress events during long-running ingest, including
+   `large_ingest.chunk_indexed`, before considering larger Bridge timeouts.
 
 4. Add optional archive auto-on-intent behavior. Keep compression archives
    passive by default; only enable archive auto-retrieval when

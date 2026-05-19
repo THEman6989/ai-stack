@@ -4,6 +4,59 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-19 - Current Local Follow-Up Summary
+
+This working-tree slice updates four related areas:
+
+- Large-paste RAG is now budget-aware. Automatic ingest waits until the active
+  context is within
+  `ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS=5000` tokens of
+  compression pressure. Paired `/rag ... /rag`, `/rake ... /rake`,
+  `/index ... /index`, and `/ingest ... /ingest` still force indexing.
+- Large-paste intent is classified locally before ingest. Document-like pastes
+  activate normal document RAG; instruction-like pastes are indexed as
+  `large_instruction` for exact lookup and keep a condensed active instruction
+  brief; mixed pastes keep active RAG while stripping obvious instruction text
+  from the indexed document body when separable.
+- Large-paste ingest records Observer-visible run-profile events:
+  `large_ingest.started`, `large_ingest.completed`, `large_ingest.failed`, or
+  `large_ingest.skipped`, with elapsed time and backend/status metadata.
+- Compression can rebalance oversized protected tails. Above the configured
+  60% target it moves older tail messages back into the compressible middle;
+  above the 80% force threshold it may move the latest user message too. If
+  that oversized latest-tail rescue would prune the summary prompt, chunked
+  summary compression is forced for that rescue even though ordinary chunked
+  summary remains globally default-off.
+- Media handling now mirrors image inputs through `media-gallery` as well as
+  videos. Image and video parts from the same chat share thread/group metadata,
+  and `/assets` plus `/gallery` gained thread/group filters, grouping, and
+  date/name/type sorting.
+
+Focused verification for the current local slice:
+
+```text
+pytest -q tests/test_context_compressor.py
+pytest -q tests/test_bridge_responses.py tests/test_media_server.py
+pytest -q tests/test_context_compressor.py tests/test_agent_context_budget.py tests/test_retrieval_router.py tests/test_bridge_responses.py tests/test_media_server.py
+PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile \
+  langgraph-app/context_compressor.py \
+  langgraph-app/agent_graph.py \
+  langgraph-app/bridge_server.py \
+  langgraph-app/media_server.py
+```
+
+Additional live RAG smoke on 2026-05-19:
+
+```text
+POST http://127.0.0.1:8140/api/native-document-rag-smoke
+source_type=large_paste
+status=passed
+acceptance_ok=true
+rag_api_not_used=true
+hit_count=2
+elapsed_seconds=2.971
+```
+
 ## 2026-05-19 - LiteLLM Embedding Param Compatibility For rag_api
 
 Document and large-paste ingest now defaults to the AlphaRavis-owned pgvector
@@ -258,12 +311,31 @@ current values for debugging.
 
 Large-paste ingest is now wired at `run_profile_start_node`. If a human message
 exceeds `ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS` and
-`ALPHARAVIS_ENABLE_LARGE_PASTE_RAG_INGEST=true`, AlphaRavis indexes the full
-text through `ingest_source(source_type="large_paste")`. Only after successful
-indexing does the active message get replaced with a compact retrieval marker
-containing the `source_key`/`rag_file_id` and a short preview. This prevents a
-large paste from consuming the active model window while preserving explicit
-retrieval through `agentic_rag_retrieve` or `query_source`.
+`ALPHARAVIS_ENABLE_LARGE_PASTE_RAG_INGEST=true`, AlphaRavis first checks the
+current context budget. Automatic paste-to-RAG only runs when the estimated
+active context has at most
+`ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS` tokens left before the
+compression trigger, default `5000`. If there is still more room, the paste
+stays in active context and `large_paste_ingests` records a skipped decision.
+Manual `/rag ... /rag` blocks force indexing of the marked block regardless of
+current context margin. Only after successful indexing does the active message
+or marked block get replaced with a compact retrieval marker containing the
+`source_key`/`rag_file_id` and a short preview.
+
+Large-paste handling now classifies the paste intent before ingest without
+calling another model. Document-like and unknown pastes keep the existing
+document-RAG path. Instruction-like pastes are indexed as `large_instruction`
+through AlphaRavis pgvector for exact lookup, but they do not activate automatic
+document RAG; the active message is replaced with a condensed instruction brief
+that the model should follow. Mixed instruction+document pastes keep active RAG
+for source-scoped retrieval and include the condensed instruction brief in the
+replacement marker. For mixed pastes with a recognizable document section,
+obvious instruction text is stripped from the indexed document body while the
+instruction brief stays active. Run-profile `large_paste_ingests` records
+`paste_intent`, confidence, instruction/document scores, context-margin data,
+manual-block status, whether instruction text was stripped from the index, and
+an `events` timeline with `large_ingest.started`, `large_ingest.completed`,
+`large_ingest.failed`, or `large_ingest.skipped` entries for Observer/debugging.
 
 Active-RAG prefetch is now wired into the LangGraph path after memory prefetch
 and before skill/handoff preparation. When `rag_active=true` and active
@@ -571,6 +643,20 @@ compression now also mirrors Hermes' multi-pass preflight loop: estimate,
 compress, re-estimate, and retry up to
 `ALPHARAVIS_PRE_RUN_COMPRESSION_MAX_PASSES` before hard trim is used as a final
 fallback.
+
+Follow-up: oversized-tail rebalancing is now enabled. If the protected recent
+tail still consumes more than `ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_RATIO` of
+the compression budget, default 60 percent, older tail messages are moved back
+into the compressible middle. The latest user message stays anchored by default
+through `ALPHARAVIS_COMPRESSION_KEEP_LATEST_USER_WHEN_REBALANCING_TAIL=true`.
+If the protected tail is critically oversized above
+`ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_FORCE_MIDDLE_RATIO`, default 80 percent,
+the latest user anchor is released too so the huge request can be archived and
+compressed instead of blocking the active window.
+Compression metadata records `oversized_tail_rebalanced`,
+`oversized_tail_tokens_before`, `oversized_tail_token_target`,
+`oversized_tail_force_latest_user_to_middle`, and moved indexes for
+Observer/debugging.
 
 The bridge hard input cutoff is disabled by default
 (`BRIDGE_HARD_INPUT_TOKEN_LIMIT=0`). LangGraph now owns the normal hard-context
@@ -1368,6 +1454,62 @@ POST /v1/responses
 POST /v1/chat/completions
   user="Antworte exakt mit CHAT_AFTER_FIX_OK"
   -> 200, content contains "CHAT_AFTER_FIX_OK"
+```
+
+## 2026-05-19 - Bridge Mirrors Chat Images And Groups Media Gallery Assets
+
+### Summary
+
+Incoming LibreChat/OpenAI Responses image blocks now use the same safe
+media-gallery mirror path as videos:
+
+```text
+BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_IMAGES=true
+BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS=true
+```
+
+The Bridge rewrites the AlphaRavis-facing media marker to the stable
+media-gallery URL after registration. LibreChat's original visible attachment
+and upload record remain untouched. Images and videos from the same chat share
+`thread_id`, `thread_key`, and `group_id`, so gallery views can group them
+together without duplicating video semantics.
+
+The media server now supports thread/group filters and date/name/type/kind
+sorting on `/assets` and `/gallery`. `/gallery` also exposes grouping modes for
+day+group, thread, group, date, and media type.
+
+### Verification
+
+```text
+pytest -q tests/test_bridge_responses.py tests/test_media_server.py
+PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile \
+  langgraph-app/bridge_server.py \
+  langgraph-app/media_server.py
+```
+
+## 2026-05-19 - Oversized Latest Paste Forces Chunked Compression Rescue
+
+### Summary
+
+Ordinary over-budget compression still keeps chunked summary off by default:
+
+```text
+ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=false
+```
+
+However, when oversized-tail rescue has to move the latest user message into
+the compressible middle, the compressor now forces chunked summary if the
+summary prompt would otherwise be pruned. This covers the case where a pasted
+file/request is too large to fit as protected latest context. Exact raw middle
+content is still archived, and any large-paste RAG/source reference created
+before compression remains available for later lookup.
+
+### Verification
+
+```text
+pytest -q tests/test_context_compressor.py
+PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile \
+  langgraph-app/context_compressor.py
 ```
 
 ## 2026-05-12 - Bridge Mirrors Incoming Chat Videos Into Media Gallery

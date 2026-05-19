@@ -296,6 +296,126 @@ def test_bridge_mirrors_chat_video_parts_to_media_gallery(monkeypatch) -> None:
     assert part["alpharavis_original_media_url"].startswith("http://librechat:3080/")
 
 
+def test_bridge_mirrors_chat_image_parts_to_media_gallery(monkeypatch) -> None:
+    requests: list[dict] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict:
+            return {
+                "asset_id": "asset_image",
+                "public_url": "http://localhost:8130/media/chat/image.png",
+                "download_error": "",
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, url: str, json: dict) -> FakeResponse:
+            requests.append({"url": url, "json": json})
+            return FakeResponse()
+
+    monkeypatch.setattr(bridge_server.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(bridge_server, "BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_IMAGES", True)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_image",
+                    "file_id": "file_image",
+                    "filename": "image.png",
+                    "image_url": {"url": "http://librechat:3080/api/files/download/user/file_image"},
+                }
+            ],
+        }
+    ]
+
+    asyncio.run(
+        bridge_server._mirror_video_parts_in_messages(
+            messages,
+            thread_id="thread_image",
+            thread_key="conversation_image",
+        )
+    )
+
+    part = messages[0]["content"][0]
+    assert requests[0]["url"].endswith("/assets/register")
+    assert requests[0]["json"]["source_key"] == "librechat:file_image"
+    assert requests[0]["json"]["media_type"] == "image"
+    assert requests[0]["json"]["group_id"] == "conversation_image"
+    assert requests[0]["json"]["origin"] == "librechat_upload"
+    assert part["image_url"]["url"] == "http://localhost:8130/media/chat/image.png"
+    assert part["alpharavis_original_media_url"].startswith("http://librechat:3080/")
+
+
+def test_bridge_groups_image_and_video_parts_by_thread(monkeypatch) -> None:
+    requests: list[dict] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, media_type: str) -> None:
+            self.media_type = media_type
+
+        def json(self) -> dict:
+            suffix = "png" if self.media_type == "image" else "mp4"
+            return {
+                "asset_id": f"asset_{self.media_type}",
+                "public_url": f"http://localhost:8130/media/chat/{self.media_type}.{suffix}",
+                "download_error": "",
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, url: str, json: dict) -> FakeResponse:
+            requests.append({"url": url, "json": json})
+            return FakeResponse(str(json["media_type"]))
+
+    monkeypatch.setattr(bridge_server.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(bridge_server, "BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_IMAGES", True)
+    monkeypatch.setattr(bridge_server, "BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS", True)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_image", "image_url": {"url": "data:image/png;base64,QUJD"}},
+                {"type": "input_video", "video_url": {"url": "data:video/mp4;base64,QUJD"}},
+            ],
+        }
+    ]
+
+    asyncio.run(
+        bridge_server._mirror_video_parts_in_messages(
+            messages,
+            thread_id="thread_mixed",
+            thread_key="conversation_mixed",
+        )
+    )
+
+    assert [request["json"]["media_type"] for request in requests] == ["image", "video"]
+    assert {request["json"]["thread_id"] for request in requests} == {"thread_mixed"}
+    assert {request["json"]["thread_key"] for request in requests} == {"conversation_mixed"}
+    assert {request["json"]["group_id"] for request in requests} == {"conversation_mixed"}
+
+
 def test_responses_body_uses_gallery_url_after_video_mirroring(monkeypatch) -> None:
     class FakeResponse:
         status_code = 200

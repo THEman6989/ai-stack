@@ -887,7 +887,12 @@ summary call.
 very large compression windows: if the summary prompt would otherwise be
 pruned, LangGraph summarizes the middle in chunks and then synthesizes the chunk
 summaries. The default remains `false`; the existing bounded one-shot summary
-path stays active unless the flag is enabled.
+path stays active unless the flag is enabled. Exception: when an oversized
+latest-tail request is so large that the compressor must move the latest user
+message into the compressible middle, chunked summary is forced for that rescue
+run if the summary prompt would otherwise be pruned. The exact raw middle still
+goes into the compression archive, and large-paste/document indexing keeps its
+RAG/source reference when that path was activated before compression.
 When testing chunking, watch the Observer `Shrinking` section:
 
 - `One-shot` means the normal bounded summary path was used.
@@ -1030,6 +1035,16 @@ This is the guard that prevents the hard cutoff from blocking a small latest
 message on an old thread. If normal compression cannot reduce a context that is
 already beyond the hard limit, hard trim removes old active messages while
 preserving the latest user turn and records the trim in `run_profile`.
+Recent-tail protection has a second guard for oversized tails. If the protected
+tail itself consumes more than the configured budget share, default 60 percent,
+older tail messages become compressible again while the latest user message
+stays anchored. This prevents the "last 3 messages" rule from keeping a huge
+assistant/tool tail active forever.
+If the protected tail becomes critical, default above 80 percent of the
+compression budget, AlphaRavis may also release the latest user-message anchor
+and archive/compress that huge active request. For huge pasted documents, use
+the Large-Paste/RAG path when possible; this critical release is the fallback
+when protected context would otherwise block the run.
 
 Before the swarm starts, AlphaRavis also has a handoff-context guard. If the
 agent-path context is already too large after planner/memory/skill setup, it
@@ -1043,6 +1058,10 @@ Useful handoff settings:
 ALPHARAVIS_ENABLE_PRE_RUN_COMPRESSION=true
 ALPHARAVIS_ENABLE_HARD_CONTEXT_TRIM=true
 ALPHARAVIS_HARD_CONTEXT_TRIM_RATIO=0.80
+ALPHARAVIS_COMPRESSION_REBALANCE_OVERSIZED_TAIL=true
+ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_RATIO=0.60
+ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_FORCE_MIDDLE_RATIO=0.80
+ALPHARAVIS_COMPRESSION_KEEP_LATEST_USER_WHEN_REBALANCING_TAIL=true
 ALPHARAVIS_ENABLE_HANDOFF_CONTEXT_GUARD=true
 ALPHARAVIS_HANDOFF_CONTEXT_TOKEN_LIMIT=8500
 ALPHARAVIS_HANDOFF_CONTEXT_KEEP_LAST_MESSAGES=16
@@ -1228,9 +1247,28 @@ thread-level RAG metadata (`rag_active`, active source keys, optional external
 file ids, and activation reason) so a later auto-retrieval node can use bounded
 chunks. Compression archives remain passive by default with
 `archive_rag_mode=tool_only`.
-Large pasted messages above `ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS` are indexed
-first; after successful indexing, the model sees a compact retrieval marker
-instead of the entire paste.
+Large pasted messages above `ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS` are only
+auto-indexed when the active context is close to the compression trigger. The
+default margin is 5000 tokens and is controlled by
+`ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS`. If there is still more
+room, the paste stays in normal active context. To force indexing anyway, wrap
+the exact text in paired `/rag` markers:
+
+```text
+/rag
+large source text
+/rag
+```
+
+After successful indexing, the model sees a compact retrieval marker instead of
+the entire marked or auto-indexed paste.
+Large pasted prompt instructions are treated differently from ordinary
+documents. AlphaRavis classifies large pastes as document, instruction, mixed,
+or unknown without loading another model. Instruction-like pastes are kept as a
+condensed active instruction brief and indexed for exact lookup, but they do not
+turn on automatic document RAG. Mixed pastes keep the instruction brief active
+and use RAG only for the document/data details; obvious instruction text is
+stripped from the indexed body when the document section can be separated.
 Document and large-paste ingest now defaults to the AlphaRavis-owned pgvector
 backend, not `rag_api`:
 
@@ -1580,17 +1618,19 @@ By default the Bridge does not forward raw media blocks into LangGraph:
 ```text
 BRIDGE_ALLOW_RAW_MEDIA_CONTEXT=false
 BRIDGE_MEDIA_CONTEXT_MODE=metadata
+BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_IMAGES=true
 BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS=true
 ```
 
 That means uploads/links arrive as metadata markers containing fields such as
 type, file id, URL, mime type, or title. This prevents a video or image blob from
-filling the LLM context. Incoming video blocks are mirrored into `media-data`
-through `media-gallery` first, then the AlphaRavis-facing marker uses the stable
-gallery URL. LibreChat's visible attachment card and original upload file are
-not rewritten by this Bridge step. Use `register_media_asset` to save other
-URL/file-id media manually. Registration is metadata-only by default; set the
-tool's `index=true` only when you explicitly want immediate vision indexing.
+filling the LLM context. Incoming image and video blocks are mirrored into
+`media-data` through `media-gallery` first, then the AlphaRavis-facing marker
+uses the stable gallery URL. LibreChat's visible attachment card and original
+upload file are not rewritten by this Bridge step. Use `register_media_asset`
+to save other URL/file-id media manually. Registration is metadata-only by
+default; set the tool's `index=true` only when you explicitly want immediate
+vision indexing.
 
 For LibreChat video uploads, use the normal `AlphaRavis Responses` model spec.
 The LibreChat container applies `scripts/patch_librechat_video_uploads.js` at
@@ -1649,7 +1689,12 @@ Use the gallery tabs to inspect grouped assets:
 http://localhost:8130/gallery?view=all
 http://localhost:8130/gallery?view=original
 http://localhost:8130/gallery?view=processed
+http://localhost:8130/gallery?group_by=thread&sort=title&order=asc
 ```
+
+The gallery can filter by `thread_key` or `group_id` and sort by date/name/type.
+Images and videos sent in the same chat share thread/group metadata, so
+`group_by=thread` or the default day+group view keeps them together.
 
 Video analysis remains explicit, not automatic. For Pixelle input, AlphaRavis
 should pass the copied URL through without downloading unless the downstream

@@ -231,9 +231,24 @@ Implemented:
 - `AlphaRavisState` can carry `rag_active`, `active_rag_file_ids`,
   `active_source_keys`, `rag_activation_reason`, and `archive_rag_mode`.
   Run-profile snapshots expose these fields for observer/debugging.
-- Large human paste messages are detected at `run_profile_start_node`. When
-  `ingest_source(source_type="large_paste")` succeeds, the active model context
-  receives a compact retrieval marker instead of the full pasted text.
+- Large human paste messages are detected at `run_profile_start_node`, but
+  automatic paste-to-RAG now waits for real context pressure. A plain large
+  paste is indexed only when the estimated active context has at most
+  `ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS` tokens left before the
+  compression trigger, default `5000`. Manual `/rag ... /rag` blocks force
+  source indexing regardless of current context margin.
+- Large-paste intent classification is implemented without an extra model call
+  in the hot path. Document/unknown pastes keep the existing document-RAG
+  behavior. Instruction-like pastes are indexed as `large_instruction` for exact
+  lookup but do not automatically activate document RAG; the active context gets
+  a condensed instruction brief. Mixed instruction+document pastes keep active
+  RAG for the document/data parts, preserve a condensed instruction brief in
+  the replacement marker, and strip obvious instruction text from the indexed
+  document body when a document section can be separated.
+- Large-paste ingest decisions now record an Observer-visible run-profile event
+  timeline: `large_ingest.started`, `large_ingest.completed`,
+  `large_ingest.failed`, or `large_ingest.skipped`, including elapsed time,
+  status, backend, and skip/failure metadata where available.
 - `active_rag_prefetch_node` consumes active document/large-paste RAG metadata
   after memory prefetch and injects only a bounded `<active-rag-context>` system
   message. Archive-only state with `archive_rag_mode=tool_only` remains
@@ -255,11 +270,18 @@ Implemented:
 - Bridge Test UI now includes `Native Document RAG Smoke`, which indexes a
   document/large-paste source through AlphaRavis pgvector and retrieves bounded
   chunks without calling `rag_api`.
+- Live runtime check on 2026-05-19: `Native Document RAG Smoke` with
+  `source_type=large_paste` passed in about `3.0 s` with `acceptance_ok=true`,
+  `rag_api_not_used=true`, `active_source_key_recorded=true`, and two bounded
+  pgvector hits.
 
 Still needed:
 
-- Route future document/PDF upload paths through `ingest_source(...)`.
-- Tune large-paste runtime performance. A live two-turn large-paste test reached
+- Route future document/PDF/DOCX upload paths through `ingest_source(...)`.
+  File uploads are explicit documents and should be ingested even when normal
+  pasted text would still fit in context.
+- Tune large-paste runtime performance for very large real chat runs. A previous
+  live two-turn large-paste test reached
   embedding, but a 27-chunk embedding batch and the later chat-model call hit
   the current 180s runtime timeouts before the document backend default moved to
   AlphaRavis pgvector. Candidate fixes: shorter large-paste chunks, queue-only
@@ -268,7 +290,12 @@ Still needed:
   `memory-embed` route has been switched from the slower 4b model to
   `qwen3-embedding:0.6b`, with a new
   `RAG_COLLECTION_NAME=alpharavis_qwen06` collection to avoid vector-dimension
-  collisions with old 4b rows.
+  collisions with old 4b rows. Run-profile ingest events are implemented;
+  true streaming progress to the chat UI remains a follow-up.
+- Live-test the new large-paste intent split with real prompt-instruction,
+  document, and mixed LibreChat examples. The deterministic classifier is the
+  default because it costs no VRAM; optional small-model tie-breaking can be
+  added later only if live examples show ambiguous classifications.
 - Add optional archive `auto_on_intent` behavior after live quality/latency is
   measured. Keep archive-only threads passive unless this mode is explicitly
   enabled.
@@ -422,8 +449,9 @@ provider/pipeline work.
 Implemented:
 
 - Bridge strips raw media blocks from chat context by default, preserves
-  metadata markers, and automatically mirrors incoming video blocks into
-  `media-gallery` when `BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS=true`.
+  metadata markers, and automatically mirrors incoming image/video blocks into
+  `media-gallery` when `BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_IMAGES=true` and
+  `BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS=true`.
 - LibreChat's normal `AlphaRavis Responses` model spec accepts video uploads on
   the `LangGraph Agent` endpoint. The LibreChat container applies
   `scripts/patch_librechat_video_uploads.js` at startup so this local endpoint
@@ -437,8 +465,11 @@ Implemented:
   successful mirror. LibreChat's original visible attachment/file record stays
   untouched in this phase.
 - `media-gallery` can register/download image, video, audio, or document URLs
-  and exposes `/gallery`. Video mirroring accepts HTTP(S) URLs and inline
-  `data:` video payloads while omitting the inline payload from Mongo metadata.
+  and exposes `/gallery`. Bridge mirroring accepts HTTP(S) URLs and inline
+  `data:` image/video payloads while omitting inline payloads from Mongo
+  metadata. Gallery `/assets` and `/gallery` support thread/group filters plus
+  date/name/type/kind/thread/group sorting; `/gallery` can group by
+  day+group, thread, group, date, or media type.
 - Pixelle job results are scanned for media URLs and registered when present.
 - `register_media_asset`, `semantic_media_search`, and `plan_media_analysis`
   tools exist.
@@ -746,7 +777,9 @@ ALPHARAVIS_VIDEO_ANALYSIS_TRANSCRIBE_AUDIO=false
      work if the gallery is exposed outside localhost.
   4. Build the improved gallery UI with Original/Processed/All grouping.
      Partially implemented in the media server's `/gallery` route with
-     `view=all|original|processed` tabs and derivation-group sections.
+     `view=all|original|processed` tabs, derivation/thread/group sections, and
+     query controls for media type, thread/group filters, date/name/type
+     sorting, and grouping mode.
   5. Add thumbnail/preview generation and avoid heavy autoplay.
   6. Add model-card config and Qwen3.6 defaults. Implemented.
   7. Add video download, ffprobe/ffmpeg keyframe extraction, adaptive frame
@@ -766,6 +799,10 @@ ALPHARAVIS_VIDEO_ANALYSIS_TRANSCRIBE_AUDIO=false
       before LangGraph sees it. Implemented for Bridge-facing HTTP(S) and
       inline `data:` video blocks; rewriting the visible LibreChat message card
       itself remains intentionally out of scope for this phase.
+  11a. Mirror LibreChat-origin image input into `media-data` automatically
+      before LangGraph sees it. Implemented through the same Bridge/media-gallery
+      path as videos; image and video blocks from one chat share the same
+      thread/group metadata so the gallery can display them together.
   12. Run a real Docker/LibreChat upload smoke with `AlphaRavis Responses`:
       - send a chat video through LibreChat
       - verify the Bridge registers it in `media-gallery`
@@ -1208,6 +1245,13 @@ Already adopted or partly adopted:
     budget/soft ceiling, rather than preserving 16 latest messages verbatim
   - latest user-message anchoring so the active request stays outside the
     reference-only summary
+  - oversized-tail rebalancing: if the protected recent tail is still above
+    `ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_RATIO` of the compression budget
+    (default 60%), older tail messages move back into the compressible middle
+    while the latest user message remains anchored
+  - critical oversized-tail release: if the protected tail is above
+    `ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_FORCE_MIDDLE_RATIO` (default 80%),
+    even the latest user-message anchor can be released into compression/archive
   - multi-pass pre-run compression that re-estimates after each pass before
     falling back to hard trim
   - pre-run static prompt/tool reserve, so active-message thresholds leave room
@@ -1265,14 +1309,16 @@ Current Hermes-style context hardening plan:
   `effective_active_limit=56300`, `pre_run_compression_passes=1`, and
   `pre_run_compression_budget_met=true`.
 - Implemented: optional chunked summary compression is available behind
-  `ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=false`. It only activates when
-  the summary-model prompt would otherwise be pruned, summarizes bounded chunks,
+  `ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=false` for ordinary
+  over-budget runs. It also activates automatically when oversized-tail rescue
+  has to move the latest user message into the compressible middle and the
+  summary-model prompt would otherwise be pruned. It summarizes bounded chunks,
   then synthesizes one active reference summary while preserving exact raw
   messages in the archive. Observer/debug metadata includes chunk counts,
-  omitted chars, prompt overhead/payload budgets, output budget, and
-  synthesis-pruning status. If max chunks omit prepared summary input, the final
-  synthesis prompt now explicitly tells the model to mention archive lookup for
-  omitted middle details.
+  omitted chars, prompt overhead/payload budgets, output budget,
+  oversized-tail-forced chunking, and synthesis-pruning status. If max chunks
+  omit prepared summary input, the final synthesis prompt now explicitly tells
+  the model to mention archive lookup for omitted middle details.
 - Implemented: summary max settings are ratio-first. `*_MAX_TOKENS=0` disables
   a fixed absolute cap, so summary output, summary prompt payload, and chunk
   output budgets scale from the effective compression limit derived from the
@@ -1294,16 +1340,13 @@ Current Hermes-style context hardening plan:
   The lab distinguishes `summary_mode=stub` from `summary_mode=real_llm`;
   `stub` validates plumbing only, while `real_llm` calls the configured summary
   model and is required for latency/quality evidence.
-- Still future: run a live llama.cpp over-budget check with
-  `ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=true` before considering it for
-  any default profile.
-- Still future: promote chunked summary compression only after the live-soak
-  pass proves it works with both static and variable prompt load in the running
-  stack. The live Observer acceptance criteria are `summary_failed=false`,
-  `summary_chunking_used=true`, `summary_chunk_omitted_chars=0`, and budget
-  success for the relevant pre-run/final-rescue compression scope. Until that
-  evidence exists, keep `ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=false`
-  in default profiles.
+- Still future: run a live llama.cpp over-budget check for both explicit
+  `ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=true` and the automatic
+  oversized-tail rescue path. The live Observer acceptance criteria are
+  `summary_failed=false`, `summary_chunking_used=true`,
+  `summary_chunk_omitted_chars=0`, and budget success for the relevant
+  pre-run/final-rescue compression scope. Until that evidence exists, keep the
+  global opt-in flag false for ordinary compression profiles.
 
 External context-management learnings to evaluate:
 

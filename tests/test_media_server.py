@@ -79,3 +79,105 @@ def test_stored_source_url_omits_inline_blob() -> None:
     source_url = media_server._stored_source_url("data:video/mp4;base64,QUJD")
 
     assert source_url == "data:video/mp4;base64,[inline-data-omitted]"
+
+
+class _FakeCursor(list):
+    def __init__(self, rows: list[dict]) -> None:
+        super().__init__(rows)
+        self.sort_field = ""
+        self.sort_direction = 0
+
+    def sort(self, field: str, direction: int):
+        self.sort_field = field
+        self.sort_direction = direction
+        super().sort(key=lambda row: row.get(field) or "", reverse=direction < 0)
+        return self
+
+    def limit(self, limit: int):
+        return _FakeCursor(list(self[:limit]))
+
+
+class _FakeCollection:
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+        self.queries: list[dict] = []
+        self.cursor: _FakeCursor | None = None
+
+    def find(self, query: dict):
+        self.queries.append(query)
+        cursor = _FakeCursor([dict(row) for row in self.rows])
+        self.cursor = cursor
+        return cursor
+
+
+def test_assets_support_thread_group_filters_and_sort(monkeypatch) -> None:
+    collection = _FakeCollection(
+        [
+            {"_id": "b", "asset_id": "b", "title": "Beta", "created_at": 2},
+            {"_id": "a", "asset_id": "a", "title": "Alpha", "created_at": 1},
+        ]
+    )
+    monkeypatch.setattr(media_server, "_collection", lambda: collection)
+
+    result = asyncio.run(
+        media_server.list_assets(
+            thread_key="chat-1",
+            group_id="group-1",
+            media_type="image",
+            sort="title",
+            order="asc",
+        )
+    )
+
+    assert collection.queries[0] == {
+        "media_type": "image",
+        "thread_key": "chat-1",
+        "$or": [{"group_id": "group-1"}, {"derivation_group_id": "group-1"}],
+    }
+    assert collection.cursor is not None
+    assert collection.cursor.sort_field == "title"
+    assert collection.cursor.sort_direction == 1
+    assert [asset["asset_id"] for asset in result["assets"]] == ["a", "b"]
+
+
+def test_gallery_can_group_by_thread_and_sort_by_name(monkeypatch) -> None:
+    collection = _FakeCollection(
+        [
+            {
+                "_id": "video",
+                "asset_id": "video",
+                "title": "Video",
+                "media_type": "video",
+                "asset_kind": "original",
+                "role": "input",
+                "thread_key": "chat-1",
+                "group_id": "chat-1",
+                "derivation_group_id": "chat-1",
+                "source_key": "video",
+                "public_url": "http://localhost:8130/media/video.mp4",
+                "created_at": 2,
+            },
+            {
+                "_id": "image",
+                "asset_id": "image",
+                "title": "Image",
+                "media_type": "image",
+                "asset_kind": "original",
+                "role": "input",
+                "thread_key": "chat-1",
+                "group_id": "chat-1",
+                "derivation_group_id": "chat-1",
+                "source_key": "image",
+                "public_url": "http://localhost:8130/media/image.png",
+                "created_at": 1,
+            },
+        ]
+    )
+    monkeypatch.setattr(media_server, "_collection", lambda: collection)
+
+    html = asyncio.run(media_server.gallery(group_by="thread", sort="title", order="asc"))
+
+    assert "chat-1 (2)" in html
+    assert html.index("Image") < html.index("Video")
+    assert "name='group_by'" in html
+    assert "name='sort'" in html
