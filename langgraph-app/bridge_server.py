@@ -84,6 +84,9 @@ BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_IMAGES = _env_bool(
     "BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_IMAGES",
     "true",
 )
+BRIDGE_DOCUMENT_RAG_AUTO_INGEST = _env_bool("BRIDGE_DOCUMENT_RAG_AUTO_INGEST", "true")
+BRIDGE_DOCUMENT_RAG_INGEST_ROOT = os.getenv("BRIDGE_DOCUMENT_RAG_INGEST_ROOT", "/workspace/media-data")
+BRIDGE_MEDIA_GALLERY_CONTAINER_ROOT = os.getenv("BRIDGE_MEDIA_GALLERY_CONTAINER_ROOT", "/media-data")
 BRIDGE_MEDIA_GALLERY_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_MEDIA_GALLERY_TIMEOUT_SECONDS", "45"))
 ALPHARAVIS_MEDIA_GALLERY_URL = os.getenv(
     "ALPHARAVIS_MEDIA_GALLERY_URL",
@@ -403,6 +406,20 @@ def _media_gallery_type_for_part(part: dict[str, Any]) -> str:
         return "video"
     if _is_image_media_part(part):
         return "image"
+    block_type = str(part.get("type") or "")
+    mime_type = _media_part_mime_type(part).lower()
+    source_url = _media_part_source_url(part).lower().split("?", 1)[0].split("#", 1)[0]
+    title = _media_part_title(part).lower()
+    document_ext = (
+        ".pdf", ".doc", ".docx", ".html", ".htm", ".md", ".markdown", ".txt",
+        ".log", ".csv", ".json", ".yaml", ".yml",
+    )
+    if (
+        block_type in {"file", "input_file"}
+        or mime_type.startswith(("application/pdf", "application/msword", "application/vnd.openxmlformats", "text/"))
+        or any(source_url.endswith(ext) or title.endswith(ext) for ext in document_ext)
+    ):
+        return "document"
     return ""
 
 
@@ -445,7 +462,9 @@ async def _mirror_media_part_to_media_gallery(
         return None
     if media_type == "image" and not BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_IMAGES:
         return None
-    if media_type not in {"image", "video"}:
+    if media_type == "document" and not BRIDGE_DOCUMENT_RAG_AUTO_INGEST:
+        return None
+    if media_type not in {"image", "video", "document"}:
         return None
     source_url = _media_part_source_url(part)
     if not source_url:
@@ -504,11 +523,51 @@ async def _mirror_media_part_to_media_gallery(
     if not public_url or str(record.get("download_error") or ""):
         return record if isinstance(record, dict) else None
     original_url = source_url
-    _replace_media_part_source_url(part, public_url)
+    if media_type in {"image", "video"}:
+        _replace_media_part_source_url(part, public_url)
     part["alpharavis_media_gallery_url"] = public_url
     part["alpharavis_original_media_url"] = original_url
     part["alpharavis_media_asset_id"] = str(record.get("asset_id") or "")
+    if media_type == "document":
+        ingest_path = _document_ingest_path_from_media_record(record)
+        if ingest_path:
+            part["alpharavis_document_ingest"] = {
+                "path": ingest_path,
+                "source_key": source_key,
+                "title": title,
+                "file_id": str(part.get("file_id") or part.get("id") or ""),
+                "mime_type": _media_part_mime_type(part),
+                "public_url": public_url,
+                "asset_id": str(record.get("asset_id") or ""),
+                "origin": "librechat_upload",
+            }
     return record if isinstance(record, dict) else None
+
+
+def _document_ingest_path_from_media_record(record: dict[str, Any]) -> str:
+    relative_path = str(record.get("relative_path") or "").strip().lstrip("/")
+    local_path = str(record.get("local_path") or "").strip()
+    gallery_root = BRIDGE_MEDIA_GALLERY_CONTAINER_ROOT.rstrip("/")
+    if local_path and gallery_root and local_path.startswith(gallery_root + "/"):
+        relative_path = local_path[len(gallery_root) + 1 :]
+    if relative_path:
+        return str(Path(BRIDGE_DOCUMENT_RAG_INGEST_ROOT) / relative_path)
+    return ""
+
+
+def _collect_pending_document_ingests(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    pending: list[dict[str, Any]] = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            ingest = part.get("alpharavis_document_ingest")
+            if isinstance(ingest, dict) and ingest.get("path"):
+                pending.append(dict(ingest))
+    return pending[:20]
 
 
 async def _mirror_video_part_to_media_gallery(
@@ -1326,6 +1385,7 @@ async def _build_input_payload(
             selected = [normalized[-1]]
 
     selected, reference_profiles = await _apply_context_references_to_messages(selected)
+    pending_document_ingests = _collect_pending_document_ingests(raw_messages)
 
     payload = {
         "messages": selected,
@@ -1333,6 +1393,8 @@ async def _build_input_payload(
         "thread_key": thread_key,
         "bridge_context_references": reference_profiles,
     }
+    if pending_document_ingests:
+        payload["pending_document_ingests"] = pending_document_ingests
     if isinstance(trace, dict):
         payload["alpha_trace"] = {
             "trace_id": trace.get("trace_id"),
@@ -1933,6 +1995,10 @@ def _extract_context_activity(part: Any) -> tuple[str, str, str]:
         node_name = str(node)
         lower_notice = notice.lower()
 
+        ingest_text = _extract_ingest_activity(profile)
+        if ingest_text:
+            return "large_ingest", node_name, ingest_text
+
         if (
             node_name == "hard_context_stop"
             or profile.get("hard_context_stopped")
@@ -1984,6 +2050,36 @@ def _extract_context_activity(part: Any) -> tuple[str, str, str]:
             return "context_compaction", node_name, f"Compaction aktiv: {node_name}{suffix}"
 
     return "", "", ""
+
+
+def _extract_ingest_activity(profile: dict[str, Any]) -> str:
+    for field, label in (("document_ingests", "Document ingest"), ("large_paste_ingests", "Large ingest")):
+        records = profile.get(field)
+        if not isinstance(records, list):
+            continue
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            events = record.get("events") if isinstance(record.get("events"), list) else []
+            if not events:
+                continue
+            latest = events[-1] if isinstance(events[-1], dict) else {}
+            event_name = str(latest.get("event") or "")
+            source_key = str(record.get("source_key") or latest.get("source_key") or "")
+            status = str(record.get("index_status") or latest.get("status") or "")
+            chunk_number = latest.get("chunk_number")
+            chunk_count = latest.get("chunk_count")
+            if event_name.endswith(".chunk_indexed") and chunk_number and chunk_count:
+                return f"{label}: Chunk {chunk_number}/{chunk_count} indexiert ({source_key})"
+            if event_name.endswith(".deduped"):
+                return f"{label}: vorhandene identische Quelle wiederverwendet ({source_key})"
+            if event_name.endswith(".completed"):
+                return f"{label}: abgeschlossen ({source_key}, status={status})"
+            if event_name.endswith(".started"):
+                return f"{label}: gestartet ({source_key})"
+            if event_name.endswith(".failed") or event_name.endswith(".blocked"):
+                return f"{label}: fehlgeschlagen ({source_key}, status={status or event_name})"
+    return ""
 
 
 def _delta_text(text: str, emitted: str) -> str:

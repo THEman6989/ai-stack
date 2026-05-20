@@ -612,6 +612,17 @@ def _rebalance_oversized_tail(
     )
     force_target = max(1, int(token_limit * force_ratio))
     force_latest_user_to_middle = tokens_before > force_target
+    latest_large_paste_deferred = False
+    if (
+        force_latest_user_to_middle
+        and latest_user_index >= 0
+        and _env_bool("ALPHARAVIS_DEFER_LARGE_PASTE_RAG_UNTIL_AFTER_COMPRESSION", "true")
+    ):
+        latest_text = message_content(messages[latest_user_index])
+        large_paste_min_chars = max(1, _env_int("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", 20000))
+        if len(latest_text) >= large_paste_min_chars:
+            force_latest_user_to_middle = False
+            latest_large_paste_deferred = True
     keep_latest_user = (
         _env_bool("ALPHARAVIS_COMPRESSION_KEEP_LATEST_USER_WHEN_REBALANCING_TAIL", "true")
         and not force_latest_user_to_middle
@@ -641,6 +652,7 @@ def _rebalance_oversized_tail(
             "oversized_tail_token_target": target,
             "oversized_tail_moved_indexes": [],
             "oversized_tail_force_latest_user_to_middle": force_latest_user_to_middle,
+            "oversized_tail_latest_large_paste_deferred": latest_large_paste_deferred,
             "oversized_tail_force_middle_target": force_target,
         }
     return rebalanced, {
@@ -649,6 +661,7 @@ def _rebalance_oversized_tail(
         "oversized_tail_token_target": target,
         "oversized_tail_moved_indexes": moved,
         "oversized_tail_force_latest_user_to_middle": force_latest_user_to_middle,
+        "oversized_tail_latest_large_paste_deferred": latest_large_paste_deferred,
         "oversized_tail_force_middle_target": force_target,
     }
 

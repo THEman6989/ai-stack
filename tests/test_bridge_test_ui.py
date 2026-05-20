@@ -282,6 +282,10 @@ def test_observer_page_is_full_table_view() -> None:
     assert "/api/memory-embed-probe" in test_ui_server.OBSERVER_HTML
     assert "Ollama /api/embed" in test_ui_server.OBSERVER_HTML
     assert "OpenAI /v1" in test_ui_server.OBSERVER_HTML
+    assert "RAG Load Probe" in test_ui_server.OBSERVER_HTML
+    assert "runRagLoadProbe" in test_ui_server.OBSERVER_HTML
+    assert "/api/rag-load-probe" in test_ui_server.OBSERVER_HTML
+    assert "400,1000,4000,10000,20000,40000" in test_ui_server.OBSERVER_HTML
     assert "window.setInterval" in test_ui_server.OBSERVER_HTML
 
 
@@ -538,3 +542,59 @@ def test_memory_embed_probe_reports_rejection(monkeypatch) -> None:
     assert result["stop_reason"] == "rejected"
     assert result["results"][0]["status_code"] == 413
     assert "context too large" in result["results"][0]["error"]
+
+
+def test_rag_load_probe_runs_embedding_and_reranker(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeResponse:
+        def __init__(self, endpoint: str):
+            self.endpoint = endpoint
+            self.status_code = 200
+            self.text = "{}"
+
+        def json(self):
+            if self.endpoint.endswith("/api/embed"):
+                return {"embeddings": [[0.1, 0.2, 0.3, 0.4]], "prompt_eval_count": 12}
+            if self.endpoint.endswith("/reranking"):
+                return {
+                    "usage": {"prompt_tokens": 88, "total_tokens": 88},
+                    "results": [{"index": 0, "relevance_score": 0.99}],
+                }
+            return {"output": [{"content": [{"text": "Probe answer mentions pgvector and reranking."}]}]}
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, endpoint, *, json, headers=None):
+            calls.append((endpoint, json))
+            return FakeResponse(endpoint)
+
+    monkeypatch.setattr(test_ui_server.httpx, "AsyncClient", FakeClient)
+
+    result = asyncio.run(
+        test_ui_server._run_rag_load_probe(
+            test_ui_server.RagLoadProbeRequest(
+                embedding_base_url="http://ollama-box:11434",
+                reranker_url="http://reranker-box:8000",
+                token_steps="400,1000",
+                reranker_doc_count=3,
+                bridge_query_mode="first_last",
+            )
+        )
+    )
+
+    assert result["status"] == "passed"
+    assert result["ok_step_count"] == 2
+    assert result["results"][0]["embedding"]["embedding_dimensions"] == 4
+    assert result["results"][0]["reranker"]["prompt_tokens"] == 88
+    assert result["results"][0]["bridge"]["ok"] is True
+    assert any(endpoint == "http://ollama-box:11434/api/embed" for endpoint, _payload in calls)
+    assert any(endpoint == "http://reranker-box:8000/reranking" for endpoint, _payload in calls)

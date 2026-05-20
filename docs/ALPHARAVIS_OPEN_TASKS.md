@@ -206,8 +206,8 @@ Still needed:
 Status: hybrid retrieval router foundation implemented; explicit Agentic-RAG
 tool exposed; thread activation metadata and large-paste context replacement
 implemented; native AlphaRavis pgvector is now the default document/large-paste
-backend; automatic upload ingest is still planned and live large-paste latency
-needs tuning.
+backend; LibreChat document upload auto-ingest has a first guarded bridge path;
+live large-paste latency still needs runtime tuning.
 
 Implemented:
 
@@ -232,11 +232,16 @@ Implemented:
   `active_source_keys`, `rag_activation_reason`, and `archive_rag_mode`.
   Run-profile snapshots expose these fields for observer/debugging.
 - Large human paste messages are detected at `run_profile_start_node`, but
-  automatic paste-to-RAG now waits for real context pressure. A plain large
-  paste is indexed only when the estimated active context has at most
-  `ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS` tokens left before the
-  compression trigger, default `5000`. Manual `/rag ... /rag` blocks force
-  source indexing regardless of current context margin.
+  automatic paste-to-RAG now runs after pre-run compression by default. Plain
+  large pastes are deferred while old context is compressed first; after that,
+  `large_paste_post_compression_node` re-estimates the active request and only
+  indexes/replaces the paste when it still consumes at least
+  `ALPHARAVIS_LARGE_PASTE_RAG_POST_COMPRESSION_TRIGGER_RATIO` of the active
+  compression budget, default `0.80`. Manual `/rag ... /rag` blocks still force
+  source indexing immediately. After a RAG/source replacement, the same node can
+  run a follow-up compression pass for remaining non-document chatter when the
+  active context still exceeds
+  `ALPHARAVIS_LARGE_PASTE_POST_RAG_COMPRESSION_TRIGGER_RATIO`, default `0.80`.
 - Large-paste intent classification is implemented without an extra model call
   in the hot path. Document/unknown pastes keep the existing document-RAG
   behavior. Instruction-like pastes are indexed as `large_instruction` for exact
@@ -249,6 +254,25 @@ Implemented:
   timeline: `large_ingest.started`, `large_ingest.completed`,
   `large_ingest.failed`, or `large_ingest.skipped`, including elapsed time,
   status, backend, and skip/failure metadata where available.
+- Direct pgvector document/large-paste indexing can now emit
+  `large_ingest.chunk_indexed` / `document_ingest.chunk_indexed` progress
+  events into the run profile. The Bridge streaming path turns those run-profile
+  ingest events into status/reasoning activity lines when activity streaming is
+  enabled.
+- The durable embedding queue can reclaim stale `running` rows after
+  `ALPHARAVIS_EMBEDDING_JOB_STALE_AFTER_SECONDS` (default `900`). This prevents
+  document/upload ingest from staying stuck if a dev reload or container restart
+  happens after a job is claimed but before it is marked `done` / `failed`.
+- LibreChat document upload auto-ingest first slice is implemented. The Bridge
+  registers `file` / `input_file` document parts with media-gallery, maps the
+  returned media-gallery path into the LangGraph workspace path, sends
+  `pending_document_ingests` into the graph state, and `run_profile_start_node`
+  loads the file through LangChain document loaders before routing it through
+  `ingest_source(...)`.
+- Source digest dedup is now active by default with
+  `ALPHARAVIS_PGVECTOR_DEDUP_SOURCES=true`: if an identical source digest is
+  already indexed for the same scoped source key, pgvector embed/upsert is
+  skipped and the existing source is reused.
 - `active_rag_prefetch_node` consumes active document/large-paste RAG metadata
   after memory prefetch and injects only a bounded `<active-rag-context>` system
   message. Archive-only state with `archive_rag_mode=tool_only` remains
@@ -277,15 +301,17 @@ Implemented:
 
 Still needed:
 
-- Route future document/PDF/DOCX upload paths through `ingest_source(...)`.
-  File uploads are explicit documents and should be ingested even when normal
-  pasted text would still fit in context. Partially implemented:
-  `ingest_document_file` gives agents/operators a guarded server-local path
-  ingest tool that loads via LangChain document loaders and routes the text
-  through `ingest_source(...)`. Remaining follow-up: connect the actual
-  LibreChat upload handoff once the bridge has the trusted server-side file
-  path, not just `file_id` metadata.
-- Partially implemented: LangChain document-loader normalization for file-like
+- Implemented first slice: document/PDF/DOCX upload paths route through
+  `ingest_source(...)` when LibreChat sends a `file` / `input_file` document
+  part with a downloadable URL. `ingest_document_file` remains available for
+  explicit server-local files. Live Bridge-compatible `input_file` smoke on
+  2026-05-19 verified media-gallery registration and
+  `pending_document_ingests` handoff; the queued pgvector job was then drained
+  through the embedding queue and produced pgvector Catalog+Chunk rows for the
+  upload source key. Remaining follow-up: browser-test real LibreChat PDF/DOCX
+  uploads and extend mapping only if LibreChat emits a new attachment shape not
+  covered by the current parser.
+- Implemented: LangChain document-loader normalization for file-like
   sources now exists in `langgraph-app/document_ingest.py`. PDF, DOCX, HTML,
   Markdown, plain text, CSV/JSON/YAML/log files can be loaded into normalized
   document text plus source metadata before reaching `ingest_source(...)`.
@@ -299,31 +325,48 @@ Still needed:
   objects when `langchain_core.documents` is available, otherwise a compatible
   local document shape. Follow-up: wire this adapter into future graph nodes
   where a Retriever interface is cleaner than router payloads.
-- Implemented first slice: optional deterministic reranking behind the router,
-  default-off with `ALPHARAVIS_ENABLE_RAG_RERANKING=false`. It blends lexical
+- Implemented: optional reranking behind the router, default-off with
+  `ALPHARAVIS_ENABLE_RAG_RERANKING=false`. Deterministic mode blends lexical
   query/chunk overlap with backend vector score and annotates hits with
-  `rerank_score`; external model rerankers remain future work.
-- Add optional LLM structured-output grading after deterministic grading is
-  proven in live use.
-- Add streaming ingest progress for large documents/pastes. Run-profile
-  start/completion/failure/skip events exist, but long-running jobs do not yet
-  emit live `large_ingest.chunk_indexed` status to LibreChat/Observer.
+  `rerank_score`. Model mode uses the configured llama.cpp Qwen3-Reranker
+  endpoint (`ALPHARAVIS_RAG_RERANKER_URL`, default
+  `http://192.168.178.140:8000`) and falls back to deterministic reranking when
+  `ALPHARAVIS_RAG_RERANKER_FALLBACK_DETERMINISTIC=true`.
+- Implemented first slice: optional LLM structured-output grading for
+  Agentic-RAG is available behind `ALPHARAVIS_AGENTIC_RAG_LLM_GRADING=false`.
+  The router accepts an LLM grader callback, falls back cleanly to deterministic
+  grading on errors, and records the grading strategy in the trace. The example
+  grader is `openai/big-boss`; the grader call disables hidden thinking with
+  `enable_thinking=false` / `preserve_thinking=false` to keep the JSON judgment
+  cheap. Remaining follow-up: live latency/quality comparison before making it
+  default-on.
+- Implemented first slice: streaming ingest progress for direct large
+  documents/pastes. Run-profile start/completion/failure/skip events now include
+  chunk-level progress for direct pgvector writes and Bridge activity extraction
+  can surface those events. Remaining follow-up: progress from asynchronously
+  drained queue jobs, because queued embedding jobs finish outside the active
+  chat stream.
 - Partially implemented: add queue-only large document ingest for very large
   sources, with progress and a source handle returned before all chunks are
   embedded. The retrieval router now distinguishes queued pgvector work with
   `index_status=queued` and `queued_backends=["alpharavis_pgvector"]`, and
   Large Paste replacement markers can return a source handle while embeddings
   are still queued. Live chunk-level progress remains open.
-- Partially implemented: add chunk digest/dedup metadata for repeated pasted
-  text and repeated archive chunks. Source and chunk digests are now stored in
-  AlphaRavis pgvector metadata; digest-based skip/reuse policy remains open.
-- Implemented: guarded source chunk read for known source keys when bounded
-  semantic retrieval is not enough. `read_source_chunks` returns ordered
-  pgvector chunks for a known `source_key`, scoped to the current thread by
-  default, and capped by `ALPHARAVIS_SOURCE_READ_MAX_CHUNKS` /
-  `ALPHARAVIS_SOURCE_READ_MAX_CHARS`. Remaining follow-up: add a richer
-  full-source reconstruction/export path only if the guarded chunk reader is
-  not enough.
+- Implemented first slice: chunk/source digest metadata is now used for scoped
+  source dedup. Repeated identical sources with the same scoped source key skip
+  embed/upsert and return a `deduped:...` backend result. Large-paste source
+  keys are now content-based within the thread so repeated identical paste
+  content lands on the same source key. Remaining follow-up: cross-source chunk
+  reuse if we later need dedup across different source keys without losing
+  exact reconstruction semantics.
+- Implemented: guarded source reads for known source keys when bounded semantic
+  retrieval is not enough. `read_source_chunks` returns ordered pgvector chunks
+  for a known `source_key`, scoped to the current thread by default, and capped
+  by `ALPHARAVIS_SOURCE_READ_MAX_CHUNKS` /
+  `ALPHARAVIS_SOURCE_READ_MAX_CHARS`. `read_raw_source` reads a bounded raw
+  Store slice for newly ingested documents and large pastes; it supports
+  `search`, `start`, and `max_chars` so the model can page through exact source
+  text without injecting the whole source.
 - Implemented: user/operator RAG pin/unpin controls for thread-level active
   source sets. `pin_active_rag_sources`, `unpin_active_rag_sources`, and
   `inspect_active_rag_sources` persist per-thread active source/file ids in the
@@ -345,7 +388,15 @@ Still needed:
   `qwen3-embedding:0.6b`, with a new
   `RAG_COLLECTION_NAME=alpharavis_qwen06` collection to avoid vector-dimension
   collisions with old 4b rows. Run-profile ingest events are implemented;
-  true streaming progress to the chat UI remains a follow-up.
+  direct-ingest chunk progress can now be surfaced through Bridge activity
+  events. Queue-drained background progress remains a follow-up.
+    Follow-up probe on 2026-05-20 after enabling GPU acceleration on the
+    Ollama host: `qwen3-embedding:4b` loaded and returned 2560-dim vectors,
+    with warm probes around 12.8s for 2048 chars and 22.3s for 8192 chars;
+    `ollama ps` reported about 2.38GB VRAM for the loaded 4B model. The 0.6B
+    baseline remained faster, around 7.2s and 10.9s for the same warm probes.
+    If 4B becomes the active route, use a separate 2560-dim collection rather
+    than `alpharavis_qwen06`.
 - Live-test the new large-paste intent split with real prompt-instruction,
   document, and mixed LibreChat examples. The deterministic classifier is the
   default because it costs no VRAM; optional small-model tie-breaking can be
@@ -353,10 +404,68 @@ Still needed:
 - Add optional archive `auto_on_intent` behavior after live quality/latency is
   measured. Keep archive-only threads passive unless this mode is explicitly
   enabled.
-- Add external/model reranking behind the router after the deterministic
-  default-off reranking slice is measured.
-- Add optional LLM structured-output grading after deterministic grading is
-  proven in live use.
+- Implemented: model reranking is live after restarting the llama.cpp Qwen3
+  reranker with a larger physical batch than `-ub 64`. Direct GPU probes on
+  2026-05-20 completed 3 docs / 277 tokens in about 0.51s and 10 docs / 1028
+  tokens in about 2.03s. An in-container AlphaRavis router probe reported
+  `strategy=llamacpp_qwen3_reranker`, `fallback_used=false`, and 0.426s for
+  three candidates. The CPU reranker experiment was about 4x slower, so the
+  current practical default is GPU reranking while keeping deterministic
+  fallback enabled.
+- Implemented: Bridge Test UI now includes `RAG Load Probe`
+  (`/api/rag-load-probe`) to run concurrent embedding and reranker probes across
+  configurable rough-token steps, with optional real Bridge `/v1/responses`
+  queries. First live GPU probe with `qwen3-embedding:4b` plus GPU Qwen3
+  reranker passed 400, 1000, 4000, 10000, 20000, and 40000 rough-token steps.
+  The 4B embedding server reported `prompt_eval_count=4095` from 10k upward,
+  so larger inputs should be treated as accepted but capped/truncated by the
+  current embedding context unless the server context is raised. A smaller
+  Bridge query probe passed 400 and 1000 rough-token steps through
+  `/v1/responses`.
+- Live-test optional LLM structured-output grading and keep it default-off until
+  latency/quality justify enabling it.
+- Implemented first slice: active RAG prefetch now prepares a bounded
+  retrieval query before embedding. Short questions stay direct, long/noisy
+  turns are locally condensed and capped, and ambiguous long prompts can call
+  the always-on small classifier model on the Big-Boss host port `8001`
+  (`unsloth/Qwen3.5-2B-GGUF:Q4_1`, 8k context, reasoning off) for JSON labels,
+  a short retrieval query, and line ranges. If
+  `ALPHARAVIS_RAG_CLASSIFIER_API_BASE` is empty, AlphaRavis derives it from
+  `BIG_BOSS_API_BASE` by replacing the port with `8001`. Fallback remains the
+  local query condensation path when the classifier fails or returns invalid
+  JSON.
+- Implemented follow-up: large-paste ingest can use the same small classifier
+  for long mixed prompts. Instruction/question line ranges are stripped from
+  the indexed document body, the classifier retrieval query and line ranges are
+  stored in ingest metadata/run_profile, and mixed replacement markers preserve
+  the current query/task lines so the active user request is not lost.
+- Implemented follow-up: source ingest metadata now includes deterministic
+  `content_type=code|log|config|prose|table|mixed`, `source_title`,
+  `source_keywords`, `source_entities`, and `source_symbols` for
+  document-upload, explicit document-file, large-paste, and compression-archive
+  sources. The pgvector chunk profile honors `content_type=log|code|config|prose`
+  so logs/config/code can use better chunking hints without another model call.
+- Implemented follow-up: long-prompt route classification can use the existing
+  small Qwen3.5 classifier only after the normal short FastPath decision rejects
+  a prompt for length. High-confidence `direct_query` / `noisy_query` labels
+  with no document/instruction ranges may use the direct answer path; document,
+  mixed, instruction, low-confidence, tool-keyword, and very large prompts stay
+  on the agent path. Short FastPath behavior is unchanged.
+- Implemented follow-up: archive-recall query condensation now builds a compact
+  stronger archive/RAG query from vague prompts such as "wie war das nochmal mit
+  X" plus recent thread context. The planner stores the suggested query in
+  `run_profile`, and `context_retrieval_agent` has a
+  `condense_archive_recall_query` tool for vague recall searches.
+- Not planned as a separate model call: RAG/source sufficiency. The agent graph
+  carries a standing prompt hint instead: for code/log sources, treat RAG hits
+  as pointers and use `read_raw_source` for exact surrounding original text when
+  snippets are insufficient.
+- Planned: add tests and a Test UI/Observer probe for the small-model
+  classifier path. It should verify short direct queries, long noisy queries,
+  instruction-only large prompts, document-only large prompts, and mixed
+  instruction+document prompts. Fallback must remain the existing local
+  heuristic classifier when the model endpoint is down, times out, or returns
+  invalid JSON.
 
 ## Custom Model / Power Management
 
@@ -480,7 +589,11 @@ Implemented:
   allowed and drains queued pgvector jobs.
 - The runner may work while big-boss is active, so the small Ollama node can be
   used for embeddings without taking over complex chat.
-- `ALPHARAVIS_ENABLE_EMBEDDING_SCHEDULER=true` drains the queue periodically.
+- `ALPHARAVIS_ENABLE_EMBEDDING_SCHEDULER=true` drains the queue periodically
+  after real graph inactivity. `run_profile_start_node` updates an in-process
+  activity timestamp, and the scheduler waits for
+  `ALPHARAVIS_EMBEDDING_SCHEDULER_IDLE_AFTER_SECONDS` before running queued
+  embedding jobs.
 - `queue_vector_memory_backfill` queues bounded old Store records by query.
 - `ALPHARAVIS_ENABLE_VECTOR_BACKFILL_DAEMON=true` can repeat that bounded
   backfill search, but only when `ALPHARAVIS_VECTOR_BACKFILL_QUERY` is set.
@@ -1472,8 +1585,13 @@ External context-management learnings to evaluate:
     `ALPHARAVIS_PGVECTOR_SPLITTER=auto|langchain|alpharavis`. In `auto`,
     explicit document and large-paste sources use LangChain
     `RecursiveCharacterTextSplitter` when available, while chat/archive/code/log
-    profiles keep the AlphaRavis splitter. Chunk size and overlap still use the
+    profiles keep the AlphaRavis splitter. Archive and archive-collection
+    sources now scan content before choosing their profile: code fences/common
+    code syntax use the code profile, log/traceback lines use the log profile,
+    and normal conversations stay chat. Chunk size and overlap still use the
     existing AlphaRavis ENV profile knobs.
+  - Still open: section-level mixed archive splitting, where one archive can
+    split prose, logs, and code blocks with different per-section strategies.
   - `file_id`/`source_key`-scoped targeted search for big-message ingest;
   - chunk digest/dedup metadata for repeated pasted text and repeated archive
     chunks;

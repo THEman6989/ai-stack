@@ -650,7 +650,9 @@ pgvector is the searchable Inhaltsverzeichnis and chunk index.
 Document and large-paste RAG uses this AlphaRavis-owned pgvector backend by
 default through `ALPHARAVIS_DOCUMENT_RAG_BACKEND=alpharavis_pgvector`; `rag_api`
 is a selectable adapter for compatibility and comparison, not the primary
-source of truth.
+source of truth. Source digest dedup is active by default for identical scoped
+source keys, so repeated identical source content can reuse an existing
+pgvector catalog/chunk set instead of embedding the same source again.
 
 Relevant settings:
 
@@ -1355,6 +1357,11 @@ ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_CHARS=800
 
 This means long code, logs, reports, and compressed archives are fully
 retrievable without becoming one oversized embedding input.
+Archive and archive-collection sources choose that profile from their content:
+code fences/common source syntax use the code profile, log/traceback lines use
+the log profile, and normal conversation archives stay on the chat profile.
+Mixed section-level archive splitting remains future work; the current choice
+is one profile per indexed source.
 
 The tool exposed to agents is:
 
@@ -1377,10 +1384,16 @@ When an agent already knows the relevant `source_key`, archive key, or RAG
 semantic search against only those sources. This keeps known-source questions
 from pulling unrelated chunks into context and mirrors the `rag_api`
 `/query`/`/query_multiple` pattern for external documents.
+If `ALPHARAVIS_ENABLE_RAG_RERANKING=true`, these scoped hits are reranked before
+grading/context-packet construction. Deterministic reranking is local; model
+reranking calls the configured llama.cpp Qwen3-Reranker endpoint and falls back
+to deterministic reranking on endpoint errors when configured.
 When the question needs the Agentic-RAG control loop, `agentic_rag_retrieve`
-runs source-scoped retrieval, deterministic grading, one optional query rewrite,
-and returns a bounded `context_packet` plus `graph_trace`. It is an explicit
-tool path, not automatic archive injection.
+runs source-scoped retrieval, deterministic grading by default, one optional
+query rewrite, and returns a bounded `context_packet` plus `graph_trace`. When
+`ALPHARAVIS_AGENTIC_RAG_LLM_GRADING=true`, the router can call an optional
+structured-output LLM grader and falls back to deterministic grading on errors.
+It is an explicit tool path, not automatic archive injection.
 Thread-level RAG activation metadata is carried separately:
 
 ```text
@@ -1418,6 +1431,11 @@ still keeping the important source content retrievable by source key.
 `active_rag_prefetch_node` later consumes the active source/file ids and injects
 only bounded retrieved chunks in an `<active-rag-context>` system message.
 Archive-only state remains passive while `archive_rag_mode=tool_only`.
+LibreChat document uploads use the same activation path: the Bridge registers
+downloadable `file` / `input_file` document parts with media-gallery, maps the
+stored media path into the LangGraph workspace, sends it as
+`pending_document_ingests`, and `run_profile_start_node` loads it through
+LangChain document loaders before calling `ingest_source(...)`.
 The AlphaRavis pgvector path follows the same retriever shape as `rag_api`:
 `query + source key(s) + k`, where a single source maps to `$eq` semantics and
 multiple sources map to `$in` semantics. It can also apply an optional
@@ -1723,11 +1741,12 @@ Media is safe-by-default:
 
 - LibreChat/OpenWebUI media blocks are reduced to URL/file-id/type metadata by
   the bridge unless `BRIDGE_ALLOW_RAW_MEDIA_CONTEXT=true`.
-- Incoming image/video media blocks are mirrored through `media-gallery` first
-  when `BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_IMAGES=true` and
-  `BRIDGE_MEDIA_GALLERY_AUTO_REGISTER_VIDEOS=true`. The Bridge rewrites only
-  the AlphaRavis-facing media marker to the stable gallery URL; LibreChat's
-  visible attachment record and original upload storage stay unchanged.
+- Incoming image/video/document blocks are mirrored through `media-gallery`
+  first when the corresponding Bridge flags are enabled. Image/video blocks are
+  rewritten only in the AlphaRavis-facing media marker to the stable gallery URL;
+  document blocks keep their original URL marker but also receive a
+  `pending_document_ingests` entry for LangGraph RAG ingest. LibreChat's visible
+  attachment record and original upload storage stay unchanged.
 - Pixelle output URLs are registered with `media-gallery`.
 - The gallery downloads/stores returned assets under `media-data` and records
   metadata in MongoDB.
@@ -1743,7 +1762,9 @@ Media is safe-by-default:
   - `assets`: one row per file/media asset
   - `references`: where that asset appeared in chat/tool context
   - `alpharavis_embedding_jobs`: durable index queue, including
-    `media_analysis` jobs
+    `media_analysis` jobs. Stale `running` rows are claimable again after
+    `ALPHARAVIS_EMBEDDING_JOB_STALE_AFTER_SECONDS` so interrupted dev reloads
+    or container restarts do not strand queued document/media ingest forever.
   - `alpharavis_media_vectors`: searchable frame/media embedding rows
 - Registration is metadata-only by default. Immediate registration-time vision
   indexing requires an explicit `index=true` tool argument or

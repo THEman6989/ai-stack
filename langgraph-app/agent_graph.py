@@ -12,6 +12,7 @@ import shlex
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 from deepagents import create_deep_agent
@@ -380,6 +381,7 @@ class AlphaRavisState(MessagesState):
     active_source_keys: NotRequired[list[str]]
     rag_activation_reason: NotRequired[str]
     archive_rag_mode: NotRequired[str]
+    pending_document_ingests: NotRequired[list[dict[str, Any]]]
     context_summary: NotRequired[str]
     archive_summary: NotRequired[str]
     archived_context_keys: NotRequired[list[str]]
@@ -416,6 +418,7 @@ OPENWEBUI_URL = os.getenv("OPENWEBUI_URL", "http://openwebui:8080").rstrip("/")
 COMFY_IP = REMOTE_PCS.get("comfy_server", {}).get("ip")
 ARCHIVE_INDEX_NS = ("alpharavis", "archive_index")
 ARCHIVE_COLLECTION_INDEX_NS = ("alpharavis", "archive_collection_index")
+SOURCE_RECORD_INDEX_NS = ("alpharavis", "source_record_index")
 DEBUGGING_LESSON_NS = ("alpharavis", "debugging_lessons")
 SKILL_LIBRARY_NS = ("alpharavis", "skill_library")
 SKILL_CONTEXT_MESSAGE_ID = "alpharavis_skill_library_context"
@@ -433,6 +436,7 @@ CURATED_MEMORY_INDEX_NS = ("alpharavis", "curated_memory_index")
 SESSION_TURN_INDEX_NS = ("alpharavis", "session_turn_index")
 ARTIFACT_INDEX_NS = ("alpharavis", "artifact_index")
 RAG_THREAD_PINS_KEY = "active_rag_sources"
+LAST_GRAPH_ACTIVITY_AT = time.time()
 MANUAL_COMPRESSION_PATTERNS = [
     "archive diesen abschnitt",
     "archiviere diesen abschnitt",
@@ -3640,7 +3644,7 @@ async def ingest_document_file(
             }
         )
 
-    ingest_root = Path(os.getenv("ALPHARAVIS_DOCUMENT_INGEST_ROOT", _workspace_root())).expanduser().resolve()
+    ingest_root = Path(os.getenv("ALPHARAVIS_DOCUMENT_INGEST_ROOT") or _workspace_root()).expanduser().resolve()
     resolved_path = Path(path).expanduser().resolve()
     safety_error = _check_read_path(resolved_path, allowed_root=ingest_root)
     if safety_error:
@@ -3680,6 +3684,10 @@ async def ingest_document_file(
         "document_ingest_root": str(ingest_root),
         "content_chars": len(text),
     }
+    metadata = {
+        **metadata,
+        **_source_metadata_summary(text, title=normalized_title, metadata=metadata),
+    }
 
     try:
         ingest = await _router_ingest_source(
@@ -3704,6 +3712,22 @@ async def ingest_document_file(
                 "error": str(exc)[:500],
             }
         )
+    raw_source_record = await _store_raw_source_record(
+        source_type=source_type,
+        source_key=normalized_source_key,
+        title=normalized_title,
+        content=text,
+        indexed_content=text,
+        thread_id=thread_id,
+        thread_key=thread_id,
+        metadata={
+            **metadata,
+            "origin": "agent_document_file_ingest",
+            "path": str(resolved_path),
+            "ingest_status": ingest.get("index_status", ""),
+            "indexed_backends": list(ingest.get("indexed_backends") or []),
+        },
+    )
 
     pins: dict[str, Any] = {}
     pin_warning = ""
@@ -3736,6 +3760,7 @@ async def ingest_document_file(
             "loaded_chars": loaded.get("text_chars", len(text)),
             "loader_metadata": loaded.get("metadata", {}),
             "ingest": ingest,
+            "raw_source_record": raw_source_record,
             "pinned": pins,
             "pin_warning": pin_warning,
         }
@@ -3828,6 +3853,7 @@ async def agentic_rag_retrieve(
             }
         )
 
+    llm_grade_func = _llm_grade_retrieval_hits if _env_bool("ALPHARAVIS_AGENTIC_RAG_LLM_GRADING", "false") else None
     source_type_filter = str(source_type or "all").strip().lower()
     rag_source_keys = None
     if source_type_filter == "archive":
@@ -3847,6 +3873,7 @@ async def agentic_rag_retrieve(
         rag_source_keys=rag_source_keys,
         allow_rewrite=allow_rewrite,
         max_context_chars=max_context_chars or None,
+        llm_grade_func=llm_grade_func,
     )
     _log_event(
         logging.INFO,
@@ -3861,6 +3888,65 @@ async def agentic_rag_retrieve(
         elapsed_seconds=round(time.perf_counter() - started, 3),
     )
     return _json_tool_result(payload)
+
+
+async def _llm_grade_retrieval_hits(
+    *,
+    query: str,
+    hits: list[dict[str, Any]],
+    deterministic_grade: dict[str, Any],
+) -> dict[str, Any]:
+    max_hits = max(1, min(len(hits), int(os.getenv("ALPHARAVIS_AGENTIC_RAG_LLM_GRADING_MAX_HITS", "8"))))
+    candidates = []
+    for index, hit in enumerate(hits[:max_hits], start=1):
+        candidates.append(
+            {
+                "candidate_id": index,
+                "source_key": hit.get("source_key", ""),
+                "title": hit.get("title", ""),
+                "backend": hit.get("retrieval_backend", ""),
+                "text": str(hit.get("chunk_text") or hit.get("preview_text") or "")[:1200],
+                "deterministic_relevance_score": hit.get("relevance_score") or hit.get("rerank_score") or hit.get("similarity"),
+            }
+        )
+    prompt = (
+        "Return only JSON. Decide which retrieval candidates are relevant to the user query. "
+        "Schema: {\"relevant_ids\":[1],\"rejected_ids\":[2],\"rationale\":\"short\"}. "
+        "Relevant means the candidate contains facts that directly help answer the query. "
+        f"Query: {query}\n\nCandidates:\n{json.dumps(candidates, ensure_ascii=False)}"
+    )
+    response = await _ainvoke_direct_model(
+        [
+            SystemMessage(content="You are a strict RAG relevance grader. Output valid JSON only."),
+            HumanMessage(content=prompt),
+        ],
+        model_name=os.getenv("ALPHARAVIS_AGENTIC_RAG_GRADER_MODEL", "openai/big-boss"),
+        timeout_seconds=float(os.getenv("ALPHARAVIS_AGENTIC_RAG_GRADER_TIMEOUT_SECONDS", "25")),
+        model_kwargs={"chat_template_kwargs": {"enable_thinking": False, "preserve_thinking": False}},
+        purpose="agentic_rag_llm_grading",
+    )
+    raw = _message_content(response).strip()
+    match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+    payload = json.loads(match.group(0) if match else raw)
+    relevant_ids = {int(item) for item in payload.get("relevant_ids", []) if str(item).strip().isdigit()}
+    rejected_ids = {int(item) for item in payload.get("rejected_ids", []) if str(item).strip().isdigit()}
+    relevant_hits = []
+    rejected_hits = []
+    for index, hit in enumerate(hits[:max_hits], start=1):
+        enriched = {**hit, "llm_relevance": index in relevant_ids}
+        if index in relevant_ids:
+            relevant_hits.append(enriched)
+        elif index in rejected_ids or index not in relevant_ids:
+            rejected_hits.append(enriched)
+    for hit in hits[max_hits:]:
+        rejected_hits.append({**hit, "llm_relevance": False})
+    return {
+        "relevant_hits": relevant_hits,
+        "rejected_hits": rejected_hits,
+        "llm_rationale": str(payload.get("rationale") or "")[:500],
+        "grading_strategy": "llm_structured_output",
+        "min_relevance": deterministic_grade.get("min_relevance"),
+    }
 
 
 async def _load_thread_rag_pins(thread_id: str) -> dict[str, Any]:
@@ -3982,6 +4068,57 @@ async def read_source_chunks(
     except Exception as exc:
         return _json_tool_result({"source_key": source_key, "chunks": [], "error": str(exc)[:500]})
     return _json_tool_result(payload)
+
+
+@tool
+async def read_raw_source(
+    source_key: str,
+    source_type: str = "all",
+    start: int = 0,
+    max_chars: int = 12000,
+    search: str = "",
+    include_other_threads: bool = False,
+):
+    """Read a bounded raw slice for a known document/large-paste source key from the AlphaRavis Store."""
+
+    source_key = str(source_key or "").strip()
+    if not source_key:
+        return _json_tool_result({"found": False, "error": "source_key is required."})
+    record = await _load_raw_source_record(
+        source_key,
+        source_type=source_type,
+        thread_id=_state_thread_id(),
+        include_other_threads=include_other_threads,
+    )
+    if not isinstance(record, dict):
+        return _json_tool_result(
+            {
+                "found": False,
+                "source_key": source_key,
+                "source_type": source_type,
+                "next_action": (
+                    "Use read_source_chunks for indexed chunks, or query_archive/read_archive_record "
+                    "if the key is an archive key."
+                ),
+            }
+        )
+    window = _bounded_text_window(str(record.get("content") or ""), start=start, max_chars=max_chars, search=search)
+    return _json_tool_result(
+        {
+            "found": True,
+            "source_key": source_key,
+            "source_type": record.get("source_type") or source_type,
+            "thread_id": record.get("thread_id") or "",
+            "thread_key": record.get("thread_key") or "",
+            "title": record.get("title") or source_key,
+            "metadata": record.get("metadata") or {},
+            **window,
+            "retrieval_policy": (
+                "This is a bounded raw slice from the Store source-of-truth, not a semantic RAG hit. "
+                "Use search or start to page; do not request the whole source unless it is small."
+            ),
+        }
+    )
 
 
 @tool
@@ -4577,8 +4714,8 @@ async def search_archived_context(query: str, limit: int = 5, include_other_thre
 
 
 @tool
-async def read_archive_record(archive_key: str, thread_id: str = ""):
-    """Load one raw archive record by key. Defaults to the current chat thread."""
+async def read_archive_record(archive_key: str, thread_id: str = "", start: int = 0, max_chars: int = 12000, search: str = ""):
+    """Load one bounded raw archive slice by key. Defaults to the current chat thread."""
 
     if get_store is None:
         return "LangGraph store access is unavailable in this runtime."
@@ -4598,17 +4735,23 @@ async def read_archive_record(archive_key: str, thread_id: str = ""):
         value = _store_item_value(index_item)
     if not isinstance(value, dict):
         return _json_tool_result({"archive_key": archive_key, "thread_id": thread_id, "found": False})
+    content_window = _bounded_text_window(str(value.get("content") or ""), start=start, max_chars=max_chars, search=search)
     return _json_tool_result(
         {
             "archive_key": archive_key,
+            "found": True,
             "thread_id": value.get("thread_id") or thread_id,
             "thread_key": value.get("thread_key") or value.get("thread_id") or thread_id,
             "title": value.get("title") or archive_key,
             "created_at": value.get("archived_at") or value.get("created_at"),
             "summary": value.get("summary") or "",
-            "content": value.get("content") or "",
+            "content": content_window["content"],
+            "content_window": {key: value for key, value in content_window.items() if key != "content"},
             "messages": value.get("messages") or [],
             "metadata": value.get("metadata") or {},
+            "retrieval_policy": (
+                "Archive content is bounded. Use search or start/max_chars to page only the needed raw slice."
+            ),
         }
     )
 
@@ -5677,6 +5820,7 @@ async def _maybe_index_vector_memory(
     thread_key: str = "",
     scope: str = "thread",
     metadata: dict[str, Any] | None = None,
+    progress_callback: Any | None = None,
 ) -> str | None:
     if not _vector_memory_available():
         return None
@@ -5719,6 +5863,7 @@ async def _maybe_index_vector_memory(
                 thread_key=thread_key,
                 scope=scope,
                 metadata=metadata or {},
+                progress_callback=progress_callback,
             )
         except Exception as exc:
             message = f"pgvector indexing failed for {source_type}:{source_key}: {exc}"
@@ -5842,6 +5987,10 @@ def _thread_archive_ns(thread_id: str) -> tuple[str, ...]:
 
 def _thread_archive_collection_ns(thread_id: str) -> tuple[str, ...]:
     return ("alpharavis", "threads", thread_id, "archive_collections")
+
+
+def _thread_source_record_ns(thread_id: str) -> tuple[str, ...]:
+    return ("alpharavis", "threads", thread_id, "source_records")
 
 
 def _thread_session_turn_ns(thread_id: str) -> tuple[str, ...]:
@@ -6090,6 +6239,477 @@ def _latest_user_query(messages: list[Any]) -> str:
     return "\n".join(_message_text(message) for message in messages[-4:])
 
 
+def _retrieval_query_max_chars() -> int:
+    return max(200, int(os.getenv("ALPHARAVIS_RETRIEVAL_QUERY_MAX_CHARS", "1500")))
+
+
+def _retrieval_query_direct_max_chars() -> int:
+    return max(200, int(os.getenv("ALPHARAVIS_RETRIEVAL_DIRECT_QUERY_MAX_CHARS", "1500")))
+
+
+def _retrieval_query_classifier_min_chars() -> int:
+    return max(500, int(os.getenv("ALPHARAVIS_RETRIEVAL_QUERY_CLASSIFIER_MIN_CHARS", "6000")))
+
+
+def _retrieval_query_classifier_enabled() -> bool:
+    return _env_bool("ALPHARAVIS_ENABLE_RETRIEVAL_QUERY_CLASSIFIER", "true")
+
+
+def _small_classifier_default_base_url() -> str:
+    configured = os.getenv("ALPHARAVIS_RAG_CLASSIFIER_API_BASE", "").strip()
+    if configured:
+        return configured.rstrip("/")
+    big_boss = os.getenv("BIG_BOSS_API_BASE", "").strip()
+    if big_boss:
+        parsed = urlparse(big_boss)
+        if parsed.scheme and parsed.hostname:
+            netloc = parsed.hostname
+            if parsed.username or parsed.password:
+                auth = parsed.username or ""
+                if parsed.password:
+                    auth += f":{parsed.password}"
+                netloc = f"{auth}@{netloc}"
+            netloc = f"{netloc}:8001"
+            return urlunparse((parsed.scheme, netloc, "/v1", "", "", "")).rstrip("/")
+    return "http://llama-classifier:8001/v1"
+
+
+def _small_classifier_model() -> str:
+    return os.getenv("ALPHARAVIS_RAG_CLASSIFIER_MODEL", "unsloth/Qwen3.5-2B-GGUF:Q4_1")
+
+
+def _small_classifier_timeout() -> float:
+    return max(1.0, float(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_TIMEOUT_SECONDS", "12")))
+
+
+def _line_ranges_from_text(text: str) -> tuple[list[str], list[tuple[int, str]]]:
+    lines = str(text or "").splitlines()
+    numbered = [(index + 1, line) for index, line in enumerate(lines)]
+    return lines, numbered
+
+
+def _classifier_window_text(text: str) -> str:
+    lines, numbered = _line_ranges_from_text(text)
+    if len(text) <= int(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_FULL_TEXT_MAX_CHARS", "12000")):
+        return "\n".join(f"{index}: {line}" for index, line in numbered)
+
+    marker_re = re.compile(
+        r"(?i)(^|\b)(/rag|/rake|/index|/ingest|task|instructions?|rules?|document|source|context|question|frage|aufgabe|anweisung|quelle)\b"
+    )
+    selected: dict[int, str] = {}
+    head_lines = int(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_HEAD_LINES", "80"))
+    tail_lines = int(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_TAIL_LINES", "100"))
+    radius = int(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_MARKER_RADIUS_LINES", "8"))
+    for index, line in numbered[:head_lines]:
+        selected[index] = line
+    for index, line in numbered[-tail_lines:]:
+        selected[index] = line
+    for index, line in numbered:
+        if marker_re.search(line):
+            start = max(1, index - radius)
+            end = min(len(lines), index + radius)
+            for nearby in range(start, end + 1):
+                selected[nearby] = lines[nearby - 1]
+    rendered = "\n".join(f"{index}: {selected[index]}" for index in sorted(selected))
+    max_chars = int(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_WINDOW_MAX_CHARS", "24000"))
+    if len(rendered) > max_chars:
+        rendered = rendered[:max_chars].rstrip() + "\n[Classifier window truncated.]"
+    return rendered
+
+
+def _local_retrieval_query(text: str) -> str:
+    raw = str(text or "").strip()
+    max_chars = _retrieval_query_max_chars()
+    if len(raw) <= _retrieval_query_direct_max_chars():
+        return raw[:max_chars].strip()
+
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    question_re = re.compile(
+        r"(?i)(\?|^(was|wie|warum|wann|wo|wer|welche|welcher|welches|wieso|how|what|why|when|where|who|which)\b|"
+        r"\b(find|search|suche|such|erklär|erklaer|zeige|tell me|look up|nachschauen|nachschau)\b)"
+    )
+    selected: list[str] = []
+    for line in reversed(lines[-120:]):
+        if question_re.search(line):
+            selected.insert(0, line)
+        if sum(len(item) + 1 for item in selected) >= max_chars:
+            break
+    if not selected:
+        selected = lines[-20:]
+    query = "\n".join(selected).strip()
+    if len(query) > max_chars:
+        query = query[-max_chars:].strip()
+    return query or raw[:max_chars].strip()
+
+
+def _parse_classifier_json(content: str) -> dict[str, Any]:
+    text = str(content or "").strip()
+    if not text:
+        raise ValueError("empty classifier response")
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+    if fenced:
+        text = fenced.group(1)
+    elif "{" in text and "}" in text:
+        text = text[text.find("{") : text.rfind("}") + 1]
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        recovered: dict[str, Any] = {}
+        decoder = json.JSONDecoder()
+        for key in ("intent", "retrieval_query", "instruction_lines", "document_lines", "question_lines", "confidence", "reason"):
+            match = re.search(rf'"{re.escape(key)}"\s*:\s*', text)
+            if not match:
+                continue
+            try:
+                value, _ = decoder.raw_decode(text[match.end() :].lstrip())
+            except json.JSONDecodeError:
+                continue
+            recovered[key] = value
+        if recovered:
+            payload = recovered
+        else:
+            raise
+    if not isinstance(payload, dict):
+        raise ValueError("classifier JSON was not an object")
+    return payload
+
+
+def _normalize_line_ranges(value: Any) -> list[list[int]]:
+    ranges: list[list[int]] = []
+    if not isinstance(value, list):
+        return ranges
+    for item in value:
+        if isinstance(item, list) and len(item) >= 2:
+            start, end = item[0], item[1]
+        elif isinstance(item, dict):
+            start, end = item.get("start"), item.get("end")
+        else:
+            continue
+        try:
+            start_i = max(1, int(start))
+            end_i = max(start_i, int(end))
+        except (TypeError, ValueError):
+            continue
+        ranges.append([start_i, end_i])
+    return ranges[:40]
+
+
+def _line_range_indexes(line_count: int, ranges: Any) -> set[int]:
+    indexes: set[int] = set()
+    if line_count <= 0:
+        return indexes
+    for start, end in _normalize_line_ranges(ranges):
+        start_i = max(1, min(line_count, start))
+        end_i = max(start_i, min(line_count, end))
+        indexes.update(range(start_i, end_i + 1))
+    return indexes
+
+
+def _text_from_line_ranges(text: str, ranges: Any, *, max_chars: int | None = None) -> str:
+    lines = str(text or "").splitlines()
+    indexes = _line_range_indexes(len(lines), ranges)
+    if not indexes:
+        return ""
+    selected = [line for index, line in enumerate(lines, start=1) if index in indexes]
+    rendered = "\n".join(selected).strip()
+    if max_chars is not None and len(rendered) > max_chars:
+        rendered = rendered[:max_chars].rstrip() + "\n[Line range text truncated.]"
+    return rendered
+
+
+def _strip_line_ranges_from_text(text: str, ranges: Any) -> str:
+    lines = str(text or "").splitlines()
+    indexes = _line_range_indexes(len(lines), ranges)
+    if not indexes:
+        return str(text or "")
+    kept = [line for index, line in enumerate(lines, start=1) if index not in indexes]
+    return "\n".join(kept).strip()
+
+
+_SOURCE_STOPWORDS = {
+    "about",
+    "after",
+    "also",
+    "and",
+    "aus",
+    "bei",
+    "but",
+    "das",
+    "der",
+    "die",
+    "dies",
+    "diese",
+    "ein",
+    "eine",
+    "for",
+    "from",
+    "hier",
+    "mit",
+    "nicht",
+    "oder",
+    "sich",
+    "that",
+    "the",
+    "und",
+    "von",
+    "was",
+    "wenn",
+    "with",
+}
+
+
+def _detect_source_content_type(text: str, *, title: str = "", metadata: dict[str, Any] | None = None) -> str:
+    metadata = metadata if isinstance(metadata, dict) else {}
+    explicit = str(metadata.get("content_type") or metadata.get("source_content_type") or "").strip().lower()
+    if explicit in {"code", "log", "config", "prose", "table", "mixed"}:
+        return explicit
+
+    pathish = " ".join(
+        str(value or "")
+        for value in (
+            title,
+            metadata.get("filename"),
+            metadata.get("file_name"),
+            metadata.get("path"),
+            metadata.get("file_path"),
+            metadata.get("source_path"),
+            metadata.get("source_key"),
+        )
+    ).strip().lower()
+    if any(pathish.endswith(ext) or ext in pathish for ext in (".json", ".yaml", ".yml", ".toml", ".ini", ".env", ".cfg", ".conf")):
+        return "config"
+    if any(pathish.endswith(ext) or ext in pathish for ext in (".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".sh", ".sql", ".html", ".css")):
+        return "code"
+    if any(pathish.endswith(ext) for ext in (".log", ".trace", ".out", ".err")):
+        return "log"
+    if any(pathish.endswith(ext) or ext in pathish for ext in (".csv", ".tsv")):
+        return "table"
+
+    sample = str(text or "")[:12000]
+    lines = [line for line in sample.splitlines() if line.strip()]
+    if not lines:
+        return "prose"
+    code_lines = sum(
+        1
+        for line in lines
+        if re.search(r"^\s*(async\s+def|def|class|function|import|from|const|let|var|SELECT|CREATE TABLE|if\s+.+:|for\s+.+:)\b", line)
+        or re.search(r"[{};]\s*$", line)
+    )
+    log_lines = sum(
+        1
+        for line in lines
+        if re.search(r"^\s*(\d{4}-\d{2}-\d{2}[T\s]|\[[^\]]+\]\s*)?(INFO|WARN|WARNING|ERROR|DEBUG|TRACE|Traceback|Exception)\b", line)
+    )
+    config_lines = sum(1 for line in lines if re.search(r"^\s*[\w.-]+\s*[:=]\s*[^=].*$", line))
+    table_lines = sum(
+        1
+        for line in lines
+        if ("\t" in line and len(line.split("\t")) >= 3)
+        or (line.count("|") >= 2)
+        or (line.count(",") >= 3 and len(line) < 500)
+    )
+    total = max(1, len(lines))
+    strong = [
+        name
+        for name, count, threshold in (
+            ("code", code_lines, 0.12),
+            ("log", log_lines, 0.12),
+            ("config", config_lines, 0.25),
+            ("table", table_lines, 0.25),
+        )
+        if count / total >= threshold and count >= 3
+    ]
+    if len(strong) > 1:
+        return "mixed"
+    if strong:
+        return strong[0]
+    if "```" in sample:
+        return "code"
+    return "prose"
+
+
+def _extract_source_keywords(text: str, *, limit: int = 12) -> list[str]:
+    words = re.findall(r"(?u)\b[\w][\w.-]{3,}\b", str(text or "")[:20000])
+    counts: dict[str, int] = {}
+    display: dict[str, str] = {}
+    for word in words:
+        lowered = word.strip("._-").lower()
+        if len(lowered) < 4 or lowered in _SOURCE_STOPWORDS or lowered.isdigit():
+            continue
+        counts[lowered] = counts.get(lowered, 0) + 1
+        display.setdefault(lowered, word.strip("._-"))
+    ranked = sorted(counts, key=lambda item: (-counts[item], item))
+    return [display[item] for item in ranked[:limit]]
+
+
+def _extract_source_entities(text: str, *, limit: int = 12) -> list[str]:
+    sample = str(text or "")[:20000]
+    candidates = re.findall(r"\b(?:[A-ZÄÖÜ][\wÄÖÜäöüß.-]{2,}|[A-Z0-9_]{3,})(?:[/.-][A-Z0-9_][\w.-]*)*\b", sample)
+    seen: set[str] = set()
+    entities: list[str] = []
+    for candidate in candidates:
+        cleaned = candidate.strip(".,:;()[]{}")
+        lowered = cleaned.lower()
+        if lowered in seen or lowered in _SOURCE_STOPWORDS or cleaned.isdigit():
+            continue
+        seen.add(lowered)
+        entities.append(cleaned)
+        if len(entities) >= limit:
+            break
+    return entities
+
+
+def _extract_source_symbols(text: str, *, limit: int = 20) -> list[str]:
+    sample = str(text or "")[:30000]
+    patterns = [
+        r"(?m)^\s*(?:async\s+def|def|class)\s+([A-Za-z_][\w]*)",
+        r"(?m)^\s*(?:function|const|let|var)\s+([A-Za-z_$][\w$]*)",
+        r"(?m)^\s*(?:export\s+)?(?:class|interface|type)\s+([A-Za-z_$][\w$]*)",
+        r"(?m)^\s*([A-Z][A-Z0-9_]{2,})\s*=",
+        r"\b([\w.-]+\.(?:py|js|ts|tsx|jsx|json|ya?ml|toml|log|md|txt|csv|sql))\b",
+    ]
+    seen: set[str] = set()
+    symbols: list[str] = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, sample):
+            symbol = str(match.group(1)).strip()
+            key = symbol.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            symbols.append(symbol)
+            if len(symbols) >= limit:
+                return symbols
+    return symbols
+
+
+def _source_title_from_text(text: str, *, fallback: str) -> str:
+    for line in str(text or "").splitlines()[:80]:
+        stripped = line.strip().strip("#").strip()
+        if not stripped or len(stripped) > 140:
+            continue
+        if re.match(r"(?i)^(document|source|context|data|instructions?|rules?|logs?)\s*[:#-]?$", stripped):
+            continue
+        return stripped[:120]
+    return fallback[:120]
+
+
+def _source_metadata_summary(
+    content: str,
+    *,
+    title: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    metadata = metadata if isinstance(metadata, dict) else {}
+    content_type = _detect_source_content_type(content, title=title, metadata=metadata)
+    source_title = str(metadata.get("source_title") or "").strip()
+    if not source_title:
+        source_title = _source_title_from_text(
+            content,
+            fallback=str(metadata.get("filename") or metadata.get("file_name") or title or "Untitled source"),
+        )
+    return {
+        "content_type": content_type,
+        "source_title": source_title,
+        "source_keywords": _extract_source_keywords(content),
+        "source_entities": _extract_source_entities(content),
+        "source_symbols": _extract_source_symbols(content),
+    }
+
+
+async def _classify_prompt_for_retrieval(text: str) -> dict[str, Any]:
+    system_prompt = (
+        "You are AlphaRavis' retrieval query and prompt-structure classifier. "
+        "Return strict JSON only. Do not answer the user. Do not rewrite source text. "
+        "Classify the prompt and identify line ranges in the ORIGINAL numbered text. "
+        "Use labels: small_chat, direct_query, noisy_query, instruction, document, mixed. "
+        "The retrieval_query must be short German/English search text with key entities, filenames, "
+        "error codes, and concepts. It must not exceed 1200 characters. "
+        "For mixed prompts, put active rules in instruction_lines and searchable source/data in document_lines. "
+        "If unsure, set confidence below 0.6. "
+        "Line ranges must be arrays of two integers, for example [[1,3],[8,12]], never copied text. "
+        "Use broad contiguous ranges, at most 4 ranges per line-range key. "
+        "Return minified JSON and keep reason under 120 characters. "
+        "Return exactly these keys: intent, retrieval_query, instruction_lines, document_lines, question_lines, confidence, reason."
+    )
+    user_payload = {
+        "task": "classify_prompt_for_rag",
+        "numbered_text": _classifier_window_text(text),
+    }
+    payload = {
+        "model": _small_classifier_model(),
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+        ],
+        "temperature": 0,
+        "max_tokens": int(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_MAX_TOKENS", "512")),
+        "stream": False,
+        "response_format": {"type": "json_object"},
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    url = f"{_small_classifier_default_base_url().rstrip('/')}/chat/completions"
+    started = time.perf_counter()
+    async with httpx.AsyncClient(timeout=_small_classifier_timeout()) as client:
+        response = await client.post(url, json=payload, headers={"Authorization": f"Bearer {os.getenv('LOCAL_LLM_API_KEY', 'sk-local-dev')}"})
+        response.raise_for_status()
+        body = response.json()
+    choice = (body.get("choices") or [{}])[0] if isinstance(body, dict) else {}
+    message = choice.get("message") if isinstance(choice, dict) else {}
+    content = message.get("content") if isinstance(message, dict) else ""
+    parsed = _parse_classifier_json(str(content or ""))
+    retrieval_query = str(parsed.get("retrieval_query") or "").strip()
+    intent = str(parsed.get("intent") or "noisy_query").strip().lower()
+    if intent not in {"small_chat", "direct_query", "noisy_query", "instruction", "document", "mixed"}:
+        intent = "noisy_query"
+    confidence = float(parsed.get("confidence") or 0.0)
+    return {
+        "intent": intent,
+        "retrieval_query": retrieval_query[: _retrieval_query_max_chars()],
+        "instruction_lines": _normalize_line_ranges(parsed.get("instruction_lines")),
+        "document_lines": _normalize_line_ranges(parsed.get("document_lines")),
+        "question_lines": _normalize_line_ranges(parsed.get("question_lines")),
+        "confidence": round(max(0.0, min(1.0, confidence)), 3),
+        "reason": str(parsed.get("reason") or "")[:500],
+        "elapsed_seconds": round(time.perf_counter() - started, 3),
+        "model": _small_classifier_model(),
+        "base_url": _small_classifier_default_base_url(),
+    }
+
+
+async def _prepare_retrieval_query(text: str) -> dict[str, Any]:
+    raw = str(text or "").strip()
+    local_query = _local_retrieval_query(raw)
+    result: dict[str, Any] = {
+        "query": local_query,
+        "strategy": "direct" if len(raw) <= _retrieval_query_direct_max_chars() else "local_condensed",
+        "original_chars": len(raw),
+        "query_chars": len(local_query),
+        "classifier": None,
+        "warning": "",
+    }
+    if (
+        not _retrieval_query_classifier_enabled()
+        or len(raw) < _retrieval_query_classifier_min_chars()
+    ):
+        return result
+    try:
+        classification = await _classify_prompt_for_retrieval(raw)
+    except Exception as exc:
+        result["warning"] = f"classifier_failed: {type(exc).__name__}: {exc}"
+        return result
+    model_query = str(classification.get("retrieval_query") or "").strip()
+    confidence = float(classification.get("confidence") or 0.0)
+    if model_query and confidence >= float(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_MIN_CONFIDENCE", "0.5")):
+        result["query"] = model_query[: _retrieval_query_max_chars()]
+        result["strategy"] = "small_model_classifier"
+        result["query_chars"] = len(result["query"])
+    else:
+        result["strategy"] = "local_condensed_classifier_low_confidence"
+    result["classifier"] = classification
+    return result
+
+
 def _compression_paused_by_user(messages: list[Any]) -> bool:
     if not _env_bool("ALPHARAVIS_ALLOW_USER_COMPRESSION_PAUSE", "true"):
         return False
@@ -6128,6 +6748,65 @@ def _looks_like_archive_recall_request(text: str) -> bool:
         "zusammenfassung",
     )
     return any(pattern in lowered for pattern in patterns)
+
+
+def _condense_archive_recall_query_from_text(query: str, context: str = "") -> dict[str, Any]:
+    raw_query = str(query or "").strip()
+    raw_context = str(context or "").strip()
+    topic = re.sub(
+        r"(?i)\b(wie war das nochmal mit|wie war das noch mal mit|was war nochmal mit|was war noch mal mit|"
+        r"hatten wir|vorhin|vorher|oben|damals|frueher|früher|archive|archiv|compressed context|old context|"
+        r"previous context|zusammenfassung|erinnerst du dich an|remember)\b",
+        " ",
+        raw_query,
+    )
+    topic = re.sub(r"\s+", " ", topic).strip(" ?:,.-")
+    candidates = [topic, raw_query, raw_context]
+    keywords: list[str] = []
+    for candidate in candidates:
+        for word in _extract_source_keywords(candidate, limit=24):
+            lowered = word.lower()
+            if lowered not in {item.lower() for item in keywords}:
+                keywords.append(word)
+            if len(keywords) >= 10:
+                break
+        if len(keywords) >= 10:
+            break
+    entities = _extract_source_entities("\n".join(candidates), limit=8)
+    symbols = _extract_source_symbols("\n".join(candidates), limit=8)
+    parts = []
+    if topic:
+        parts.append(topic)
+    if keywords:
+        parts.append("keywords: " + ", ".join(keywords[:10]))
+    if entities:
+        parts.append("entities: " + ", ".join(entities[:8]))
+    if symbols:
+        parts.append("symbols: " + ", ".join(symbols[:8]))
+    condensed = "; ".join(part for part in parts if part).strip()
+    if not condensed:
+        condensed = raw_query[: _retrieval_query_max_chars()]
+    return {
+        "query": condensed[: _retrieval_query_max_chars()],
+        "topic": topic[:500],
+        "keywords": keywords[:10],
+        "entities": entities[:8],
+        "symbols": symbols[:8],
+        "strategy": "archive_recall_condenser",
+    }
+
+
+def _archive_recall_query_for_messages(messages: list[Any]) -> dict[str, Any]:
+    latest = _latest_user_query(messages)
+    context = _recent_turn_window_text(messages, int(os.getenv("ALPHARAVIS_ARCHIVE_RECALL_CONTEXT_TURNS", "3")))
+    return _condense_archive_recall_query_from_text(latest, context)
+
+
+@tool
+async def condense_archive_recall_query(query: str, recent_context: str = ""):
+    """Build a stronger archive/RAG search query for vague recall requests."""
+
+    return _json_tool_result(_condense_archive_recall_query_from_text(query, recent_context))
 
 
 def _profile_update(state: AlphaRavisState, **updates: Any) -> dict[str, Any]:
@@ -6203,15 +6882,55 @@ def _large_paste_auto_margin_tokens() -> int:
     return max(0, int(os.getenv("ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS", "5000")))
 
 
-def _large_paste_auto_should_ingest(state: dict[str, Any], messages: list[Any]) -> tuple[bool, dict[str, Any]]:
+def _large_paste_auto_stage() -> str:
+    value = os.getenv("ALPHARAVIS_LARGE_PASTE_RAG_AUTO_STAGE", "post_compression").strip().lower()
+    return value if value in {"pre_run", "post_compression"} else "post_compression"
+
+
+def _large_paste_post_compression_trigger_ratio() -> float:
+    raw = os.getenv(
+        "ALPHARAVIS_LARGE_PASTE_RAG_POST_COMPRESSION_TRIGGER_RATIO",
+        os.getenv("ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_FORCE_MIDDLE_RATIO", "0.80"),
+    )
+    return max(0.10, min(float(raw), 0.99))
+
+
+def _large_paste_post_rag_compression_enabled() -> bool:
+    return _env_bool("ALPHARAVIS_LARGE_PASTE_POST_RAG_COMPRESSION_ENABLED", "true")
+
+
+def _large_paste_post_rag_compression_trigger_ratio() -> float:
+    raw = os.getenv(
+        "ALPHARAVIS_LARGE_PASTE_POST_RAG_COMPRESSION_TRIGGER_RATIO",
+        os.getenv("ALPHARAVIS_LARGE_PASTE_RAG_POST_COMPRESSION_TRIGGER_RATIO", "0.80"),
+    )
+    return max(0.10, min(float(raw), 0.99))
+
+
+def _large_paste_auto_should_ingest(state: dict[str, Any], messages: list[Any], *, phase: str = "initial") -> tuple[bool, dict[str, Any]]:
     budget = _context_budget_snapshot(state, messages=messages)
     margin = int(budget.get("effective_active_limit") or 0) - int(budget.get("message_tokens") or 0)
-    threshold = _large_paste_auto_margin_tokens()
-    return margin <= threshold, {
+    effective_active_limit = int(budget.get("effective_active_limit") or 0)
+    message_tokens = int(budget.get("message_tokens") or 0)
+    post_ratio = _large_paste_post_compression_trigger_ratio()
+    post_threshold = max(1, int(effective_active_limit * post_ratio)) if effective_active_limit > 0 else 0
+    auto_stage = _large_paste_auto_stage()
+    if phase == "initial":
+        should_ingest = auto_stage == "pre_run" and margin <= _large_paste_auto_margin_tokens()
+    elif phase == "post_compression":
+        should_ingest = auto_stage == "post_compression" and post_threshold > 0 and message_tokens >= post_threshold
+    else:
+        should_ingest = False
+    return should_ingest, {
+        "large_paste_auto_stage": auto_stage,
+        "large_paste_auto_phase": phase,
         "message_tokens": int(budget.get("message_tokens") or 0),
-        "effective_active_limit": int(budget.get("effective_active_limit") or 0),
+        "effective_active_limit": effective_active_limit,
         "tokens_until_compression": margin,
-        "auto_margin_tokens": threshold,
+        "auto_margin_tokens": _large_paste_auto_margin_tokens(),
+        "post_compression_trigger_ratio": post_ratio,
+        "post_compression_trigger_tokens": post_threshold,
+        "post_compression_token_ratio": round(message_tokens / effective_active_limit, 4) if effective_active_limit > 0 else 0,
         "compression_needed": bool(budget.get("compression_needed")),
     }
 
@@ -6255,6 +6974,14 @@ _LARGE_PASTE_MANUAL_BLOCK_RE = re.compile(
 
 def _large_paste_intent_classifier_enabled() -> bool:
     return _env_bool("ALPHARAVIS_ENABLE_LARGE_PASTE_INTENT_CLASSIFIER", "true")
+
+
+def _large_paste_small_classifier_enabled() -> bool:
+    return _env_bool("ALPHARAVIS_ENABLE_LARGE_PASTE_SMALL_CLASSIFIER", "true")
+
+
+def _large_paste_small_classifier_min_chars() -> int:
+    return max(500, int(os.getenv("ALPHARAVIS_LARGE_PASTE_SMALL_CLASSIFIER_MIN_CHARS", "6000")))
 
 
 def _classify_large_paste_intent(content: str) -> dict[str, Any]:
@@ -6318,6 +7045,7 @@ def _classify_large_paste_intent(content: str) -> dict[str, Any]:
             confidence = min(instruction_score, document_score) / max(instruction_score, document_score)
     return {
         "intent": intent,
+        "classifier": "heuristic",
         "instruction_score": round(instruction_score, 3),
         "document_score": round(document_score, 3),
         "confidence": round(min(1.0, confidence), 3),
@@ -6326,8 +7054,86 @@ def _classify_large_paste_intent(content: str) -> dict[str, Any]:
     }
 
 
-def _large_paste_instruction_brief(content: str) -> str:
+def _large_paste_intent_from_small_classifier(model_result: dict[str, Any], heuristic: dict[str, Any]) -> dict[str, Any]:
+    intent = str(model_result.get("intent") or "").strip().lower()
+    heuristic_intent = str(heuristic.get("intent") or "unknown")
+    has_document_ranges = bool(model_result.get("document_lines"))
+    has_instruction_ranges = bool(model_result.get("instruction_lines"))
+    if intent == "instruction":
+        if heuristic_intent == "mixed" or (heuristic_intent == "document" and has_instruction_ranges):
+            paste_intent = "mixed"
+        else:
+            paste_intent = "instruction"
+    elif intent == "mixed" or (has_instruction_ranges and has_document_ranges):
+        paste_intent = "mixed"
+    elif intent == "document" or has_document_ranges:
+        paste_intent = "document"
+    else:
+        paste_intent = str(heuristic.get("intent") or "unknown")
+
+    return {
+        **heuristic,
+        "intent": paste_intent,
+        "classifier": "small_model_classifier",
+        "small_model_intent": intent or "",
+        "small_model_confidence": model_result.get("confidence"),
+        "confidence": model_result.get("confidence", heuristic.get("confidence")),
+        "retrieval_query": str(model_result.get("retrieval_query") or "")[: _retrieval_query_max_chars()],
+        "instruction_lines": list(model_result.get("instruction_lines") or []),
+        "document_lines": list(model_result.get("document_lines") or []),
+        "question_lines": list(model_result.get("question_lines") or []),
+        "small_model_reason": str(model_result.get("reason") or "")[:500],
+        "small_model_elapsed_seconds": model_result.get("elapsed_seconds"),
+        "small_model_base_url": model_result.get("base_url"),
+        "small_model_model": model_result.get("model"),
+    }
+
+
+async def _classify_large_paste_for_ingest(content: str) -> dict[str, Any]:
+    heuristic = (
+        _classify_large_paste_intent(content)
+        if _large_paste_intent_classifier_enabled()
+        else {
+            "intent": "document",
+            "classifier": "heuristic_disabled",
+            "confidence": 1.0,
+            "instruction_score": 0.0,
+            "document_score": 0.0,
+        }
+    )
+    if (
+        not _large_paste_small_classifier_enabled()
+        or len(str(content or "")) < _large_paste_small_classifier_min_chars()
+    ):
+        return heuristic
+    try:
+        model_result = await _classify_prompt_for_retrieval(content)
+    except Exception as exc:
+        return {
+            **heuristic,
+            "small_model_warning": f"classifier_failed: {type(exc).__name__}: {exc}"[:500],
+        }
+    confidence = float(model_result.get("confidence") or 0.0)
+    min_confidence = float(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_MIN_CONFIDENCE", "0.5"))
+    if confidence < min_confidence:
+        return {
+            **heuristic,
+            "small_model_low_confidence": confidence,
+            "small_model_intent": str(model_result.get("intent") or ""),
+            "retrieval_query": str(model_result.get("retrieval_query") or "")[: _retrieval_query_max_chars()],
+            "instruction_lines": list(model_result.get("instruction_lines") or []),
+            "document_lines": list(model_result.get("document_lines") or []),
+            "question_lines": list(model_result.get("question_lines") or []),
+        }
+    return _large_paste_intent_from_small_classifier(model_result, heuristic)
+
+
+def _large_paste_instruction_brief(content: str, classification: dict[str, Any] | None = None) -> str:
     max_chars = max(500, int(os.getenv("ALPHARAVIS_LARGE_PASTE_INSTRUCTION_BRIEF_CHARS", "5000")))
+    classification = classification if isinstance(classification, dict) else {}
+    ranged_brief = _text_from_line_ranges(content, classification.get("instruction_lines"), max_chars=max_chars)
+    if ranged_brief:
+        return ranged_brief
     lines = [line.rstrip() for line in str(content or "").splitlines()]
     selected: list[str] = []
     directive_re = re.compile(
@@ -6357,10 +7163,35 @@ def _large_paste_instruction_brief(content: str) -> str:
     return brief or str(content or "")[:max_chars].strip()
 
 
-def _large_paste_document_body_for_index(content: str, paste_intent: str) -> str:
+def _tail_question_line_ranges(text: str) -> list[list[int]]:
+    lines = str(text or "").splitlines()
+    question_re = re.compile(
+        r"(?i)(\?|^(was|wie|warum|wann|wo|wer|welche|welcher|welches|wieso|how|what|why|when|where|who|which)\b|"
+        r"\b(find|search|suche|such|erklär|erklaer|zeige|tell me|look up|nachschauen|nachschau)\b)"
+    )
+    ranges: list[list[int]] = []
+    for offset, line in enumerate(lines[-20:], start=max(1, len(lines) - 19)):
+        stripped = line.strip()
+        if stripped and len(stripped) <= 500 and question_re.search(stripped):
+            ranges.append([offset, offset])
+    return ranges[:6]
+
+
+def _large_paste_document_body_for_index(content: str, paste_intent: str, classification: dict[str, Any] | None = None) -> str:
     text = str(content or "")
     if paste_intent != "mixed":
         return text
+    classification = classification if isinstance(classification, dict) else {}
+    removable_ranges: list[list[int]] = []
+    removable_ranges.extend(_normalize_line_ranges(classification.get("instruction_lines")))
+    removable_ranges.extend(_normalize_line_ranges(classification.get("question_lines")))
+    if not classification.get("question_lines"):
+        removable_ranges.extend(_tail_question_line_ranges(text))
+    if removable_ranges:
+        body = _strip_line_ranges_from_text(text, removable_ranges)
+        if len(body) >= 200:
+            return body
+
     document_heading = re.search(
         r"(?im)^\s{0,4}(#{1,6}\s*)?(document|source|context|data|input|text|dokument|quelle|daten|kontext)\s*[:#-]?\s*$",
         text,
@@ -6420,7 +7251,7 @@ def _large_paste_marker(
     status_phrase = "queued for bounded RAG retrieval" if str(index_status or "").lower() == "queued" else "indexed for bounded RAG retrieval"
     lookup_phrase = "queued for exact lookup" if str(index_status or "").lower() == "queued" else "indexed for exact lookup"
     if paste_intent == "instruction":
-        brief = _large_paste_instruction_brief(content)
+        brief = _large_paste_instruction_brief(content, classification)
         return "\n\n".join(
             [
                 f"[Large paste classified as instruction-like and {lookup_phrase}: source_key={source_key}; title={title}]",
@@ -6431,13 +7262,19 @@ def _large_paste_marker(
             ]
         )
     if paste_intent == "mixed":
-        brief = _large_paste_instruction_brief(content)
+        brief = _large_paste_instruction_brief(content, classification)
         lines = [
             f"[Large paste classified as mixed instructions plus document/data and {status_phrase}: source_key={source_key}; rag_file_id={rag_file_id}; title={title}]",
             "Follow the condensed instruction brief below. Use active RAG/query_source against this source for document/data details.",
             f"Classification: intent=mixed; confidence={classification.get('confidence', '')}.",
             f"Condensed instruction brief:\n{brief}",
         ]
+        retrieval_query = str(classification.get("retrieval_query") or "").strip()
+        question_brief = _text_from_line_ranges(content, classification.get("question_lines"), max_chars=1200)
+        if retrieval_query:
+            lines.append(f"Retrieval/query focus:\n{retrieval_query}")
+        if question_brief:
+            lines.append(f"Current question/task lines:\n{question_brief}")
         return "\n\n".join(lines)
     lines = [
         f"[Large paste {status_phrase}: source_key={source_key}; rag_file_id={rag_file_id}; title={title}]",
@@ -6466,15 +7303,130 @@ def _replace_message_content(message: Any, content: str) -> Any:
     return {"role": role or "human", "content": content, "id": message_id}
 
 
+def _bounded_text_window(text: str, *, start: int = 0, max_chars: int = 12000, search: str = "") -> dict[str, Any]:
+    raw = str(text or "")
+    total_chars = len(raw)
+    hard_max = max(200, int(os.getenv("ALPHARAVIS_RAW_SOURCE_READ_MAX_CHARS", "30000")))
+    max_chars = max(200, min(int(max_chars or 12000), hard_max))
+    search = str(search or "").strip()
+    match_index = -1
+    if search:
+        match_index = raw.lower().find(search.lower())
+        if match_index >= 0:
+            context_before = max(0, int(os.getenv("ALPHARAVIS_RAW_SOURCE_SEARCH_CONTEXT_BEFORE_CHARS", "1000")))
+            start = max(0, match_index - context_before)
+    start = max(0, min(int(start or 0), total_chars))
+    end = min(total_chars, start + max_chars)
+    content = raw[start:end]
+    return {
+        "content": content,
+        "start": start,
+        "end": end,
+        "total_chars": total_chars,
+        "returned_chars": len(content),
+        "max_chars": max_chars,
+        "truncated_before": start > 0,
+        "truncated_after": end < total_chars,
+        "search": search,
+        "match_index": match_index,
+    }
+
+
+async def _store_raw_source_record(
+    *,
+    source_type: str,
+    source_key: str,
+    title: str,
+    content: str,
+    indexed_content: str = "",
+    thread_id: str,
+    thread_key: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if get_store is None:
+        return {"stored": False, "warning": "LangGraph store access is unavailable in this runtime."}
+    source_key = str(source_key or "").strip()
+    if not source_key:
+        return {"stored": False, "warning": "source_key is required."}
+    try:
+        store = get_store()
+    except Exception as exc:
+        return {"stored": False, "warning": f"No LangGraph store is attached to this run: {exc}"}
+    now = int(time.time())
+    metadata = metadata if isinstance(metadata, dict) else {}
+    record = {
+        "source_key": source_key,
+        "source_type": str(source_type or "source"),
+        "title": str(title or source_key),
+        "content": str(content or ""),
+        "indexed_content": str(indexed_content or content or ""),
+        "content_chars": len(str(content or "")),
+        "indexed_content_chars": len(str(indexed_content or content or "")),
+        "thread_id": thread_id,
+        "thread_key": thread_key,
+        "created_at": now,
+        "updated_at": now,
+        "metadata": {
+            **metadata,
+            "source_key": source_key,
+            "source_type": str(source_type or "source"),
+            "raw_source_record": True,
+        },
+    }
+    try:
+        await _maybe_put(store, _thread_source_record_ns(thread_id), source_key, record)
+        await _maybe_put(
+            store,
+            SOURCE_RECORD_INDEX_NS,
+            source_key,
+            {key: value for key, value in record.items() if key not in {"content", "indexed_content"}},
+        )
+    except Exception as exc:
+        return {"stored": False, "warning": f"raw source record write failed: {exc}"}
+    return {"stored": True, "source_key": source_key, "content_chars": record["content_chars"]}
+
+
+async def _load_raw_source_record(source_key: str, *, source_type: str = "all", thread_id: str = "", include_other_threads: bool = False) -> dict[str, Any] | None:
+    if get_store is None:
+        return None
+    try:
+        store = get_store()
+    except Exception:
+        return None
+    source_key = str(source_key or "").strip()
+    if not source_key:
+        return None
+    thread_id = thread_id.strip() or _state_thread_id()
+    item = await _maybe_get(store, _thread_source_record_ns(thread_id), source_key)
+    value = _store_item_value(item)
+    if not isinstance(value, dict) and include_other_threads:
+        index_item = await _maybe_get(store, SOURCE_RECORD_INDEX_NS, source_key)
+        index_value = _store_item_value(index_item)
+        if isinstance(index_value, dict):
+            other_thread_id = str(index_value.get("thread_id") or "")
+            if other_thread_id:
+                other_item = await _maybe_get(store, _thread_source_record_ns(other_thread_id), source_key)
+                value = _store_item_value(other_item)
+    if not isinstance(value, dict):
+        return None
+    wanted_type = str(source_type or "all").strip().lower()
+    actual_type = str(value.get("source_type") or "").strip().lower()
+    if wanted_type not in {"", "all"} and actual_type and actual_type != wanted_type:
+        return None
+    return value
+
+
 async def _ingest_large_paste_messages(
     state: dict[str, Any],
     messages: list[Any],
+    *,
+    phase: str = "initial",
 ) -> tuple[list[Any], list[dict[str, Any]], dict[str, Any]]:
     if not _large_paste_ingest_enabled() or _router_ingest_source is None:
         return messages, [], {}
 
     min_chars = _large_paste_min_chars()
-    auto_should_ingest, auto_budget = _large_paste_auto_should_ingest(state, messages)
+    auto_should_ingest, auto_budget = _large_paste_auto_should_ingest(state, messages, phase=phase)
     thread_id = _state_thread_id(state)
     thread_key = _state_thread_key(state)
     output: list[Any] = []
@@ -6488,18 +7440,23 @@ async def _ingest_large_paste_messages(
         manual: bool,
         block_index: int = 0,
     ) -> tuple[str | None, dict[str, Any] | None, dict[str, Any]]:
-        classification = (
-            _classify_large_paste_intent(body)
-            if _large_paste_intent_classifier_enabled()
-            else {"intent": "document", "confidence": 1.0, "instruction_score": 0.0, "document_score": 0.0}
-        )
+        classification = await _classify_large_paste_for_ingest(body)
         paste_intent = str(classification.get("intent") or "unknown")
         source_type = "large_instruction" if paste_intent == "instruction" else "large_paste"
-        digest = hashlib.sha256(f"{thread_id}:{message_index}:{block_index}:{body}".encode("utf-8")).hexdigest()[:16]
+        digest = hashlib.sha256(f"{thread_id}:{source_type}:{body}".encode("utf-8")).hexdigest()[:16]
         source_key = f"{source_type}:{thread_id}:{digest}"
         title = "Large instruction paste " + digest if paste_intent == "instruction" else f"Large paste {digest}"
         preferred_backend = "alpharavis_pgvector" if paste_intent == "instruction" else "auto"
-        ingest_content = _large_paste_document_body_for_index(body, paste_intent)
+        ingest_content = _large_paste_document_body_for_index(body, paste_intent, classification)
+        source_metadata = _source_metadata_summary(
+            ingest_content,
+            title=title,
+            metadata={
+                "source_type": source_type,
+                "source_key": source_key,
+                "paste_intent": paste_intent,
+            },
+        )
         ingest_started = time.perf_counter()
         ingest_events: list[dict[str, Any]] = [
             {
@@ -6513,6 +7470,15 @@ async def _ingest_large_paste_messages(
                 "indexed_content_chars": len(ingest_content),
             }
         ]
+
+        def progress_callback(event: dict[str, Any]) -> None:
+            progress_event = dict(event)
+            progress_event["t"] = round(time.perf_counter() - ingest_started, 3)
+            ingest_events.append(progress_event)
+
+        async def pgvector_index_with_progress(**kwargs):
+            return await _maybe_index_vector_memory(**kwargs, progress_callback=progress_callback)
+
         try:
             ingest_result = await _router_ingest_source(
                 source_type=source_type,
@@ -6527,11 +7493,19 @@ async def _ingest_large_paste_messages(
                     "source_key": source_key,
                     "rag_activation_reason": "large_paste",
                     "origin": "chat_large_paste_manual" if manual else "chat_large_paste_auto",
+                    **source_metadata,
                     "manual_rag_block": manual,
                     "paste_intent": paste_intent,
                     "paste_intent_confidence": classification.get("confidence"),
                     "paste_intent_instruction_score": classification.get("instruction_score"),
                     "paste_intent_document_score": classification.get("document_score"),
+                    "paste_intent_classifier": classification.get("classifier"),
+                    "paste_intent_small_model_intent": classification.get("small_model_intent"),
+                    "paste_intent_small_model_warning": classification.get("small_model_warning"),
+                    "paste_intent_retrieval_query": classification.get("retrieval_query"),
+                    "paste_intent_instruction_line_ranges": classification.get("instruction_lines"),
+                    "paste_intent_document_line_ranges": classification.get("document_lines"),
+                    "paste_intent_question_line_ranges": classification.get("question_lines"),
                     "message_index": message_index,
                     "block_index": block_index,
                     "content_chars": len(body),
@@ -6540,7 +7514,7 @@ async def _ingest_large_paste_messages(
                     **auto_budget,
                 },
                 preferred_backend=preferred_backend,
-                pgvector_index=_maybe_index_vector_memory,
+                pgvector_index=pgvector_index_with_progress,
             )
         except Exception as exc:
             elapsed = round(time.perf_counter() - ingest_started, 3)
@@ -6577,6 +7551,27 @@ async def _ingest_large_paste_messages(
                 "rag_active": bool(ingest_result.get("rag_active")),
             }
         )
+        raw_source_record = await _store_raw_source_record(
+            source_type=source_type,
+            source_key=source_key,
+            title=title,
+            content=body,
+            indexed_content=ingest_content,
+            thread_id=thread_id,
+            thread_key=thread_key,
+            metadata={
+                "origin": "chat_large_paste_manual" if manual else "chat_large_paste_auto",
+                "manual_rag_block": manual,
+                "paste_intent": paste_intent,
+                **source_metadata,
+                "message_index": message_index,
+                "block_index": block_index,
+                "ingest_status": ingest_result.get("index_status", ""),
+                "indexed_backends": list(ingest_result.get("indexed_backends") or []),
+                "rag_file_id": ingest_result.get("rag_file_id", ""),
+                "instruction_text_stripped_from_index": paste_intent == "mixed" and ingest_content != body,
+            },
+        )
         ingest_record = {
             "source_key": source_key,
             "source_type": source_type,
@@ -6585,6 +7580,18 @@ async def _ingest_large_paste_messages(
             "paste_intent_confidence": classification.get("confidence"),
             "paste_intent_instruction_score": classification.get("instruction_score"),
             "paste_intent_document_score": classification.get("document_score"),
+            "paste_intent_classifier": classification.get("classifier"),
+            "paste_intent_small_model_intent": classification.get("small_model_intent"),
+            "paste_intent_small_model_warning": classification.get("small_model_warning"),
+            "paste_intent_retrieval_query": classification.get("retrieval_query"),
+            "paste_intent_instruction_line_ranges": classification.get("instruction_lines"),
+            "paste_intent_document_line_ranges": classification.get("document_lines"),
+            "paste_intent_question_line_ranges": classification.get("question_lines"),
+            "content_type": source_metadata.get("content_type"),
+            "source_title": source_metadata.get("source_title"),
+            "source_keywords": source_metadata.get("source_keywords"),
+            "source_entities": source_metadata.get("source_entities"),
+            "source_symbols": source_metadata.get("source_symbols"),
             "rag_file_id": ingest_result.get("rag_file_id", ""),
             "index_status": ingest_result.get("index_status", ""),
             "indexed_backends": list(ingest_result.get("indexed_backends") or []),
@@ -6593,6 +7600,7 @@ async def _ingest_large_paste_messages(
             "content_chars": len(body),
             "indexed_content_chars": len(ingest_content),
             "instruction_text_stripped_from_index": paste_intent == "mixed" and ingest_content != body,
+            "raw_source_record": raw_source_record,
             "elapsed_seconds": elapsed,
             "events": ingest_events,
             **auto_budget,
@@ -6653,7 +7661,13 @@ async def _ingest_large_paste_messages(
 
         if not auto_should_ingest:
             output.append(message)
-            skip_reason = "context_margin_above_auto_rag_threshold"
+            skip_reason = (
+                "large_paste_deferred_until_post_compression"
+                if phase == "initial" and auto_budget.get("large_paste_auto_stage") == "post_compression"
+                else "post_compression_context_below_auto_rag_threshold"
+                if phase == "post_compression"
+                else "context_margin_above_auto_rag_threshold"
+            )
             ingests.append(
                 {
                     "index_status": "skipped",
@@ -6685,6 +7699,161 @@ async def _ingest_large_paste_messages(
         output.append(_replace_message_content(message, replacement) if replacement else message)
 
     return output, ingests, rag_update
+
+
+async def _ingest_pending_document_uploads(state: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if _document_load_file is None or _router_ingest_source is None:
+        return [], {}
+    pending = [item for item in list(state.get("pending_document_ingests") or []) if isinstance(item, dict)]
+    if not pending:
+        return [], {}
+
+    ingest_root = Path(os.getenv("ALPHARAVIS_DOCUMENT_INGEST_ROOT") or _workspace_root()).expanduser().resolve()
+    thread_id = _state_thread_id(state)
+    thread_key = _state_thread_key(state)
+    ingests: list[dict[str, Any]] = []
+    rag_update: dict[str, Any] = {}
+
+    for index, item in enumerate(pending[:20]):
+        path = Path(str(item.get("path") or "")).expanduser().resolve()
+        source_key = str(item.get("source_key") or item.get("file_id") or path.name or f"document:{index}").strip()
+        title = str(item.get("title") or path.name or source_key).strip()
+        started = time.perf_counter()
+        events: list[dict[str, Any]] = [
+            {
+                "event": "document_ingest.started",
+                "t": 0.0,
+                "source_key": source_key,
+                "path": str(path),
+            }
+        ]
+        safety_error = _check_read_path(path, allowed_root=ingest_root)
+        if safety_error:
+            ingests.append(
+                {
+                    "source_key": source_key,
+                    "title": title,
+                    "path": str(path),
+                    "index_status": "blocked",
+                    "error": safety_error,
+                    "events": [*events, {"event": "document_ingest.blocked", "t": round(time.perf_counter() - started, 3), "error": safety_error}],
+                }
+            )
+            continue
+
+        loaded = _document_load_file(path)
+        if not loaded.get("ok"):
+            ingests.append(
+                {
+                    "source_key": source_key,
+                    "title": title,
+                    "path": str(path),
+                    "index_status": "failed",
+                    "error": loaded.get("error", "document loader returned no text"),
+                    "events": [*events, {"event": "document_ingest.failed", "t": round(time.perf_counter() - started, 3), "error": loaded.get("error", "")}],
+                }
+            )
+            continue
+
+        def progress_callback(event: dict[str, Any]) -> None:
+            progress_event = dict(event)
+            progress_event["event"] = str(progress_event.get("event") or "document_ingest.progress").replace("large_ingest.", "document_ingest.")
+            progress_event["t"] = round(time.perf_counter() - started, 3)
+            events.append(progress_event)
+
+        async def pgvector_index_with_progress(**kwargs):
+            return await _maybe_index_vector_memory(**kwargs, progress_callback=progress_callback)
+
+        metadata = {
+            **(loaded.get("metadata") if isinstance(loaded.get("metadata"), dict) else {}),
+            "origin": str(item.get("origin") or "librechat_upload"),
+            "file_id": str(item.get("file_id") or ""),
+            "mime_type": str(item.get("mime_type") or ""),
+            "public_url": str(item.get("public_url") or ""),
+            "asset_id": str(item.get("asset_id") or ""),
+            "document_ingest_path": str(path),
+            "document_ingest_root": str(ingest_root),
+            "rag_activation_reason": "document_ingest",
+            "content_chars": int(loaded.get("text_chars") or len(str(loaded.get("text") or ""))),
+        }
+        loaded_text = str(loaded.get("text") or "")
+        metadata = {
+            **metadata,
+            **_source_metadata_summary(loaded_text, title=title, metadata=metadata),
+        }
+        try:
+            ingest_result = await _router_ingest_source(
+                source_type=str(item.get("source_type") or "uploaded_document"),
+                source_key=source_key,
+                title=title,
+                content=loaded_text,
+                thread_id=thread_id,
+                thread_key=thread_key,
+                scope="thread",
+                metadata=metadata,
+                preferred_backend=str(item.get("preferred_backend") or "auto"),
+                pgvector_index=pgvector_index_with_progress,
+            )
+        except Exception as exc:
+            ingests.append(
+                {
+                    "source_key": source_key,
+                    "title": title,
+                    "path": str(path),
+                    "index_status": "failed",
+                    "error": str(exc)[:500],
+                    "events": [*events, {"event": "document_ingest.failed", "t": round(time.perf_counter() - started, 3), "error": str(exc)[:500]}],
+                }
+            )
+            continue
+        raw_source_record = await _store_raw_source_record(
+            source_type=str(item.get("source_type") or "uploaded_document"),
+            source_key=source_key,
+            title=title,
+            content=loaded_text,
+            indexed_content=loaded_text,
+            thread_id=thread_id,
+            thread_key=thread_key,
+            metadata={
+                **metadata,
+                "ingest_status": ingest_result.get("index_status", ""),
+                "indexed_backends": list(ingest_result.get("indexed_backends") or []),
+            },
+        )
+
+        events.append(
+            {
+                "event": "document_ingest.completed",
+                "t": round(time.perf_counter() - started, 3),
+                "source_key": source_key,
+                "status": ingest_result.get("index_status", ""),
+                "indexed_backends": list(ingest_result.get("indexed_backends") or []),
+                "queued_backends": list(ingest_result.get("queued_backends") or []),
+                "rag_active": bool(ingest_result.get("rag_active")),
+            }
+        )
+        ingests.append(
+            {
+                "source_key": source_key,
+                "title": title,
+                "path": str(path),
+                "rag_file_id": ingest_result.get("rag_file_id", ""),
+                "index_status": ingest_result.get("index_status", ""),
+                "indexed_backends": list(ingest_result.get("indexed_backends") or []),
+                "queued_backends": list(ingest_result.get("queued_backends") or []),
+                "rag_active": bool(ingest_result.get("rag_active")),
+                "loaded_chars": loaded.get("text_chars", 0),
+                "content_type": metadata.get("content_type"),
+                "source_title": metadata.get("source_title"),
+                "source_keywords": metadata.get("source_keywords"),
+                "raw_source_record": raw_source_record,
+                "elapsed_seconds": round(time.perf_counter() - started, 3),
+                "events": events,
+            }
+        )
+        rag_update.update(_rag_state_update_from_ingest({**state, **rag_update}, ingest_result))
+
+    return ingests, rag_update
 
 
 def _tool_name_for_profile(tool_obj: Any) -> str:
@@ -6822,11 +7991,47 @@ def _fast_path_decision(state: AlphaRavisState) -> tuple[bool, str]:
     return True, "short non-tool chat"
 
 
+async def _long_prompt_direct_route_decision(state: AlphaRavisState, base_reason: str) -> tuple[bool, str, dict[str, Any] | None]:
+    if not _env_bool("ALPHARAVIS_ENABLE_LONG_PROMPT_DIRECT_ROUTE_CLASSIFIER", "true"):
+        return False, base_reason, None
+    if not str(base_reason or "").startswith("query too long"):
+        return False, base_reason, None
+    messages = list(state.get("messages", []))
+    query = _latest_user_query(messages).strip()
+    if len(query) < _retrieval_query_classifier_min_chars():
+        return False, base_reason, None
+    max_chars = max(
+        _retrieval_query_classifier_min_chars(),
+        int(os.getenv("ALPHARAVIS_LONG_PROMPT_DIRECT_ROUTE_MAX_CHARS", "12000")),
+    )
+    if len(query) > max_chars:
+        return False, f"{base_reason}; too large for direct-route classifier", None
+    if not _retrieval_query_classifier_enabled():
+        return False, base_reason, None
+    try:
+        classification = await _classify_prompt_for_retrieval(query)
+    except Exception as exc:
+        return False, f"{base_reason}; route classifier failed: {type(exc).__name__}", {
+            "warning": f"classifier_failed: {type(exc).__name__}: {exc}"[:500],
+        }
+    intent = str(classification.get("intent") or "").strip().lower()
+    confidence = float(classification.get("confidence") or 0.0)
+    min_confidence = float(os.getenv("ALPHARAVIS_LONG_PROMPT_DIRECT_ROUTE_MIN_CONFIDENCE", "0.7"))
+    has_source_ranges = bool(classification.get("document_lines") or classification.get("instruction_lines"))
+    if intent in {"direct_query", "noisy_query", "small_chat"} and confidence >= min_confidence and not has_source_ranges:
+        return True, f"long prompt classified as {intent}; direct answer path", classification
+    return False, f"{base_reason}; long prompt classified as {intent or 'unknown'}", classification
+
+
 async def run_profile_start_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
+    global LAST_GRAPH_ACTIVITY_AT
+    LAST_GRAPH_ACTIVITY_AT = time.time()
     trace_started = time.perf_counter()
     trace_id = _state_trace_id(state)
     messages = list(state.get("messages", []))
+    document_ingests, document_rag_update = await _ingest_pending_document_uploads(state)
     messages, large_paste_ingests, rag_update = await _ingest_large_paste_messages(state, messages)
+    rag_update = {**document_rag_update, **rag_update}
     latest = _latest_user_query(messages)
     bridge_refs = [item for item in list(state.get("bridge_context_references") or []) if isinstance(item, dict)]
     selected_toolsets, toolset_context = _toolset_context_for_request(latest)
@@ -6843,6 +8048,7 @@ async def run_profile_start_node(state: AlphaRavisState, runtime: Any | None = N
         "static_context_reserve_detail": _static_context_reserve_detail({"selected_toolsets": selected_toolsets}),
         "bridge_context_references": bridge_refs[:8],
         "bridge_context_reference_count": sum(int(item.get("reference_count", 0)) for item in bridge_refs),
+        "document_ingests": document_ingests,
         "large_paste_ingests": large_paste_ingests,
         "rag_active": bool(rag_update.get("rag_active", state.get("rag_active"))),
         "active_source_keys": list(rag_update.get("active_source_keys") or state.get("active_source_keys") or []),
@@ -6885,6 +8091,102 @@ async def run_profile_start_node(state: AlphaRavisState, runtime: Any | None = N
         **rag_update,
     }
     if any(bool(item.get("message_replaced")) for item in large_paste_ingests):
+        updates["messages"] = [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages]
+    return updates
+
+
+async def large_paste_post_compression_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
+    if _large_paste_auto_stage() != "post_compression":
+        return {}
+    messages = list(state.get("messages", []))
+    messages, large_paste_ingests, rag_update = await _ingest_large_paste_messages(
+        state,
+        messages,
+        phase="post_compression",
+    )
+    actionable_ingests = [
+        item
+        for item in large_paste_ingests
+        if isinstance(item, dict) and item.get("index_status") != "skipped"
+    ]
+    if not actionable_ingests and not rag_update:
+        return {}
+    existing_profile = dict(state.get("run_profile") or {})
+    combined_ingests = [
+        *list(existing_profile.get("large_paste_ingests") or []),
+        *large_paste_ingests,
+    ]
+    post_rag_compression: dict[str, Any] = {}
+    profile_extra: dict[str, Any] = {}
+    if any(bool(item.get("message_replaced")) for item in actionable_ingests) and _large_paste_post_rag_compression_enabled():
+        compression_state: AlphaRavisState = {
+            **dict(state),
+            **rag_update,
+            "messages": messages,
+            "run_profile": {**existing_profile, "large_paste_ingests": combined_ingests},
+        }
+        post_rag_budget = _context_budget_snapshot(compression_state, messages=messages)
+        effective_active_limit = int(post_rag_budget.get("effective_active_limit") or 0)
+        ratio = _large_paste_post_rag_compression_trigger_ratio()
+        trigger_tokens = max(1, int(effective_active_limit * ratio)) if effective_active_limit > 0 else 0
+        profile_extra.update(
+            {
+                "large_paste_post_rag_compression_checked": True,
+                "large_paste_post_rag_compression_ratio": ratio,
+                "large_paste_post_rag_compression_trigger_tokens": trigger_tokens,
+                "large_paste_post_rag_compression_tokens": int(post_rag_budget.get("message_tokens") or 0),
+            }
+        )
+        if trigger_tokens > 0 and int(post_rag_budget.get("message_tokens") or 0) >= trigger_tokens:
+            try:
+                result, archive_key, compression_updates = await _run_hermes_style_compression(
+                    state=compression_state,
+                    runtime=runtime,
+                    mode="pre_run",
+                    token_limit=trigger_tokens,
+                    summary_context_token_limit=int(post_rag_budget.get("context_length") or _detected_context_length()),
+                    force=True,
+                )
+                if not result.skipped:
+                    post_rag_compression = compression_updates
+                    rebuilt_messages = [
+                        message for message in compression_updates.get("messages", []) if not _is_remove_message(message)
+                    ]
+                    tokens_after = _estimate_tokens(_drop_previous_compaction_messages(rebuilt_messages or messages))
+                    profile_extra.update(
+                        {
+                            "large_paste_post_rag_compression_used": True,
+                            "large_paste_post_rag_compression_archive_key": archive_key,
+                            "large_paste_post_rag_compression_tokens_after": tokens_after,
+                            **_compression_debug_profile(result, prefix="large_paste_post_rag_compression", archive_key=archive_key),
+                        }
+                    )
+                else:
+                    profile_extra.update(
+                        {
+                            "large_paste_post_rag_compression_used": False,
+                            "large_paste_post_rag_compression_skipped": result.reason,
+                        }
+                    )
+            except Exception as exc:
+                profile_extra.update(
+                    {
+                        "large_paste_post_rag_compression_used": False,
+                        "large_paste_post_rag_compression_error": str(exc)[:500],
+                    }
+                )
+    updates: dict[str, Any] = {
+        **rag_update,
+        **post_rag_compression,
+        "run_profile": _profile_update(
+            {**state, **post_rag_compression},
+            large_paste_ingests=combined_ingests,
+            large_paste_post_compression_checked=True,
+            large_paste_post_compression_ingested=bool(actionable_ingests),
+            **profile_extra,
+        ),
+    }
+    if "messages" not in post_rag_compression and any(bool(item.get("message_replaced")) for item in actionable_ingests):
         updates["messages"] = [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages]
     return updates
 
@@ -6946,6 +8248,9 @@ async def route_decision_node(state: AlphaRavisState) -> dict[str, Any]:
         }
 
     use_fast_path, reason = _fast_path_decision(state)
+    route_classifier: dict[str, Any] | None = None
+    if not use_fast_path:
+        use_fast_path, reason, route_classifier = await _long_prompt_direct_route_decision(state, reason)
     route = "fast_path" if use_fast_path else "swarm"
     _log_event(
         logging.INFO,
@@ -6978,6 +8283,7 @@ async def route_decision_node(state: AlphaRavisState) -> dict[str, Any]:
             state,
             route=route,
             route_reason=reason,
+            route_classifier=route_classifier,
             fast_path_locked=bool(state.get("fast_path_locked") or lock_thread),
             route_decided_at=time.time(),
         ),
@@ -7159,13 +8465,16 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
             )
 
     archive_recall_hint = ""
+    archive_recall_query_profile: dict[str, Any] = {}
     archived_keys = list(state.get("archived_context_keys") or [])
     if archived_keys and _looks_like_archive_recall_request(latest):
+        archive_recall_query_profile = _archive_recall_query_for_messages(messages)
         archive_recall_hint = (
             "\nArchive recall hint: The latest user request appears to refer to "
             "older compressed context. Prefer context_retrieval_agent or "
-            "read_archive_record(...) with the relevant archive_key instead of "
-            "guessing from a summary. Recent archive keys: "
+            "query_archive(...) / read_archive_record(...) with the relevant "
+            "archive_key instead of guessing from a summary. Suggested archive "
+            f"search query: {archive_recall_query_profile.get('query', '')}. Recent archive keys: "
             f"{', '.join(str(key) for key in archived_keys[-5:])}.\n"
         )
 
@@ -7287,6 +8596,8 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
             planner_used=True,
             hermes_route_hint=bool(hermes_hint),
             archive_recall_hint=bool(archive_recall_hint),
+            archive_recall_query=archive_recall_query_profile.get("query", ""),
+            archive_recall_query_profile=archive_recall_query_profile or None,
             selected_toolsets=selected_toolsets,
             **({"provider_hardening_last_retry": planner_compatibility_retry} if planner_compatibility_retry else {}),
             **({"provider_hardening_profile": planner_provider_profile} if planner_provider_profile else {}),
@@ -7572,6 +8883,7 @@ async def _store_compression_archive(
 
     archived_at = int(time.time())
     title = _archive_record_title(mode, archive_key, result.summary)
+    source_metadata = _source_metadata_summary(result.archive_content, title=title, metadata={"source_type": "archive", "source_key": archive_key})
     archive_record = {
         "archive_key": archive_key,
         "title": title,
@@ -7597,6 +8909,7 @@ async def _store_compression_archive(
             "archive_key": archive_key,
             "source_type": "archive",
             "source_key": archive_key,
+            **source_metadata,
             "created_at": archived_at,
             "summary_failed": result.summary_failed,
             "summary_error": result.summary_error[:500],
@@ -8911,9 +10224,11 @@ async def active_rag_prefetch_node(state: AlphaRavisState, runtime: Any | None =
     if archive_rag_mode == "tool_only" and not source_keys:
         return {"run_profile": _profile_update(state, active_rag_prefetch_status="archive_tool_only")}
 
-    query = _latest_user_query(list(state.get("messages", []))).strip()
-    if not _active_rag_prefetch_query(query):
+    raw_query = _latest_user_query(list(state.get("messages", []))).strip()
+    if not _active_rag_prefetch_query(raw_query):
         return {"run_profile": _profile_update(state, active_rag_prefetch_status="trivial_query")}
+    query_profile = await _prepare_retrieval_query(raw_query)
+    query = str(query_profile.get("query") or raw_query).strip()
 
     try:
         payload = await _router_agentic_rag_retrieve(
@@ -8930,6 +10245,7 @@ async def active_rag_prefetch_node(state: AlphaRavisState, runtime: Any | None =
             rag_source_keys=rag_file_ids or None,
             allow_rewrite=True,
             max_context_chars=_active_rag_prefetch_context_chars(),
+            llm_grade_func=_llm_grade_retrieval_hits if _env_bool("ALPHARAVIS_AGENTIC_RAG_LLM_GRADING", "false") else None,
         )
     except Exception as exc:
         _log_exception("memory.active_rag_prefetch.failed", exc, level=logging.WARNING, dependency="retrieval_router")
@@ -8961,6 +10277,11 @@ async def active_rag_prefetch_node(state: AlphaRavisState, runtime: Any | None =
             active_rag_prefetch_source_keys=source_keys,
             active_rag_prefetch_rag_file_ids=rag_file_ids,
             active_rag_prefetch_final_query=payload.get("final_query", "") if isinstance(payload, dict) else "",
+            active_rag_prefetch_query_strategy=query_profile.get("strategy", ""),
+            active_rag_prefetch_query_chars=query_profile.get("query_chars", 0),
+            active_rag_prefetch_original_query_chars=query_profile.get("original_chars", 0),
+            active_rag_prefetch_classifier=query_profile.get("classifier"),
+            active_rag_prefetch_query_warning=query_profile.get("warning", ""),
             active_rag_prefetch_trace=payload.get("graph_trace", []) if isinstance(payload, dict) else [],
         ),
     }
@@ -9540,6 +10861,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             pin_active_rag_sources,
             unpin_active_rag_sources,
             read_source_chunks,
+            read_raw_source,
             search_session_history,
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
@@ -9547,6 +10869,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             check_hermes_agent,
             call_hermes_agent,
             search_archived_context,
+            condense_archive_recall_query,
             read_archive_record,
             read_archive_collection,
             inspect_context_budget,
@@ -9773,6 +11096,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "If semantic_memory_search returns source_type=archive_collection, "
             "inspect child_archive_keys and load only relevant raw archives with "
             "read_archive_record through the context agent; do not guess old details. "
+            "For known document or large-paste source keys, use read_raw_source "
+            "only for bounded exact slices after scoped retrieval/chunk lookup. "
+            "For code/log sources, verify exact surrounding original text with "
+            "read_raw_source when snippets are insufficient for an edit or diagnosis. "
             "Use semantic_media_search when the user asks to find past images or "
             "videos by meaning. Use inspect_embedding_queue_status when the user "
             "asks whether text, archives, or media are still pending indexing. "
@@ -9826,6 +11153,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             pin_active_rag_sources,
             unpin_active_rag_sources,
             read_source_chunks,
+            read_raw_source,
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
             list_alpha_ravis_artifacts,
@@ -9929,6 +11257,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             pin_active_rag_sources,
             unpin_active_rag_sources,
             read_source_chunks,
+            read_raw_source,
             semantic_media_search,
             inspect_media_index_status,
             inspect_embedding_queue_status,
@@ -9977,9 +11306,16 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "only searches this thread plus global memories. If a hit is "
             "source_type=archive_collection, inspect child_archive_keys and load "
             "only the relevant raw archive records with read_archive_record. "
+            "For vague recall phrasing like 'wie war das nochmal mit X', use "
+            "condense_archive_recall_query first when the active request lacks "
+            "enough search terms. "
             "When you already know the relevant source_key/file_id/archive_key, "
             "prefer query_source, query_sources, or query_archive so retrieval "
-            "stays scoped to that source before loading raw archive records. "
+            "stays scoped to that source before loading bounded raw slices. "
+            "Use read_raw_source for exact document/large-paste source text and "
+            "read_archive_record for exact archive text; page with search/start/max_chars. "
+            "For code/log sources, treat RAG hits as pointers and inspect the "
+            "bounded original source around relevant symbols before making exact claims. "
             "Use agentic_rag_retrieve when a source-scoped question needs the "
             "retrieve/grade/rewrite loop and a bounded context_packet for a "
             "grounded answer; do not inject full archives automatically. "
@@ -10192,6 +11528,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     builder = StateGraph(AlphaRavisState)
     builder.add_node("run_profile_start", run_profile_start_node)
     builder.add_node("pre_run_context_guard", pre_run_context_guard_node)
+    builder.add_node("large_paste_post_compression", large_paste_post_compression_node)
     builder.add_node("route_decision", route_decision_node)
     builder.add_node("hard_context_stop", hard_context_stop_node)
     builder.add_node("crisis_preflight", crisis_preflight_node)
@@ -10214,7 +11551,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     builder.add_node("run_profile_finish", run_profile_finish_node)
     builder.add_edge(START, "run_profile_start")
     builder.add_edge("run_profile_start", "pre_run_context_guard")
-    builder.add_edge("pre_run_context_guard", "route_decision")
+    builder.add_edge("pre_run_context_guard", "large_paste_post_compression")
+    builder.add_edge("large_paste_post_compression", "route_decision")
     builder.add_conditional_edges(
         "route_decision",
         route_after_decision,
@@ -10291,12 +11629,21 @@ async def _embedding_scheduler_loop() -> None:
     interval = max(10, int(os.getenv("ALPHARAVIS_EMBEDDING_SCHEDULER_INTERVAL_SECONDS", "120")))
     initial_delay = max(0, int(os.getenv("ALPHARAVIS_EMBEDDING_SCHEDULER_INITIAL_DELAY_SECONDS", "30")))
     job_limit = max(1, int(os.getenv("ALPHARAVIS_EMBEDDING_JOB_BATCH_SIZE", "10")))
-    last_activity_age = float(os.getenv("ALPHARAVIS_EMBEDDING_SCHEDULER_LAST_ACTIVITY_AGE_SECONDS", "999999"))
+    idle_after = float(
+        os.getenv(
+            "ALPHARAVIS_EMBEDDING_SCHEDULER_IDLE_AFTER_SECONDS",
+            os.getenv("ALPHARAVIS_MODEL_IDLE_SECONDS", "600"),
+        )
+    )
     if initial_delay:
         await asyncio.sleep(initial_delay)
 
     while True:
         try:
+            last_activity_age = max(0.0, time.time() - LAST_GRAPH_ACTIVITY_AT)
+            if last_activity_age < idle_after:
+                await asyncio.sleep(interval)
+                continue
             result = await _model_mgmt_run_embedding_lifecycle(
                 reason="scheduled embedding queue maintenance",
                 remote_pcs=REMOTE_PCS,

@@ -97,6 +97,30 @@ class MemoryEmbedProbeRequest(BaseModel):
     max_steps: int = 8
 
 
+class RagLoadProbeRequest(BaseModel):
+    embedding_base_url: str = "http://192.168.178.140:11434"
+    embedding_model: str = "qwen3-embedding:4b"
+    embedding_api_key: str = ""
+    embedding_backend: str = "ollama_embed"
+    reranker_url: str = "http://192.168.178.140:8000"
+    reranker_endpoint: str = "/reranking"
+    reranker_model: str = "qwen3-reranker-0.6b"
+    query: str = "How does AlphaRavis handle native pgvector retrieval and reranking?"
+    text: str = (
+        "AlphaRavis native RAG stores source-scoped chunks in pgvector, uses a "
+        "durable embedding queue, and can rerank bounded retrieval hits before "
+        "grounding the answer."
+    )
+    token_steps: str = "400,1000,4000,10000,20000,40000"
+    chars_per_token: float = 4.0
+    reranker_doc_count: int = 10
+    reranker_doc_chars: int = 700
+    timeout_seconds: float = 240.0
+    bridge_query_mode: str = "none"
+    bridge_protocol: str = "responses"
+    stop_on_failure: bool = True
+
+
 def _extract_responses_text(payload: dict[str, Any]) -> str:
     chunks: list[str] = []
     for item in payload.get("output", []):
@@ -1044,6 +1068,222 @@ async def _run_memory_embed_probe(request: MemoryEmbedProbeRequest) -> dict[str,
     }
 
 
+def _load_probe_token_steps(raw_steps: str, *, max_steps: int = 8) -> list[int]:
+    steps: list[int] = []
+    for part in str(raw_steps or "").split(","):
+        try:
+            tokens = int(part.strip())
+        except ValueError:
+            continue
+        tokens = _bounded_int(tokens, minimum=1, maximum=60000, default=1)
+        if tokens not in steps:
+            steps.append(tokens)
+        if len(steps) >= max_steps:
+            break
+    return steps or [400, 1000, 4000]
+
+
+def _reranker_endpoint(base_url: str, endpoint: str) -> str:
+    base = str(base_url or "").strip().rstrip("/") or "http://192.168.178.140:8000"
+    suffix = str(endpoint or "/reranking").strip() or "/reranking"
+    if not suffix.startswith("/"):
+        suffix = f"/{suffix}"
+    return f"{base}{suffix}"
+
+
+def _rag_load_documents(text: str, *, doc_count: int, doc_chars: int) -> list[str]:
+    doc_count = _bounded_int(doc_count, minimum=1, maximum=50, default=10)
+    doc_chars = _bounded_int(doc_chars, minimum=80, maximum=4000, default=700)
+    seed = text or "AlphaRavis RAG load probe."
+    docs: list[str] = []
+    stride = max(1, doc_chars // 2)
+    for index in range(doc_count):
+        start = (index * stride) % max(1, len(seed))
+        chunk = (seed[start:] + "\n" + seed[:start]).strip()
+        docs.append(f"Document {index + 1}: {chunk[:doc_chars]}")
+    return docs
+
+
+async def _call_embedding_step(
+    client: httpx.AsyncClient,
+    request: RagLoadProbeRequest,
+    *,
+    text: str,
+) -> dict[str, Any]:
+    backend = str(request.embedding_backend or "openai").strip().lower()
+    if backend not in {"openai", "ollama_embed", "ollama_embeddings"}:
+        backend = "openai"
+    endpoint = _embedding_endpoint(request.embedding_base_url, backend)
+    probe_request = MemoryEmbedProbeRequest(
+        base_url=request.embedding_base_url,
+        model=request.embedding_model,
+        api_key=request.embedding_api_key,
+        backend=backend,
+        text=text,
+    )
+    headers = (
+        {"Authorization": f"Bearer {request.embedding_api_key.strip()}"}
+        if backend == "openai" and request.embedding_api_key.strip()
+        else {}
+    )
+    started = time.perf_counter()
+    result: dict[str, Any] = {"endpoint": endpoint, "model": request.embedding_model, "backend": backend}
+    try:
+        response = await client.post(endpoint, json=_embedding_payload(probe_request, text, backend), headers=headers)
+        result.update({"status_code": response.status_code, "elapsed_seconds": round(time.perf_counter() - started, 3)})
+        if response.status_code >= 400:
+            result.update({"ok": False, "error": response.text[:1000]})
+            return result
+        body = response.json()
+        dim = _embedding_dimension(body)
+        result.update(
+            {
+                "ok": dim is not None,
+                "embedding_dimensions": dim,
+                "prompt_eval_count": body.get("prompt_eval_count") if isinstance(body, dict) else None,
+                "total_duration_ns": body.get("total_duration") if isinstance(body, dict) else None,
+                "response_keys": sorted(body.keys()) if isinstance(body, dict) else [],
+            }
+        )
+        if dim is None:
+            result["error"] = "Embedding response did not contain a recognized embedding vector."
+    except Exception as exc:
+        result.update({"ok": False, "elapsed_seconds": round(time.perf_counter() - started, 3), "error": f"{type(exc).__name__}: {exc}"})
+    return result
+
+
+async def _call_reranker_step(
+    client: httpx.AsyncClient,
+    request: RagLoadProbeRequest,
+    *,
+    documents: list[str],
+) -> dict[str, Any]:
+    endpoint = _reranker_endpoint(request.reranker_url, request.reranker_endpoint)
+    payload = {"model": request.reranker_model, "query": request.query, "documents": documents}
+    started = time.perf_counter()
+    result: dict[str, Any] = {"endpoint": endpoint, "model": request.reranker_model, "document_count": len(documents)}
+    try:
+        response = await client.post(endpoint, json=payload)
+        result.update({"status_code": response.status_code, "elapsed_seconds": round(time.perf_counter() - started, 3)})
+        if response.status_code >= 400:
+            result.update({"ok": False, "error": response.text[:1000]})
+            return result
+        body = response.json()
+        items = body.get("results") if isinstance(body, dict) else []
+        usage = body.get("usage") if isinstance(body, dict) and isinstance(body.get("usage"), dict) else {}
+        result.update(
+            {
+                "ok": isinstance(items, list) and len(items) > 0,
+                "prompt_tokens": usage.get("prompt_tokens") or usage.get("total_tokens"),
+                "result_count": len(items) if isinstance(items, list) else 0,
+                "top_index": items[0].get("index") if isinstance(items, list) and items and isinstance(items[0], dict) else None,
+                "top_score": items[0].get("relevance_score") if isinstance(items, list) and items and isinstance(items[0], dict) else None,
+            }
+        )
+        if not result["ok"]:
+            result["error"] = "Reranker response did not contain results."
+    except Exception as exc:
+        result.update({"ok": False, "elapsed_seconds": round(time.perf_counter() - started, 3), "error": f"{type(exc).__name__}: {exc}"})
+    return result
+
+
+async def _call_bridge_load_query(
+    client: httpx.AsyncClient,
+    request: RagLoadProbeRequest,
+    *,
+    text: str,
+    tokens: int,
+    step_index: int,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    prompt = (
+        f"AlphaRavis load probe step {step_index + 1}, roughly {tokens} input tokens.\n"
+        "Answer briefly and mention whether the probe text talks about embeddings, reranking, or pgvector.\n\n"
+        f"{text}"
+    )
+    chat_request = ChatRequest(message=prompt, protocol=request.bridge_protocol, stream=False)
+    trace_id = f"rag-load-probe-{uuid.uuid4().hex[:8]}"
+    session_id = f"rag-load-{uuid.uuid4().hex[:8]}"
+    url, payload = _bridge_request_payload(
+        chat_request,
+        text=prompt,
+        protocol=_protocol(request.bridge_protocol),
+        session_id=session_id,
+        trace_id=trace_id,
+        stream=False,
+    )
+    result: dict[str, Any] = {"endpoint": url, "protocol": _protocol(request.bridge_protocol), "trace_id": trace_id}
+    try:
+        response = await client.post(url, json=payload, headers={"Authorization": "Bearer sk-local-dev"})
+        result.update({"status_code": response.status_code, "elapsed_seconds": round(time.perf_counter() - started, 3)})
+        if response.status_code >= 400:
+            result.update({"ok": False, "error": response.text[:1000]})
+            return result
+        body = response.json()
+        text_out = _extract_responses_text(body) if result["protocol"] == "responses" else _extract_chat_text(body)
+        result.update({"ok": bool(text_out), "output_chars": len(text_out), "output_preview": text_out[:400]})
+    except Exception as exc:
+        result.update({"ok": False, "elapsed_seconds": round(time.perf_counter() - started, 3), "error": f"{type(exc).__name__}: {exc}"})
+    return result
+
+
+async def _run_rag_load_probe(request: RagLoadProbeRequest) -> dict[str, Any]:
+    started = time.perf_counter()
+    timeout_seconds = _bounded_float(request.timeout_seconds, minimum=5.0, maximum=900.0, default=240.0)
+    chars_per_token = _bounded_float(request.chars_per_token, minimum=1.0, maximum=12.0, default=4.0)
+    steps = _load_probe_token_steps(request.token_steps)
+    bridge_mode = str(request.bridge_query_mode or "none").strip().lower()
+    if bridge_mode not in {"none", "first_last", "all"}:
+        bridge_mode = "none"
+    results: list[dict[str, Any]] = []
+    stop_reason = "completed"
+
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        for index, tokens in enumerate(steps):
+            chars = max(1, int(tokens * chars_per_token))
+            text = _embed_probe_text(request.text, chars)
+            documents = _rag_load_documents(text, doc_count=request.reranker_doc_count, doc_chars=request.reranker_doc_chars)
+            step_started = time.perf_counter()
+            embedding_task = _call_embedding_step(client, request, text=text)
+            reranker_task = _call_reranker_step(client, request, documents=documents)
+            embedding, reranker = await asyncio.gather(embedding_task, reranker_task)
+            bridge = None
+            if bridge_mode == "all" or (bridge_mode == "first_last" and index in {0, len(steps) - 1}):
+                bridge = await _call_bridge_load_query(client, request, text=text, tokens=tokens, step_index=index)
+            step = {
+                "tokens": tokens,
+                "chars": chars,
+                "elapsed_seconds": round(time.perf_counter() - step_started, 3),
+                "embedding": embedding,
+                "reranker": reranker,
+                "bridge": bridge,
+                "ok": bool(embedding.get("ok")) and bool(reranker.get("ok")) and (bridge is None or bool(bridge.get("ok"))),
+            }
+            results.append(step)
+            if not step["ok"] and request.stop_on_failure:
+                stop_reason = "failed_step"
+                break
+
+    ok_count = sum(1 for item in results if item.get("ok"))
+    required_count = len(results)
+    return {
+        "status": "passed" if results and ok_count == required_count and stop_reason == "completed" else ("partial" if ok_count else "failed"),
+        "steps": steps,
+        "results": results,
+        "ok_step_count": ok_count,
+        "completed_step_count": len(results),
+        "stop_reason": stop_reason,
+        "embedding_model": request.embedding_model,
+        "reranker_model": request.reranker_model,
+        "bridge_query_mode": bridge_mode,
+        "elapsed_seconds": round(time.perf_counter() - started, 3),
+        "notes": [
+            "Each step runs the embedding request and reranker request concurrently to expose shared GPU/CPU contention.",
+            "Bridge query mode sends a real AlphaRavis request after the concurrent embedding/reranker step for selected sizes.",
+        ],
+    }
+
+
 def _trim_chunking_runs() -> None:
     if len(CHUNKING_RUNS) <= CHUNKING_RUN_RETENTION:
         return
@@ -1141,6 +1381,11 @@ async def native_document_rag_smoke(request: NativeDocumentRagSmokeRequest) -> J
 @app.post("/api/memory-embed-probe")
 async def memory_embed_probe(request: MemoryEmbedProbeRequest) -> JSONResponse:
     return JSONResponse(await _run_memory_embed_probe(request))
+
+
+@app.post("/api/rag-load-probe")
+async def rag_load_probe(request: RagLoadProbeRequest) -> JSONResponse:
+    return JSONResponse(await _run_rag_load_probe(request))
 
 
 @app.post("/api/send")
@@ -1336,6 +1581,7 @@ OBSERVER_HTML = """<!doctype html>
     .embed-form { grid-template-columns: minmax(220px, 1.4fr) 150px 120px 120px repeat(4, minmax(86px, 1fr)) 130px; }
     .embed-text-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .embed-text-form textarea { min-height: 58px; resize: vertical; }
+    .rag-load-form { grid-template-columns: minmax(190px, 1.2fr) minmax(160px, 1fr) 135px minmax(180px, 1.2fr) minmax(150px, 1fr) minmax(190px, 1fr) 70px 86px 86px 105px 120px; }
     .chunk-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
     .chunk-actions { border: 1px solid #252d3b; border-radius: 7px; background: #0c1017; max-height: 180px; overflow: auto; }
     .chunk-actions div { display: grid; grid-template-columns: 58px minmax(120px, 1fr) 2fr; gap: 8px; padding: 6px 8px; border-bottom: 1px solid #182030; color: #cbd5e1; font-size: 12px; }
@@ -1553,6 +1799,64 @@ OBSERVER_HTML = """<!doctype html>
       <div id="memoryEmbedActions" class="chunk-actions"></div>
       <pre id="memoryEmbedRaw" class="chunk-raw">{}</pre>
     </section>
+    <section class="chunk-lab" aria-label="RAG Load Probe">
+      <div class="chunk-lab-head">
+        <h2>RAG Load Probe</h2>
+        <span id="ragLoadStatus" class="status">bereit</span>
+      </div>
+      <div class="chunk-form rag-load-form">
+        <label>Embedding URL
+          <input id="ragLoadEmbeddingBaseUrl" type="text" value="http://192.168.178.140:11434">
+        </label>
+        <label>Embedding Model
+          <input id="ragLoadEmbeddingModel" type="text" value="qwen3-embedding:4b">
+        </label>
+        <label>Embedding Backend
+          <select id="ragLoadEmbeddingBackend">
+            <option value="ollama_embed">Ollama /api/embed</option>
+            <option value="openai">OpenAI /v1</option>
+            <option value="ollama_embeddings">Ollama /api/embeddings</option>
+          </select>
+        </label>
+        <label>Reranker URL
+          <input id="ragLoadRerankerUrl" type="text" value="http://192.168.178.140:8000">
+        </label>
+        <label>Reranker Model
+          <input id="ragLoadRerankerModel" type="text" value="qwen3-reranker-0.6b">
+        </label>
+        <label>Token Steps
+          <input id="ragLoadTokenSteps" type="text" value="400,1000,4000,10000,20000,40000">
+        </label>
+        <label>Docs
+          <input id="ragLoadDocCount" type="number" min="1" max="50" step="1" value="10">
+        </label>
+        <label>Doc Chars
+          <input id="ragLoadDocChars" type="number" min="80" max="4000" step="20" value="700">
+        </label>
+        <label>Timeout
+          <input id="ragLoadTimeout" type="number" min="5" max="900" step="5" value="240">
+        </label>
+        <label>Bridge
+          <select id="ragLoadBridgeMode">
+            <option value="none">Keine</option>
+            <option value="first_last">Erste+Letzte</option>
+            <option value="all">Alle</option>
+          </select>
+        </label>
+        <button id="runRagLoadProbe" class="run" type="button">Load Probe</button>
+      </div>
+      <div class="chunk-form archive-rag-form">
+        <label>Query
+          <input id="ragLoadQuery" type="text" value="How does AlphaRavis handle native pgvector retrieval and reranking?">
+        </label>
+        <label style="grid-column: 1 / -1;">Probe Text
+          <textarea id="ragLoadText">AlphaRavis native RAG stores source-scoped chunks in pgvector, uses a durable embedding queue, and can rerank bounded retrieval hits before grounding the answer.</textarea>
+        </label>
+      </div>
+      <div id="ragLoadStats" class="chunk-stats"></div>
+      <div id="ragLoadActions" class="chunk-actions"></div>
+      <pre id="ragLoadRaw" class="chunk-raw">{}</pre>
+    </section>
     <section class="detail">
       <div class="detail-head">
         <div class="tabs">
@@ -1631,6 +1935,23 @@ OBSERVER_HTML = """<!doctype html>
     const memoryEmbedStats = document.getElementById('memoryEmbedStats');
     const memoryEmbedActions = document.getElementById('memoryEmbedActions');
     const memoryEmbedRaw = document.getElementById('memoryEmbedRaw');
+    const ragLoadStatus = document.getElementById('ragLoadStatus');
+    const ragLoadEmbeddingBaseUrl = document.getElementById('ragLoadEmbeddingBaseUrl');
+    const ragLoadEmbeddingModel = document.getElementById('ragLoadEmbeddingModel');
+    const ragLoadEmbeddingBackend = document.getElementById('ragLoadEmbeddingBackend');
+    const ragLoadRerankerUrl = document.getElementById('ragLoadRerankerUrl');
+    const ragLoadRerankerModel = document.getElementById('ragLoadRerankerModel');
+    const ragLoadTokenSteps = document.getElementById('ragLoadTokenSteps');
+    const ragLoadDocCount = document.getElementById('ragLoadDocCount');
+    const ragLoadDocChars = document.getElementById('ragLoadDocChars');
+    const ragLoadTimeout = document.getElementById('ragLoadTimeout');
+    const ragLoadBridgeMode = document.getElementById('ragLoadBridgeMode');
+    const ragLoadQuery = document.getElementById('ragLoadQuery');
+    const ragLoadText = document.getElementById('ragLoadText');
+    const runRagLoadProbe = document.getElementById('runRagLoadProbe');
+    const ragLoadStats = document.getElementById('ragLoadStats');
+    const ragLoadActions = document.getElementById('ragLoadActions');
+    const ragLoadRaw = document.getElementById('ragLoadRaw');
     let records = [];
     let selectedId = '';
     let activeTab = 'send';
@@ -2105,6 +2426,77 @@ OBSERVER_HTML = """<!doctype html>
         runMemoryEmbedProbe.disabled = false;
       }
     }
+    function renderRagLoadProbe(result) {
+      const passed = result.status === 'passed';
+      const partial = result.status === 'partial';
+      ragLoadStatus.textContent = `${result.status || 'unknown'} in ${result.elapsed_seconds || 0}s`;
+      ragLoadStatus.className = `status ${passed ? 'ok' : (partial ? 'warn' : 'hard')}`;
+      ragLoadStats.innerHTML = '';
+      [
+        ['Steps', `${fmtNumber(result.ok_step_count || 0)} / ${fmtNumber(result.completed_step_count || 0)}`, passed ? 'ok' : (partial ? 'warn' : 'hard')],
+        ['Embedding', result.embedding_model || ''],
+        ['Reranker', result.reranker_model || ''],
+        ['Bridge', result.bridge_query_mode || 'none'],
+        ['Stop', result.stop_reason || '', result.stop_reason === 'completed' ? 'ok' : 'warn'],
+      ].forEach(([label, value, className]) => ragLoadStats.appendChild(chunkMetric(label, value, className || '')));
+      ragLoadActions.innerHTML = '';
+      for (const item of (result.results || [])) {
+        const row = document.createElement('div');
+        const time = document.createElement('span');
+        time.className = 'muted';
+        time.textContent = `${Number(item.elapsed_seconds || 0).toFixed(3)}s`;
+        const event = document.createElement('span');
+        event.textContent = `${fmtNumber(item.tokens)} tok / ${fmtNumber(item.chars)} chars`;
+        const detail = document.createElement('span');
+        detail.className = 'muted';
+        const embedding = item.embedding || {};
+        const reranker = item.reranker || {};
+        const bridge = item.bridge || null;
+        const parts = [
+          `emb=${embedding.ok ? 'ok' : 'fail'} ${Number(embedding.elapsed_seconds || 0).toFixed(2)}s dim=${embedding.embedding_dimensions || ''}`,
+          `rank=${reranker.ok ? 'ok' : 'fail'} ${Number(reranker.elapsed_seconds || 0).toFixed(2)}s toks=${reranker.prompt_tokens || ''}`,
+        ];
+        if (bridge) parts.push(`llm=${bridge.ok ? 'ok' : 'fail'} ${Number(bridge.elapsed_seconds || 0).toFixed(2)}s`);
+        if (!item.ok) parts.push((embedding.error || reranker.error || bridge?.error || '').slice(0, 180));
+        detail.textContent = parts.join(' | ');
+        row.append(time, event, detail);
+        ragLoadActions.appendChild(row);
+      }
+      ragLoadRaw.textContent = pretty(result);
+    }
+    async function startRagLoadProbe() {
+      runRagLoadProbe.disabled = true;
+      ragLoadStatus.textContent = 'starte...';
+      ragLoadStatus.className = 'status warn';
+      try {
+        const response = await fetch('/api/rag-load-probe', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            embedding_base_url: ragLoadEmbeddingBaseUrl.value || '',
+            embedding_model: ragLoadEmbeddingModel.value || '',
+            embedding_backend: ragLoadEmbeddingBackend.value || 'ollama_embed',
+            reranker_url: ragLoadRerankerUrl.value || '',
+            reranker_model: ragLoadRerankerModel.value || '',
+            query: ragLoadQuery.value || '',
+            text: ragLoadText.value || '',
+            token_steps: ragLoadTokenSteps.value || '',
+            reranker_doc_count: Number(ragLoadDocCount.value || 10),
+            reranker_doc_chars: Number(ragLoadDocChars.value || 700),
+            timeout_seconds: Number(ragLoadTimeout.value || 240),
+            bridge_query_mode: ragLoadBridgeMode.value || 'none',
+            stop_on_failure: true,
+          }),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        renderRagLoadProbe(await response.json());
+      } catch (error) {
+        ragLoadStatus.textContent = error.message;
+        ragLoadStatus.className = 'status hard';
+      } finally {
+        runRagLoadProbe.disabled = false;
+      }
+    }
     function selectedRecord() {
       return records.find((record) => record.id === selectedId) || records[0] || null;
     }
@@ -2296,6 +2688,7 @@ OBSERVER_HTML = """<!doctype html>
     runArchiveRagSmoke.addEventListener('click', () => startArchiveRagSmoke());
     runNativeRagSmoke.addEventListener('click', () => startNativeRagSmoke());
     runMemoryEmbedProbe.addEventListener('click', () => startMemoryEmbedProbe());
+    runRagLoadProbe.addEventListener('click', () => startRagLoadProbe());
     loadRecords().catch((error) => { statusEl.textContent = error.message; });
     window.setInterval(() => loadRecords().catch(() => {}), 2500);
   </script>

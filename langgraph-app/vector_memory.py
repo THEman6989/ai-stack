@@ -5,7 +5,7 @@ import hashlib
 import os
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -157,8 +157,27 @@ def _chunk_profile(source_type: str = "", title: str = "", metadata: dict[str, A
     explicit = str(metadata.get("chunk_profile") or os.getenv("ALPHARAVIS_PGVECTOR_CHUNK_PROFILE", "")).strip().lower()
     if explicit in {"default", "chat", "archive", "log", "code"}:
         return explicit
+    content_type = str(metadata.get("content_type") or metadata.get("source_content_type") or "").strip().lower()
+    if content_type == "log":
+        return "log"
+    if content_type in {"code", "config"}:
+        return "code"
+    if content_type == "prose":
+        return "default"
 
     source = str(source_type or "").lower()
+    sample = text[:6000]
+    looks_like_code = bool(
+        "```" in sample
+        or re.search(
+            r"^\s*(?:async\s+def|def|class|function|import|from|const|let|var|SELECT|CREATE TABLE)\b",
+            sample,
+            re.MULTILINE,
+        )
+    )
+    looks_like_log = bool(
+        re.search(r"^\s*(?:\d{4}-\d{2}-\d{2}|INFO|WARN|WARNING|ERROR|DEBUG|Traceback|Exception:)", sample, re.MULTILINE)
+    )
     pathish = " ".join(
         str(value or "")
         for value in [
@@ -182,13 +201,18 @@ def _chunk_profile(source_type: str = "", title: str = "", metadata: dict[str, A
         return "code"
     if source in {"log", "logs", "terminal", "command_output"} or any(pathish.endswith(ext) for ext in log_ext):
         return "log"
+    if source in {"archive", "archive_collection"}:
+        if looks_like_code:
+            return "code"
+        if looks_like_log:
+            return "log"
+        return "chat"
     if source in {"archive", "archive_collection", "session_turn", "chat", "conversation"}:
         return "chat"
 
-    sample = text[:6000]
-    if "```" in sample or re.search(r"^\s*(?:async\s+def|def|class|function|import|from|const|let|var|SELECT|CREATE TABLE)\b", sample, re.MULTILINE):
+    if looks_like_code:
         return "code"
-    if re.search(r"^\s*(?:\d{4}-\d{2}-\d{2}|INFO|WARN|WARNING|ERROR|DEBUG|Traceback|Exception:)", sample, re.MULTILINE):
+    if looks_like_log:
         return "log"
     return "default"
 
@@ -871,6 +895,54 @@ def _delete_source_sync(
         conn.commit()
 
 
+def _source_digest_match_sync(
+    *,
+    namespace: str,
+    scope: str,
+    thread_id: str,
+    source_type: str,
+    source_key: str,
+    source_digest: str,
+) -> dict[str, Any] | None:
+    try:
+        _require_psycopg()
+        table = _table_identifier()
+        with psycopg.connect(_database_url()) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL(
+                        """
+                        SELECT id, source_key, title, chunk_count, metadata, updated_at
+                        FROM {table}
+                        WHERE namespace = %s
+                          AND scope = %s
+                          AND COALESCE(thread_id, '') = %s
+                          AND source_type = %s
+                          AND source_key = %s
+                          AND is_catalog = true
+                          AND metadata->>'source_digest' = %s
+                        ORDER BY updated_at DESC
+                        LIMIT 1
+                        """
+                    ).format(table=table),
+                    (namespace, scope, thread_id or "", source_type, source_key, source_digest),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                record = {
+                    "id": row[0],
+                    "source_key": row[1],
+                    "title": row[2],
+                    "chunk_count": row[3],
+                    "metadata": row[4] if isinstance(row[4], dict) else {},
+                    "updated_at": row[5].isoformat() if hasattr(row[5], "isoformat") else str(row[5] or ""),
+                }
+                return record
+    except Exception:
+        return None
+
+
 def _ensure_queue_schema_sync() -> None:
     _require_psycopg()
     table_name = _queue_table_name()
@@ -976,6 +1048,25 @@ async def enqueue_memory_record(
 ) -> str:
     if not is_enabled():
         return ""
+    source_type = re.sub(r"[^a-zA-Z0-9_-]+", "_", source_type.strip().lower())[:80] or "memory"
+    source_key = str(source_key or "").strip()
+    source_digest = _content_digest(content)
+    if (
+        _env_bool("ALPHARAVIS_PGVECTOR_DEDUP_SOURCES", "true")
+        and source_key
+        and source_digest
+    ):
+        match = await asyncio.to_thread(
+            _source_digest_match_sync,
+            namespace=namespace,
+            scope=scope or "thread",
+            thread_id=thread_id or "",
+            source_type=source_type,
+            source_key=source_key,
+            source_digest=source_digest,
+        )
+        if match:
+            return f"deduped:{source_type}:{source_key}:{int(match.get('chunk_count') or 0)}"
     payload = {
         "source_type": source_type,
         "source_key": source_key,
@@ -1130,6 +1221,7 @@ async def upsert_memory_record(
     scope: str = "thread",
     namespace: str = "alpharavis",
     metadata: dict[str, Any] | None = None,
+    progress_callback: Callable[[dict[str, Any]], Any] | None = None,
 ) -> str:
     if not is_enabled():
         return ""
@@ -1145,6 +1237,33 @@ async def upsert_memory_record(
     if not chunks:
         raise VectorMemoryError("content is required for vector memory indexing.")
 
+    metadata = metadata or {}
+    source_digest = _content_digest(content)
+    if _env_bool("ALPHARAVIS_PGVECTOR_DEDUP_SOURCES", "true"):
+        match = await asyncio.to_thread(
+            _source_digest_match_sync,
+            namespace=namespace,
+            scope=scope or "thread",
+            thread_id=thread_id or "",
+            source_type=source_type,
+            source_key=source_key,
+            source_digest=source_digest,
+        )
+        if match:
+            if progress_callback is not None:
+                result = progress_callback(
+                    {
+                        "event": "large_ingest.deduped",
+                        "source_type": source_type,
+                        "source_key": source_key,
+                        "chunk_count": int(match.get("chunk_count") or len(chunks)),
+                        "source_digest": source_digest,
+                    }
+                )
+                if asyncio.iscoroutine(result):
+                    await result
+            return f"deduped:{source_type}:{source_key}:{int(match.get('chunk_count') or len(chunks))}"
+
     first_embedding = await embed_text(f"{title.strip()}\n\n{chunks[0]}".strip())
     dimensions = len(first_embedding.vector)
     await asyncio.to_thread(_ensure_schema_sync, dimensions)
@@ -1158,8 +1277,6 @@ async def upsert_memory_record(
     )
 
     chunk_count = len(chunks)
-    metadata = metadata or {}
-    source_digest = _content_digest(content)
     catalog_text = build_catalog_text(
         source_type=source_type,
         source_key=source_key,
@@ -1242,6 +1359,22 @@ async def upsert_memory_record(
             metadata=chunk_metadata,
             embedding=embedding.vector,
         )
+        if progress_callback is not None:
+            result = progress_callback(
+                {
+                    "event": "large_ingest.chunk_indexed",
+                    "source_type": source_type,
+                    "source_key": source_key,
+                    "chunk_index": index,
+                    "chunk_number": index + 1,
+                    "chunk_count": chunk_count,
+                    "chunk_chars": len(chunk),
+                    "chunk_digest": chunk_metadata["chunk_digest"],
+                    "source_digest": source_digest,
+                }
+            )
+            if asyncio.iscoroutine(result):
+                await result
     return f"{source_type}:{source_key}:{chunk_count}"
 
 
@@ -1525,6 +1658,10 @@ def _claim_embedding_jobs_sync(limit: int, max_attempts: int) -> list[dict[str, 
     _require_psycopg()
     _ensure_queue_schema_sync()
     table = _queue_table_identifier()
+    stale_after_seconds = max(
+        60,
+        int(os.getenv("ALPHARAVIS_EMBEDDING_JOB_STALE_AFTER_SECONDS", "900")),
+    )
     with psycopg.connect(_database_url()) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -1533,7 +1670,13 @@ def _claim_embedding_jobs_sync(limit: int, max_attempts: int) -> list[dict[str, 
                     WITH claimed AS (
                         SELECT id
                         FROM {table}
-                        WHERE status IN ('pending', 'failed')
+                        WHERE (
+                            status IN ('pending', 'failed')
+                            OR (
+                                status = 'running'
+                                AND updated_at <= now() - (%s * interval '1 second')
+                            )
+                        )
                           AND attempts < %s
                           AND available_at <= now()
                         ORDER BY created_at
@@ -1543,12 +1686,22 @@ def _claim_embedding_jobs_sync(limit: int, max_attempts: int) -> list[dict[str, 
                     UPDATE {table}
                     SET status = 'running',
                         attempts = attempts + 1,
+                        last_error = CASE
+                            WHEN status = 'running'
+                            THEN %s
+                            ELSE last_error
+                        END,
                         updated_at = now()
                     WHERE id IN (SELECT id FROM claimed)
                     RETURNING id, payload, attempts
                     """
                 ).format(table=table),
-                (max_attempts, limit),
+                (
+                    stale_after_seconds,
+                    max_attempts,
+                    limit,
+                    f"Reclaimed stale running job after {stale_after_seconds}s.",
+                ),
             )
             rows = cur.fetchall()
         conn.commit()

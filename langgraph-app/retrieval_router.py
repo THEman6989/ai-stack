@@ -271,6 +271,54 @@ def grade_retrieval_hits(
     }
 
 
+async def maybe_llm_grade_retrieval_hits(
+    *,
+    query: str,
+    hits: list[dict[str, Any]],
+    deterministic_grade: dict[str, Any],
+    llm_grade_func: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    if not env_bool("ALPHARAVIS_AGENTIC_RAG_LLM_GRADING", "false"):
+        return {**deterministic_grade, "grading_strategy": "deterministic"}
+    if llm_grade_func is None:
+        return {
+            **deterministic_grade,
+            "grading_strategy": "deterministic",
+            "llm_grading": {"enabled": True, "used": False, "warning": "llm_grade_func was not provided"},
+        }
+    try:
+        llm_grade = await llm_grade_func(
+            query=query,
+            hits=hits,
+            deterministic_grade=deterministic_grade,
+        )
+    except Exception as exc:
+        return {
+            **deterministic_grade,
+            "grading_strategy": "deterministic",
+            "llm_grading": {"enabled": True, "used": False, "error": str(exc)[:500]},
+        }
+    if not isinstance(llm_grade, dict) or not isinstance(llm_grade.get("relevant_hits"), list):
+        return {
+            **deterministic_grade,
+            "grading_strategy": "deterministic",
+            "llm_grading": {"enabled": True, "used": False, "warning": "llm grader returned invalid payload"},
+        }
+    relevant = [hit for hit in llm_grade.get("relevant_hits", []) if isinstance(hit, dict)]
+    rejected = [hit for hit in llm_grade.get("rejected_hits", []) if isinstance(hit, dict)]
+    return {
+        **deterministic_grade,
+        **llm_grade,
+        "decision": "generate_answer" if relevant else "rewrite_question" if hits else "no_results",
+        "relevant_hits": relevant,
+        "rejected_hits": rejected,
+        "relevant_count": len(relevant),
+        "rejected_count": len(rejected),
+        "grading_strategy": str(llm_grade.get("grading_strategy") or "llm_structured_output"),
+        "llm_grading": {"enabled": True, "used": True},
+    }
+
+
 def rerank_retrieval_hits(
     *,
     query: str,
@@ -296,6 +344,171 @@ def rerank_retrieval_hits(
         )
     reranked.sort(key=lambda item: (float(item.get("rerank_score") or 0.0), -int(item.get("rerank_original_rank") or 0)), reverse=True)
     return reranked[: max(1, int(limit))] if limit is not None else reranked
+
+
+def _reranker_mode() -> str:
+    raw = os.getenv("ALPHARAVIS_RAG_RERANKER_MODE", "deterministic").strip().lower()
+    if raw in {"model", "llamacpp", "llama_cpp", "qwen3", "qwen3_reranker"}:
+        return "model"
+    if raw in {"auto"}:
+        return "model" if os.getenv("ALPHARAVIS_RAG_RERANKER_URL", "").strip() else "deterministic"
+    return "deterministic"
+
+
+def _reranker_url() -> str:
+    base = os.getenv("ALPHARAVIS_RAG_RERANKER_URL", "http://192.168.178.140:8000").strip().rstrip("/")
+    endpoint = os.getenv("ALPHARAVIS_RAG_RERANKER_ENDPOINT", "/reranking").strip() or "/reranking"
+    if endpoint.startswith("http://") or endpoint.startswith("https://"):
+        return endpoint
+    return f"{base}/{endpoint.lstrip('/')}"
+
+
+def _reranker_document_text(hit: dict[str, Any], *, max_chars: int) -> str:
+    text = str(hit.get("chunk_text") or hit.get("preview_text") or hit.get("content") or "").strip()
+    if max_chars > 0:
+        text = text[:max_chars].rstrip()
+    return text or str(hit.get("title") or hit.get("source_key") or "empty")
+
+
+async def _call_model_reranker(query: str, documents: list[str]) -> Any:
+    try:
+        import httpx
+    except Exception as exc:  # pragma: no cover - dependency should exist in runtime.
+        raise RuntimeError(f"httpx unavailable for model reranker: {exc}") from exc
+
+    timeout = float(os.getenv("ALPHARAVIS_RAG_RERANKER_TIMEOUT_SECONDS", "8"))
+    payload: dict[str, Any] = {
+        "query": query,
+        "documents": documents,
+    }
+    model = os.getenv("ALPHARAVIS_RAG_RERANKER_MODEL", "").strip()
+    if model:
+        payload["model"] = model
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(_reranker_url(), json=payload)
+    if response.status_code >= 400:
+        raise RuntimeError(f"reranker HTTP {response.status_code}: {response.text[:500]}")
+    return response.json()
+
+
+def _parse_model_rerank_scores(payload: Any, *, expected_count: int) -> dict[int, float]:
+    if isinstance(payload, dict):
+        items = payload.get("results")
+        if items is None:
+            items = payload.get("data")
+        if items is None:
+            items = payload.get("rerank_results")
+    else:
+        items = payload
+    if not isinstance(items, list):
+        raise RuntimeError("reranker returned no results array")
+
+    scores: dict[int, float] = {}
+    for rank, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        raw_index = (
+            item.get("index")
+            if item.get("index") is not None
+            else item.get("document_index")
+            if item.get("document_index") is not None
+            else item.get("id")
+        )
+        try:
+            index = int(raw_index)
+        except Exception:
+            index = rank
+        raw_score = (
+            item.get("relevance_score")
+            if item.get("relevance_score") is not None
+            else item.get("score")
+            if item.get("score") is not None
+            else item.get("rerank_score")
+        )
+        try:
+            score = float(raw_score)
+        except Exception:
+            continue
+        if 0 <= index < expected_count:
+            scores[index] = score
+    if not scores:
+        raise RuntimeError("reranker returned no parseable scores")
+    return scores
+
+
+async def rerank_retrieval_hits_with_fallback(
+    *,
+    query: str,
+    hits: list[dict[str, Any]],
+    limit: int | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
+    mode = _reranker_mode()
+    if mode == "model" and hits:
+        max_hits = max(1, min(len(hits), int(os.getenv("ALPHARAVIS_RAG_RERANKER_MAX_HITS", "20"))))
+        max_chars = max(16, int(os.getenv("ALPHARAVIS_RAG_RERANKER_MAX_CHARS", "700")))
+        candidates = hits[:max_hits]
+        documents = [_reranker_document_text(hit, max_chars=max_chars) for hit in candidates]
+        try:
+            payload = await _call_model_reranker(query, documents)
+            scores = _parse_model_rerank_scores(payload, expected_count=len(candidates))
+            reranked: list[dict[str, Any]] = []
+            for index, hit in enumerate(candidates):
+                score = scores.get(index, float("-inf"))
+                reranked.append(
+                    {
+                        **hit,
+                        "rerank_score": round(float(score), 6) if score != float("-inf") else 0.0,
+                        "rerank_original_rank": index + 1,
+                        "rerank_strategy": "llamacpp_qwen3_reranker",
+                        "rerank_backend": _reranker_url(),
+                    }
+                )
+            if len(hits) > len(candidates):
+                for index, hit in enumerate(hits[len(candidates):], start=len(candidates)):
+                    reranked.append(
+                        {
+                            **hit,
+                            "rerank_score": 0.0,
+                            "rerank_original_rank": index + 1,
+                            "rerank_strategy": "llamacpp_qwen3_reranker_unscored_tail",
+                            "rerank_backend": _reranker_url(),
+                        }
+                    )
+            reranked.sort(
+                key=lambda item: (float(item.get("rerank_score") or 0.0), -int(item.get("rerank_original_rank") or 0)),
+                reverse=True,
+            )
+            metadata = {
+                "enabled": True,
+                "strategy": "llamacpp_qwen3_reranker",
+                "backend": _reranker_url(),
+                "model": os.getenv("ALPHARAVIS_RAG_RERANKER_MODEL", "qwen3-reranker-0.6b"),
+                "fallback_used": False,
+                "scored_count": len(scores),
+                "candidate_count": len(candidates),
+            }
+            return (reranked[: max(1, int(limit))] if limit is not None else reranked), metadata, ""
+        except Exception as exc:
+            if not env_bool("ALPHARAVIS_RAG_RERANKER_FALLBACK_DETERMINISTIC", "true"):
+                raise
+            warning = f"Model reranker failed; used deterministic fallback: {exc}"
+            fallback = rerank_retrieval_hits(query=query, hits=hits, limit=limit)
+            metadata = {
+                "enabled": True,
+                "strategy": "deterministic_lexical_vector_blend",
+                "requested_strategy": "llamacpp_qwen3_reranker",
+                "backend": _reranker_url(),
+                "fallback_used": True,
+            }
+            return fallback, metadata, warning
+
+    fallback = rerank_retrieval_hits(query=query, hits=hits, limit=limit)
+    return fallback, {
+        "enabled": True,
+        "strategy": "deterministic_lexical_vector_blend",
+        "fallback_used": False,
+    }, ""
 
 
 def rewrite_retrieval_query(query: str, *, source_keys: list[str] | None = None) -> str:
@@ -791,9 +1004,15 @@ async def query_sources_with_backends(
     document_hits = rag_results[:limit]
     results = [*memory_hits, *document_hits]
     reranking_enabled = env_bool("ALPHARAVIS_ENABLE_RAG_RERANKING", "false")
+    reranking_metadata = {"enabled": False, "strategy": ""}
+    rerank_warning = ""
     if reranking_enabled:
-        results = rerank_retrieval_hits(query=query, hits=results, limit=limit)
-    warnings = [warning for warning in [vector_warning, rag_warning] if warning]
+        results, reranking_metadata, rerank_warning = await rerank_retrieval_hits_with_fallback(
+            query=query,
+            hits=results,
+            limit=limit,
+        )
+    warnings = [warning for warning in [vector_warning, rag_warning, rerank_warning] if warning]
     return {
         "query": query,
         "source_keys": source_keys,
@@ -806,10 +1025,7 @@ async def query_sources_with_backends(
             "only when exact raw archived turns are needed; do not load unrelated archives."
         ),
         "results": results,
-        "reranking": {
-            "enabled": reranking_enabled,
-            "strategy": "deterministic_lexical_vector_blend" if reranking_enabled else "",
-        },
+        "reranking": reranking_metadata,
         "warnings": warnings,
         "backend_counts": {
             "alpharavis_pgvector": len(memory_hits),
@@ -834,6 +1050,7 @@ async def agentic_rag_retrieve(
     rag_source_keys: list[str] | None = None,
     allow_rewrite: bool = True,
     max_context_chars: int | None = None,
+    llm_grade_func: Callable[..., Awaitable[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Run the first AlphaRavis agentic-RAG loop around source retrieval.
 
@@ -858,7 +1075,20 @@ async def agentic_rag_retrieve(
     )
     trace.append({"node": "retrieve", "query": query, "result_count": len(first.get("results", []))})
     grade = grade_retrieval_hits(query=query, hits=list(first.get("results", [])), max_hits=limit)
-    trace.append({"node": "grade_documents", "decision": grade["decision"], "relevant_count": grade["relevant_count"]})
+    grade = await maybe_llm_grade_retrieval_hits(
+        query=query,
+        hits=list(first.get("results", [])),
+        deterministic_grade=grade,
+        llm_grade_func=llm_grade_func,
+    )
+    trace.append(
+        {
+            "node": "grade_documents",
+            "decision": grade["decision"],
+            "relevant_count": grade["relevant_count"],
+            "strategy": grade.get("grading_strategy", "deterministic"),
+        }
+    )
 
     final_query = query
     final_retrieval = first
@@ -882,6 +1112,12 @@ async def agentic_rag_retrieve(
                 rag_source_keys=rag_source_keys,
             )
             retry_grade = grade_retrieval_hits(query=rewritten_query, hits=list(retry.get("results", [])), max_hits=limit)
+            retry_grade = await maybe_llm_grade_retrieval_hits(
+                query=rewritten_query,
+                hits=list(retry.get("results", [])),
+                deterministic_grade=retry_grade,
+                llm_grade_func=llm_grade_func,
+            )
             trace.append(
                 {
                     "node": "retrieve",
@@ -895,6 +1131,7 @@ async def agentic_rag_retrieve(
                     "node": "grade_documents",
                     "decision": retry_grade["decision"],
                     "relevant_count": retry_grade["relevant_count"],
+                    "strategy": retry_grade.get("grading_strategy", "deterministic"),
                     "retry": True,
                 }
             )

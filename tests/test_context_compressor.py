@@ -221,6 +221,7 @@ def test_chunked_summary_reports_and_prompts_for_max_chunk_omissions(monkeypatch
 
 
 def test_oversized_tail_forces_chunked_summary_when_prompt_is_pruned(monkeypatch) -> None:
+    monkeypatch.setenv("ALPHARAVIS_DEFER_LARGE_PASTE_RAG_UNTIL_AFTER_COMPRESSION", "false")
     monkeypatch.setenv("ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY", "false")
     monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MAX_TOKENS", "1200")
     monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MIN_TOKENS", "1000")

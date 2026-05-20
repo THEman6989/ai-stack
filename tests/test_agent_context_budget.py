@@ -234,6 +234,7 @@ def test_run_profile_start_ingests_large_paste_and_replaces_active_context(monke
         }
 
     monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "20")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_AUTO_STAGE", "pre_run")
     monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS", "999999")
     monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MARKER_PREVIEW_CHARS", "8")
     monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
@@ -267,6 +268,133 @@ def test_run_profile_start_ingests_large_paste_and_replaces_active_context(monke
     assert ingest_record["events"][-1]["status"] == "indexed"
 
 
+def test_large_paste_auto_ingest_defers_until_after_pre_run_compression(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_ingest_source(**kwargs):
+        calls["ingest"] = kwargs
+        return {
+            "source_key": kwargs["source_key"],
+            "rag_file_id": kwargs["source_key"],
+            "index_status": "indexed",
+            "indexed_backends": ["alpharavis_pgvector"],
+            "rag_active": True,
+            "active_source_keys": [kwargs["source_key"]],
+            "active_rag_file_ids": [],
+            "rag_activation_reason": "large_paste",
+            "archive_rag_mode": "tool_only",
+        }
+
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "200")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_AUTO_STAGE", "post_compression")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_POST_COMPRESSION_TRIGGER_RATIO", "0.01")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_POST_RAG_COMPRESSION_ENABLED", "false")
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_LARGE_PASTE_SMALL_CLASSIFIER", "false")
+    monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
+    monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", object())
+
+    content = "Document:\n" + ("post compression large paste marker " * 800)
+    start_updates = asyncio.run(
+        agent_graph.run_profile_start_node(
+            {
+                "messages": [{"role": "human", "content": content, "id": "msg-1"}],
+                "thread_id": "thread-1",
+                "thread_key": "thread-key",
+            }
+        )
+    )
+
+    assert calls == {}
+    assert "messages" not in start_updates
+    assert start_updates["run_profile"]["large_paste_ingests"][0]["skip_reason"] == "large_paste_deferred_until_post_compression"
+
+    post_updates = asyncio.run(
+        agent_graph.large_paste_post_compression_node(
+            {
+                **start_updates,
+                "messages": [{"role": "human", "content": content, "id": "msg-1"}],
+                "thread_id": "thread-1",
+                "thread_key": "thread-key",
+            }
+        )
+    )
+
+    assert calls["ingest"]["content"] == content
+    assert post_updates["rag_active"] is True
+    assert post_updates["run_profile"]["large_paste_post_compression_ingested"] is True
+    assert post_updates["run_profile"]["large_paste_ingests"][-1]["index_status"] == "indexed"
+    assert isinstance(post_updates["messages"][0], agent_graph.RemoveMessage)
+
+
+def test_large_paste_post_rag_compresses_remaining_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_ingest_source(**kwargs):
+        calls["ingest"] = kwargs
+        return {
+            "source_key": kwargs["source_key"],
+            "rag_file_id": kwargs["source_key"],
+            "index_status": "indexed",
+            "indexed_backends": ["alpharavis_pgvector"],
+            "rag_active": True,
+            "active_source_keys": [kwargs["source_key"]],
+            "active_rag_file_ids": [],
+            "rag_activation_reason": "large_paste",
+            "archive_rag_mode": "tool_only",
+        }
+
+    async def fake_compress(**kwargs):
+        calls["compress"] = kwargs
+        result = types.SimpleNamespace(
+            skipped=False,
+            reason="",
+            middle=[{"role": "assistant", "content": "old chatter"}],
+            head=[],
+            tail=[],
+            summary_failed=False,
+            summary_error="",
+            archive_metadata={},
+        )
+        return result, "archive-after-rag", {
+            "messages": [
+                agent_graph.RemoveMessage(id=agent_graph.REMOVE_ALL_MESSAGES),
+                {"role": "system", "content": "compressed remaining chatter"},
+            ],
+            "run_profile": {"pre_run_compression_used": True},
+        }
+
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "200")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_AUTO_STAGE", "post_compression")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_POST_COMPRESSION_TRIGGER_RATIO", "0.01")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_POST_RAG_COMPRESSION_ENABLED", "true")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_POST_RAG_COMPRESSION_TRIGGER_RATIO", "0.01")
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_LARGE_PASTE_SMALL_CLASSIFIER", "false")
+    monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
+    monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", object())
+    monkeypatch.setattr(agent_graph, "_run_hermes_style_compression", fake_compress)
+
+    content = "Document:\n" + ("post rag compression source " * 1000)
+    updates = asyncio.run(
+        agent_graph.large_paste_post_compression_node(
+                {
+                    "messages": [
+                        {"role": "assistant", "content": "old chatter " * 4000},
+                        {"role": "human", "content": content, "id": "msg-1"},
+                    ],
+                "thread_id": "thread-1",
+                "thread_key": "thread-key",
+                "run_profile": {"large_paste_ingests": []},
+            }
+        )
+    )
+
+    assert calls["ingest"]["content"] == content
+    assert calls["compress"]["token_limit"] > 0
+    assert updates["messages"][1]["content"] == "compressed remaining chatter"
+    assert updates["run_profile"]["large_paste_post_rag_compression_used"] is True
+    assert updates["run_profile"]["large_paste_post_rag_compression_archive_key"] == "archive-after-rag"
+
+
 def test_run_profile_start_skips_auto_large_paste_when_context_margin_is_large(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: dict[str, object] = {}
 
@@ -275,6 +403,7 @@ def test_run_profile_start_skips_auto_large_paste_when_context_margin_is_large(m
         return {}
 
     monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "20")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_AUTO_STAGE", "pre_run")
     monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS", "5")
     monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
     monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", object())
@@ -322,6 +451,7 @@ def test_run_profile_start_replaces_queued_large_paste_with_source_handle(monkey
         }
 
     monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "20")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_AUTO_STAGE", "pre_run")
     monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS", "999999")
     monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
     monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", object())
@@ -459,6 +589,7 @@ def test_run_profile_start_indexes_instruction_paste_without_rag_activation(monk
         }
 
     monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "20")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_AUTO_STAGE", "pre_run")
     monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS", "999999")
     monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_INSTRUCTION_BRIEF_CHARS", "500")
     monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
@@ -525,6 +656,7 @@ def test_run_profile_start_keeps_mixed_paste_rag_active_with_instruction_brief(m
         }
 
     monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "20")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_AUTO_STAGE", "pre_run")
     monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS", "999999")
     monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
     monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", object())
@@ -560,6 +692,268 @@ def test_run_profile_start_keeps_mixed_paste_rag_active_with_instruction_brief(m
     replacement_text = updates["messages"][1]["content"]
     assert "classified as mixed instructions plus document/data" in replacement_text
     assert "Use active RAG/query_source" in replacement_text
+
+
+def test_large_paste_small_classifier_ranges_strip_instruction_and_question(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_classifier(text: str):
+        return {
+            "intent": "mixed",
+            "retrieval_query": "MIXED_RANGE_MARKER AlphaRavis deployment",
+            "instruction_lines": [[1, 3]],
+            "document_lines": [[5, 26]],
+            "question_lines": [[27, 27]],
+            "confidence": 0.92,
+            "model": "small",
+            "base_url": "http://100.71.57.22:8001/v1",
+            "elapsed_seconds": 0.1,
+        }
+
+    async def fake_ingest_source(**kwargs):
+        calls["ingest"] = kwargs
+        return {
+            "source_key": kwargs["source_key"],
+            "rag_file_id": kwargs["source_key"],
+            "index_status": "indexed",
+            "indexed_backends": ["alpharavis_pgvector"],
+            "rag_active": True,
+            "active_source_keys": [kwargs["source_key"]],
+            "active_rag_file_ids": [],
+            "rag_activation_reason": "large_paste",
+            "archive_rag_mode": "tool_only",
+        }
+
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "20")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_AUTO_STAGE", "pre_run")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS", "999999")
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_LARGE_PASTE_SMALL_CLASSIFIER", "true")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_SMALL_CLASSIFIER_MIN_CHARS", "20")
+    monkeypatch.setattr(agent_graph, "_classify_prompt_for_retrieval", fake_classifier)
+    monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
+    monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", object())
+
+    content = "\n".join(
+        [
+            "Instructions:",
+            "You must answer only from the provided document.",
+            "Never invent facts.",
+            "",
+            "Document:",
+            "Runtime marker: MIXED_RANGE_MARKER. The deployment uses AlphaRavis pgvector.",
+            *[f"log line {index}: deployment data and classifier range coverage" for index in range(20)],
+            "Welche Deployment-Regel steht im Dokument?",
+        ]
+    )
+    updates = asyncio.run(
+        agent_graph.run_profile_start_node(
+            {
+                "messages": [{"role": "human", "content": content, "id": "msg-1"}],
+                "thread_id": "thread-1",
+                "thread_key": "thread-key",
+            }
+        )
+    )
+
+    indexed_content = calls["ingest"]["content"]
+    assert "Runtime marker: MIXED_RANGE_MARKER" in indexed_content
+    assert "You must answer only" not in indexed_content
+    assert "Welche Deployment-Regel" not in indexed_content
+    assert calls["ingest"]["metadata"]["paste_intent_classifier"] == "small_model_classifier"
+    assert calls["ingest"]["metadata"]["paste_intent_question_line_ranges"] == [[27, 27]]
+    ingest_record = updates["run_profile"]["large_paste_ingests"][0]
+    assert ingest_record["paste_intent_classifier"] == "small_model_classifier"
+    replacement_text = updates["messages"][1]["content"]
+    assert "Retrieval/query focus" in replacement_text
+    assert "MIXED_RANGE_MARKER AlphaRavis deployment" in replacement_text
+    assert "Current question/task lines" in replacement_text
+
+
+def test_classifier_json_parser_recovers_complete_fields_from_truncated_reason() -> None:
+    parsed = agent_graph._parse_classifier_json(
+        '{"intent":"mixed","retrieval_query":"AlphaRavis deployment",'
+        '"instruction_lines":[[1,3]],"document_lines":[[5,26]],'
+        '"question_lines":[[27,27]],"confidence":0.92,"reason":"unterminated'
+    )
+
+    assert parsed["intent"] == "mixed"
+    assert parsed["retrieval_query"] == "AlphaRavis deployment"
+    assert parsed["instruction_lines"] == [[1, 3]]
+    assert parsed["question_lines"] == [[27, 27]]
+    assert parsed["confidence"] == 0.92
+    assert "reason" not in parsed
+
+
+def test_large_paste_small_instruction_does_not_override_local_mixed_document() -> None:
+    result = agent_graph._large_paste_intent_from_small_classifier(
+        {
+            "intent": "instruction",
+            "retrieval_query": "deployment rule",
+            "instruction_lines": [[1, 3]],
+            "document_lines": [],
+            "question_lines": [],
+            "confidence": 0.91,
+        },
+        {
+            "intent": "mixed",
+            "classifier": "heuristic",
+            "confidence": 0.7,
+            "instruction_score": 4.0,
+            "document_score": 3.0,
+        },
+    )
+
+    assert result["intent"] == "mixed"
+    body = agent_graph._large_paste_document_body_for_index(
+        "\n".join(
+            [
+                "Instructions:",
+                "You must use only the document.",
+                "Never invent facts.",
+                "",
+                "Document:",
+                "Runtime marker: LOCAL_MIXED_WINS.",
+                *[f"log line {index}: document data" for index in range(20)],
+                "Welche Regel steht im Dokument?",
+            ]
+        ),
+        result["intent"],
+        result,
+    )
+    assert "You must use only" not in body
+    assert "Welche Regel" not in body
+    assert "Runtime marker: LOCAL_MIXED_WINS" in body
+
+
+def test_source_metadata_summary_labels_code_log_table_and_symbols() -> None:
+    code = agent_graph._source_metadata_summary(
+        "def alpha_ravis_router():\n    return 'ok'\nclass RetrievalRouter:\n    pass",
+        title="router.py",
+        metadata={},
+    )
+    log = agent_graph._source_metadata_summary(
+        "2026-05-20 ERROR api-bridge failed\nTraceback boom\nINFO retry complete",
+        title="api.log",
+        metadata={},
+    )
+    table = agent_graph._source_metadata_summary(
+        "name,status,count\nalpha,ok,3\nbeta,failed,1\ngamma,ok,2",
+        title="results.csv",
+        metadata={},
+    )
+
+    assert code["content_type"] == "code"
+    assert "alpha_ravis_router" in code["source_symbols"]
+    assert log["content_type"] == "log"
+    assert table["content_type"] == "table"
+    assert code["source_keywords"]
+
+
+def test_large_paste_ingest_adds_source_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_classifier(content: str):
+        return {"intent": "document", "classifier": "heuristic", "confidence": 0.8}
+
+    async def fake_ingest_source(**kwargs):
+        calls["ingest"] = kwargs
+        return {
+            "index_status": "indexed",
+            "rag_file_id": kwargs["source_key"],
+            "indexed_backends": ["alpharavis_pgvector"],
+            "queued_backends": [],
+            "rag_active": True,
+            "active_source_keys": [kwargs["source_key"]],
+            "active_rag_file_ids": [],
+            "rag_activation_reason": "large_paste",
+            "metadata": kwargs["metadata"],
+        }
+
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "20")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_AUTO_STAGE", "pre_run")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS", "999999")
+    monkeypatch.setattr(agent_graph, "_classify_large_paste_for_ingest", fake_classifier)
+    monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
+    monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", object())
+
+    content = "def alpha_ravis_source_metadata():\n    return 'code'\n" * 6
+    updates = asyncio.run(
+        agent_graph.run_profile_start_node(
+            {
+                "messages": [{"role": "human", "content": content, "id": "msg-1"}],
+                "thread_id": "thread-1",
+                "thread_key": "thread-key",
+            }
+        )
+    )
+
+    metadata = calls["ingest"]["metadata"]
+    assert metadata["content_type"] == "code"
+    assert "alpha_ravis_source_metadata" in metadata["source_symbols"]
+    ingest_record = updates["run_profile"]["large_paste_ingests"][0]
+    assert ingest_record["content_type"] == "code"
+    assert "source_keywords" in ingest_record
+
+
+def test_long_prompt_direct_route_classifier_can_use_fast_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_classifier(text: str):
+        return {
+            "intent": "noisy_query",
+            "retrieval_query": "weather in berlin",
+            "instruction_lines": [],
+            "document_lines": [],
+            "question_lines": [[1, 1]],
+            "confidence": 0.93,
+        }
+
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_FAST_PATH", "true")
+    monkeypatch.setenv("ALPHARAVIS_FAST_PATH_MAX_CHARS", "80")
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_RETRIEVAL_QUERY_CLASSIFIER", "true")
+    monkeypatch.setenv("ALPHARAVIS_RETRIEVAL_QUERY_CLASSIFIER_MIN_CHARS", "500")
+    monkeypatch.setenv("ALPHARAVIS_LONG_PROMPT_DIRECT_ROUTE_MAX_CHARS", "2000")
+    monkeypatch.setattr(agent_graph, "_classify_prompt_for_retrieval", fake_classifier)
+
+    long_noisy = "Viel Vorrede ohne Spezialbedarf. " * 30 + "Was ist die kurze Antwort?"
+    updates = asyncio.run(agent_graph.route_decision_node({"messages": [{"role": "human", "content": long_noisy}]}))
+
+    assert updates["fast_path_route"] == "fast_path"
+    assert updates["run_profile"]["route_classifier"]["intent"] == "noisy_query"
+
+
+def test_long_prompt_document_route_stays_agent_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_classifier(text: str):
+        return {
+            "intent": "document",
+            "retrieval_query": "deployment document",
+            "instruction_lines": [],
+            "document_lines": [[1, 20]],
+            "question_lines": [[21, 21]],
+            "confidence": 0.95,
+        }
+
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_FAST_PATH", "true")
+    monkeypatch.setenv("ALPHARAVIS_FAST_PATH_MAX_CHARS", "80")
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_RETRIEVAL_QUERY_CLASSIFIER", "true")
+    monkeypatch.setenv("ALPHARAVIS_RETRIEVAL_QUERY_CLASSIFIER_MIN_CHARS", "500")
+    monkeypatch.setenv("ALPHARAVIS_LONG_PROMPT_DIRECT_ROUTE_MAX_CHARS", "2000")
+    monkeypatch.setattr(agent_graph, "_classify_prompt_for_retrieval", fake_classifier)
+
+    document_prompt = "Material:\n" + ("runtime setting retrieval enabled\n" * 30) + "Welche Regel steht drin?"
+    updates = asyncio.run(agent_graph.route_decision_node({"messages": [{"role": "human", "content": document_prompt}]}))
+
+    assert updates["fast_path_route"] == "swarm"
+    assert "classified as document" in updates["run_profile"]["route_reason"]
+
+
+def test_archive_recall_query_condenser_uses_topic_and_context() -> None:
+    profile = agent_graph._condense_archive_recall_query_from_text(
+        "Wie war das nochmal mit dem Reranker?",
+        "Vorher haben wir Qwen3-Reranker GPU batch size und deterministic fallback besprochen.",
+    )
+
+    assert profile["strategy"] == "archive_recall_condenser"
+    assert "Reranker" in profile["query"] or "reranker" in profile["query"]
+    assert "fallback" in profile["query"].lower()
 
 
 def test_active_rag_prefetch_injects_bounded_context(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -605,6 +999,155 @@ def test_active_rag_prefetch_injects_bounded_context(monkeypatch: pytest.MonkeyP
     assert updates["run_profile"]["active_rag_prefetch_status"] == "injected"
     assert updates["messages"][0].id == agent_graph.ACTIVE_RAG_CONTEXT_MESSAGE_ID
     assert "The grounded document detail." in updates["messages"][0].content
+
+
+def test_active_rag_prefetch_caps_long_noisy_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_agentic_rag_retrieve(**kwargs):
+        calls.update(kwargs)
+        return {
+            "final_query": kwargs["query"],
+            "graph_trace": [],
+            "context_packet": {
+                "query": kwargs["query"],
+                "chunk_count": 1,
+                "chunks": [
+                    {
+                        "rank": 1,
+                        "source_key": "doc-1",
+                        "retrieval_backend": "alpharavis_pgvector",
+                        "relevance_score": 0.9,
+                        "chunk_text": "Condensed query detail.",
+                    }
+                ],
+            },
+        }
+
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_RETRIEVAL_QUERY_CLASSIFIER", "false")
+    monkeypatch.setenv("ALPHARAVIS_RETRIEVAL_DIRECT_QUERY_MAX_CHARS", "200")
+    monkeypatch.setenv("ALPHARAVIS_RETRIEVAL_QUERY_MAX_CHARS", "180")
+    monkeypatch.setattr(agent_graph, "_router_agentic_rag_retrieve", fake_agentic_rag_retrieve)
+
+    noisy = "Dies ist sehr viel Vorrede. " * 80 + "\nWelche Details stehen im AlphaRavis Dokument ueber Reranking?"
+    updates = asyncio.run(
+        agent_graph.active_rag_prefetch_node(
+            {
+                "messages": [{"role": "human", "content": noisy}],
+                "thread_id": "thread-1",
+                "rag_active": True,
+                "active_source_keys": ["doc-1"],
+            }
+        )
+    )
+
+    assert len(calls["query"]) <= 180
+    assert "Reranking" in calls["query"]
+    assert updates["run_profile"]["active_rag_prefetch_query_strategy"] == "local_condensed"
+    assert updates["run_profile"]["active_rag_prefetch_original_query_chars"] > 200
+
+
+def test_active_rag_prefetch_uses_small_model_classifier_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_classifier(text: str):
+        return {
+            "intent": "mixed",
+            "retrieval_query": "AlphaRavis reranker GPU embedding context",
+            "instruction_lines": [[1, 3]],
+            "document_lines": [[10, 40]],
+            "question_lines": [[90, 91]],
+            "confidence": 0.91,
+            "model": "small",
+            "elapsed_seconds": 0.1,
+        }
+
+    async def fake_agentic_rag_retrieve(**kwargs):
+        calls.update(kwargs)
+        return {
+            "context_packet": {
+                "query": kwargs["query"],
+                "chunk_count": 1,
+                "chunks": [
+                    {
+                        "rank": 1,
+                        "source_key": "doc-1",
+                        "retrieval_backend": "alpharavis_pgvector",
+                        "relevance_score": 0.9,
+                        "chunk_text": "Classifier query detail.",
+                    }
+                ],
+            },
+            "graph_trace": [],
+        }
+
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_RETRIEVAL_QUERY_CLASSIFIER", "true")
+    monkeypatch.setenv("ALPHARAVIS_RETRIEVAL_QUERY_CLASSIFIER_MIN_CHARS", "200")
+    monkeypatch.setattr(agent_graph, "_classify_prompt_for_retrieval", fake_classifier)
+    monkeypatch.setattr(agent_graph, "_router_agentic_rag_retrieve", fake_agentic_rag_retrieve)
+
+    long_prompt = "Instructions: keep output short.\n" + ("Document: AlphaRavis embeddings and reranking.\n" * 20)
+    updates = asyncio.run(
+        agent_graph.active_rag_prefetch_node(
+            {
+                "messages": [{"role": "human", "content": long_prompt}],
+                "thread_id": "thread-1",
+                "rag_active": True,
+                "active_source_keys": ["doc-1"],
+            }
+        )
+    )
+
+    assert calls["query"] == "AlphaRavis reranker GPU embedding context"
+    assert updates["run_profile"]["active_rag_prefetch_query_strategy"] == "small_model_classifier"
+    assert updates["run_profile"]["active_rag_prefetch_classifier"]["intent"] == "mixed"
+
+
+def test_active_rag_prefetch_falls_back_when_classifier_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def failing_classifier(text: str):
+        raise RuntimeError("offline")
+
+    async def fake_agentic_rag_retrieve(**kwargs):
+        calls.update(kwargs)
+        return {
+            "context_packet": {
+                "query": kwargs["query"],
+                "chunk_count": 1,
+                "chunks": [
+                    {
+                        "rank": 1,
+                        "source_key": "doc-1",
+                        "retrieval_backend": "alpharavis_pgvector",
+                        "relevance_score": 0.9,
+                        "chunk_text": "Fallback detail.",
+                    }
+                ],
+            },
+            "graph_trace": [],
+        }
+
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_RETRIEVAL_QUERY_CLASSIFIER", "true")
+    monkeypatch.setenv("ALPHARAVIS_RETRIEVAL_QUERY_CLASSIFIER_MIN_CHARS", "200")
+    monkeypatch.setenv("ALPHARAVIS_RETRIEVAL_QUERY_MAX_CHARS", "220")
+    monkeypatch.setattr(agent_graph, "_classify_prompt_for_retrieval", failing_classifier)
+    monkeypatch.setattr(agent_graph, "_router_agentic_rag_retrieve", fake_agentic_rag_retrieve)
+
+    long_prompt = "Vorrede. " * 80 + "\nWelche Details stehen im Dokument?"
+    updates = asyncio.run(
+        agent_graph.active_rag_prefetch_node(
+            {
+                "messages": [{"role": "human", "content": long_prompt}],
+                "thread_id": "thread-1",
+                "rag_active": True,
+                "active_source_keys": ["doc-1"],
+            }
+        )
+    )
+
+    assert calls["query"]
+    assert updates["run_profile"]["active_rag_prefetch_query_warning"].startswith("classifier_failed")
 
 
 def test_rag_pin_tools_persist_thread_active_sources(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -700,6 +1243,91 @@ def test_read_source_chunks_tool_uses_current_thread(monkeypatch: pytest.MonkeyP
     assert '"chunk_text": "bounded"' in result
 
 
+def test_read_raw_source_reads_bounded_store_slice(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeStore:
+        def __init__(self):
+            self.values = {
+                (agent_graph._thread_source_record_ns("thread-1"), "source-1"): {
+                    "source_key": "source-1",
+                    "source_type": "large_paste",
+                    "title": "Raw Source",
+                    "content": "alpha\nneedle starts here\n" + ("body " * 200),
+                    "thread_id": "thread-1",
+                    "thread_key": "thread-1",
+                    "metadata": {"origin": "test"},
+                }
+            }
+
+        def get(self, namespace, key):
+            return self.values.get((namespace, key))
+
+    monkeypatch.setattr(agent_graph, "get_store", lambda: FakeStore())
+    monkeypatch.setattr(agent_graph, "_thread_id_from_config", lambda: "thread-1")
+
+    result = asyncio.run(agent_graph.read_raw_source("source-1", source_type="large_paste", search="needle", max_chars=80))
+
+    assert '"found": true' in result
+    assert "needle starts here" in result
+    assert '"total_chars"' in result
+    assert '"truncated_after": true' in result
+
+
+def test_store_raw_source_record_writes_thread_and_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    writes: list[tuple[tuple[str, ...], str, dict[str, object]]] = []
+
+    async def fake_put(store, namespace, key, value):
+        writes.append((namespace, key, value))
+
+    monkeypatch.setattr(agent_graph, "get_store", lambda: object())
+    monkeypatch.setattr(agent_graph, "_maybe_put", fake_put)
+
+    result = asyncio.run(
+        agent_graph._store_raw_source_record(
+            source_type="large_paste",
+            source_key="source-1",
+            title="Source",
+            content="raw content",
+            indexed_content="indexed content",
+            thread_id="thread-1",
+            thread_key="thread-key",
+            metadata={"origin": "test"},
+        )
+    )
+
+    assert result["stored"] is True
+    assert writes[0][0] == agent_graph._thread_source_record_ns("thread-1")
+    assert writes[0][1] == "source-1"
+    assert writes[0][2]["content"] == "raw content"
+    assert writes[0][2]["indexed_content"] == "indexed content"
+    assert writes[1][0] == agent_graph.SOURCE_RECORD_INDEX_NS
+    assert "content" not in writes[1][2]
+
+
+def test_read_archive_record_returns_bounded_slice(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeStore:
+        def get(self, namespace, key):
+            if namespace == agent_graph._thread_archive_ns("thread-1") and key == "archive-1":
+                return {
+                    "archive_key": "archive-1",
+                    "title": "Archive",
+                    "summary": "summary",
+                    "content": "prefix " + ("archive raw " * 200),
+                    "thread_id": "thread-1",
+                    "thread_key": "thread-1",
+                    "metadata": {},
+                }
+            return None
+
+    monkeypatch.setattr(agent_graph, "get_store", lambda: FakeStore())
+
+    result = asyncio.run(agent_graph.read_archive_record("archive-1", thread_id="thread-1", start=7, max_chars=240))
+
+    assert '"found": true' in result
+    assert '"start": 7' in result
+    assert '"max_chars": 240' in result
+    assert '"truncated_after": true' in result
+
+
 def test_ingest_document_file_loads_and_pins_allowed_file(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = tmp_path / "doc.md"
     source.write_text("# ignored by fake loader", encoding="utf-8")
@@ -768,6 +1396,79 @@ def test_ingest_document_file_blocks_outside_ingest_root(tmp_path, monkeypatch: 
 
     assert '"index_status": "blocked"' in result
     assert "outside the allowed root" in result
+
+
+def test_pending_document_uploads_ingest_into_active_rag(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "upload.md"
+    source.write_text("ignored", encoding="utf-8")
+    calls: dict[str, object] = {}
+
+    def fake_load_document_file(path):
+        return {
+            "ok": True,
+            "path": str(path),
+            "title": "Upload",
+            "text": "Uploaded document content.",
+            "text_chars": 26,
+            "metadata": {"filename": "upload.md"},
+        }
+
+    async def fake_ingest_source(**kwargs):
+        calls.update(kwargs)
+        await kwargs["pgvector_index"](
+            source_type=kwargs["source_type"],
+            source_key=kwargs["source_key"],
+            title=kwargs["title"],
+            content=kwargs["content"],
+            thread_id=kwargs["thread_id"],
+            thread_key=kwargs["thread_key"],
+            scope=kwargs["scope"],
+            metadata=kwargs["metadata"],
+        )
+        return {
+            "index_status": "indexed",
+            "source_key": kwargs["source_key"],
+            "rag_file_id": kwargs["source_key"],
+            "rag_active": True,
+            "active_source_keys": [kwargs["source_key"]],
+            "active_rag_file_ids": [],
+            "indexed_backends": ["alpharavis_pgvector"],
+            "queued_backends": [],
+        }
+
+    async def fake_index(**kwargs):
+        progress_callback = kwargs.get("progress_callback")
+        if progress_callback:
+            progress_callback({"event": "large_ingest.chunk_indexed", "chunk_number": 1, "chunk_count": 1})
+        return "uploaded_document:librechat:file_doc:1"
+
+    monkeypatch.setenv("ALPHARAVIS_DOCUMENT_INGEST_ROOT", str(tmp_path))
+    monkeypatch.setattr(agent_graph, "_document_load_file", fake_load_document_file)
+    monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
+    monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", fake_index)
+
+    ingests, rag_update = asyncio.run(
+        agent_graph._ingest_pending_document_uploads(
+            {
+                "thread_id": "thread-1",
+                "thread_key": "thread-key",
+                "pending_document_ingests": [
+                    {
+                        "path": str(source),
+                        "source_key": "librechat:file_doc",
+                        "title": "Upload",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert calls["source_key"] == "librechat:file_doc"
+    assert calls["content"] == "Uploaded document content."
+    assert rag_update["rag_active"] is True
+    assert rag_update["active_source_keys"] == ["librechat:file_doc"]
+    assert ingests[0]["events"][1]["event"] == "document_ingest.chunk_indexed"
+    assert ingests[0]["events"][-1]["event"] == "document_ingest.completed"
 
 
 def test_active_rag_prefetch_uses_pgvector_only_sources_without_rag_file_ids(monkeypatch: pytest.MonkeyPatch) -> None:

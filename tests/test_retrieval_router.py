@@ -135,6 +135,140 @@ def test_query_sources_with_backends_can_rerank_results(monkeypatch) -> None:
     assert payload["results"][0]["rerank_score"] > 0
 
 
+def test_query_sources_with_backends_can_use_model_reranker(monkeypatch) -> None:
+    async def fake_pgvector_search(**kwargs):
+        return [
+            {
+                "source_type": "document",
+                "source_key": "doc-1",
+                "title": "First",
+                "chunk_text": "coffee notes",
+                "similarity": 0.9,
+            },
+            {
+                "source_type": "document",
+                "source_key": "doc-1",
+                "title": "Second",
+                "chunk_text": "AlphaRavis upload ingest uses LangChain loaders.",
+                "similarity": 0.2,
+            },
+        ]
+
+    async def fake_model_reranker(query, documents):
+        assert query == "How are upload documents ingested?"
+        assert len(documents) == 2
+        return {"results": [{"index": 0, "relevance_score": 0.1}, {"index": 1, "relevance_score": 0.95}]}
+
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_RAG_RERANKING", "true")
+    monkeypatch.setenv("ALPHARAVIS_RAG_RERANKER_MODE", "model")
+    monkeypatch.setenv("ALPHARAVIS_RAG_RERANKER_URL", "http://reranker:8000")
+    monkeypatch.setattr(retrieval_router, "_call_model_reranker", fake_model_reranker)
+
+    payload = asyncio.run(
+        retrieval_router.query_sources_with_backends(
+            query="How are upload documents ingested?",
+            source_keys=["doc-1"],
+            source_type="document",
+            limit=2,
+            pgvector_search=fake_pgvector_search,
+            pgvector_available=True,
+        )
+    )
+
+    assert payload["reranking"]["strategy"] == "llamacpp_qwen3_reranker"
+    assert payload["reranking"]["fallback_used"] is False
+    assert payload["results"][0]["title"] == "Second"
+    assert payload["results"][0]["rerank_score"] == 0.95
+
+
+def test_query_sources_with_backends_falls_back_when_model_reranker_fails(monkeypatch) -> None:
+    async def fake_pgvector_search(**kwargs):
+        return [
+            {
+                "source_type": "document",
+                "source_key": "doc-1",
+                "title": "Weak vector hit",
+                "chunk_text": "unrelated coffee notes",
+                "similarity": 0.9,
+            },
+            {
+                "source_type": "document",
+                "source_key": "doc-1",
+                "title": "Strong lexical hit",
+                "chunk_text": "AlphaRavis pgvector large paste retrieval rule",
+                "similarity": 0.2,
+            },
+        ]
+
+    async def failing_model_reranker(query, documents):
+        raise RuntimeError("reranker offline")
+
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_RAG_RERANKING", "true")
+    monkeypatch.setenv("ALPHARAVIS_RAG_RERANKER_MODE", "model")
+    monkeypatch.setenv("ALPHARAVIS_RAG_RERANKER_URL", "http://reranker:8000")
+    monkeypatch.setattr(retrieval_router, "_call_model_reranker", failing_model_reranker)
+
+    payload = asyncio.run(
+        retrieval_router.query_sources_with_backends(
+            query="AlphaRavis large paste retrieval",
+            source_keys=["doc-1"],
+            source_type="document",
+            limit=2,
+            pgvector_search=fake_pgvector_search,
+            pgvector_available=True,
+        )
+    )
+
+    assert payload["reranking"]["fallback_used"] is True
+    assert payload["reranking"]["requested_strategy"] == "llamacpp_qwen3_reranker"
+    assert payload["results"][0]["title"] == "Strong lexical hit"
+    assert any("Model reranker failed" in warning for warning in payload["warnings"])
+
+
+def test_agentic_rag_retrieve_can_use_optional_llm_grading(monkeypatch) -> None:
+    async def fake_pgvector_search(**kwargs):
+        return [
+            {
+                "source_type": "document",
+                "source_key": "doc-1",
+                "title": "Vector preferred but wrong",
+                "chunk_text": "coffee notes",
+                "similarity": 0.95,
+            },
+            {
+                "source_type": "document",
+                "source_key": "doc-1",
+                "title": "LLM relevant",
+                "chunk_text": "AlphaRavis upload ingest uses LangChain loaders.",
+                "similarity": 0.2,
+            },
+        ]
+
+    async def fake_llm_grade_func(**kwargs):
+        hits = kwargs["hits"]
+        return {
+            "relevant_hits": [{**hits[1], "relevance_score": 1.0}],
+            "rejected_hits": [{**hits[0], "relevance_score": 0.0}],
+            "grading_strategy": "llm_structured_output",
+        }
+
+    monkeypatch.setenv("ALPHARAVIS_AGENTIC_RAG_LLM_GRADING", "true")
+    payload = asyncio.run(
+        retrieval_router.agentic_rag_retrieve(
+            query="How are upload documents ingested?",
+            source_keys=["doc-1"],
+            source_type="document",
+            limit=2,
+            pgvector_search=fake_pgvector_search,
+            pgvector_available=True,
+            llm_grade_func=fake_llm_grade_func,
+        )
+    )
+
+    assert payload["grade"]["grading_strategy"] == "llm_structured_output"
+    assert payload["context_packet"]["chunks"][0]["title"] == "LLM relevant"
+
+
 def test_retrieval_hits_to_documents_returns_langchain_shaped_documents() -> None:
     docs = retrieval_router.retrieval_hits_to_documents(
         [

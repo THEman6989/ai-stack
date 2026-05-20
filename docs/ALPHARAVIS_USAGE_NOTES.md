@@ -1214,23 +1214,58 @@ ALPHARAVIS_PGVECTOR_CODE_CHUNK_OVERLAP_TOKENS=80
 ALPHARAVIS_PGVECTOR_EMBEDDING_TIMEOUT_SECONDS=45
 ALPHARAVIS_SOURCE_READ_MAX_CHUNKS=20
 ALPHARAVIS_SOURCE_READ_MAX_CHARS=30000
+ALPHARAVIS_RAW_SOURCE_READ_MAX_CHARS=30000
+ALPHARAVIS_RAW_SOURCE_SEARCH_CONTEXT_BEFORE_CHARS=1000
 ALPHARAVIS_ENABLE_RAG_RERANKING=false
+ALPHARAVIS_RAG_RERANKER_MODE=model
+ALPHARAVIS_RAG_RERANKER_URL=http://192.168.178.140:8000
+ALPHARAVIS_RAG_RERANKER_ENDPOINT=/reranking
+ALPHARAVIS_RAG_RERANKER_MODEL=qwen3-reranker-0.6b
+ALPHARAVIS_RAG_RERANKER_TIMEOUT_SECONDS=8
+ALPHARAVIS_RAG_RERANKER_MAX_HITS=20
+ALPHARAVIS_RAG_RERANKER_MAX_CHARS=700
+ALPHARAVIS_RAG_RERANKER_FALLBACK_DETERMINISTIC=true
+ALPHARAVIS_AGENTIC_RAG_LLM_GRADING=false
+ALPHARAVIS_AGENTIC_RAG_GRADER_MODEL=openai/big-boss
+ALPHARAVIS_AGENTIC_RAG_GRADER_TIMEOUT_SECONDS=25
+ALPHARAVIS_PGVECTOR_DEDUP_SOURCES=true
 ALPHARAVIS_DOCUMENT_INGEST_ROOT=
 ```
 
 AlphaRavis chooses the chunk profile from `source_type`, filename/path metadata,
 Markdown code fences, and common code/log syntax. Code detection is intentionally
 heuristic for now; a later Tree-sitter/AST splitter can cut by function/class
-boundaries more precisely. With `ALPHARAVIS_PGVECTOR_SPLITTER=auto`, explicit
+boundaries more precisely. Archives and archive collections are not forced to a
+chat profile anymore: AlphaRavis first scans their content for code fences,
+common code syntax, and log/traceback lines, then uses `code`, `log`, or `chat`
+accordingly. With `ALPHARAVIS_PGVECTOR_SPLITTER=auto`, explicit
 document and large-paste sources use LangChain's
 `RecursiveCharacterTextSplitter` when the runtime package is available, while
 chat/archive/code/log profiles keep the AlphaRavis splitter. Use
 `ALPHARAVIS_PGVECTOR_SPLITTER=langchain` to force LangChain splitting, or
 `alpharavis` to force the local fallback.
 Optional router reranking is default-off. When
-`ALPHARAVIS_ENABLE_RAG_RERANKING=true`, AlphaRavis reorders source-scoped hits
-with a deterministic lexical/vector score blend before grading and context
-packet construction.
+`ALPHARAVIS_ENABLE_RAG_RERANKING=true`, AlphaRavis reorders source-scoped hits.
+With `ALPHARAVIS_RAG_RERANKER_MODE=model`, it calls the configured llama.cpp
+reranker endpoint, currently the always-on Qwen3-Reranker-0.6B server at
+`http://192.168.178.140:8000/reranking`. If that call fails or times out,
+`ALPHARAVIS_RAG_RERANKER_FALLBACK_DETERMINISTIC=true` falls back to the local
+deterministic lexical/vector score blend and records a warning in the retrieval
+payload.
+Optional Agentic-RAG LLM grading is also default-off. When
+`ALPHARAVIS_AGENTIC_RAG_LLM_GRADING=true`, source-scoped Agentic-RAG asks the
+configured grader model for structured relevance decisions and falls back to the
+deterministic grader if the model call fails or returns invalid JSON. The
+example uses `openai/big-boss`, but the grader call explicitly disables hidden
+thinking with `chat_template_kwargs.enable_thinking=false` and
+`preserve_thinking=false` because this task is only a short JSON relevance
+decision.
+
+`ALPHARAVIS_PGVECTOR_DEDUP_SOURCES=true` skips pgvector embed/upsert when the
+same scoped source key already has an identical `source_digest`. Repeated
+identical large pastes in one thread now produce the same content-based
+`source_key`, which makes the dedup path effective without changing exact
+source-scoped retrieval semantics.
 
 File-like RAG ingest has an internal LangChain loader helper in
 `langgraph-app/document_ingest.py`. It normalizes PDF, DOCX, HTML, Markdown,
@@ -1238,9 +1273,11 @@ plain text, CSV/JSON/YAML, and log files into text plus per-document metadata
 before the content is handed to `ingest_source(...)`. Agents/operators can use
 `ingest_document_file` for explicit server-local files; it reads only under
 `ALPHARAVIS_DOCUMENT_INGEST_ROOT` and then pins the resulting active RAG source
-for the current thread by default. The real LibreChat upload path is not yet
-auto-routed through this helper because the bridge still needs a trusted
-server-side file-path handoff.
+for the current thread by default. LibreChat `file` / `input_file` document
+parts are auto-registered through media-gallery when
+`BRIDGE_DOCUMENT_RAG_AUTO_INGEST=true`; the Bridge sends the mapped
+`pending_document_ingests` path to LangGraph, where `run_profile_start_node`
+loads and indexes the document through the same router.
 
 Use the 32k context window for capability testing and exceptional large-query
 cases, not as the normal archive/memory chunk size.
@@ -1257,6 +1294,7 @@ pin_active_rag_sources
 unpin_active_rag_sources
 inspect_active_rag_sources
 read_source_chunks
+read_raw_source
 ```
 
 It searches the current thread plus global memories by default and also queries
@@ -1265,7 +1303,11 @@ threads only when `include_other_threads=true` is explicitly requested.
 Use `query_source` / `query_sources` when the agent already has a source key,
 archive key, artifact key, or external RAG `file_id` and should retrieve only
 relevant chunks from that known source. Use `query_archive` for a known archive
-key before deciding whether the raw `read_archive_record` payload is needed.
+key before deciding whether a bounded raw `read_archive_record` slice is needed.
+Use `read_source_chunks` for ordered indexed chunks and `read_raw_source` for a
+bounded raw Store slice of a known document/large-paste source. Both raw-source
+tools support bounded paging; use `search` to jump near a phrase and `start` to
+continue reading from an offset.
 Use `agentic_rag_retrieve` when the known-source question needs a
 retrieve/grade/rewrite pass and a bounded `context_packet` for a grounded
 answer. It stays tool-only; it does not automatically load complete archives
@@ -1275,12 +1317,20 @@ thread-level RAG metadata (`rag_active`, active source keys, optional external
 file ids, and activation reason) so a later auto-retrieval node can use bounded
 chunks. Compression archives remain passive by default with
 `archive_rag_mode=tool_only`.
-Large pasted messages above `ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS` are only
-auto-indexed when the active context is close to the compression trigger. The
-default margin is 5000 tokens and is controlled by
-`ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS`. If there is still more
-room, the paste stays in normal active context. To force indexing anyway, wrap
-the exact text in paired `/rag` markers:
+Large pasted messages above `ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS` are not
+auto-indexed immediately by default. With
+`ALPHARAVIS_LARGE_PASTE_RAG_AUTO_STAGE=post_compression`, AlphaRavis first lets
+pre-run compression reduce older context. Then it re-estimates the active
+request; if the large paste still keeps the request above
+`ALPHARAVIS_LARGE_PASTE_RAG_POST_COMPRESSION_TRIGGER_RATIO` of the active
+compression budget, default `0.80`, the paste is indexed as RAG/raw source and
+replaced with a source marker. This keeps normal large-but-fitting prompts in
+active context, while avoiding compression of the user's latest large paste
+before RAG gets a chance to preserve it. After that replacement, AlphaRavis can
+run one more compression pass for the remaining non-document chatter when the
+thread is still above `ALPHARAVIS_LARGE_PASTE_POST_RAG_COMPRESSION_TRIGGER_RATIO`
+of the active budget. To force indexing anyway, wrap the exact text in paired
+`/rag` markers:
 
 ```text
 /rag
@@ -1327,9 +1377,12 @@ New records go into a durable embedding queue by default:
 ALPHARAVIS_PGVECTOR_INDEX_MODE=queue
 ALPHARAVIS_PGVECTOR_QUEUE_TABLE=alpharavis_embedding_jobs
 ALPHARAVIS_EMBEDDING_JOB_BATCH_SIZE=10
+ALPHARAVIS_EMBEDDING_JOB_STALE_AFTER_SECONDS=900
 ```
 
 The Power Management Agent can drain that queue with `run_embedding_memory_jobs`.
+If a dev reload or container restart interrupts a claimed job, the next queue
+drain can reclaim stale `running` rows after the configured stale timeout.
 
 Archive mirroring into `rag_api` is prepared but off by default:
 
@@ -1361,6 +1414,28 @@ enter the target base URL/IP, model name, OpenAI-compatible or Ollama mode,
 choose text or experimental vision input, then run the probe. It reports
 embedding dimensions, latency per input size, max accepted chars/tokens, and
 whether the backend rejected or became too slow.
+The same Observer page also has `RAG Load Probe` for combined runtime checks.
+It runs the selected embedding endpoint and reranker endpoint concurrently
+across configurable rough-token steps such as `400,1000,4000,10000,20000,40000`
+and can optionally send real Bridge `/v1/responses` requests for selected
+steps. Use it when checking whether GPU embedding and GPU reranking can coexist
+without excessive latency. If the embedding response reports the same
+`prompt_eval_count` for larger and larger requests, treat that as evidence that
+the embedding server is accepting but truncating/capping inputs at its current
+context length.
+For active document/large-paste RAG, AlphaRavis prepares a bounded retrieval
+query before it asks the embedding backend for a query vector. Short questions
+are embedded directly. Long/noisy turns are locally condensed and capped by
+`ALPHARAVIS_RETRIEVAL_QUERY_MAX_CHARS`. Ambiguous long prompts can call the
+small local classifier at `ALPHARAVIS_RAG_CLASSIFIER_API_BASE`; when that value
+is empty, AlphaRavis derives the base URL from `BIG_BOSS_API_BASE` and port
+`8001`. The classifier must return JSON only; AlphaRavis records its labels and
+line ranges in the run profile and falls back to local condensation if the
+classifier is unavailable.
+For long large-paste ingest, `ALPHARAVIS_ENABLE_LARGE_PASTE_SMALL_CLASSIFIER`
+lets the same classifier refine mixed instruction+document prompts. Instruction
+and question ranges are removed from the indexed body, while the mixed marker
+keeps the current query/task lines visible for the model.
 It is allowed when the big llama.cpp server is active or the system has been
 idle long enough, depending on `ALPHARAVIS_EMBEDDING_LOAD_POLICY`.
 
@@ -1369,9 +1444,12 @@ To let LangGraph drain the queue automatically:
 ```text
 ALPHARAVIS_ENABLE_EMBEDDING_SCHEDULER=true
 ALPHARAVIS_EMBEDDING_SCHEDULER_INTERVAL_SECONDS=120
+ALPHARAVIS_EMBEDDING_SCHEDULER_IDLE_AFTER_SECONDS=600
 ```
 
-The lifecycle runner pauses if the small Ollama chat/crisis model is already
+The scheduler uses real graph inactivity: every LangGraph run refreshes an
+in-process activity timestamp, and queued embedding jobs only drain after the
+configured idle window. The lifecycle runner pauses if the small Ollama chat/crisis model is already
 loaded and `ALPHARAVIS_EMBEDDING_UNLOAD_CHAT_MODEL=false`. This avoids stealing
 the management node from crisis work. If you want the runner to unload the small
 chat model for embedding windows, set:

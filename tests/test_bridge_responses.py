@@ -358,6 +358,94 @@ def test_bridge_mirrors_chat_image_parts_to_media_gallery(monkeypatch) -> None:
     assert part["alpharavis_original_media_url"].startswith("http://librechat:3080/")
 
 
+def test_bridge_registers_document_upload_for_pending_rag_ingest(monkeypatch) -> None:
+    requests: list[dict] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict:
+            return {
+                "asset_id": "asset_doc",
+                "public_url": "http://localhost:8130/media/2026/doc.pdf",
+                "local_path": "/media-data/2026/thread/input/asset-doc.pdf",
+                "relative_path": "2026/thread/input/asset-doc.pdf",
+                "download_error": "",
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, url: str, json: dict) -> FakeResponse:
+            requests.append({"url": url, "json": json})
+            return FakeResponse()
+
+    monkeypatch.setattr(bridge_server.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(bridge_server, "BRIDGE_DOCUMENT_RAG_AUTO_INGEST", True)
+    monkeypatch.setattr(bridge_server, "BRIDGE_DOCUMENT_RAG_INGEST_ROOT", "/workspace/media-data")
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_file",
+                    "file_id": "file_doc",
+                    "filename": "doc.pdf",
+                    "mime_type": "application/pdf",
+                    "file_url": {"url": "http://librechat:3080/api/files/download/user/file_doc"},
+                }
+            ],
+        }
+    ]
+
+    asyncio.run(
+        bridge_server._mirror_video_parts_in_messages(
+            messages,
+            thread_id="thread_doc",
+            thread_key="conversation_doc",
+        )
+    )
+
+    part = messages[0]["content"][0]
+    pending = bridge_server._collect_pending_document_ingests(messages)
+    assert requests[0]["json"]["media_type"] == "document"
+    assert requests[0]["json"]["source_key"] == "librechat:file_doc"
+    assert part["file_url"]["url"].startswith("http://librechat:3080/")
+    assert pending[0]["path"] == "/workspace/media-data/2026/thread/input/asset-doc.pdf"
+    assert pending[0]["source_key"] == "librechat:file_doc"
+
+
+def test_bridge_extracts_ingest_progress_activity() -> None:
+    text = bridge_server._extract_ingest_activity(
+        {
+            "large_paste_ingests": [
+                {
+                    "source_key": "large_paste:thread:abc",
+                    "index_status": "indexed",
+                    "events": [
+                        {
+                            "event": "large_ingest.chunk_indexed",
+                            "chunk_number": 2,
+                            "chunk_count": 5,
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert "Chunk 2/5" in text
+    assert "large_paste:thread:abc" in text
+
+
 def test_bridge_groups_image_and_video_parts_by_thread(monkeypatch) -> None:
     requests: list[dict] = []
 

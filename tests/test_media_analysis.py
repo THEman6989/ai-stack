@@ -94,8 +94,13 @@ def test_vector_chunk_profile_detects_code_and_chat(monkeypatch) -> None:
     monkeypatch.delenv("ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_CHARS", raising=False)
 
     assert vector_memory._chunk_profile("artifact", "app.py", {}, "def run():\n    return 1") == "code"
+    assert vector_memory._chunk_profile("large_paste", "notes", {"content_type": "log"}, "plain text") == "log"
+    assert vector_memory._chunk_profile("large_paste", "settings", {"content_type": "config"}, "plain text") == "code"
     assert vector_memory._chunk_profile("archive", "chat archive", {}, "user: hello\nassistant: hi") == "chat"
+    assert vector_memory._chunk_profile("archive", "code archive", {}, "```python\ndef archived():\n    return 1\n```") == "code"
+    assert vector_memory._chunk_profile("archive_collection", "ops archive", {}, "ERROR service crashed\nTraceback") == "log"
     assert vector_memory._chunk_max_chars(source_type="archive") == 2800
+    assert vector_memory._chunk_max_chars(source_type="archive", text="def archived():\n    return 1") == 2400
     assert vector_memory._chunk_max_chars(source_type="artifact", title="app.py", text="def run():\n    return 1") == 2400
 
 
@@ -201,6 +206,83 @@ def test_upsert_memory_record_adds_source_and_chunk_digests(monkeypatch) -> None
     assert first_chunk["chunk_digest"] == vector_memory._content_digest("chunk one")
     assert second_chunk["chunk_digest"] == vector_memory._content_digest("chunk two")
     assert first_chunk["digest_algorithm"] == "sha256-normalized-text"
+
+
+def test_upsert_memory_record_skips_existing_identical_source_digest(monkeypatch) -> None:
+    calls: dict[str, int] = {"embed": 0, "delete": 0, "insert": 0}
+
+    async def fake_embed_text(text):
+        calls["embed"] += 1
+        raise AssertionError("duplicate source should not embed")
+
+    async def immediate_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(vector_memory, "is_enabled", lambda: True)
+    monkeypatch.setattr(vector_memory, "chunk_text", lambda *args, **kwargs: ["same chunk"])
+    monkeypatch.setattr(vector_memory, "embed_text", fake_embed_text)
+    monkeypatch.setattr(vector_memory.asyncio, "to_thread", immediate_to_thread)
+    monkeypatch.setattr(
+        vector_memory,
+        "_source_digest_match_sync",
+        lambda **kwargs: {"chunk_count": 1, "source_key": kwargs["source_key"]},
+    )
+    monkeypatch.setattr(vector_memory, "_delete_source_sync", lambda **kwargs: calls.__setitem__("delete", calls["delete"] + 1))
+    monkeypatch.setattr(vector_memory, "_insert_chunk_sync", lambda **kwargs: calls.__setitem__("insert", calls["insert"] + 1))
+
+    result = asyncio.run(
+        vector_memory.upsert_memory_record(
+            source_type="large_paste",
+            source_key="source-1",
+            title="Source One",
+            content="same chunk",
+            thread_id="thread-1",
+        )
+    )
+
+    assert result == "deduped:large_paste:source-1:1"
+    assert calls == {"embed": 0, "delete": 0, "insert": 0}
+
+
+def test_upsert_memory_record_emits_chunk_progress(monkeypatch) -> None:
+    progress: list[dict[str, object]] = []
+
+    @dataclass
+    class FakeEmbedding:
+        vector: list[float]
+        model: str = "fake-embed"
+
+    async def fake_embed_text(text):
+        return FakeEmbedding([0.1, 0.2, 0.3])
+
+    async def immediate_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(vector_memory, "is_enabled", lambda: True)
+    monkeypatch.setattr(vector_memory, "chunk_text", lambda *args, **kwargs: ["chunk one", "chunk two"])
+    monkeypatch.setattr(vector_memory, "embed_text", fake_embed_text)
+    monkeypatch.setattr(vector_memory.asyncio, "to_thread", immediate_to_thread)
+    monkeypatch.setattr(vector_memory, "_source_digest_match_sync", lambda **kwargs: None)
+    monkeypatch.setattr(vector_memory, "_ensure_schema_sync", lambda dimensions: None)
+    monkeypatch.setattr(vector_memory, "_delete_source_sync", lambda **kwargs: None)
+    monkeypatch.setattr(vector_memory, "_catalog_enabled", lambda: False)
+    monkeypatch.setattr(vector_memory, "_insert_chunk_sync", lambda **kwargs: None)
+
+    asyncio.run(
+        vector_memory.upsert_memory_record(
+            source_type="large_paste",
+            source_key="source-1",
+            title="Source One",
+            content="chunk one\n\nchunk two",
+            thread_id="thread-1",
+            progress_callback=progress.append,
+        )
+    )
+
+    assert [event["event"] for event in progress] == ["large_ingest.chunk_indexed", "large_ingest.chunk_indexed"]
+    assert progress[0]["chunk_number"] == 1
+    assert progress[1]["chunk_number"] == 2
+    assert progress[1]["chunk_count"] == 2
 
 
 def test_read_source_chunks_clamps_bounds(monkeypatch) -> None:
