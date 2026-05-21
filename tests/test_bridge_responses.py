@@ -1007,6 +1007,9 @@ def test_bridge_observer_records_source_ingest_updates() -> None:
                         "content_type": "code",
                         "content_chars": 120000,
                         "indexed_content_chars": 119000,
+                        "chunk_count": 42,
+                        "indexed_chunk_count": 42,
+                        "source_digest": "digest123",
                         "index_status": "indexed",
                         "indexed_backends": ["alpharavis_pgvector"],
                         "rag_active": True,
@@ -1025,6 +1028,9 @@ def test_bridge_observer_records_source_ingest_updates() -> None:
     assert record["content_type"] == "code"
     assert record["message_replaced"] is True
     assert record["indexed_backends"] == ["alpharavis_pgvector"]
+    assert record["chunk_count"] == 42
+    assert record["indexed_chunk_count"] == 42
+    assert record["source_digest"] == "digest123"
 
 
 def test_bridge_observer_prefers_after_compression_budget_fields() -> None:
@@ -1070,6 +1076,7 @@ def test_bridge_observer_extracts_compression_debug_profile() -> None:
             "pre_run_compression_summary_chunk_prompt_overhead_tokens": 1600,
             "pre_run_compression_workflow_event_count": 7,
             "pre_run_compression_workflow_event_chars": 1800,
+            "pre_run_compression_workflow_event_preview": "- message 4: tool_call shell_command id=call_1",
             "pre_run_compression_archive_key": "archive123",
         }
     )
@@ -1088,6 +1095,7 @@ def test_bridge_observer_extracts_compression_debug_profile() -> None:
     assert pre_run["summary_chunk_prompt_overhead_tokens"] == 1600
     assert pre_run["workflow_event_count"] == 7
     assert pre_run["workflow_event_chars"] == 1800
+    assert pre_run["workflow_event_preview"].startswith("- message 4")
     assert pre_run["archive_key"] == "archive123"
 
 

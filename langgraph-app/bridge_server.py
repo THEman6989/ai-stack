@@ -989,6 +989,7 @@ def _compression_profile_from_run_profile(profile: dict[str, Any]) -> dict[str, 
         "workflow_tool_call_count",
         "workflow_tool_result_count",
         "workflow_event_chars",
+        "workflow_event_preview",
     )
     for prefix in prefixes:
         item = {suffix: profile.get(f"{prefix}_{suffix}") for suffix in suffixes if profile.get(f"{prefix}_{suffix}") is not None}
@@ -1028,6 +1029,9 @@ def _large_ingest_profile_from_run_profile(profile: dict[str, Any]) -> dict[str,
                 "paste_intent": manifest.get("paste_intent") or record.get("paste_intent") or "",
                 "content_chars": manifest.get("content_chars") or record.get("content_chars") or latest_event.get("content_chars") or 0,
                 "indexed_content_chars": manifest.get("indexed_content_chars") or record.get("indexed_content_chars") or 0,
+                "chunk_count": manifest.get("chunk_count") or record.get("chunk_count") or latest_event.get("chunk_count") or 0,
+                "indexed_chunk_count": manifest.get("indexed_chunk_count") or record.get("indexed_chunk_count") or 0,
+                "source_digest": manifest.get("source_digest") or record.get("source_digest") or latest_event.get("source_digest") or "",
                 "indexed_backends": list(manifest.get("indexed_backends") or record.get("indexed_backends") or []),
                 "queued_backends": list(manifest.get("queued_backends") or record.get("queued_backends") or []),
                 "skip_reason": record.get("skip_reason") or latest_event.get("reason") or "",
@@ -2126,6 +2130,8 @@ def _extract_ingest_activity(profile: dict[str, Any]) -> str:
             chunk_count = latest.get("chunk_count")
             if event_name.endswith(".chunk_indexed") and chunk_number and chunk_count:
                 return f"{label}: Chunk {chunk_number}/{chunk_count} indexiert ({source_key})"
+            if event_name.endswith(".deduped"):
+                return f"{label}: dedupliziert ({source_key}, chunks={latest.get('chunk_count', 0)})"
             if event_name.endswith(".deduped"):
                 return f"{label}: vorhandene identische Quelle wiederverwendet ({source_key})"
             if event_name.endswith(".completed"):

@@ -74,6 +74,16 @@ if importlib.util.find_spec("fastapi") is None:
     responses_stub.StreamingResponse = StreamingResponse
     sys.modules["fastapi.responses"] = responses_stub
 
+    staticfiles_stub = types.ModuleType("fastapi.staticfiles")
+    staticfiles_stub.__spec__ = ModuleSpec("fastapi.staticfiles", loader=None)
+
+    class StaticFiles:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    staticfiles_stub.StaticFiles = StaticFiles
+    sys.modules["fastapi.staticfiles"] = staticfiles_stub
+
 if importlib.util.find_spec("pydantic") is None:
     pydantic_stub = types.ModuleType("pydantic")
     pydantic_stub.__spec__ = ModuleSpec("pydantic", loader=None)
@@ -86,7 +96,11 @@ if importlib.util.find_spec("pydantic") is None:
             for name, value in kwargs.items():
                 setattr(self, name, value)
 
+    def Field(default=None, *, default_factory=None, **kwargs):
+        return default_factory() if default_factory is not None else default
+
     pydantic_stub.BaseModel = BaseModel
+    pydantic_stub.Field = Field
     sys.modules["pydantic"] = pydantic_stub
 
 import test_ui_server  # noqa: E402
@@ -235,9 +249,13 @@ def test_observer_page_is_full_table_view() -> None:
     assert "budgetOf(record)" in test_ui_server.OBSERVER_HTML
     assert "context_budget" in test_ui_server.OBSERVER_HTML
     assert "Source Ingest" in test_ui_server.OBSERVER_HTML
+    assert "Big Message / Source Ingest" in test_ui_server.OBSERVER_HTML
     assert "source_ingests" in test_ui_server.OBSERVER_HTML
     assert "function renderSourceIngests()" in test_ui_server.OBSERVER_HTML
     assert "Marker aktiv" in test_ui_server.OBSERVER_HTML
+    assert "Embedding Queue" in test_ui_server.OBSERVER_HTML
+    assert "/api/embedding-queue/status" in test_ui_server.OBSERVER_HTML
+    assert "function renderEmbeddingQueue" in test_ui_server.OBSERVER_HTML
     assert "provider_reported_context_limit" in test_ui_server.OBSERVER_HTML
     assert "final_budget_rescue_budget_met" in test_ui_server.OBSERVER_HTML
     assert "Restbudget" in test_ui_server.OBSERVER_HTML
@@ -245,6 +263,8 @@ def test_observer_page_is_full_table_view() -> None:
     assert "Compression Shrinking" in test_ui_server.OBSERVER_HTML
     assert "function renderShrinking()" in test_ui_server.OBSERVER_HTML
     assert "function shrinkSummary(record)" in test_ui_server.OBSERVER_HTML
+    assert "Workflow / Tool Events" in test_ui_server.OBSERVER_HTML
+    assert "workflow_event_preview" in test_ui_server.OBSERVER_HTML
     assert "summary_chunking_used" in test_ui_server.OBSERVER_HTML
     assert "summary_prompt_pruned" in test_ui_server.OBSERVER_HTML
     assert "Chunk Count" in test_ui_server.OBSERVER_HTML
@@ -284,6 +304,10 @@ def test_observer_page_is_full_table_view() -> None:
     assert "/api/native-document-rag-smoke" in test_ui_server.OBSERVER_HTML
     assert "nativeRagRaw" in test_ui_server.OBSERVER_HTML
     assert "NATIVE_PGVECTOR_RAG_SMOKE" in test_ui_server.OBSERVER_HTML
+    assert "Small Qwen Classifier Probe" in test_ui_server.OBSERVER_HTML
+    assert "runRagClassifierProbe" in test_ui_server.OBSERVER_HTML
+    assert "/api/rag-classifier-probe" in test_ui_server.OBSERVER_HTML
+    assert "ragClassifierRaw" in test_ui_server.OBSERVER_HTML
     assert "Memory Embed Tester" in test_ui_server.OBSERVER_HTML
     assert "runMemoryEmbedProbe" in test_ui_server.OBSERVER_HTML
     assert "/api/memory-embed-probe" in test_ui_server.OBSERVER_HTML
@@ -467,6 +491,62 @@ def test_native_document_rag_smoke_uses_alpharavis_pgvector_only(monkeypatch) ->
     assert result["acceptance_ok"] is True
     assert result["acceptance"]["pgvector_backend_selected"] is True
     assert result["acceptance"]["rag_api_not_used"] is True
+
+
+def test_rag_classifier_probe_covers_semantic_and_fallback_cases() -> None:
+    result = asyncio.run(
+        test_ui_server._run_rag_classifier_probe(
+            test_ui_server.RagClassifierProbeRequest(mode="local_fallback")
+        )
+    )
+
+    cases = {item["case"]: item for item in result["results"]}
+    assert result["status"] == "passed"
+    assert set(cases) == {
+        "short_direct",
+        "long_noisy",
+        "instruction_only",
+        "document_only",
+        "mixed",
+        "fallback_down",
+        "fallback_invalid_json",
+        "fallback_timeout",
+    }
+    assert cases["short_direct"]["classification"] == "short_direct"
+    assert cases["long_noisy"]["classification"] == "long_noisy"
+    assert cases["instruction_only"]["classification"] == "instruction_only"
+    assert cases["document_only"]["classification"] == "document_only"
+    assert cases["mixed"]["classification"] == "mixed"
+    assert cases["fallback_down"]["fallback_used"] is True
+    assert cases["fallback_invalid_json"]["fallback_used"] is True
+    assert cases["fallback_timeout"]["fallback_used"] is True
+
+
+def test_embedding_queue_status_reports_progress(monkeypatch) -> None:
+    async def fake_queue_stats():
+        return {
+            "table": "alpharavis_embedding_queue",
+            "counts": {"pending": 2, "running": 1, "failed": 1, "done": 6},
+            "recent_active": [
+                {
+                    "source_type": "large_paste",
+                    "source_key": "source-1",
+                    "title": "Large Source",
+                    "status": "pending",
+                    "last_error": "",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(test_ui_server, "pgvector_queue_stats", fake_queue_stats)
+
+    result = asyncio.run(test_ui_server._embedding_queue_status())
+
+    assert result["status"] == "active"
+    assert result["active_count"] == 4
+    assert result["done_count"] == 6
+    assert result["progress"] == 0.6
+    assert result["recent_active"][0]["source_key"] == "source-1"
 
 
 def test_memory_embed_probe_openai_compatible(monkeypatch) -> None:

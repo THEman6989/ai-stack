@@ -7,10 +7,44 @@ window can continue without re-deriving the design.
 
 ## Continue Here
 
-This is the current operator handoff for the RAG/compression/classifier work.
-The important point is that Large Paste, compression, RAG, raw-source reads, and
-the small Qwen3.5 classifier are now one coordinated path, not separate
-experiments.
+This is the current operator handoff for the completed RAG/compression,
+classifier, Observer, Service Dashboard, Tailscale, and Media Gallery feature
+slice. The important point is that Large Paste, compression, RAG, raw-source
+reads, archive recall, and the small Qwen3.5 classifier are now one coordinated
+LangGraph-owned path, not separate experiments.
+
+Current completed slice:
+
+- Large-paste ingest is LangGraph-owned. Clients forward input and display
+  metadata; they do not decide whether a paste becomes source/RAG/summary.
+- Plain huge pastes are handled after compression by default. Manual
+  `/rag`, `/rake`, `/index`, `/ingest`, `/big-context`, and fenced
+  `<big-context>` blocks force source ingest.
+- Large-paste source markers now include compact source manifests with content
+  type, char counts, chunk/index stats, digest, backends, source key, and
+  current-task/question handling. If no clear question exists, the marker asks
+  what to analyze instead of inventing broad work.
+- Raw-source and archive reads stay bounded. `read_source_chunks(...)`,
+  `read_raw_source(...)`, and `read_archive_record(...)` are the exact-context
+  tools after RAG points to the right source.
+- Section-level mixed archive splitting is implemented for archives and archive
+  collections, so prose/log/code/config sections keep order but use matching
+  chunk profiles.
+- Current-thread archive auto-intent is now default-on for Agent-path runs when
+  archive keys exist. Fast Path never runs this node. The Qwen3.5 2B classifier
+  must reject current upload/file/image/video/URL/Pixelle/active-source tasks
+  unless the user explicitly asks for older/archive context.
+- Explicit document/PDF-style uploads, artifacts, and large-paste sources now
+  route through `retrieval_router.ingest_source(...)` where implemented.
+- The Test UI/Observer includes the Small-Qwen classifier probe and queued
+  embedding progress polling.
+- Workflow/tool-event compaction metadata is shown in Observer shrinking cards.
+- Service Dashboard separates Web Interfaces, APIs, and Infrastructure; cards
+  are clickable again, use `Öffnen`, and expose local/Tailnet/HTTPS addresses
+  for APIs. Pixelle and LiteLLM are represented as both UI/API where relevant.
+- Media Gallery has a refreshed responsive dark layout and its own favicon.
+- Tailscale path handling keeps the public dashboard path but proxies Serve to
+  service roots unless a service explicitly overrides the upstream path.
 
 Runtime endpoints and model roles:
 
@@ -44,7 +78,9 @@ Current Large Paste / RAG policy:
 
 - Do not immediately send every large human paste into RAG.
 - Manual paired markers (`/rag ... /rag`, `/rake ... /rake`,
-  `/index ... /index`, `/ingest ... /ingest`) still force immediate indexing.
+  `/index ... /index`, `/ingest ... /ingest`, `/big-context ... /big-context`)
+  and fenced `<big-context name="...">...</big-context>` blocks still force
+  immediate indexing.
 - Plain long pastes first go through the normal pre-run compression path so old
   context is reduced before deciding what to do with the newest paste.
 - After that, `large_paste_post_compression_node` checks whether the active
@@ -88,8 +124,13 @@ Classifier behavior:
   `archive_recall`, `search_query`, `confidence`, and `reason`. If the
   classifier is down, times out, low-confidence, or returns invalid JSON,
   AlphaRavis falls back to the local archive-recall condenser/heuristic.
-- The JSON parser has been hardened for truncated outputs, but the classifier
-  path still needs a dedicated Test UI/Observer probe.
+- Agent-path archive auto-intent is default-on through
+  `ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_AGENT_DEFAULT=true`. Fast Path bypasses it;
+  `archive_rag_mode=manual` is the strict per-thread opt-out.
+- The JSON parser has been hardened for truncated outputs, and the Bridge Test
+  UI/Observer now has a Small-Qwen classifier probe with short direct, long
+  noisy, instruction-only, document-only, mixed, and simulated
+  down/invalid/timeout fallback cases.
 
 Idle embedding scheduler:
 
@@ -119,25 +160,38 @@ pytest -q tests/test_agent_context_budget.py \
 git diff --check
 docker compose up -d --no-deps --force-recreate langgraph-api
 docker compose ps langgraph-api
+
+PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile \
+  langgraph-app/agent_graph.py
+pytest -q tests/test_agent_context_budget.py
+pytest -q tests/test_bridge_test_ui.py tests/test_bridge_responses.py \
+  tests/test_media_server.py tests/test_tailscale_https_routes.py \
+  tests/test_service_redirector_server.py
 ```
 
 Result: compile passed, the focused pytest set passed with `76 passed`,
 `git diff --check` passed, and `langgraph-api` restarted healthy with the new
 runtime env values visible inside the container.
+Latest focused check for this commit: `tests/test_agent_context_budget.py`,
+`tests/test_bridge_test_ui.py`, `tests/test_bridge_responses.py`,
+`tests/test_media_server.py`, `tests/test_tailscale_https_routes.py`, and
+`tests/test_service_redirector_server.py` passed together with `133 passed`;
+`git diff --check` is clean.
 
 Next work agreed with the user:
 
-1. Add a Test UI/Observer probe for the small-model classifier path. It should
-   cover short direct, long noisy, instruction-only, document-only, mixed, and
-   archive auto-on-intent, endpoint-down, invalid-JSON, low-confidence, and
-   timeout fallback cases.
-2. Run an 8k-vs-16k Qwen3.5 2B classifier context comparison. Measure latency,
+1. Run an 8k-vs-16k Qwen3.5 2B classifier context comparison. Measure latency,
    JSON validity, archive-recall query quality, and mixed large-paste
    line-range quality before assuming 16k as the practical default.
-3. Browser/live-test the new deterministic source metadata and long-prompt route
+2. Browser/live-test the new deterministic source metadata and long-prompt route
    classifier behavior with real LibreChat examples before changing any user UI
    defaults.
-4. Do not add a separate RAG sufficiency model call for now. The user decided
+3. Live-test archive auto-intent false positives with real tasks, especially:
+   current video/image/file/Pixelle tasks, "wie war das nochmal" recall, and
+   noisy long questions that mention old work but include an active source.
+4. Live-test Tailscale HTTPS routes from another Tailnet device after Tailnet
+   certificates are enabled.
+5. Do not add a separate RAG sufficiency model call for now. The user decided
    the big Agent model can decide whether chunks are enough, as long as the
    raw-source/archive tools and prompt hint are always available in Agent mode.
 
@@ -187,10 +241,12 @@ Latest local follow-up in this working tree:
   "wie war das nochmal mit X". Planner hints now include a stronger suggested
   archive/RAG search query from recent thread context, and the context retrieval
   agent has `condense_archive_recall_query`.
-- `archive_rag_mode=auto_on_intent` now asks the safe Qwen3.5 2B classifier
-  whether the latest request is archive recall and which bounded `search_query`
-  to use. The local archive-recall condenser remains the fallback for endpoint,
-  timeout, low-confidence, or JSON failures.
+- Agent-path archive auto-intent now asks the safe Qwen3.5 2B classifier by
+  default when current-thread archive keys exist. It decides whether the latest
+  request is archive recall and which bounded `search_query` to use. The local
+  archive-recall condenser remains the fallback for endpoint, timeout,
+  low-confidence, or JSON failures. Fast Path bypasses this node, and
+  `archive_rag_mode=manual` is the strict opt-out.
 - section-level mixed archive splitting is implemented without an LLM call:
   archive/archive-collection text is segmented into ordered prose/log/code/config
   sections and chunked with the matching profile while preserving order.
@@ -201,8 +257,13 @@ Latest local follow-up in this working tree:
   `large_ingest.chunk_indexed` / `document_ingest.chunk_indexed`.
 - large-paste replacement now also records a compact `source_manifest` in
   `large_paste_ingests`, includes a short `Source manifest` line in the active
-  marker, and the Bridge Observer renders a small `Source Ingest` section from
-  LangGraph metadata. The Bridge only surfaces the graph decision; LangGraph
+  marker, and the Bridge Observer renders a `Big Message / Source Ingest`
+  section from LangGraph metadata. The manifest includes chunk/index stats and
+  source digest when available. Explicit ingest syntax also supports paired
+  `/big-context ... /big-context` and fenced
+  `<big-context name="...">...</big-context>` blocks. If no explicit question is
+  detected, the marker asks what to extract/analyze instead of doing broad
+  unsupported analysis. The Bridge only surfaces the graph decision; LangGraph
   still owns the large-message/RAG/compression policy.
 - focused compression instructions are implemented as a bounded chat-tag path:
   `<focus_topic>...</focus_topic>`, `<compact_instructions>...</compact_instructions>`,
@@ -225,7 +286,9 @@ Latest local follow-up in this working tree:
 - tool/workflow telemetry is compacted separately from normal chat messages.
   Tool-call requests, tool outputs, duplicate outputs, and long action logs go
   into `Workflow / Tool Event Compact Log` in archive metadata/content. Redacted
-  original messages remain in the raw archive for exact reads.
+  original messages remain in the raw archive for exact reads. Observer
+  `Shrinking` cards render the compact event counts and a bounded
+  `Workflow / Tool Events` preview for the selected compression scope.
 - Memory tiers are now documented as an AlphaRavis policy: latest task tail,
   active compaction summary, raw archive, archive collection, source/RAG record,
   vector recall, MemoryKernel facts, temporary workflow state, and Observer
@@ -250,13 +313,25 @@ Latest local follow-up in this working tree:
   `ALPHARAVIS_AGENTIC_RAG_LLM_GRADING=false`; deterministic grading remains the
   default/fallback. The configured example grader is `openai/big-boss`, and the
   grader call disables hidden thinking for speed.
-- the local runtime `.env` currently enables LLM grading with
-  `ALPHARAVIS_AGENTIC_RAG_LLM_GRADING=true` and
-  `ALPHARAVIS_AGENTIC_RAG_GRADER_MODEL=openai/big-boss`.
+- current product decision: do not require Big-Boss LLM grading while the Qwen3
+  reranker is active. Keep LLM grading default-off as a debug/comparison path;
+  the normal RAG policy is Qwen3 reranker plus deterministic grading/fallback.
 - router reranking now supports a real llama.cpp/Qwen3-Reranker model backend
   through `ALPHARAVIS_RAG_RERANKER_MODE=model`. It falls back to deterministic
   lexical/vector reranking when the endpoint is down, times out, or returns a
   bad payload.
+- `write_alpha_ravis_artifact(...)` now indexes artifacts through
+  `retrieval_router.ingest_source(...)`, same as compression archives,
+  document uploads, and large-paste ingest. Future manual ingest commands
+  should use the same router entrypoint instead of calling pgvector or
+  `rag_api` directly.
+- The Test UI/Observer has a Small Qwen classifier probe. Local/fallback mode
+  covers short direct, long noisy, instruction-only, document-only, mixed, and
+  simulated endpoint-down/invalid-JSON/timeout fallback cases; real-Qwen mode
+  calls the configured small classifier endpoint for the semantic cases.
+- The Observer now polls `/api/embedding-queue/status` and renders pending,
+  running, failed, done, progress, and recent active jobs for the shared
+  pgvector embedding queue.
 - archive and archive-collection chunk profiling now scans content before
   choosing a profile: code fences/common source syntax use the code profile,
   log/traceback-heavy archives use the log profile, and normal conversation
@@ -584,7 +659,9 @@ Active document / large-paste RAG:
   an external adapter, `active_rag_file_ids`, with bounded
   `agentic_rag_retrieve(...)`
 - it injects only a compact `<active-rag-context>` system message
-- archive-only state with `archive_rag_mode=tool_only` stays passive
+- archive-only Agent-path state runs the bounded Qwen3.5 2B archive-intent
+  check by default; current upload/file/image/video/URL/Pixelle/source tasks
+  must not receive archive context unless old/archive context is explicit
 - Bridge Test UI exposes `Native Document RAG Smoke` to validate the
   AlphaRavis-owned pgvector path without `rag_api`.
 
@@ -696,12 +773,13 @@ Current reranking direction:
    media-gallery stores the file, `pending_document_ingests` reaches LangGraph,
    and the queued pgvector job becomes searchable after the queue drains.
 
-4. Stream ingest progress events for asynchronous queue-drained jobs.
+4. Live-check queue progress polling for asynchronous queue-drained jobs.
 
    Direct pgvector writes already emit chunk progress into run-profile activity.
-   Queued embedding jobs finish outside the active chat stream, so they need a
-   separate progress channel or polling surface before the UI can show live
-   progress for large queued uploads/pastes.
+   First UI slice implemented: the Observer polls the shared embedding queue and
+   shows pending/running/failed/done counts plus recent active jobs. Remaining
+   work is a live large-upload/paste check and optional richer per-source
+   progress once queue jobs expose total chunk counts after claiming.
 
 5. Live-check section-level mixed archive splitting.
 
@@ -710,24 +788,21 @@ Current reranking direction:
    Remaining work is live quality comparison on real mixed archives and tuning
    the heuristics if section boundaries are too aggressive.
 
-6. Measure reranker + Big-Boss LLM-grading together, then choose the default
-   policy.
+6. Keep the Qwen3 reranker as the normal ranking policy.
 
-   Current local runtime has both model reranking and Big-Boss LLM grading
-   enabled. After the reranker endpoint is fixed, compare latency and answer
-   quality with: reranker-only, Big-Boss grading-only, and both. The likely
-   production default is model reranking on and LLM grading off unless the extra
-   precision is worth the latency.
+   The reranker is the intended active model-side quality step. Big-Boss
+   LLM-grading is not needed in the normal path while reranking is active; keep
+   it default-off and use it only for explicit comparison/debug probes.
 
-7. Live-check optional archive auto-on-intent behavior.
+7. Live-check Agent-path archive auto-on-intent behavior.
 
-   Implemented locally behind explicit `archive_rag_mode=auto_on_intent`.
-   Compression archives remain passive by default. The path asks the safe
+   Implemented locally as Agent-path default behavior via
+   `ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_AGENT_DEFAULT=true`. Compression archives
+   still do not activate document RAG, but archive-only Agent runs ask the safe
    Qwen3.5 2B classifier for strict JSON (`archive_recall`, `search_query`,
-   `confidence`, `reason`) and falls back to local archive-recall condensation
-   on endpoint/timeout/JSON failures. Remaining work is measuring latency,
-   answer quality, and false positives on real LibreChat recall examples before
-   enabling this mode anywhere by default.
+   `confidence`, `reason`) and fall back to local archive-recall condensation on
+   endpoint/timeout/JSON failures. Remaining work is measuring latency, answer
+   quality, and false positives on real LibreChat recall examples.
 
 8. Compare Qwen3.5 2B classifier context at 8k vs 16k.
 

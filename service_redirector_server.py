@@ -31,11 +31,16 @@ TAILSCALE_URLS_PATH = Path(os.getenv("ALPHARAVIS_TAILSCALE_URLS_FILE", DEFAULT_T
 URL_MODE = os.getenv("ALPHARAVIS_SERVICE_DASHBOARD_URL_MODE", "auto").strip().lower()
 
 
+FAVICON_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#0b1018"/><path d="M16 41V23l16-9 16 9v18l-16 9-16-9Z" fill="#47d7ac"/><path d="M24 37V27l8-5 8 5v10l-8 5-8-5Z" fill="#101620"/></svg>"""
+
+
 SERVICES: list[dict[str, Any]] = [
     {
         "name": "AlphaRavis Dashboard",
         "service": "service-dashboard",
         "kind": "Navigation",
+        "category": "web",
+        "icon": "AR",
         "description": "Landing page for every local AlphaRavis service.",
         "host_url": f"http://localhost:{SERVICE_DASHBOARD_PUBLIC_PORT}",
         "docker_url": "http://service-dashboard:8090",
@@ -46,6 +51,8 @@ SERVICES: list[dict[str, Any]] = [
         "name": "LibreChat",
         "service": "librechat",
         "kind": "Main UI",
+        "category": "web",
+        "icon": "LC",
         "description": "Primary chat interface for AlphaRavis and Hermes.",
         "host_url": "http://localhost:3080",
         "docker_url": "http://librechat:3080",
@@ -56,6 +63,8 @@ SERVICES: list[dict[str, Any]] = [
         "name": "LangGraph API",
         "service": "langgraph-api",
         "kind": "Brain",
+        "category": "api",
+        "icon": "LG",
         "description": "Runs the AlphaRavis LangGraph graph alpha_ravis.",
         "host_url": "http://localhost:2024",
         "docker_url": "http://langgraph-api:2024",
@@ -66,6 +75,8 @@ SERVICES: list[dict[str, Any]] = [
         "name": "LangGraph Studio",
         "service": "langgraph-api",
         "kind": "External Studio",
+        "category": "web",
+        "icon": "LS",
         "description": "LangSmith Studio pointed at the local LangGraph API.",
         "host_url": "https://smith.langchain.com/studio/?baseUrl=http://localhost:2024",
         "docker_url": "http://langgraph-api:2024",
@@ -76,6 +87,8 @@ SERVICES: list[dict[str, Any]] = [
         "name": "AlphaRavis Bridge",
         "service": "api-bridge",
         "kind": "OpenAI API",
+        "category": "api",
+        "icon": "AB",
         "description": "OpenAI-compatible bridge used by LibreChat and OpenWebUI.",
         "host_url": "http://localhost:8123",
         "docker_url": "http://api-bridge:8123",
@@ -86,6 +99,8 @@ SERVICES: list[dict[str, Any]] = [
         "name": "Bridge Test UI",
         "service": "bridge-test-ui",
         "kind": "Diagnostics",
+        "category": "web",
+        "icon": "BT",
         "description": "Minimal UI for streaming and protocol debugging.",
         "host_url": f"http://localhost:{TEST_UI_PORT}",
         "docker_url": "http://bridge-test-ui:8140",
@@ -96,6 +111,8 @@ SERVICES: list[dict[str, Any]] = [
         "name": "Hermes Agent",
         "service": "hermes-agent",
         "kind": "Coding Agent API",
+        "category": "api",
+        "icon": "HA",
         "description": "OpenAI-compatible coding and system specialist.",
         "host_url": "http://localhost:8642",
         "docker_url": "http://hermes-agent:8642",
@@ -106,6 +123,8 @@ SERVICES: list[dict[str, Any]] = [
         "name": "Hermes Dashboard",
         "service": "hermes-dashboard",
         "kind": "Optional UI",
+        "category": "web",
+        "icon": "HD",
         "description": "Optional Hermes dashboard, enabled by Compose profile.",
         "host_url": "http://localhost:9119",
         "docker_url": "http://hermes-dashboard:9119",
@@ -116,10 +135,25 @@ SERVICES: list[dict[str, Any]] = [
     {
         "name": "LiteLLM",
         "service": "litellm",
-        "kind": "Model Gateway",
-        "description": "Central model router for local and external model backends.",
+        "kind": "Model Gateway UI",
+        "category": "web",
+        "icon": "LM",
+        "description": "LiteLLM browser surface for model gateway inspection and admin tasks.",
         "host_url": "http://localhost:4000",
         "docker_url": "http://litellm:4000",
+        "port": 4000,
+        "accent": "#4bd2ff",
+    },
+    {
+        "name": "LiteLLM API",
+        "service": "litellm-api",
+        "kind": "Model Gateway API",
+        "category": "api",
+        "icon": "LA",
+        "description": "OpenAI-compatible LiteLLM proxy API used by AlphaRavis and Hermes.",
+        "host_url": "http://localhost:4000/v1",
+        "tailscale_public_path": "/v1",
+        "docker_url": "http://litellm:4000/v1",
         "port": 4000,
         "accent": "#4bd2ff",
     },
@@ -127,6 +161,8 @@ SERVICES: list[dict[str, Any]] = [
         "name": "RAG API",
         "service": "rag_api",
         "kind": "Retrieval API",
+        "category": "api",
+        "icon": "RG",
         "description": "Local document retrieval and embedding backend.",
         "host_url": "http://localhost:8000",
         "docker_url": "http://rag_api:8000",
@@ -137,8 +173,11 @@ SERVICES: list[dict[str, Any]] = [
         "name": "Media Gallery",
         "service": "media-gallery",
         "kind": "Media UI/API",
+        "category": "web",
+        "icon": "MG",
         "description": "Serves registered media, galleries, and analysis assets.",
-        "host_url": f"http://localhost:{MEDIA_PORT}",
+        "host_url": f"http://localhost:{MEDIA_PORT}/gallery",
+        "tailscale_public_path": "/gallery",
         "docker_url": "http://media-gallery:8130",
         "port": MEDIA_PORT,
         "accent": "#ff8a58",
@@ -147,6 +186,8 @@ SERVICES: list[dict[str, Any]] = [
         "name": "Deep Agents UI",
         "service": "deep-agents-ui",
         "kind": "Inspection UI",
+        "category": "web",
+        "icon": "DA",
         "description": "LangGraph/DeepAgents inspection frontend.",
         "host_url": "http://localhost:3000",
         "docker_url": "http://deep-agents-ui:3000",
@@ -157,6 +198,8 @@ SERVICES: list[dict[str, Any]] = [
         "name": "Agent Custom UI",
         "service": "agent-custom-ui",
         "kind": "Agent UI",
+        "category": "web",
+        "icon": "AU",
         "description": "Custom AlphaRavis frontend wired to alpha_ravis.",
         "host_url": "http://localhost:3001",
         "docker_url": "http://agent-custom-ui:3000",
@@ -167,6 +210,8 @@ SERVICES: list[dict[str, Any]] = [
         "name": "OpenWebUI",
         "service": "openwebui",
         "kind": "Optional UI",
+        "category": "web",
+        "icon": "OW",
         "description": "Optional second frontend through the AlphaRavis bridge.",
         "host_url": f"http://localhost:{OPENWEBUI_PORT}",
         "docker_url": "http://openwebui:8080",
@@ -175,69 +220,101 @@ SERVICES: list[dict[str, Any]] = [
         "accent": "#f8df72",
     },
     {
-        "name": "Pixelle MCP",
+        "name": "Pixelle",
         "service": "pixelle",
-        "kind": "Media Tool",
-        "description": "Pixelle image/video tool service.",
+        "kind": "Media Tool UI",
+        "category": "web",
+        "icon": "PX",
+        "description": "Pixelle image/video tool web surface.",
         "host_url": "http://localhost:9004",
         "docker_url": "http://pixelle:9004",
         "port": 9004,
         "accent": "#ff65b3",
     },
     {
+        "name": "Pixelle MCP",
+        "service": "pixelle-mcp",
+        "kind": "Streamable HTTP MCP",
+        "category": "api",
+        "icon": "PM",
+        "description": "Streamable HTTP MCP endpoint for Pixelle tool integration.",
+        "host_url": "http://localhost:9004/pixelle/mcp",
+        "tailscale_public_path": "/pixelle/mcp",
+        "docker_url": "http://pixelle:9004/pixelle/mcp",
+        "port": 9004,
+        "accent": "#ff65b3",
+    },
+    {
         "name": "LangGraph Research UI",
         "service": "langgraph-api",
-        "kind": "LangGraphics UI",
-        "description": "Research specialist visual port exposed by langgraph-api.",
+        "kind": "Agent Visual Port",
+        "category": "infra",
+        "icon": "LR",
+        "description": "Experimental Research specialist port exposed by langgraph-api; use LangGraph Studio for normal graph inspection.",
         "host_url": "http://localhost:8760",
         "docker_url": "http://langgraph-api:8760",
         "port": 8760,
         "accent": "#7ad7ff",
+        "non_http": True,
     },
     {
         "name": "LangGraph General UI",
         "service": "langgraph-api",
-        "kind": "LangGraphics UI",
-        "description": "General specialist visual port exposed by langgraph-api.",
+        "kind": "Agent Visual Port",
+        "category": "infra",
+        "icon": "LG",
+        "description": "Experimental General specialist port exposed by langgraph-api; not guaranteed to serve a standalone browser UI.",
         "host_url": "http://localhost:8762",
         "docker_url": "http://langgraph-api:8762",
         "port": 8762,
         "accent": "#7ad7ff",
+        "non_http": True,
     },
     {
         "name": "LangGraph Computer UI",
         "service": "langgraph-api",
-        "kind": "LangGraphics UI",
-        "description": "Computer/CUA specialist visual port exposed by langgraph-api.",
+        "kind": "Agent Visual Port",
+        "category": "infra",
+        "icon": "LC",
+        "description": "Experimental Computer/CUA specialist port exposed by langgraph-api; not guaranteed to serve a standalone browser UI.",
         "host_url": "http://localhost:8764",
         "docker_url": "http://langgraph-api:8764",
         "port": 8764,
         "accent": "#7ad7ff",
+        "non_http": True,
     },
     {
         "name": "LangGraph Debugger UI",
         "service": "langgraph-api",
-        "kind": "LangGraphics UI",
-        "description": "Debugger specialist visual port exposed by langgraph-api.",
+        "kind": "Agent Visual Port",
+        "category": "infra",
+        "icon": "LD",
+        "description": "Experimental Debugger specialist port exposed by langgraph-api; not guaranteed to serve a standalone browser UI.",
         "host_url": "http://localhost:8766",
         "docker_url": "http://langgraph-api:8766",
         "port": 8766,
         "accent": "#7ad7ff",
+        "non_http": True,
     },
     {
         "name": "LangGraph Supervisor UI",
         "service": "langgraph-api",
-        "kind": "LangGraphics UI",
-        "description": "Main supervisor visual port exposed by langgraph-api.",
+        "kind": "Agent Visual Port",
+        "category": "infra",
+        "icon": "LV",
+        "description": "Experimental Supervisor specialist port exposed by langgraph-api; not guaranteed to serve a standalone browser UI.",
         "host_url": "http://localhost:8768",
         "docker_url": "http://langgraph-api:8768",
         "port": 8768,
         "accent": "#7ad7ff",
+        "non_http": True,
     },
     {
         "name": "LangGraph VNC",
         "service": "langgraph-api",
         "kind": "Remote Desktop",
+        "category": "infra",
+        "icon": "VN",
         "description": "VNC access to the LangGraph sandbox display.",
         "host_url": "vnc://localhost:5900",
         "docker_url": "langgraph-api:5900",
@@ -248,6 +325,8 @@ SERVICES: list[dict[str, Any]] = [
         "name": "MongoDB",
         "service": "mongodb",
         "kind": "Database",
+        "category": "infra",
+        "icon": "DB",
         "description": "LibreChat storage plus LangGraph checkpoint/state backing.",
         "host_url": "mongodb://localhost:27017",
         "docker_url": "mongodb://mongodb:27017",
@@ -259,6 +338,8 @@ SERVICES: list[dict[str, Any]] = [
         "name": "Redis",
         "service": "redis",
         "kind": "Cache",
+        "category": "infra",
+        "icon": "RD",
         "description": "Redis sidecar for cache and service coordination.",
         "host_url": "redis://localhost:6379",
         "docker_url": "redis://redis:6379",
@@ -270,6 +351,8 @@ SERVICES: list[dict[str, Any]] = [
         "name": "pgvector",
         "service": "vectordb",
         "kind": "Vector DB",
+        "category": "infra",
+        "icon": "PG",
         "description": "Postgres with pgvector for RAG and semantic memory.",
         "host_url": "postgresql://localhost:5432/rag_api",
         "docker_url": "postgresql://postgres@vectordb:5432/rag_api",
@@ -294,6 +377,12 @@ def effective_services() -> list[dict[str, Any]]:
     payload = load_tailscale_payload()
     host_overrides = payload.get("host_url_overrides", {})
     service_overrides = payload.get("redirector_overrides", {})
+    tailscale_host = str(payload.get("tailscale_host") or "").strip().rstrip(".")
+    route_ports = {
+        int(route.get("port"))
+        for route in payload.get("routes", [])
+        if isinstance(route, dict) and str(route.get("port") or "").isdigit()
+    }
     use_tailscale = URL_MODE in {"auto", "tailscale", "https"}
     services: list[dict[str, Any]] = []
     for original in SERVICES:
@@ -303,6 +392,13 @@ def effective_services() -> list[dict[str, Any]]:
         if use_tailscale and not service.get("non_http"):
             tailscale_url = str(host_overrides.get(local_url) or service_overrides.get(str(service.get("service", ""))) or "")
         service["local_url"] = local_url
+        service["https_url"] = tailscale_url
+        service["tailnet_http_url"] = ""
+        parsed = urlparse(local_url)
+        if tailscale_host and parsed.scheme == "http" and parsed.port is not None and not service.get("non_http"):
+            service["tailnet_http_url"] = f"http://{tailscale_host}:{parsed.port}{parsed.path or ''}"
+            if use_tailscale and not tailscale_url and parsed.port in route_ports:
+                tailscale_url = f"https://{tailscale_host}:{parsed.port}{parsed.path or ''}"
         if tailscale_url:
             service["host_url"] = tailscale_url
             service["tailscale_url"] = tailscale_url
@@ -316,7 +412,12 @@ def effective_services() -> list[dict[str, Any]]:
 def render_index() -> bytes:
     services = effective_services()
     service_json = json.dumps(services, ensure_ascii=True)
-    cards = "\n".join(render_card(service) for service in services)
+    web_services = [service for service in services if service.get("category") == "web"]
+    api_services = [service for service in services if service.get("category") == "api"]
+    infra_services = [service for service in services if service.get("category") == "infra"]
+    web_cards = "\n".join(render_card(service) for service in web_services)
+    api_cards = "\n".join(render_card(service, address_picker=True) for service in api_services)
+    infra_cards = "\n".join(render_card(service, address_picker=True) for service in infra_services)
     mode_label = "Tailscale HTTPS" if any(service.get("url_mode") == "tailscale" for service in services) else "Localhost"
     body = f"""<!doctype html>
 <html lang="de">
@@ -324,6 +425,7 @@ def render_index() -> bytes:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AlphaRavis Service Dashboard</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <style>
     :root {{
       color-scheme: dark;
@@ -418,6 +520,49 @@ def render_index() -> bytes:
       grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
       gap: 12px;
     }}
+    .section {{
+      margin-top: 14px;
+    }}
+    .section-head {{
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 26px 0 10px;
+    }}
+    .section-head h2 {{
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: 0;
+    }}
+    .section-head p {{
+      margin: 0;
+      max-width: 680px;
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    details.section {{
+      border-top: 1px solid var(--line);
+      padding-top: 14px;
+    }}
+    details.section > summary {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      cursor: pointer;
+      list-style: none;
+      margin-bottom: 12px;
+    }}
+    details.section > summary::-webkit-details-marker {{ display: none; }}
+    details.section > summary h2 {{
+      margin: 0;
+      font-size: 18px;
+    }}
+    .summary-note {{
+      color: var(--muted);
+      font-size: 13px;
+    }}
     .card {{
       min-height: 200px;
       display: flex;
@@ -431,6 +576,7 @@ def render_index() -> bytes:
       border-radius: 10px;
       background: linear-gradient(180deg, rgba(21, 29, 41, .96), rgba(12, 17, 25, .97));
       padding: 16px;
+      cursor: pointer;
       transition: transform .16s ease, border-color .16s ease, background .16s ease;
     }}
     .card::before {{
@@ -458,6 +604,26 @@ def render_index() -> bytes:
       align-items: flex-start;
       justify-content: space-between;
       gap: 10px;
+    }}
+    .identity {{
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      min-width: 0;
+    }}
+    .logo {{
+      flex: none;
+      display: grid;
+      place-items: center;
+      width: 42px;
+      height: 42px;
+      border: 1px solid color-mix(in srgb, var(--accent, #47d7ac) 46%, white 8%);
+      border-radius: 8px;
+      color: #081018;
+      background: var(--accent, #47d7ac);
+      font-weight: 900;
+      font-size: 13px;
+      letter-spacing: 0;
     }}
     .name {{
       margin: 0;
@@ -529,6 +695,7 @@ def render_index() -> bytes:
       color: var(--accent, #47d7ac);
       font-weight: 800;
       font-size: 13px;
+      text-decoration: none;
     }}
     .profile {{
       color: #f8df72;
@@ -542,18 +709,45 @@ def render_index() -> bytes:
       text-transform: uppercase;
       letter-spacing: 0.02em;
     }}
+    .address-list {{
+      display: grid;
+      gap: 6px;
+      margin-top: 4px;
+    }}
+    .address {{
+      display: grid;
+      grid-template-columns: 80px minmax(0, 1fr) auto;
+      gap: 7px;
+      align-items: center;
+    }}
+    .address a {{
+      color: #f8fbff;
+      text-decoration: none;
+      overflow-wrap: anywhere;
+    }}
+    .mini {{
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 6px;
+      color: var(--soft);
+      padding: 3px 6px;
+      font-size: 11px;
+      text-decoration: none;
+      background: rgba(255,255,255,.04);
+    }}
     @media (max-width: 780px) {{
       main {{ width: calc(100% - 32px); padding: 24px 0; }}
       h1 {{ font-size: clamp(26px, 10vw, 48px); }}
       .grid {{ grid-template-columns: 1fr; }}
       .card {{ min-height: auto; }}
       .description {{ -webkit-line-clamp: 4; }}
+      .section-head {{ align-items: flex-start; flex-direction: column; }}
     }}
     @media (max-width: 480px) {{
       main {{ width: calc(100% - 24px); }}
       .toolbar {{ flex-direction: column; align-items: stretch; }}
       .mode {{ width: fit-content; }}
       .count {{ text-align: right; margin-top: -30px; }}
+      .address {{ grid-template-columns: 1fr; }}
     }}
   </style>
 </head>
@@ -562,16 +756,40 @@ def render_index() -> bytes:
     <header>
       <div class="eyebrow">AlphaRavis Local Stack</div>
       <h1>Service Dashboard</h1>
-      <p class="subhead">Alle wichtigen Docker-Compose-Services, oeffentliche URLs und interne Docker-Adressen an einem Ort. Kacheln mit Web- oder API-URL oeffnen direkt den jeweiligen Dienst.</p>
+      <p class="subhead">Alle wichtigen Docker-Compose-Services, öffentliche URLs und interne Docker-Adressen an einem Ort. Kacheln mit Web- oder API-URL öffnen direkt den jeweiligen Dienst.</p>
     </header>
     <section class="toolbar" aria-label="Dashboard filter">
       <input id="filter" class="search" type="search" placeholder="Service suchen" autocomplete="off">
       <span class="mode">{html.escape(mode_label)}</span>
       <div class="count"><span id="visible-count">{len(services)}</span> Services</div>
     </section>
-    <section id="grid" class="grid">
-      {cards}
+    <section class="section" aria-label="Web Interfaces">
+      <div class="section-head">
+        <h2>Web Interfaces</h2>
+        <p>Primäre Oberflächen fuer Chat, Beobachtung, Media und Agent-Inspektion. In Tailscale-Modus oeffnen die Karten bevorzugt HTTPS.</p>
+      </div>
+      <div class="grid">
+        {web_cards}
+      </div>
     </section>
+    <details class="section" open>
+      <summary>
+        <h2>APIs</h2>
+        <span class="summary-note">HTTP lokal, HTTP Tailnet und Tailscale HTTPS sichtbar nebeneinander.</span>
+      </summary>
+      <div class="grid">
+        {api_cards}
+      </div>
+    </details>
+    <details class="section">
+      <summary>
+        <h2>Infrastructure</h2>
+        <span class="summary-note">Datenbanken, VNC und interne Protokolle.</span>
+      </summary>
+      <div class="grid">
+        {infra_cards}
+      </div>
+    </details>
   </main>
   <script>
     window.ALPHARAVIS_SERVICES = {service_json};
@@ -589,6 +807,22 @@ def render_index() -> bytes:
       }}
       count.textContent = String(visible);
     }});
+    document.addEventListener("click", (event) => {{
+      const button = event.target.closest("[data-copy-url]");
+      if (button) {{
+        event.preventDefault();
+        event.stopPropagation();
+        if (!navigator.clipboard) return;
+        navigator.clipboard.writeText(button.dataset.copyUrl || "");
+        button.textContent = "Kopiert";
+        window.setTimeout(() => {{ button.textContent = "Copy"; }}, 900);
+        return;
+      }}
+      if (event.target.closest("a, button, input, select, textarea, summary")) return;
+      const card = event.target.closest("[data-open-url]");
+      const url = card?.dataset.openUrl || "";
+      if (url) window.open(url, "_blank", "noreferrer");
+    }});
   </script>
 </body>
 </html>
@@ -596,29 +830,55 @@ def render_index() -> bytes:
     return body.encode("utf-8")
 
 
-def render_card(service: dict[str, Any]) -> str:
+def render_card(service: dict[str, Any], *, address_picker: bool = False) -> str:
     host_url = str(service["host_url"])
     local_url = str(service.get("local_url", host_url))
+    https_url = str(service.get("https_url") or service.get("tailscale_url") or "")
+    tailnet_http_url = str(service.get("tailnet_http_url") or "")
     disabled = bool(service.get("non_http"))
-    tag = "div" if disabled else "a"
-    href = "" if disabled else f' href="{html.escape(host_url, quote=True)}"'
-    target = "" if disabled else ' target="_blank" rel="noreferrer"'
+    tag = "div"
     search = " ".join(
         str(service.get(key, ""))
-        for key in ("name", "service", "kind", "description", "host_url", "docker_url", "profile")
+        for key in ("name", "service", "kind", "description", "host_url", "local_url", "tailscale_url", "docker_url", "profile")
     ).lower()
     profile = service.get("profile")
-    open_label = "TCP endpoint" if disabled else "Oeffnen"
+    open_label = "TCP endpoint" if disabled else "Öffnen"
     profile_html = f'<span class="profile">profile: {html.escape(str(profile))}</span>' if profile else "<span></span>"
     mode = str(service.get("url_mode", "local"))
     mode_html = f'<span class="url-mode">{html.escape(mode)}</span>'
     local_row = ""
     if host_url != local_url:
         local_row = f'<div class="row"><span class="label">Local</span><code>{html.escape(local_url)}</code></div>'
+    open_href = "" if disabled else f'<a class="open" href="{html.escape(host_url, quote=True)}" target="_blank" rel="noreferrer">{open_label}</a>'
+    if disabled:
+        open_href = f'<span class="open">{open_label}</span>'
+    addresses = ""
+    if address_picker and not disabled:
+        address_rows = []
+        for label, url, preferred in [
+            ("HTTPS", https_url, mode == "tailscale"),
+            ("Local", local_url, mode != "tailscale"),
+            ("Tailnet", tailnet_http_url, False),
+        ]:
+            if not url:
+                continue
+            badge = " *" if preferred else ""
+            address_rows.append(
+                "<div class=\"address\">"
+                f"<span class=\"label\">{html.escape(label + badge)}</span>"
+                f"<a href=\"{html.escape(url, quote=True)}\" target=\"_blank\" rel=\"noreferrer\">{html.escape(url)}</a>"
+                f"<button class=\"mini\" type=\"button\" data-copy-url=\"{html.escape(url, quote=True)}\">Copy</button>"
+                "</div>"
+            )
+        if address_rows:
+            addresses = f"<div class=\"address-list\">{''.join(address_rows)}</div>"
     return f"""
-      <{tag} class="card" style="--accent: {html.escape(str(service["accent"]), quote=True)};" data-card data-search="{html.escape(search, quote=True)}"{href}{target} aria-disabled="{str(disabled).lower()}">
+      <{tag} class="card" style="--accent: {html.escape(str(service["accent"]), quote=True)};" data-card data-open-url="{html.escape(host_url if not disabled else '', quote=True)}" data-search="{html.escape(search, quote=True)}" aria-disabled="{str(disabled).lower()}">
         <div class="topline">
-          <h2 class="name">{html.escape(str(service["name"]))}</h2>
+          <div class="identity">
+            <span class="logo">{html.escape(str(service.get("icon") or str(service["name"])[:2]).upper()[:3])}</span>
+            <h2 class="name">{html.escape(str(service["name"]))}</h2>
+          </div>
           <span class="kind">{html.escape(str(service["kind"]))}</span>
         </div>
         <p class="description">{html.escape(str(service["description"]))}</p>
@@ -627,9 +887,10 @@ def render_card(service: dict[str, Any]) -> str:
           {local_row}
           <div class="row"><span class="label">Docker</span><code>{html.escape(str(service["docker_url"]))}</code></div>
           <div class="row"><span class="label">Port</span><code>{html.escape(str(service["port"]))}</code></div>
+          {addresses}
         </div>
         <div class="actions">
-          <span class="open">{open_label}</span>
+          {open_href}
           {mode_html}
           {profile_html}
         </div>
@@ -643,6 +904,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path in {"/", "/index.html"}:
             self.send_bytes(render_index(), "text/html; charset=utf-8")
+            return
+        if parsed.path == "/favicon.svg":
+            self.send_bytes(FAVICON_SVG, "image/svg+xml")
             return
         if parsed.path == "/services.json":
             self.send_json({"services": effective_services(), "url_mode": URL_MODE})

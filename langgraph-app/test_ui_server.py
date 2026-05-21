@@ -24,11 +24,13 @@ from retrieval_router import ingest_source as router_ingest_source
 
 try:
     from vector_memory import is_enabled as pgvector_memory_enabled
+    from vector_memory import queue_stats as pgvector_queue_stats
     from vector_memory import semantic_search as pgvector_semantic_search
     from vector_memory import upsert_memory_record as pgvector_upsert_memory_record
 except Exception as exc:  # pragma: no cover - depends on optional runtime deps
     PGVECTOR_IMPORT_ERROR: Exception | None = exc
     pgvector_memory_enabled = None
+    pgvector_queue_stats = None
     pgvector_semantic_search = None
     pgvector_upsert_memory_record = None
 else:
@@ -120,6 +122,13 @@ class RagLoadProbeRequest(BaseModel):
     bridge_query_mode: str = "none"
     bridge_protocol: str = "responses"
     stop_on_failure: bool = True
+
+
+class RagClassifierProbeRequest(BaseModel):
+    mode: str = "local_fallback"
+    classifier_base_url: str = ""
+    classifier_model: str = ""
+    timeout_seconds: float = 8.0
 
 
 def _extract_responses_text(payload: dict[str, Any]) -> str:
@@ -1298,6 +1307,259 @@ async def _run_rag_load_probe(request: RagLoadProbeRequest) -> dict[str, Any]:
     }
 
 
+def _classifier_base_url(request: RagClassifierProbeRequest) -> str:
+    configured = (request.classifier_base_url or os.getenv("ALPHARAVIS_RAG_CLASSIFIER_API_BASE", "")).strip().rstrip("/")
+    if configured:
+        return configured
+    boss = os.getenv("BIG_BOSS_API_BASE", "http://100.71.57.22:8033/v1").strip().rstrip("/")
+    match = re.match(r"^(https?://[^:/]+)(?::\d+)?(?:/v1)?$", boss)
+    if match:
+        return f"{match.group(1)}:8001/v1"
+    return "http://100.71.57.22:8001/v1"
+
+
+def _classifier_model(request: RagClassifierProbeRequest) -> str:
+    return (request.classifier_model or os.getenv("ALPHARAVIS_RAG_CLASSIFIER_MODEL", "qwen3.5-2b")).strip()
+
+
+def _classifier_probe_cases() -> list[dict[str, str]]:
+    noisy = " ".join(["kurz gesagt"] * 120)
+    return [
+        {
+            "case": "short_direct",
+            "text": "Was steht im RAG ueber AlphaRavis reranking?",
+            "expected": "short_direct",
+        },
+        {
+            "case": "long_noisy",
+            "text": f"{noisy}\n\nEigentliche Frage: Wie funktioniert der Archive Recall Condenser?",
+            "expected": "long_noisy",
+        },
+        {
+            "case": "instruction_only",
+            "text": "Bitte antworte knapp, nutze Quellen, veraendere keine FastPass Defaults.",
+            "expected": "instruction_only",
+        },
+        {
+            "case": "document_only",
+            "text": "AlphaRavis RAG Policy:\n- Large Paste wird als Quelle abgelegt.\n- Reranker bleibt aktiv.",
+            "expected": "document_only",
+        },
+        {
+            "case": "mixed",
+            "text": "Bitte analysiere das Dokument.\n\n```log\nERROR alpha rag queue pending\nINFO reranker active\n```\n\nWas ist die Ursache?",
+            "expected": "mixed",
+        },
+        {
+            "case": "fallback_down",
+            "text": "Simulierter Endpoint-Ausfall: Was soll die lokale Kondensation tun?",
+            "expected": "fallback",
+        },
+        {
+            "case": "fallback_invalid_json",
+            "text": "Simuliertes kaputtes JSON: extrahiere trotzdem eine Suchfrage.",
+            "expected": "fallback",
+        },
+        {
+            "case": "fallback_timeout",
+            "text": "Simulierter Timeout: nutze lokale Fallback-Klassifikation.",
+            "expected": "fallback",
+        },
+    ]
+
+
+def _json_object_from_text(text: str) -> dict[str, Any]:
+    raw = (text or "").strip()
+    try:
+        value = json.loads(raw)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        pass
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            value = json.loads(raw[start : end + 1])
+            return value if isinstance(value, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _local_classifier_decision(case: dict[str, str], *, reason: str = "") -> dict[str, Any]:
+    text = case["text"]
+    lines = text.splitlines()
+    has_code_fence = "```" in text
+    has_bullets = any(line.lstrip().startswith(("-", "*")) for line in lines)
+    has_question = "?" in text or "Eigentliche Frage:" in text or "Was ist" in text
+    word_count = len(re.findall(r"\w+", text))
+    if case["case"] == "short_direct":
+        kind = "short_direct"
+        query = text.strip()
+    elif case["case"] == "instruction_only":
+        kind = "instruction_only"
+        query = ""
+    elif has_code_fence and has_question:
+        kind = "mixed"
+        query = lines[-1].strip() if lines else text.strip()
+    elif has_bullets and not has_question:
+        kind = "document_only"
+        query = ""
+    elif word_count > 120:
+        kind = "long_noisy"
+        match = re.search(r"Eigentliche Frage:\s*(.+)", text, re.IGNORECASE | re.DOTALL)
+        query = match.group(1).strip() if match else " ".join(text.split()[-40:])
+    else:
+        kind = "retrieval_query"
+        query = text.strip()
+    document_ranges = []
+    if kind in {"document_only", "mixed"} and lines:
+        document_ranges.append({"start_line": 1 if kind == "document_only" else 3, "end_line": len(lines)})
+    return {
+        "classification": kind,
+        "query": query[:500],
+        "document_line_ranges": document_ranges,
+        "fallback_used": True,
+        "fallback_reason": reason,
+    }
+
+
+async def _call_qwen_classifier(
+    client: httpx.AsyncClient,
+    request: RagClassifierProbeRequest,
+    case: dict[str, str],
+) -> dict[str, Any]:
+    system = (
+        "Classify an AlphaRavis RAG prompt. Return strict JSON only with keys "
+        "classification, query, document_line_ranges. classification must be one "
+        "of short_direct,long_noisy,instruction_only,document_only,mixed,retrieval_query."
+    )
+    response = await client.post(
+        f"{_classifier_base_url(request)}/chat/completions",
+        json={
+            "model": _classifier_model(request),
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": case["text"]},
+            ],
+            "temperature": 0,
+            "max_tokens": 512,
+        },
+        headers={"Authorization": "Bearer sk-local-dev"},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    content = _extract_chat_text(payload)
+    parsed = _json_object_from_text(content)
+    if not parsed:
+        raise ValueError("classifier returned invalid JSON")
+    parsed["fallback_used"] = False
+    return parsed
+
+
+async def _run_rag_classifier_probe(request: RagClassifierProbeRequest) -> dict[str, Any]:
+    started = time.perf_counter()
+    mode = (request.mode or "local_fallback").strip().lower()
+    cases = _classifier_probe_cases()
+    results: list[dict[str, Any]] = []
+    real_cases = {"short_direct", "long_noisy", "instruction_only", "document_only", "mixed"}
+    async with httpx.AsyncClient(timeout=max(1.0, float(request.timeout_seconds))) as client:
+        for case in cases:
+            case_started = time.perf_counter()
+            simulated = case["case"].startswith("fallback_")
+            try:
+                if simulated:
+                    if case["case"] == "fallback_invalid_json":
+                        parsed = _json_object_from_text("not-json")
+                        if not parsed:
+                            raise ValueError("invalid JSON")
+                    if case["case"] == "fallback_timeout":
+                        raise httpx.TimeoutException("simulated timeout")
+                    raise httpx.ConnectError("simulated endpoint down")
+                if mode == "real_qwen" and case["case"] in real_cases:
+                    decision = await _call_qwen_classifier(client, request, case)
+                    source = "qwen"
+                else:
+                    decision = _local_classifier_decision(case, reason="local probe mode")
+                    source = "local_fallback"
+            except Exception as exc:
+                decision = _local_classifier_decision(case, reason=str(exc)[:200])
+                source = "fallback"
+            classification = str(decision.get("classification") or "")
+            expected = case["expected"]
+            if expected == "fallback":
+                ok = bool(decision.get("fallback_used"))
+            else:
+                ok = bool(classification)
+            results.append(
+                {
+                    "case": case["case"],
+                    "expected": expected,
+                    "classification": classification,
+                    "query": decision.get("query", ""),
+                    "document_line_ranges": decision.get("document_line_ranges", []),
+                    "fallback_used": bool(decision.get("fallback_used")),
+                    "fallback_reason": decision.get("fallback_reason", ""),
+                    "source": source,
+                    "ok": ok,
+                    "elapsed_seconds": round(time.perf_counter() - case_started, 3),
+                }
+            )
+    ok_count = sum(1 for item in results if item.get("ok"))
+    return {
+        "status": "passed" if ok_count == len(results) else ("partial" if ok_count else "failed"),
+        "mode": mode,
+        "classifier_base_url": _classifier_base_url(request),
+        "classifier_model": _classifier_model(request),
+        "ok_case_count": ok_count,
+        "case_count": len(results),
+        "results": results,
+        "elapsed_seconds": round(time.perf_counter() - started, 3),
+        "notes": [
+            "real_qwen mode calls the configured small Qwen classifier for the five semantic cases.",
+            "fallback cases deliberately simulate down, invalid JSON, and timeout behavior.",
+        ],
+    }
+
+
+async def _embedding_queue_status() -> dict[str, Any]:
+    if pgvector_queue_stats is None:
+        return {
+            "enabled": False,
+            "status": "unavailable",
+            "error": str(PGVECTOR_IMPORT_ERROR or "pgvector queue module unavailable"),
+        }
+    try:
+        stats = await pgvector_queue_stats()
+    except Exception as exc:
+        return {"enabled": False, "status": "error", "error": str(exc)[:500]}
+    counts = dict(stats.get("counts") or {}) if isinstance(stats, dict) else {}
+    pending = int(counts.get("pending") or 0)
+    running = int(counts.get("running") or 0)
+    failed = int(counts.get("failed") or 0)
+    done = int(counts.get("done") or 0)
+    active = pending + running + failed
+    total = active + done
+    progress = round(done / total, 4) if total > 0 else None
+    return {
+        "enabled": bool(stats.get("enabled", True)) if isinstance(stats, dict) else True,
+        "status": "active" if active else "idle",
+        "table": stats.get("table", "") if isinstance(stats, dict) else "",
+        "counts": counts,
+        "active_count": active,
+        "done_count": done,
+        "progress": progress,
+        "recent_active": stats.get("recent_active", []) if isinstance(stats, dict) else [],
+        "raw": stats,
+        "meaning": {
+            "pending": "queued but not indexed yet",
+            "running": "currently claimed by the embedding runner",
+            "failed": "not indexed; will retry until max attempts",
+            "done": "indexed or processed successfully",
+        },
+    }
+
+
 def _trim_chunking_runs() -> None:
     if len(CHUNKING_RUNS) <= CHUNKING_RUN_RETENTION:
         return
@@ -1400,6 +1662,16 @@ async def memory_embed_probe(request: MemoryEmbedProbeRequest) -> JSONResponse:
 @app.post("/api/rag-load-probe")
 async def rag_load_probe(request: RagLoadProbeRequest) -> JSONResponse:
     return JSONResponse(await _run_rag_load_probe(request))
+
+
+@app.post("/api/rag-classifier-probe")
+async def rag_classifier_probe(request: RagClassifierProbeRequest) -> JSONResponse:
+    return JSONResponse(await _run_rag_classifier_probe(request))
+
+
+@app.get("/api/embedding-queue/status")
+async def embedding_queue_status() -> JSONResponse:
+    return JSONResponse(await _embedding_queue_status())
 
 
 @app.post("/api/send")
@@ -1588,6 +1860,9 @@ OBSERVER_HTML = """<!doctype html>
     .shrink-bar { height: 8px; background: #1a2230; border-radius: 999px; overflow: hidden; }
     .shrink-bar span { display: block; height: 100%; background: #2f8f5b; border-radius: inherit; }
     .shrink-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+    .workflow-log { border-top: 1px solid #252d3b; padding-top: 7px; color: #c9d3e0; }
+    .workflow-log summary { cursor: pointer; color: #eef1f5; font-size: 12px; }
+    .workflow-log pre { margin: 7px 0 0; max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: #d8e0ea; font-size: 11px; line-height: 1.4; }
     .chunk-lab { border: 1px solid #2b3240; border-radius: 8px; background: #11151d; padding: 10px; display: grid; gap: 10px; }
     .chunk-lab-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
     .chunk-lab h2 { margin: 0; font-size: 13px; color: #cbd5e1; }
@@ -1669,12 +1944,20 @@ OBSERVER_HTML = """<!doctype html>
       </div>
       <div id="budgetGrid" class="budget-grid"></div>
     </section>
-    <section class="budget" aria-label="Source Ingest">
+    <section class="budget" aria-label="Big Message / Source Ingest">
       <div class="budget-title">
-        <span>Source Ingest</span>
+        <span>Big Message / Source Ingest</span>
         <span id="sourceStatus" class="status">Keine Quellen-Events.</span>
       </div>
       <div id="sourceGrid" class="source-grid"></div>
+    </section>
+    <section class="budget" aria-label="Embedding Queue">
+      <div class="budget-title">
+        <span>Embedding Queue</span>
+        <span id="embeddingQueueStatus" class="status">lade...</span>
+      </div>
+      <div id="embeddingQueueGrid" class="source-grid"></div>
+      <div id="embeddingQueueActions" class="chunk-actions"></div>
     </section>
     <section class="shrink" aria-label="Compression Shrinking">
       <div class="budget-title">
@@ -1779,6 +2062,33 @@ OBSERVER_HTML = """<!doctype html>
       <div id="nativeRagStats" class="chunk-stats"></div>
       <div id="nativeRagActions" class="chunk-actions"></div>
       <pre id="nativeRagRaw" class="chunk-raw">{}</pre>
+    </section>
+    <section class="chunk-lab" aria-label="Small Qwen Classifier Probe">
+      <div class="chunk-lab-head">
+        <h2>Small Qwen Classifier Probe</h2>
+        <span id="ragClassifierStatus" class="status">bereit</span>
+      </div>
+      <div class="chunk-form archive-rag-form">
+        <label>Mode
+          <select id="ragClassifierMode">
+            <option value="local_fallback">Local/Fallback</option>
+            <option value="real_qwen">Real Qwen 2B</option>
+          </select>
+        </label>
+        <label>Classifier URL
+          <input id="ragClassifierBaseUrl" type="text" value="">
+        </label>
+        <label>Model
+          <input id="ragClassifierModel" type="text" value="qwen3.5-2b">
+        </label>
+        <label>Timeout
+          <input id="ragClassifierTimeout" type="number" min="1" max="60" step="1" value="8">
+        </label>
+        <button id="runRagClassifierProbe" class="run" type="button">Classifier Probe</button>
+      </div>
+      <div id="ragClassifierStats" class="chunk-stats"></div>
+      <div id="ragClassifierActions" class="chunk-actions"></div>
+      <pre id="ragClassifierRaw" class="chunk-raw">{}</pre>
     </section>
     <section class="chunk-lab" aria-label="Memory Embed Probe">
       <div class="chunk-lab-head">
@@ -2141,6 +2451,10 @@ OBSERVER_HTML = """<!doctype html>
           ['Prompt Payload', data.summary_prompt_payload_token_limit ? fmtNumber(data.summary_prompt_payload_token_limit) : ''],
           ['Prompt Overhead', data.summary_prompt_overhead_tokens_estimate ? fmtNumber(data.summary_prompt_overhead_tokens_estimate) : ''],
           ['Prompt Pruned', data.summary_prompt_pruned === undefined ? '' : (data.summary_prompt_pruned ? 'ja' : 'nein')],
+          ['Workflow Events', data.workflow_event_count ? fmtNumber(data.workflow_event_count) : ''],
+          ['Tool Calls', data.workflow_tool_call_count ? fmtNumber(data.workflow_tool_call_count) : ''],
+          ['Tool Results', data.workflow_tool_result_count ? fmtNumber(data.workflow_tool_result_count) : ''],
+          ['Workflow Chars', data.workflow_event_chars ? fmtNumber(data.workflow_event_chars) : ''],
           ['Chunk Count', data.summary_chunk_count ? `${data.summary_chunk_count}` : ''],
           ['Chunk Payload', data.summary_chunk_payload_token_limit ? fmtNumber(data.summary_chunk_payload_token_limit) : ''],
           ['Chunk Overhead', data.summary_chunk_prompt_overhead_tokens ? fmtNumber(data.summary_chunk_prompt_overhead_tokens) : ''],
@@ -2155,6 +2469,16 @@ OBSERVER_HTML = """<!doctype html>
         card.appendChild(head);
         card.appendChild(bar);
         card.appendChild(grid);
+        if (data.workflow_event_preview) {
+          const workflow = document.createElement('details');
+          workflow.className = 'workflow-log';
+          const summary = document.createElement('summary');
+          summary.textContent = `Workflow / Tool Events (${fmtNumber(data.workflow_event_count || 0)})`;
+          const preview = document.createElement('pre');
+          preview.textContent = data.workflow_event_preview;
+          workflow.append(summary, preview);
+          card.appendChild(workflow);
+        }
         shrinkGrid.appendChild(card);
       }
     }
@@ -2186,6 +2510,7 @@ OBSERVER_HTML = """<!doctype html>
         const source = document.createElement('p');
         source.textContent = item.source_key || '';
         const backends = [...(item.indexed_backends || []), ...(item.queued_backends || [])].filter(Boolean).join(', ');
+        const queued = (item.queued_backends || []).filter(Boolean).join(', ');
         const grid = document.createElement('div');
         grid.className = 'source-metrics';
         [
@@ -2194,7 +2519,9 @@ OBSERVER_HTML = """<!doctype html>
           ['Intent', item.paste_intent || ''],
           ['Chars', fmtNumber(item.content_chars || '')],
           ['Indexed', fmtNumber(item.indexed_content_chars || '')],
+          ['Chunks', item.chunk_count ? `${fmtNumber(item.indexed_chunk_count || 0)}/${fmtNumber(item.chunk_count)}` : ''],
           ['Backends', backends],
+          ['Queue', queued],
           ['RAG aktiv', item.rag_active === undefined ? '' : (item.rag_active ? 'ja' : 'nein')],
           ['Manual', item.manual_rag_block ? 'ja' : 'nein'],
           ['Elapsed', item.elapsed_seconds ? `${item.elapsed_seconds}s` : ''],
@@ -2204,6 +2531,54 @@ OBSERVER_HTML = """<!doctype html>
         });
         card.append(head, source, grid);
         sourceGrid.appendChild(card);
+      }
+    }
+    function renderEmbeddingQueue(result) {
+      embeddingQueueGrid.innerHTML = '';
+      embeddingQueueActions.innerHTML = '';
+      if (!result || result.status === 'unavailable' || result.status === 'error') {
+        embeddingQueueStatus.textContent = result?.error || 'Queue nicht verfuegbar.';
+        embeddingQueueStatus.className = 'status warn';
+        return;
+      }
+      const counts = result.counts || {};
+      const active = Number(result.active_count || 0);
+      embeddingQueueStatus.textContent = active
+        ? `${fmtNumber(active)} aktive Queue-Jobs`
+        : 'idle';
+      embeddingQueueStatus.className = `status ${active ? 'warn' : 'ok'}`;
+      [
+        ['Pending', fmtNumber(counts.pending || 0), counts.pending ? 'warn' : 'ok'],
+        ['Running', fmtNumber(counts.running || 0), counts.running ? 'warn' : ''],
+        ['Failed', fmtNumber(counts.failed || 0), counts.failed ? 'hard' : ''],
+        ['Done', fmtNumber(counts.done || 0), 'ok'],
+        ['Progress', result.progress === null || result.progress === undefined ? '' : `${Math.round(Number(result.progress) * 100)}%`],
+        ['Table', result.table || ''],
+      ].forEach(([name, value, className]) => {
+        if (value !== '') embeddingQueueGrid.appendChild(metric(name, value, className || ''));
+      });
+      for (const item of (result.recent_active || [])) {
+        const row = document.createElement('div');
+        const status = document.createElement('span');
+        status.className = item.status === 'failed' ? 'pill hard' : (item.status === 'running' ? 'pill warn' : 'pill');
+        status.textContent = item.status || '';
+        const source = document.createElement('span');
+        source.textContent = `${item.source_type || ''}:${item.source_key || ''}`;
+        const detail = document.createElement('span');
+        detail.className = 'muted';
+        detail.textContent = [item.title || '', item.last_error || ''].filter(Boolean).join(' | ');
+        row.append(status, source, detail);
+        embeddingQueueActions.appendChild(row);
+      }
+    }
+    async function refreshEmbeddingQueue() {
+      try {
+        const response = await fetch('/api/embedding-queue/status', { cache: 'no-store' });
+        if (!response.ok) throw new Error(await response.text());
+        renderEmbeddingQueue(await response.json());
+      } catch (error) {
+        embeddingQueueStatus.textContent = error.message;
+        embeddingQueueStatus.className = 'status hard';
       }
     }
     function chunkMetric(label, value, className = '') {
@@ -2450,6 +2825,58 @@ OBSERVER_HTML = """<!doctype html>
         nativeRagStatus.className = 'status hard';
       } finally {
         runNativeRagSmoke.disabled = false;
+      }
+    }
+    function renderRagClassifierProbe(result) {
+      const passed = result.status === 'passed';
+      const partial = result.status === 'partial';
+      ragClassifierStatus.textContent = `${result.status || 'unknown'} in ${result.elapsed_seconds || 0}s`;
+      ragClassifierStatus.className = `status ${passed ? 'ok' : (partial ? 'warn' : 'hard')}`;
+      ragClassifierStats.innerHTML = '';
+      [
+        ['Cases', `${fmtNumber(result.ok_case_count || 0)} / ${fmtNumber(result.case_count || 0)}`, passed ? 'ok' : 'warn'],
+        ['Mode', result.mode || ''],
+        ['Endpoint', result.classifier_base_url || ''],
+        ['Model', result.classifier_model || ''],
+      ].forEach(([label, value, className]) => ragClassifierStats.appendChild(chunkMetric(label, value, className || '')));
+      ragClassifierActions.innerHTML = '';
+      for (const item of (result.results || [])) {
+        const row = document.createElement('div');
+        const badge = document.createElement('span');
+        badge.className = item.ok ? 'pill ok' : 'pill hard';
+        badge.textContent = item.case || '';
+        const event = document.createElement('span');
+        event.textContent = `${item.classification || ''}${item.fallback_used ? ' (fallback)' : ''}`;
+        const detail = document.createElement('span');
+        detail.className = 'muted';
+        detail.textContent = [item.source || '', item.query || '', item.fallback_reason || ''].filter(Boolean).join(' | ').slice(0, 220);
+        row.append(badge, event, detail);
+        ragClassifierActions.appendChild(row);
+      }
+      ragClassifierRaw.textContent = pretty(result);
+    }
+    async function startRagClassifierProbe() {
+      runRagClassifierProbe.disabled = true;
+      ragClassifierStatus.textContent = 'starte...';
+      ragClassifierStatus.className = 'status warn';
+      try {
+        const response = await fetch('/api/rag-classifier-probe', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            mode: ragClassifierMode.value || 'local_fallback',
+            classifier_base_url: ragClassifierBaseUrl.value || '',
+            classifier_model: ragClassifierModel.value || '',
+            timeout_seconds: Number(ragClassifierTimeout.value || 8),
+          }),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        renderRagClassifierProbe(await response.json());
+      } catch (error) {
+        ragClassifierStatus.textContent = error.message;
+        ragClassifierStatus.className = 'status hard';
+      } finally {
+        runRagClassifierProbe.disabled = false;
       }
     }
     function renderMemoryEmbedProbe(result) {
@@ -2784,10 +3211,13 @@ OBSERVER_HTML = """<!doctype html>
     runChunking.addEventListener('click', () => startChunkingRun());
     runArchiveRagSmoke.addEventListener('click', () => startArchiveRagSmoke());
     runNativeRagSmoke.addEventListener('click', () => startNativeRagSmoke());
+    runRagClassifierProbe.addEventListener('click', () => startRagClassifierProbe());
     runMemoryEmbedProbe.addEventListener('click', () => startMemoryEmbedProbe());
     runRagLoadProbe.addEventListener('click', () => startRagLoadProbe());
     loadRecords().catch((error) => { statusEl.textContent = error.message; });
+    refreshEmbeddingQueue();
     window.setInterval(() => loadRecords().catch(() => {}), 2500);
+    window.setInterval(() => refreshEmbeddingQueue().catch(() => {}), 5000);
   </script>
 </body>
 </html>

@@ -12,16 +12,21 @@ can tell which patches are intentional and which ones can be removed.
   chunk profile per section, and preserves original section order. The feature
   is controlled by `ALPHARAVIS_PGVECTOR_SECTION_LEVEL_ARCHIVE_SPLITTING=true`
   and can be disabled per source with `section_level_splitting=false` metadata.
-- Active RAG prefetch now supports the explicit archive mode
-  `archive_rag_mode=auto_on_intent`. Compression archives remain passive by
-  default (`tool_only`), but when the mode is set AlphaRavis asks the same safe
+- Active RAG prefetch now checks current-thread compression archives by default
+  on the Agent path, controlled by
+  `ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_AGENT_DEFAULT=true`. Fast Path still never
+  enters this node. With archive keys present, AlphaRavis asks the same safe
   Qwen3.5 2B classifier for strict JSON: `archive_recall`, `search_query`,
   `confidence`, and `reason`. If the classifier confirms recall intent above
   `ALPHARAVIS_ARCHIVE_AUTO_INTENT_MIN_CONFIDENCE`, AlphaRavis runs source-scoped
   archive retrieval over the latest
   `ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_MAX_ARCHIVES` archive keys using the
-  classifier's query. If the classifier is down, times out, or returns invalid
-  JSON, AlphaRavis falls back to the local archive-recall condenser/heuristic.
+  classifier's query. The classifier prompt explicitly rejects current upload,
+  file, image, video, URL, Pixelle, or active-source tasks unless the user also
+  asks for older/archive context. If the classifier is down, times out, or
+  returns invalid JSON, AlphaRavis falls back to the local archive-recall
+  condenser/heuristic. Use `archive_rag_mode=manual` for a thread-level
+  opt-out.
 - The recall detector now recognizes vague phrasing such as "nochmal",
   "noch mal", and "wie war das" in addition to explicit archive/previous-context
   terms.
@@ -70,7 +75,10 @@ can tell which patches are intentional and which ones can be removed.
   requests, tool outputs, duplicate outputs, and long action logs are compacted
   into `Workflow / Tool Event Compact Log` instead of being treated as ordinary
   chat text. The compact log is stored in archive metadata and archive content;
-  redacted original messages remain in the raw archive for exact reads.
+  redacted original messages remain in the raw archive for exact reads. The
+  Observer `Shrinking` cards now render workflow event counts, tool-call/result
+  counts, compact-log character size, and a bounded `Workflow / Tool Events`
+  preview.
 - Architecture now defines the AlphaRavis memory-tier policy: latest task tail,
   active compaction summary, raw archive, archive collection, document/source
   record, vector recall chunks, MemoryKernel facts, temporary workflow state,
@@ -107,8 +115,15 @@ archive chunking paths:
   After replacement, the node can run a follow-up compression pass for remaining
   non-document chatter when the active context still exceeds
   `ALPHARAVIS_LARGE_PASTE_POST_RAG_COMPRESSION_TRIGGER_RATIO`, default `0.80`.
-  Paired `/rag ... /rag`, `/rake ... /rake`, `/index ... /index`, and
-  `/ingest ... /ingest` still force indexing.
+  Paired `/rag ... /rag`, `/rake ... /rake`, `/index ... /index`,
+  `/ingest ... /ingest`, `/big-context ... /big-context`, and fenced
+  `<big-context name="...">...</big-context>` blocks force indexing.
+  Source manifests now include chunk/index stats and source digest when the
+  backend reports them, and the Observer renders the status in `Big Message /
+  Source Ingest`. If no explicit current question/task is detected, the marker
+  asks what to extract or analyze instead of letting the model do broad
+  unsupported analysis. A focused 130k first-message smoke covers chunk
+  progress, manifest stats, marker replacement, and no-question fallback.
 - Large-paste intent is classified locally before ingest. Document-like pastes
   activate normal document RAG; instruction-like pastes are indexed as
   `large_instruction` for exact lookup and keep a condensed active instruction
@@ -164,7 +179,8 @@ archive chunking paths:
 - Agentic-RAG LLM grading now defaults to `openai/big-boss` when enabled, and
   the grader call disables hidden thinking with
   `chat_template_kwargs.enable_thinking=false` and `preserve_thinking=false`.
-  The active local `.env` currently has Big-Boss LLM grading enabled.
+  The active local `.env` currently keeps Big-Boss LLM grading disabled because
+  Qwen3 reranking is the normal ranking policy.
 - Router reranking now supports a real model backend. With
   `ALPHARAVIS_RAG_RERANKER_MODE=model`, AlphaRavis calls a llama.cpp
   Qwen3-Reranker endpoint and falls back to deterministic lexical/vector
@@ -497,6 +513,20 @@ source/file ids. Compression archives remain passive with
 explicit retrieval tools instead of automatic full-archive injection.
 `AlphaRavisState` now has matching fields and run-profile snapshots expose the
 current values for debugging.
+
+Artifact writes now use the same ingestion router instead of calling pgvector
+directly. `write_alpha_ravis_artifact(...)` saves the file/store record, calls
+`retrieval_router.ingest_source(source_type="artifact", preferred_backend="auto")`,
+and records normalized `ingest_status`, `indexed_backends`, `queued_backends`,
+and `rag_file_id` metadata.
+
+The Bridge Test UI/Observer now includes a Small Qwen classifier probe and an
+embedding-queue polling panel. The classifier probe covers short direct, long
+noisy, instruction-only, document-only, mixed, and simulated down/invalid
+JSON/timeout fallback cases. The queue panel polls
+`/api/embedding-queue/status` for pending/running/failed/done counts and recent
+active jobs, so queued large-source embeddings are visible after the request
+stream has finished.
 
 Large-paste ingest is now wired at `run_profile_start_node`. If a human message
 exceeds `ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS` and
@@ -1146,6 +1176,25 @@ make -n install START=no SUBMODULES=no TAILSCALE_AUTO=off
 make -n up TAILSCALE_AUTO=apply
 pytest -q tests/test_alpharavis_setup.py tests/test_tailscale_https_routes.py
 ```
+
+Follow-up polish: the Service Dashboard now separates human-facing web
+interfaces from collapsible API/backend and infrastructure sections. API cards
+show copyable Tailscale HTTPS, local HTTP, and Tailnet HTTP addresses when the
+Tailscale override payload is present, while Web UI cards keep HTTPS as the
+primary mobile/external link. Cards are directly clickable again and the action
+label uses `Öffnen`. LiteLLM is represented as both Web UI (`/`) and API
+(`/v1`); Pixelle is represented as the Web UI root plus a separate streamable
+HTTP MCP endpoint at `/pixelle/mcp`; LangGraph specialist ports are grouped as
+Infrastructure/TCP endpoints instead of primary Web UI cards or automatic
+Tailscale web routes. The dashboard and Media Gallery both serve SVG favicons,
+and the Media Gallery `/gallery` view has a refreshed responsive dark layout
+with a visible `MG` brand mark, modern filters, and mobile-friendly asset cards.
+
+Tailscale route planning now keeps a public URL path such as `/gallery` for the
+dashboard link but proxies `tailscale serve` to the service root
+`http://127.0.0.1:<port>` by default. This prevents path-bound upstream routing
+from breaking UI sub-links. A service can still set `tailscale_target_path` when
+it intentionally needs a path-bound upstream target.
 
 ## 2026-05-13 - Make Config Browser UI
 

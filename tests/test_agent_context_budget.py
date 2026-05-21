@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import types
 from pathlib import Path
@@ -175,6 +176,63 @@ def test_store_compression_archive_uses_ingest_router(monkeypatch: pytest.Monkey
     assert len(writes) == 2
 
 
+def test_write_artifact_indexes_through_retrieval_router(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: dict[str, object] = {}
+    writes: list[tuple[tuple[str, ...], str, dict[str, object]]] = []
+
+    async def fake_ingest_source(**kwargs):
+        calls["ingest"] = kwargs
+        return {
+            "index_status": "queued",
+            "rag_file_id": "artifact:artifact-key",
+            "indexed_backends": [],
+            "queued_backends": ["alpharavis_pgvector"],
+            "rag_active": True,
+            "active_source_keys": [kwargs["source_key"]],
+            "active_rag_file_ids": [],
+            "backend_results": {"alpharavis_pgvector": "queued embedding job for artifact"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    async def fake_put(_store, namespace, key, value):
+        writes.append((namespace, key, value))
+
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_ARTIFACTS", "true")
+    monkeypatch.setattr(agent_graph, "_workspace_root", lambda: str(tmp_path))
+    monkeypatch.setattr(agent_graph, "_state_thread_id", lambda *_args, **_kwargs: "thread-1")
+    monkeypatch.setattr(agent_graph, "_state_thread_key", lambda *_args, **_kwargs: "thread:key")
+    monkeypatch.setattr(agent_graph, "get_store", lambda: object())
+    monkeypatch.setattr(agent_graph, "_maybe_put", fake_put)
+    monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
+
+    raw = asyncio.run(
+        agent_graph.write_alpha_ravis_artifact(
+            title="Artifact Router Smoke",
+            content="Artifact body should be indexed through retrieval_router.ingest_source.",
+            artifact_type="note",
+            suggested_filename="router-smoke.md",
+        )
+    )
+    payload = json.loads(raw)
+
+    assert calls["ingest"]["source_type"] == "artifact"
+    assert calls["ingest"]["title"] == "Artifact Router Smoke"
+    assert calls["ingest"]["thread_id"] == "thread-1"
+    assert calls["ingest"]["thread_key"] == "thread:key"
+    assert calls["ingest"]["preferred_backend"] == "auto"
+    assert calls["ingest"]["pgvector_index"] == agent_graph._maybe_index_vector_memory
+    assert calls["ingest"]["metadata"]["rag_activation_reason"] == "artifact"
+    assert calls["ingest"]["metadata"]["filename"].endswith("router-smoke.md")
+    assert payload["ingest_status"] == "queued"
+    assert payload["queued_backends"] == ["alpharavis_pgvector"]
+    assert payload["rag_file_id"] == "artifact:artifact-key"
+    assert writes[-1][2]["ingest_status"] == "queued"
+
+
 def test_rag_state_update_from_document_ingest_merges_active_sources() -> None:
     update = agent_graph._rag_state_update_from_ingest(
         {
@@ -315,6 +373,7 @@ def test_large_paste_auto_ingest_defers_until_after_pre_run_compression(monkeypa
     monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_POST_COMPRESSION_TRIGGER_RATIO", "0.01")
     monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_POST_RAG_COMPRESSION_ENABLED", "false")
     monkeypatch.setenv("ALPHARAVIS_ENABLE_LARGE_PASTE_SMALL_CLASSIFIER", "false")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MARKER_PREVIEW_CHARS", "0")
     monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
     monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", object())
 
@@ -349,6 +408,89 @@ def test_large_paste_auto_ingest_defers_until_after_pre_run_compression(monkeypa
     assert post_updates["run_profile"]["large_paste_post_compression_ingested"] is True
     assert post_updates["run_profile"]["large_paste_ingests"][-1]["index_status"] == "indexed"
     assert isinstance(post_updates["messages"][0], agent_graph.RemoveMessage)
+
+
+def test_post_compression_130k_first_message_is_chunked_and_replaced(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_pgvector_index(**kwargs):
+        calls["pgvector"] = kwargs
+        progress_callback = kwargs.get("progress_callback")
+        for index in range(3):
+            event = {
+                "event": "large_ingest.chunk_indexed",
+                "source_type": kwargs["source_type"],
+                "source_key": kwargs["source_key"],
+                "chunk_index": index,
+                "chunk_number": index + 1,
+                "chunk_count": 3,
+                "chunk_chars": 45000 if index < 2 else 40000,
+                "chunk_digest": f"chunk-{index}",
+                "source_digest": "source-digest-130k",
+            }
+            if progress_callback is not None:
+                progress_callback(event)
+        return "indexed:large_paste:3"
+
+    async def fake_ingest_source(**kwargs):
+        calls["ingest"] = kwargs
+        await kwargs["pgvector_index"](
+            source_type=kwargs["source_type"],
+            source_key=kwargs["source_key"],
+            title=kwargs["title"],
+            content=kwargs["content"],
+            thread_id=kwargs["thread_id"],
+            thread_key=kwargs["thread_key"],
+            scope=kwargs["scope"],
+            metadata=kwargs["metadata"],
+        )
+        return {
+            "source_key": kwargs["source_key"],
+            "rag_file_id": kwargs["source_key"],
+            "index_status": "indexed",
+            "indexed_backends": ["alpharavis_pgvector"],
+            "queued_backends": [],
+            "rag_active": True,
+            "active_source_keys": [kwargs["source_key"]],
+            "active_rag_file_ids": [],
+            "rag_activation_reason": "large_paste",
+            "archive_rag_mode": "tool_only",
+        }
+
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "20000")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_AUTO_STAGE", "post_compression")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_POST_COMPRESSION_TRIGGER_RATIO", "0.01")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_POST_RAG_COMPRESSION_ENABLED", "false")
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_LARGE_PASTE_SMALL_CLASSIFIER", "false")
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MARKER_PREVIEW_CHARS", "0")
+    monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
+    monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", fake_pgvector_index)
+
+    content = "Document:\n" + ("FIRST_MESSAGE_130K_CHUNKED source body line.\n" * 3300)
+    assert len(content) > 130000
+
+    updates = asyncio.run(
+        agent_graph.large_paste_post_compression_node(
+            {
+                "messages": [{"role": "human", "content": content, "id": "msg-1"}],
+                "thread_id": "thread-1",
+                "thread_key": "thread-key",
+                "run_profile": {"large_paste_ingests": []},
+            }
+        )
+    )
+
+    assert calls["ingest"]["content"] == content
+    ingest_record = updates["run_profile"]["large_paste_ingests"][-1]
+    assert ingest_record["chunk_count"] == 3
+    assert ingest_record["indexed_chunk_count"] == 3
+    assert ingest_record["source_manifest"]["chunk_count"] == 3
+    assert ingest_record["source_manifest"]["source_digest"] == "source-digest-130k"
+    assert [event["chunk_number"] for event in ingest_record["events"] if event["event"] == "large_ingest.chunk_indexed"] == [1, 2, 3]
+    replacement_text = updates["messages"][1]["content"]
+    assert "Large paste indexed for bounded RAG retrieval" in replacement_text
+    assert "No explicit current question was detected" in replacement_text
+    assert "FIRST_MESSAGE_130K_CHUNKED" not in replacement_text
 
 
 def test_large_paste_post_rag_compresses_remaining_context(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -565,6 +707,54 @@ def test_run_profile_start_manual_rag_block_forces_ingest(monkeypatch: pytest.Mo
     assert "/rag" not in replacement_text
     assert "Large paste indexed for bounded RAG retrieval" in replacement_text
     assert "Was steht im Marker?" in replacement_text
+
+
+def test_big_context_tag_forces_ingest_and_keeps_outer_question(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_ingest_source(**kwargs):
+        calls["ingest"] = kwargs
+        return {
+            "source_key": kwargs["source_key"],
+            "rag_file_id": kwargs["source_key"],
+            "index_status": "indexed",
+            "indexed_backends": ["alpharavis_pgvector"],
+            "rag_active": True,
+            "active_source_keys": [kwargs["source_key"]],
+            "active_rag_file_ids": [],
+            "rag_activation_reason": "large_paste",
+            "archive_rag_mode": "tool_only",
+        }
+
+    monkeypatch.setenv("ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS", "999999")
+    monkeypatch.setattr(agent_graph, "_router_ingest_source", fake_ingest_source)
+    monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", object())
+
+    content = "\n".join(
+        [
+            "Bitte benutze diese Quelle.",
+            '<big-context name="ops-log">',
+            "Runtime marker: BIG_CONTEXT_BLOCK. This block must be indexed.",
+            "</big-context>",
+            "Was steht im Marker?",
+        ]
+    )
+    updates = asyncio.run(
+        agent_graph.run_profile_start_node(
+            {
+                "messages": [{"role": "human", "content": content, "id": "msg-1"}],
+                "thread_id": "thread-1",
+                "thread_key": "thread-key",
+            }
+        )
+    )
+
+    assert calls["ingest"]["metadata"]["manual_rag_block"] is True
+    assert "BIG_CONTEXT_BLOCK" in calls["ingest"]["content"]
+    replacement_text = updates["messages"][1]["content"]
+    assert "<big-context" not in replacement_text
+    assert "Was steht im Marker?" in replacement_text
+    assert "Source manifest:" in replacement_text
 
 
 def test_large_paste_intent_classifier_detects_instruction_and_mixed() -> None:
@@ -1283,10 +1473,38 @@ def test_archive_auto_intent_profile_falls_back_when_2b_fails(monkeypatch: pytes
     assert "Reranker" in profile["query"] or "reranker" in profile["query"]
 
 
-def test_active_rag_prefetch_keeps_archives_passive_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_agentic_rag_retrieve(**kwargs):
-        raise AssertionError("archive retrieval must stay passive in tool_only mode")
+def test_active_rag_prefetch_auto_checks_archives_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
 
+    async def fake_archive_classifier(messages):
+        return {
+            "archive_recall": True,
+            "query": "default archive recall query",
+            "confidence": 0.91,
+            "strategy": "small_model_archive_intent",
+        }
+
+    async def fake_agentic_rag_retrieve(**kwargs):
+        calls.update(kwargs)
+        return {
+            "final_query": kwargs["query"],
+            "context_packet": {
+                "query": kwargs["query"],
+                "chunk_count": 1,
+                "chunks": [
+                    {
+                        "rank": 1,
+                        "source_key": "archive-1",
+                        "retrieval_backend": "alpharavis_pgvector",
+                        "relevance_score": 0.9,
+                        "chunk_text": "Default archive context.",
+                    }
+                ],
+            },
+            "graph_trace": [],
+        }
+
+    monkeypatch.setattr(agent_graph, "_archive_auto_intent_profile_for_messages", fake_archive_classifier)
     monkeypatch.setattr(agent_graph, "_router_agentic_rag_retrieve", fake_agentic_rag_retrieve)
 
     updates = asyncio.run(
@@ -1295,6 +1513,62 @@ def test_active_rag_prefetch_keeps_archives_passive_by_default(monkeypatch: pyte
                 "messages": [{"role": "human", "content": "Wie war das nochmal mit dem Reranker?"}],
                 "thread_id": "thread-1",
                 "archive_rag_mode": "tool_only",
+                "archived_context_keys": ["archive-1"],
+            }
+        )
+    )
+
+    assert calls["source_type"] == "archive"
+    assert calls["query"] == "default archive recall query"
+    assert updates["run_profile"]["active_rag_prefetch_status"] == "injected"
+    assert updates["run_profile"]["active_rag_prefetch_archive_auto_on_intent"] is True
+
+
+def test_active_rag_prefetch_archive_auto_default_skips_current_source_task_when_2b_says_no(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_archive_classifier(messages):
+        return {
+            "archive_recall": False,
+            "query": "use current video",
+            "confidence": 0.93,
+            "strategy": "small_model_archive_intent",
+            "reason": "current explicit media task",
+        }
+
+    async def fake_agentic_rag_retrieve(**kwargs):
+        raise AssertionError("archive retrieval must not run for current media/source tasks")
+
+    monkeypatch.setattr(agent_graph, "_archive_auto_intent_profile_for_messages", fake_archive_classifier)
+    monkeypatch.setattr(agent_graph, "_router_agentic_rag_retrieve", fake_agentic_rag_retrieve)
+
+    updates = asyncio.run(
+        agent_graph.active_rag_prefetch_node(
+            {
+                "messages": [{"role": "human", "content": "Benutze dieses Video und mache daraus einen Pixelle Prompt."}],
+                "thread_id": "thread-1",
+                "archive_rag_mode": "tool_only",
+                "archived_context_keys": ["archive-1"],
+            }
+        )
+    )
+
+    assert updates["run_profile"]["active_rag_prefetch_status"] == "archive_auto_no_intent"
+    assert updates["run_profile"]["active_rag_prefetch_classifier"]["archive_recall"] is False
+
+
+def test_active_rag_prefetch_manual_archive_mode_stays_passive(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_agentic_rag_retrieve(**kwargs):
+        raise AssertionError("archive retrieval must stay passive in manual mode")
+
+    monkeypatch.setattr(agent_graph, "_router_agentic_rag_retrieve", fake_agentic_rag_retrieve)
+
+    updates = asyncio.run(
+        agent_graph.active_rag_prefetch_node(
+            {
+                "messages": [{"role": "human", "content": "Wie war das nochmal mit dem Reranker?"}],
+                "thread_id": "thread-1",
+                "archive_rag_mode": "manual",
                 "archived_context_keys": ["archive-1"],
             }
         )

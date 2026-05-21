@@ -38,6 +38,7 @@ DOWNLOAD_ENABLED = os.getenv("ALPHARAVIS_MEDIA_DOWNLOAD_ENABLED", "true").lower(
 MAX_DOWNLOAD_BYTES = int(os.getenv("ALPHARAVIS_MEDIA_MAX_DOWNLOAD_BYTES", str(2 * 1024 * 1024 * 1024)))
 ASSET_SORT_FIELDS = {"created_at", "title", "media_type", "asset_kind", "thread_key", "group_id"}
 GALLERY_GROUP_BY = {"day_group", "thread", "group", "day", "media_type"}
+FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#0b1018"/><path d="M12 44V20h40v24H12Z" fill="#ff8a58"/><path d="M18 38l8-9 6 6 5-7 9 10H18Z" fill="#101620"/><circle cx="42" cy="25" r="4" fill="#101620"/></svg>"""
 
 app = FastAPI(title="AlphaRavis Media Gallery", openapi_version="3.1.0")
 
@@ -45,6 +46,12 @@ app = FastAPI(title="AlphaRavis Media Gallery", openapi_version="3.1.0")
 async def root_redirect():
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url="/gallery")
+
+
+@app.get("/favicon.svg", include_in_schema=False)
+async def favicon():
+    from fastapi.responses import Response
+    return Response(content=FAVICON_SVG, media_type="image/svg+xml")
 
 ensure_write_allowed(MEDIA_ROOT, allowed_root=MEDIA_ROOT)
 MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
@@ -449,25 +456,30 @@ async def gallery(
     }
 
     body = [
-        "<!doctype html><html><head><meta charset='utf-8'><title>AlphaRavis Media Gallery</title>",
+        "<!doctype html><html lang='de'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<title>AlphaRavis Media Gallery</title><link rel='icon' href='/favicon.svg' type='image/svg+xml'>",
         "<style>"
-        "body{font-family:system-ui;margin:0;background:#101214;color:#eee}"
-        "header{position:sticky;top:0;background:#101214;padding:18px 24px;border-bottom:1px solid #2b3036;z-index:2}"
-        "main{padding:18px 24px}.tabs{display:flex;gap:8px;flex-wrap:wrap}.tabs a{color:#ddd;text-decoration:none;border:1px solid #343a42;border-radius:7px;padding:7px 11px}.tabs a.active{background:#e8eef8;color:#111;border-color:#e8eef8}"
-        ".filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-top:12px;max-width:920px}.filters input,.filters select{background:#181b1f;color:#eee;border:1px solid #343a42;border-radius:6px;padding:7px}.filters button{background:#e8eef8;color:#111;border:1px solid #e8eef8;border-radius:6px;padding:7px 11px;cursor:pointer}"
-        "details{margin:16px 0;border-top:1px solid #333;padding-top:12px}summary{cursor:pointer;font-weight:700}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}.card{position:relative;background:#181b1f;border:1px solid #2b3036;border-radius:8px;padding:10px;min-height:180px}img,video{width:100%;aspect-ratio:16/9;object-fit:contain;border-radius:6px;background:#000}.meta{font-size:12px;color:#aaa;word-break:break-word}.badge{display:inline-block;font-size:11px;text-transform:uppercase;letter-spacing:.04em;border:1px solid #46515d;border-radius:6px;padding:2px 6px;color:#cdd7e1}.actions{position:absolute;right:10px;bottom:10px;display:flex;gap:6px}.actions button,.actions a{font-size:12px;background:#222831;color:#eee;border:1px solid #3a434d;border-radius:6px;padding:5px 7px;text-decoration:none;cursor:pointer}h3{font-size:15px;margin:8px 0;line-height:1.25}"
+        ":root{color-scheme:dark;--bg:#080b10;--panel:#101620;--panel2:#151d29;--line:#253144;--text:#eef4ff;--muted:#94a3b8;--soft:#c7d2e4;--accent:#ff8a58}"
+        "*{box-sizing:border-box}body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;background:linear-gradient(145deg,#080b10 0%,#0d1118 52%,#10151d 100%);color:var(--text);min-height:100vh}"
+        "header{position:sticky;top:0;background:rgba(8,11,16,.94);backdrop-filter:blur(12px);border-bottom:1px solid var(--line);z-index:2}"
+        ".shell{width:min(1440px,calc(100vw - 40px));margin:0 auto}.hero{display:grid;gap:12px;padding:22px 0 16px}.brand{display:flex;align-items:center;gap:12px}.mark{display:grid;place-items:center;width:44px;height:44px;border-radius:8px;background:var(--accent);color:#101620;font-weight:900;letter-spacing:0}.eyebrow{color:var(--accent);font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.08em}.titleline{display:grid;gap:2px}h1{font-size:clamp(26px,5vw,54px);line-height:1;margin:0;letter-spacing:0}.subhead{max-width:860px;margin:0;color:var(--soft);font-size:15px;line-height:1.4}"
+        ".tabs{display:flex;gap:8px;flex-wrap:wrap}.tabs a{color:var(--soft);text-decoration:none;border:1px solid var(--line);border-radius:8px;padding:8px 11px;background:rgba(255,255,255,.03);font-size:13px}.tabs a.active{background:var(--accent);color:#101620;border-color:var(--accent);font-weight:800}"
+        ".filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:8px;padding:0 0 18px;max-width:1080px}.filters input,.filters select{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px;min-height:40px;font:inherit;font-size:14px}.filters button{background:#e8eef8;color:#101620;border:1px solid #e8eef8;border-radius:8px;padding:9px 12px;cursor:pointer;font-weight:800}"
+        "main{padding:20px 0 44px}details{margin:0 0 18px;border-top:1px solid var(--line);padding-top:14px}summary{cursor:pointer;font-weight:800;font-size:17px;list-style:none;display:flex;align-items:center;justify-content:space-between;gap:10px}summary::-webkit-details-marker{display:none}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px;margin-top:12px}"
+        ".card{position:relative;background:linear-gradient(180deg,rgba(21,29,41,.96),rgba(12,17,25,.98));border:1px solid var(--line);border-radius:8px;padding:12px;min-height:240px;display:flex;flex-direction:column;gap:10px;overflow:hidden}.thumb{display:block;border-radius:7px;background:#05070a;border:1px solid rgba(255,255,255,.06);overflow:hidden}img,video{width:100%;aspect-ratio:16/9;object-fit:contain;display:block;background:#000}.file-link{display:flex;align-items:center;min-height:120px;padding:12px;color:var(--soft);overflow-wrap:anywhere;text-decoration:none}.meta{font-size:12px;color:var(--muted);word-break:break-word;display:grid;gap:3px;padding-bottom:36px}.badge{display:inline-flex;width:max-content;font-size:11px;text-transform:uppercase;letter-spacing:.04em;border:1px solid rgba(255,255,255,.14);border-radius:6px;padding:3px 7px;color:var(--soft);background:rgba(255,255,255,.04)}.asset-head{display:flex;align-items:start;justify-content:space-between;gap:8px}h3{font-size:15px;margin:0;line-height:1.25;letter-spacing:0}.actions{position:absolute;right:12px;bottom:12px;display:flex;gap:6px}.actions button,.actions a{font-size:12px;background:#202838;color:var(--text);border:1px solid #344055;border-radius:7px;padding:6px 8px;text-decoration:none;cursor:pointer}.empty{color:var(--muted);border:1px dashed var(--line);border-radius:8px;padding:22px;background:rgba(255,255,255,.03)}"
+        "@media(max-width:760px){.shell{width:calc(100% - 28px)}header{position:static}.hero{padding-top:18px}.grid{grid-template-columns:1fr}.filters{grid-template-columns:1fr 1fr}.subhead{font-size:14px}.card{min-height:auto}}@media(max-width:460px){.shell{width:calc(100% - 20px)}.filters{grid-template-columns:1fr}.brand{align-items:flex-start}.mark{width:38px;height:38px}}"
         "</style>",
         "<script>function copyLink(url){navigator.clipboard&&navigator.clipboard.writeText(url)}</script>",
-        "</head><body><header><h1>AlphaRavis Media Gallery</h1><nav class='tabs'>",
+        "</head><body><header><div class='shell'><div class='hero'><div class='brand'><div class='mark'>MG</div><div class='titleline'><div class='eyebrow'>AlphaRavis Media</div><h1>Media Gallery</h1></div></div><p class='subhead'>Gespeicherte Uploads, Pixelle-Ergebnisse, Referenzen und Analyse-Assets mit stabilen Media-URLs fuer Chat, RAG und Operator-Checks.</p></div><nav class='tabs'>",
         _tab_link("All", "all", view, common_params),
         _tab_link("Original", "original", view, common_params),
         _tab_link("Processed", "processed", view, common_params),
         "</nav>",
         _filter_form(view, common_params),
-        "</header><main>",
+        "</div></header><main><div class='shell'>",
     ]
     for group, assets in groups.items():
-        body.append(f"<details open><summary>{html.escape(group)} ({len(assets)})</summary><div class='grid'>")
+        body.append(f"<details open><summary><span>{html.escape(group)} ({len(assets)})</span><span>{html.escape(str(group_by))}</span></summary><div class='grid'>")
         for asset in assets:
             title = html.escape(str(asset.get("title") or asset.get("asset_id")))
             url = html.escape(str(asset.get("public_url") or asset.get("source_url") or ""))
@@ -476,14 +488,13 @@ async def gallery(
             metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
             provider = html.escape(str(asset.get("processing_provider") or metadata.get("provider", "")))
             body.append("<div class='card'>")
-            body.append(f"<span class='badge'>{asset_kind}</span>")
-            body.append(f"<h3>{title}</h3>")
+            body.append(f"<div class='asset-head'><h3>{title}</h3><span class='badge'>{asset_kind}</span></div>")
             if url and media_type == "image":
-                body.append(f"<a href='{url}'><img src='{url}' loading='lazy'></a>")
+                body.append(f"<a class='thumb' href='{url}'><img src='{url}' loading='lazy' alt=''></a>")
             elif url and media_type == "video":
-                body.append(f"<video src='{url}' controls preload='metadata'></video>")
+                body.append(f"<div class='thumb'><video src='{url}' controls preload='metadata'></video></div>")
             elif url:
-                body.append(f"<a href='{url}'>{url}</a>")
+                body.append(f"<a class='file-link' href='{url}'>{url}</a>")
             body.append(
                 "<div class='meta'>"
                 f"role={html.escape(str(asset.get('role')))}<br>"
@@ -503,8 +514,8 @@ async def gallery(
             body.append("</div>")
         body.append("</div></details>")
     if not groups:
-        body.append("<p>No media matched the selected filters.</p>")
-    body.append("</main></body></html>")
+        body.append("<p class='empty'>No media matched the selected filters.</p>")
+    body.append("</div></main></body></html>")
     return "\n".join(body)
 
 

@@ -77,36 +77,47 @@ Implemented:
     omits the dashboard.
   - `pytest -q tests/test_tailscale_https_routes.py` passes.
 
+Implemented follow-up:
+
+- Dashboard UX refinement completed:
+  - `service_redirector_server.py` separates primary `Web Interfaces` from
+    collapsible `APIs` and `Infrastructure` sections.
+  - API/backend cards show copyable HTTPS, local HTTP, and Tailnet HTTP
+    addresses when the Tailscale override payload contains a `tailscale_host`.
+  - Cards are directly clickable again; the explicit action label remains
+    visible as `Öffnen`.
+  - LiteLLM is listed both as a Web UI (`http://localhost:4000`) and as an API
+    endpoint (`http://localhost:4000/v1`).
+  - Pixelle is listed as a Web UI on `http://localhost:9004`; the streamable
+    HTTP MCP endpoint is listed separately as
+    `http://localhost:9004/pixelle/mcp`.
+  - LangGraph specialist visual ports (`8760`, `8762`, `8764`, `8766`, `8768`)
+    are no longer primary Web Interface cards because they are experimental
+    internal agent ports and may not serve a standalone browser UI. They are
+    marked as TCP/internal infrastructure entries, so the dashboard does not
+    treat them as click-to-open Web UIs or Tailscale HTTPS web routes.
+  - Service cards now include consistent compact letter logos; Media Gallery is
+    no longer an unbranded/yellow placeholder card.
+  - The dashboard serves `/favicon.svg`.
+- Media Gallery visual refresh completed:
+  - `/gallery` now has a modern dark responsive layout, sticky desktop header,
+    mobile-friendly filters, a visible `MG` brand mark, and `/favicon.svg`.
+  - Asset cards keep image/video previews, copy/open actions, metadata, and the
+    existing grouping/filter/sort behavior.
+- Tailscale path handling fixed:
+  - `tailscale_https_routes.py` keeps the public click path, for example
+    `/gallery`, but proxies Tailscale Serve to the service root
+    `http://127.0.0.1:<port>` unless a service explicitly defines
+    `tailscale_target_path`. This avoids sub-link "Not Found" issues caused by
+    serving a whole UI under a path-bound upstream target.
+
 Still needed:
 
 - Live-test `tailscale serve --bg --https=<port>` from another allowed Tailnet
   device after Tailscale HTTPS certificates are enabled for the tailnet. This
   is now an operator/live-network validation, not an implementation blocker.
-- Dashboard UX refinement: Separate "Web Interfaces" from "APIs/Backends" in the
-  Service Dashboard.
-  - Add tabs (e.g., "GUIs", "APIs") or collapsible sections to keep the primary
-    view focused on human-usable web surfaces (LibreChat, ComfyUI, Media
-    Gallery, etc.).
-  - Pure APIs (LiteLLM, Hermes Agent, AlphaRavis Bridge) should move to the
-    secondary view to reduce clutter.
-- Dashboard Visual Polish & Branding:
-  - Ensure every service card has a high-quality, consistent logo or icon.
-  - Fix services currently missing logos (e.g., Media Gallery, yellow-accented
-    cards).
-  - Standardize icon sizes and placement for a more professional "Gallery" feel.
-- Dual-Protocol/Dual-URL Support:
-  - Ensure services remain accessible via both HTTP (local LAN/Tailnet IP) and
-    HTTPS (Tailscale MagicDNS + Serve) where possible.
-  - The Dashboard should allow switching or viewing both URL types, especially
-    for APIs where the operator might prefer a direct IP/HTTP connection to
-    avoid Tailscale Serve proxy overhead or MagicDNS resolution issues.
-  - Tailscale HTTPS remains the primary choice for mobile/external use to
-    guarantee encryption and valid certificates (no browser "untrusted"
-    warnings), especially when viewing photos/media in the Gallery.
-- Tailscale Serve Automation: Update `tailscale_https_routes.py` and the
-  dashboard to handle services that don't need a `/gallery` or `/v1` prefix
-  at the proxy level, preventing "Not Found" errors when clicking sub-links
-  in the UI.
+- Optional: replace the compact letter logos with custom SVG/PNG brand assets
+  later if a full visual identity set is wanted.
 
 ## Responses Streaming Follow-up
 
@@ -252,7 +263,10 @@ Implemented:
   documents and large-paste style sources set `rag_active=true` with
   `active_source_keys`, optional `active_rag_file_ids`, and
   `rag_activation_reason=document_ingest|large_paste`. Compression archives set
-  `rag_active=false` and `archive_rag_mode=tool_only`.
+  `rag_active=false` and `archive_rag_mode=tool_only`; Agent-path
+  archive-intent checking is now default-on separately through
+  `ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_AGENT_DEFAULT=true`, while
+  `archive_rag_mode=manual` remains the strict tool-only override.
 - `AlphaRavisState` can carry `rag_active`, `active_rag_file_ids`,
   `active_source_keys`, `rag_activation_reason`, and `archive_rag_mode`.
   Run-profile snapshots expose these fields for observer/debugging.
@@ -300,8 +314,9 @@ Implemented:
   skipped and the existing source is reused.
 - `active_rag_prefetch_node` consumes active document/large-paste RAG metadata
   after memory prefetch and injects only a bounded `<active-rag-context>` system
-  message. Archive-only state with `archive_rag_mode=tool_only` remains
-  passive.
+  message. Archive-only Agent-path state can also run the safe Qwen3.5 2B
+  archive-intent classifier; confirmed recall uses bounded source-scoped
+  archive retrieval, while Fast Path bypasses this node.
 - Live runtime check on 2026-05-19: LiteLLM now drops unsupported optional
   embedding params only for Ollama-backed routes, so LangChain/OpenAIEmbeddings
   through `rag_api` no longer fails on `encoding_format=base64` when
@@ -363,8 +378,10 @@ Still needed:
   grading on errors, and records the grading strategy in the trace. The example
   grader is `openai/big-boss`; the grader call disables hidden thinking with
   `enable_thinking=false` / `preserve_thinking=false` to keep the JSON judgment
-  cheap. Remaining follow-up: live latency/quality comparison before making it
-  default-on.
+  cheap. Current product decision: do not make this a required RAG feature while
+  the Qwen3 reranker is active. Keep LLM grading default-off as an optional
+  debug/comparison path only; use the reranker plus deterministic grading as the
+  normal policy.
 - Implemented first slice: streaming ingest progress for direct large
   documents/pastes. Run-profile start/completion/failure/skip events now include
   chunk-level progress for direct pgvector writes and Bridge activity extraction
@@ -447,8 +464,9 @@ Still needed:
   current embedding context unless the server context is raised. A smaller
   Bridge query probe passed 400 and 1000 rough-token steps through
   `/v1/responses`.
-- Live-test optional LLM structured-output grading and keep it default-off until
-  latency/quality justify enabling it.
+- LLM structured-output grading is not needed for the normal RAG path while the
+  Qwen3 reranker is active. Keep it default-off as an optional comparison/debug
+  mode only; do not track it as a blocker for RAG feature completion.
 - Implemented first slice: active RAG prefetch now prepares a bounded
   retrieval query before embedding. Short questions stay direct, long/noisy
   turns are locally condensed and capped, and ambiguous long prompts can call
@@ -1662,9 +1680,11 @@ External context-management learnings to evaluate:
     directly mirroring to `rag_api` and separately indexing pgvector. The archive
     record stores the router's normalized `ingest_status`, `rag_file_id`,
     `rag_index_status`, `rag_indexed_at`, `indexed_backends`, and
-    `ingest_errors`. Large-paste ingest now also uses the router. Remaining
-    call-sites to migrate: explicit document/PDF upload, artifacts, and any
-    future manual `/ingest` command.
+    `ingest_errors`. Large-paste ingest and `write_alpha_ravis_artifact(...)`
+    now also use the router. Remaining call-site class to watch: future
+    non-chat manual ingest commands. Explicit document/PDF/DOCX upload, chat
+    `/ingest`/large-paste flows, and AlphaRavis artifacts route through
+    `ingest_source(...)`.
   - Move backend selection out of `agent_graph.py` and into
     `retrieval_router.py`, so LangGraph nodes/tools call one AlphaRavis API
     instead of knowing about `rag_api`, pgvector, mirrors, and fallback rules.
@@ -1717,9 +1737,9 @@ External context-management learnings to evaluate:
     `final_query`, and `rewritten_query`.
     Implemented follow-up: `agent_graph.py` exposes this as the
     `agentic_rag_retrieve` tool and the RAG/memory toolset includes it. It is
-    still explicit tool use, not automatic archive injection. Remaining
-    follow-up: replace or augment the deterministic grader with optional LLM
-    structured-output grading/reranking after latency is measured.
+    still explicit tool use, not automatic archive injection. Current policy:
+    use deterministic grading plus the active Qwen3 reranker; LLM grading stays
+    optional/default-off and is not needed for the normal RAG path.
     Handoff for new context windows:
     `docs/ALPHARAVIS_RAG_HANDOFF.md` summarizes the user intent, implemented
     files, current routing behavior, LangGraph Schablone mapping, verification
@@ -1989,8 +2009,10 @@ External context-management learnings to evaluate:
   long action logs are collapsed into a `Workflow / Tool Event Compact Log`
   before the summary prompt. The compact log is stored in archive metadata and
   the raw archive record, while redacted original messages remain available for
-  exact archive reads. Remaining polish: richer Observer rendering for the
-  compact workflow log beyond raw compression metadata.
+  exact archive reads. Implemented polish: the Observer `Shrinking` cards now
+  show workflow event counts, tool-call/result counts, compact-log character
+  size, and a bounded `Workflow / Tool Events` preview instead of leaving the
+  log only in raw compression metadata.
 - Planned: add a quality rubric for promoting chunked summary from opt-in to a
   default profile. Minimum evidence should include live over-budget runs,
   static prompt plus variable prompt load, real LLM latency, before/after manual
@@ -2031,28 +2053,17 @@ External context-management learnings to evaluate:
 - Planned: do not copy Cursor/OpenAI automatic truncation behavior that silently
   drops old context. AlphaRavis should prefer explicit compression, explicit
   hard-trim notices, archive lookup instructions, and Observer-visible stats.
-- Partly implemented: handle the case where the first/latest user message itself
-  contains a huge pasted document such as 130k tokens. The current LangGraph
-  path already avoids immediately indexing every large paste: plain large
-  messages first run through pre-run compression, then
-  `large_paste_post_compression_node` indexes/replaces the document/code/log
-  body only if the active request is still above the configured
-  post-compression trigger ratio. If the protected recent tail is still too
-  large, oversized-tail rebalancing can move older tail messages, and in the
-  critical rescue case the latest user message can be released into the
-  compressible middle. Chunked summary is forced when that rescue would
-  otherwise overrun the summary model prompt. Remaining work is to turn this
-  into a cleaner LangGraph-owned product path for extremely large first-message
-  documents:
-  - LangGraph-owned policy still open: make the large-message decision fully
-    graph/orchestrator-owned for every client path, including LibreChat through
-    the Bridge, Deep Agents UI, or any direct LangGraph caller. The Bridge
-    should forward requests and surface compact status/Observer metadata, not
-    decide whether a paste becomes RAG/source/summary.
-  - Remaining graph behavior: split the large body into archived chunks, index
-    it for retrieval, and replace the active user message with the user's actual
-    question plus a small manifest/source handle when post-compression pressure
-    proves the full body cannot stay active.
+- Core implemented: handle the case where the first/latest user message itself
+  contains a huge pasted document such as 100k/130k+ characters. LangGraph owns
+  the large-message decision for every client path: plain large messages first
+  run through pre-run compression, then `large_paste_post_compression_node`
+  indexes/replaces the document/code/log body only if the active request is
+  still above the configured post-compression trigger ratio. The ingest path
+  splits/indexes the body through the router/pgvector chunking path, stores raw
+  source text, records chunk stats/source digest in `source_manifest`, and
+  replaces the active paste with a source handle plus any detected current
+  question/task. A focused 130k first-message test covers chunk progress,
+  manifest stats, marker replacement, and the no-question fallback.
   - Preferred backend: use AlphaRavis pgvector for large pasted documents by
     default, through the same `ingest_source(...)` router used by LangGraph.
     Keep `rag_api` selectable as an adapter/reference path for comparison. The
@@ -2064,38 +2075,41 @@ External context-management learnings to evaluate:
     archive with the RAG `file_id`, source title, chunk/index stats, and raw-text
     preservation policy. If exact raw preservation outside RAG is required, make
     that an explicit `preserve_raw=true` ingest mode.
-  - Explicit syntax: support advanced text markers such as `/ingest`,
-    `/big-context`, or fenced `<big-context name="...">...</big-context>` blocks
-    so operators can opt into ingestion from normal LibreChat without a custom
-    UI. "Protect" should mean preserve exact raw text in archive, not keep the
-    whole body in active model context.
+  - Implemented follow-up: explicit syntax supports paired `/ingest`,
+    `/big-context`, and fenced `<big-context name="...">...</big-context>`
+    blocks so operators can opt into ingestion from normal LibreChat without a
+    custom UI. "Protect" means preserve exact raw text in raw-source/archive
+    storage, not keep the whole body in active model context.
   - Implemented follow-up: auto-ingest status is now compactly visible. Large
     paste replacement records a `source_manifest` in `large_paste_ingests`, the
-    active marker includes a short `Source manifest` line, and the Bridge
-    Observer renders a small `Source Ingest` section from LangGraph metadata.
-    Do not add an ask-before-ingest step for the normal auto path: auto-ingest
-    only happens after compression/budget checks show the full paste does not
-    fit. Still open: optional profile control for how loudly the UI surfaces
-    the conversion. Never silently truncate the latest user text.
-  - Query handling: if the huge pasted text includes an explicit question, keep
-    that question active and retrieve relevant chunks before answering. If there
-    is no task/question, create only a lightweight manifest/table-of-contents and
-    ask what to extract or analyze.
+    active marker includes a short `Source manifest` line with chunk/index
+    stats, and the Bridge Observer renders a `Big Message / Source Ingest`
+    section from LangGraph metadata. Do not add an ask-before-ingest step for
+    the normal auto path: auto-ingest only happens after compression/budget
+    checks show the full paste does not fit. Still open: optional profile
+    control for how loudly the UI surfaces the conversion. Never silently
+    truncate the latest user text.
+  - Implemented follow-up: if the huge pasted text includes an explicit
+    question, keep that question active and retrieve relevant chunks before
+    answering. If there is no task/question, create only a lightweight
+    manifest/table-of-contents and ask what to extract or analyze.
   - Summary policy: do not make a lossy whole-document summary the source of
     truth for unknown future questions. Raw archived chunks remain authoritative;
     any overview summary must point back to chunk/archive keys.
-  - UI follow-up: a custom Big Message / Document Ingest panel can later provide
-    upload/paste progress, token/chunk stats, source handles, before/after active
-    prompt view, and retrieval previews. This is display/control polish only;
-    LangGraph remains the source of truth for the decision and metadata.
+  - UI follow-up: the Observer now has a `Big Message / Source Ingest` panel
+    with source handles, queued/indexed backend state, character counts, and
+    chunk stats. Remaining display/control polish: richer before/after active
+    prompt view and retrieval previews. LangGraph remains the source of truth
+    for the decision and metadata.
   - Tools/API: expose source-key lookup for agents, e.g. reuse
     `semantic_memory_search` plus `read_archive_record(...)` where possible, or
     add a narrower `read_large_context_chunk(source_key, chunk_id)` tool if raw
     archive records become too coarse.
-  - Acceptance: a first-message 130k-token document plus a short question should
-    complete without provider context overflow, show an Observer-visible ingest
-    record, preserve exact raw chunks, retrieve relevant chunks for the answer,
-    and avoid claiming unsupported facts from an overview summary.
+  - Acceptance: a first-message 130k-character document path is covered by a
+    focused unit smoke for chunk progress, manifest stats, source marker
+    replacement, and no-question fallback. Remaining live acceptance: run the
+    same flow through LibreChat/Browser against the real stack and verify
+    provider context safety plus grounded retrieval quality.
 
 Implementation chunks:
 
@@ -2985,15 +2999,17 @@ Implementieren trotzdem weiter fokussierte Unit-/Smoke-Tests laufen lassen.
    kann `section_level_splitting=false` gesetzt werden. Noch offen: echte
    Archiv-Retrieval-Qualitaet mit gemischten Chat/Log/Code-Archiven vergleichen.
 
-2. **Archive `auto_on_intent`: implementiert, Default bleibt passiv**
+2. **Archive `auto_on_intent`: implementiert, Agent-Pfad default-on**
 
-   `active_rag_prefetch_node` kann jetzt bei
-   `archive_rag_mode=auto_on_intent` den sicheren Qwen3.5-2B-Classifier fragen,
+   `active_rag_prefetch_node` fragt auf dem Agent-Pfad bei vorhandenen
+   aktuellen Thread-Archiven standardmaessig den sicheren Qwen3.5-2B-Classifier,
    ob die aktuelle Anfrage alte/compressed Archive meint. Der Classifier liefert
    strict JSON mit `archive_recall`, `search_query`, `confidence` und `reason`;
    bei Ausfall/Timeout/ungueltigem JSON greift der lokale Archive-Recall-
    Condenser als Fallback. Nur bei bestaetigtem Intent werden die letzten
    `ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_MAX_ARCHIVES` Archive source-scoped
-   durchsucht. `tool_only` bleibt der Default. Noch offen: grosse
-   LibreChat-/Browser-/Live-Beispiele messen, bevor `auto_on_intent` irgendwo
-   zum Standard wird.
+   durchsucht. Fast Path laeuft daran vorbei. Aktuelle Upload-/Datei-/Bild-/
+   Video-/URL-/Pixelle-/Source-Aufgaben muessen als `archive_recall=false`
+   klassifiziert werden, sofern der User nicht explizit alten Archivkontext
+   verlangt. `archive_rag_mode=manual` bleibt der Opt-out. Noch offen: grosse
+   LibreChat-/Browser-/Live-Beispiele auf False-Positive-Verhalten messen.

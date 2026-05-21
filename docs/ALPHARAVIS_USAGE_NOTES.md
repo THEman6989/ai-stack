@@ -51,6 +51,24 @@ a permissions error. Use `TAILSCALE_SUDO=true` to force sudo from the start or
 Tailscale Serve state. In dashboard `auto` mode, that JSON file makes the cards
 prefer Tailscale HTTPS URLs while still showing the original local URL on each
 card.
+The dashboard separates normal Web Interfaces from collapsible API/backend and
+Infrastructure sections. API cards show copyable Tailscale HTTPS, local HTTP,
+and Tailnet HTTP addresses when the override JSON contains the Tailnet host, so
+operators can choose the direct local/Tailnet HTTP endpoint for backend testing
+without digging through code.
+Dashboard cards are directly clickable; the visible action label is `Öffnen`.
+LiteLLM appears twice because it is both a browser UI at `http://localhost:4000`
+and an OpenAI-compatible API at `http://localhost:4000/v1`. Pixelle appears as
+a Web UI at `http://localhost:9004`, while its streamable HTTP MCP endpoint is
+listed separately as `http://localhost:9004/pixelle/mcp`. The LangGraph
+specialist ports are grouped under Infrastructure because they are experimental
+agent visual/API ports and may not behave like normal browser UIs; they are
+shown as internal TCP endpoints rather than click-to-open web cards.
+
+For services whose visible URL includes a path, such as Media Gallery
+`/gallery`, Tailscale Serve is still pointed at the service root by default.
+The dashboard link keeps `/gallery`, but the proxy target remains
+`http://127.0.0.1:<port>` so UI sub-links do not inherit a broken path prefix.
 
 `make install`, `make update`, `make update-no-start`, `make up`,
 `make up-fullstreaming`, and `make up-chat-fullstreaming` run
@@ -957,7 +975,9 @@ Tool and workflow events are not treated as ordinary chat during compression.
 Tool-call requests, tool outputs, duplicate outputs, and long action logs are
 collapsed into a separate `Workflow / Tool Event Compact Log`. The raw archive
 still keeps redacted original messages, so exact old tool output can be read
-from the archive when needed.
+from the archive when needed. In the Observer `Shrinking` cards, open
+`Workflow / Tool Events` to inspect the compact event preview and counts without
+switching to raw JSON.
 
 Use the lab's `Summary Mode` selector carefully:
 
@@ -1371,8 +1391,9 @@ into active context.
 For newly ingested explicit documents or large pastes, AlphaRavis records
 thread-level RAG metadata (`rag_active`, active source keys, optional external
 file ids, and activation reason) so a later auto-retrieval node can use bounded
-chunks. Compression archives remain passive by default with
-`archive_rag_mode=tool_only`.
+chunks. Compression archives do not set document RAG active, but Agent-path
+runs can check current-thread archives by default through the archive
+auto-intent classifier. Fast Path does not run archive prefetch.
 Large pasted messages above `ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS` are not
 auto-indexed immediately by default. With
 `ALPHARAVIS_LARGE_PASTE_RAG_AUTO_STAGE=post_compression`, AlphaRavis first lets
@@ -1386,7 +1407,8 @@ before RAG gets a chance to preserve it. After that replacement, AlphaRavis can
 run one more compression pass for the remaining non-document chatter when the
 thread is still above `ALPHARAVIS_LARGE_PASTE_POST_RAG_COMPRESSION_TRIGGER_RATIO`
 of the active budget. To force indexing anyway, wrap the exact text in paired
-`/rag` markers:
+`/rag` or `/big-context` markers, or in a fenced `<big-context name="...">`
+block:
 
 When AlphaRavis replaces a large paste, the active message keeps a compact
 source marker with a `Source manifest` line. The Bridge Observer also shows a
@@ -1399,10 +1421,21 @@ surfaces this metadata; LangGraph owns the decision.
 /rag
 large source text
 /rag
+
+/big-context
+large source text
+/big-context
+
+<big-context name="ops-log">
+large source text
+</big-context>
 ```
 
 After successful indexing, the model sees a compact retrieval marker instead of
-the entire marked or auto-indexed paste.
+the entire marked or auto-indexed paste. The marker includes chunk/index stats
+when available. If no explicit question or task line is detected, AlphaRavis
+keeps the source handle active and asks what to extract, analyze, or answer
+instead of guessing a broad analysis.
 Large pasted prompt instructions are treated differently from ordinary
 documents. AlphaRavis classifies large pastes as document, instruction, mixed,
 or unknown without loading another model. Instruction-like pastes are kept as a
@@ -1423,15 +1456,17 @@ document backend, active threads keep `active_source_keys` but do not add
 `active_rag_file_ids`, so automatic prefetch does not call `rag_api` unless the
 source was actually mirrored there.
 When `ALPHARAVIS_ENABLE_ACTIVE_RAG_PREFETCH=true`, active document/large-paste
-threads automatically prefetch bounded chunks into `<active-rag-context>`.
-Archive-only threads remain tool-only by default. If a thread or pin explicitly
-sets `archive_rag_mode=auto_on_intent`, AlphaRavis asks the safe Qwen3.5 2B
-classifier whether the latest request is an archive-recall request and what
-bounded `search_query` to use. If the classifier is down, times out, or returns
-bad JSON, the local archive-recall condenser remains the fallback. Confirmed
-recall requests can trigger a bounded archive prefetch over the most recent
-`ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_MAX_ARCHIVES` archive keys. Keep this mode
-opt-in until live quality, latency, and false-positive behavior are measured.
+threads automatically prefetch bounded chunks into `<active-rag-context>`. With
+`ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_AGENT_DEFAULT=true`, archive-only Agent-path
+threads also ask the safe Qwen3.5 2B classifier whether the latest request is
+an archive-recall request and what bounded `search_query` to use. If the
+classifier is down, times out, or returns bad JSON, the local archive-recall
+condenser remains the fallback. Confirmed recall requests can trigger a bounded
+archive prefetch over the most recent
+`ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_MAX_ARCHIVES` archive keys. Current upload,
+file, image, video, URL, Pixelle, and active-source tasks should be classified
+as no archive recall unless the user also asks for old/archive context. Set
+`archive_rag_mode=manual` when a thread must keep archives strictly tool-only.
 If weak pgvector hits are too noisy, set
 `ALPHARAVIS_PGVECTOR_DISTANCE_THRESHOLD` for AlphaRavis's own pgvector table.
 This is separate from `rag_api`'s `RAG_DISTANCE_THRESHOLD`, but uses the same
@@ -1581,6 +1616,10 @@ recoverable later.
 Artifact reads and writes go through the central file-safety guard, then through
 the artifact-root check. This means an artifact cannot escape its root, and a
 misconfigured artifact path cannot be used to read or write secrets.
+Artifact writes also index through `retrieval_router.ingest_source(...)`, so
+artifact RAG metadata follows the same `ingest_status`, `indexed_backends`,
+`queued_backends`, and `rag_file_id` shape as documents and large pasted
+sources.
 
 ## Agent-Specific Memories
 
@@ -1810,6 +1849,11 @@ to save other URL/file-id media manually. Registration is metadata-only by
 default; set the tool's `index=true` only when you explicitly want immediate
 vision indexing.
 
+The Media Gallery is available at `/gallery` on the media-gallery service and
+now has its own browser favicon plus a responsive dark UI with grouped asset
+cards, filters, copy/open actions, and a compact `MG` brand mark. It should be
+usable from mobile browsers through the Tailscale HTTPS dashboard link.
+
 For LibreChat video uploads, use the normal `AlphaRavis Responses` model spec.
 The LibreChat container applies `scripts/patch_librechat_video_uploads.js` at
 startup so the `LangGraph Agent` endpoint sends videos as `video_url`
@@ -1848,6 +1892,9 @@ Use `semantic_media_search` to search indexed media semantically. Use
 been processed by the vision embedding path. Use
 `inspect_embedding_queue_status` to see how much text/archive/media indexing
 work is still pending, running, failed, or done in `alpharavis_embedding_jobs`.
+The Bridge Observer also has an `Embedding Queue` panel that polls the same
+queue status every few seconds and shows pending/running/failed/done counts plus
+recent active jobs.
 
 When `prepare_media_for_model` is called with `mode=index`, it queues a durable
 `media_analysis` job in the same embedding queue used for text, archive,

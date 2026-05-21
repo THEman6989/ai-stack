@@ -4415,21 +4415,76 @@ async def write_alpha_ravis_artifact(
         except Exception as exc:
             return f"Wrote artifact to `{artifact_path}`, but store indexing failed: {exc}"
 
-    vector_result = await _maybe_index_vector_memory(
-        source_type="artifact",
-        source_key=artifact_id,
-        title=record["title"],
-        content=content,
-        thread_id=thread_id,
-        thread_key=thread_key,
-        scope="thread",
-        metadata={
-            "artifact_type": record["artifact_type"],
-            "path": record["path"],
-            "relative_path": record["relative_path"],
-            "content_chars": record["content_chars"],
-        },
+    ingest_metadata = {
+        "artifact_type": record["artifact_type"],
+        "path": record["path"],
+        "relative_path": record["relative_path"],
+        "content_chars": record["content_chars"],
+        "filename": Path(record["relative_path"]).name,
+        "rag_activation_reason": "artifact",
+    }
+    if _router_ingest_source is not None:
+        ingest_result = await _router_ingest_source(
+            source_type="artifact",
+            source_key=artifact_id,
+            title=record["title"],
+            content=content,
+            thread_id=thread_id,
+            thread_key=thread_key,
+            scope="thread",
+            metadata=ingest_metadata,
+            preferred_backend="auto",
+            pgvector_index=_maybe_index_vector_memory,
+        )
+        vector_result = str((ingest_result.get("backend_results") or {}).get("alpharavis_pgvector") or "")
+    else:
+        vector_result = await _maybe_index_vector_memory(
+            source_type="artifact",
+            source_key=artifact_id,
+            title=record["title"],
+            content=content,
+            thread_id=thread_id,
+            thread_key=thread_key,
+            scope="thread",
+            metadata=ingest_metadata,
+        )
+        ingest_result = {
+            "source_type": "artifact",
+            "source_key": artifact_id,
+            "index_status": "queued"
+            if vector_result and "queued" in str(vector_result).lower()
+            else "indexed"
+            if vector_result and not str(vector_result).startswith("pgvector indexing failed")
+            else "failed",
+            "indexed_backends": ["alpharavis_pgvector"]
+            if vector_result and not str(vector_result).startswith("pgvector indexing failed")
+            else [],
+            "queued_backends": ["alpharavis_pgvector"] if vector_result and "queued" in str(vector_result).lower() else [],
+            "backend_results": {"alpharavis_pgvector": vector_result},
+            "warnings": [vector_result]
+            if vector_result and str(vector_result).startswith("pgvector indexing failed")
+            else [],
+            "errors": [],
+        }
+
+    record.update(
+        {
+            "ingest_status": ingest_result.get("index_status", ""),
+            "indexed_backends": ingest_result.get("indexed_backends", []),
+            "queued_backends": ingest_result.get("queued_backends", []),
+            "rag_file_id": ingest_result.get("rag_file_id", ""),
+            "rag_active": ingest_result.get("rag_active", False),
+            "active_source_keys": ingest_result.get("active_source_keys", []),
+            "active_rag_file_ids": ingest_result.get("active_rag_file_ids", []),
+        }
     )
+    if get_store is not None:
+        try:
+            store = get_store()
+            await _maybe_put(store, _thread_artifact_ns(thread_id), artifact_id, record)
+            await _maybe_put(store, ARTIFACT_INDEX_NS, artifact_id, record)
+        except Exception:
+            pass
 
     return json.dumps(
         {
@@ -4437,8 +4492,14 @@ async def write_alpha_ravis_artifact(
             "path": str(artifact_path),
             "relative_path": record["relative_path"],
             "content_chars": len(content),
+            "ingest_status": ingest_result.get("index_status", ""),
+            "indexed_backends": ingest_result.get("indexed_backends", []),
+            "queued_backends": ingest_result.get("queued_backends", []),
+            "rag_file_id": ingest_result.get("rag_file_id", ""),
             "vector_index": vector_result if vector_result and not vector_result.startswith("pgvector indexing failed") else "",
             "vector_warning": vector_result if vector_result and vector_result.startswith("pgvector indexing failed") else "",
+            "ingest_warnings": ingest_result.get("warnings", []),
+            "ingest_errors": ingest_result.get("errors", []),
         },
         ensure_ascii=False,
         indent=2,
@@ -6295,7 +6356,7 @@ def _classifier_window_text(text: str) -> str:
         return "\n".join(f"{index}: {line}" for index, line in numbered)
 
     marker_re = re.compile(
-        r"(?i)(^|\b)(/rag|/rake|/index|/ingest|task|instructions?|rules?|document|source|context|question|frage|aufgabe|anweisung|quelle)\b"
+        r"(?i)(^|\b)(/rag|/rake|/index|/ingest|/big-context|/big_context|<big-context|<big_context|task|instructions?|rules?|document|source|context|question|frage|aufgabe|anweisung|quelle)\b"
     )
     selected: dict[int, str] = {}
     head_lines = int(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_HEAD_LINES", "80"))
@@ -6885,6 +6946,10 @@ def _archive_auto_intent_min_confidence() -> float:
     return max(0.0, min(1.0, float(os.getenv("ALPHARAVIS_ARCHIVE_AUTO_INTENT_MIN_CONFIDENCE", "0.6"))))
 
 
+def _archive_auto_on_intent_agent_default_enabled() -> bool:
+    return _env_bool("ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_AGENT_DEFAULT", "true")
+
+
 async def _classify_archive_recall_with_small_model(query: str, context: str) -> dict[str, Any]:
     system_prompt = (
         "You are AlphaRavis' archive-recall intent classifier. Return strict JSON only. "
@@ -6892,7 +6957,10 @@ async def _classify_archive_recall_with_small_model(query: str, context: str) ->
         "older compressed conversation/archive context. Use the recent context only to "
         "build a stronger archive search query. Do not mark normal new tasks, greetings, "
         "or document questions as archive recall unless the user refers to prior/old/archived "
-        "conversation context. Return exactly these keys: archive_recall, search_query, "
+        "conversation context. Return archive_recall=false for requests to use, analyze, "
+        "edit, summarize, or generate from a current explicit upload, file, image, video, "
+        "URL, Pixelle result, or active source unless the user also explicitly asks for "
+        "older/previous/archive context. Return exactly these keys: archive_recall, search_query, "
         "confidence, reason. search_query must be concise German/English search text under "
         "1200 characters with entities, filenames, error names, model names, and topic terms."
     )
@@ -7145,7 +7213,10 @@ _LARGE_PASTE_DOCUMENT_PATTERNS = (
 
 
 _LARGE_PASTE_MANUAL_BLOCK_RE = re.compile(
-    r"(?im)^[ \t]*/(?:rag|rake|index|ingest)(?:[ \t]+[^\n]*)?[ \t]*$"
+    r"(?im)^[ \t]*/(?:rag|rake|index|ingest|big-context|big_context)(?:[ \t]+[^\n]*)?[ \t]*$"
+)
+_LARGE_PASTE_BIG_CONTEXT_TAG_RE = re.compile(
+    r"(?is)<big[-_]context\b(?P<attrs>[^>]*)>(?P<body>.*?)</big[-_]context>"
 )
 
 
@@ -7354,6 +7425,14 @@ def _tail_question_line_ranges(text: str) -> list[list[int]]:
     return ranges[:6]
 
 
+def _large_paste_question_brief(content: str, classification: dict[str, Any] | None = None, *, max_chars: int = 1200) -> str:
+    classification = classification if isinstance(classification, dict) else {}
+    question_brief = _text_from_line_ranges(content, classification.get("question_lines"), max_chars=max_chars)
+    if question_brief:
+        return question_brief
+    return _text_from_line_ranges(content, _tail_question_line_ranges(content), max_chars=max_chars)
+
+
 def _large_paste_document_body_for_index(content: str, paste_intent: str, classification: dict[str, Any] | None = None) -> str:
     text = str(content or "")
     if paste_intent != "mixed":
@@ -7409,7 +7488,26 @@ def _manual_large_paste_blocks(content: str) -> list[dict[str, Any]]:
                     "marker": start_marker.group(0).strip(),
                 }
             )
-    return blocks
+    for match in _LARGE_PASTE_BIG_CONTEXT_TAG_RE.finditer(text):
+        body = str(match.group("body") or "").strip("\n")
+        if body.strip():
+            blocks.append(
+                {
+                    "start": match.start(),
+                    "end": match.end(),
+                    "body": body,
+                    "marker": "<big-context>",
+                }
+            )
+    blocks.sort(key=lambda item: int(item["start"]))
+    non_overlapping: list[dict[str, Any]] = []
+    last_end = -1
+    for block in blocks:
+        if int(block["start"]) < last_end:
+            continue
+        non_overlapping.append(block)
+        last_end = int(block["end"])
+    return non_overlapping
 
 
 def _large_paste_marker(
@@ -7461,17 +7559,28 @@ def _large_paste_marker(
             f"Condensed instruction brief:\n{brief}",
         ]
         retrieval_query = str(classification.get("retrieval_query") or "").strip()
-        question_brief = _text_from_line_ranges(content, classification.get("question_lines"), max_chars=1200)
+        question_brief = _large_paste_question_brief(content, classification)
         if retrieval_query:
             lines.append(f"Retrieval/query focus:\n{retrieval_query}")
         if question_brief:
             lines.append(f"Current question/task lines:\n{question_brief}")
+        else:
+            lines.append(
+                "No explicit current question was detected. Ask the user what to extract, analyze, or answer from this source before doing broad analysis."
+            )
         return "\n\n".join(lines)
+    question_brief = _large_paste_question_brief(content, classification)
     lines = [
         f"[Large paste {status_phrase}: source_key={source_key}; rag_file_id={rag_file_id}; title={title}]",
         f"Source manifest: {manifest}.",
         "Use agentic_rag_retrieve or query_source against this source when details from the pasted text are needed.",
     ]
+    if question_brief:
+        lines.append(f"Current question/task lines:\n{question_brief}")
+    else:
+        lines.append(
+            "No explicit current question was detected. Ask the user what to extract, analyze, or answer from this source before doing broad analysis."
+        )
     if paste_intent == "unknown":
         lines.append("Classification: intent=unknown; treated as document-style RAG for backward-compatible large-paste handling.")
     if preview:
@@ -7743,6 +7852,24 @@ async def _ingest_large_paste_messages(
                 "rag_active": bool(ingest_result.get("rag_active")),
             }
         )
+        chunk_events = [
+            event
+            for event in ingest_events
+            if isinstance(event, dict) and str(event.get("event") or "").endswith(".chunk_indexed")
+        ]
+        dedup_events = [
+            event
+            for event in ingest_events
+            if isinstance(event, dict) and str(event.get("event") or "").endswith(".deduped")
+        ]
+        chunk_count = max([int(event.get("chunk_count") or 0) for event in [*chunk_events, *dedup_events]] or [0])
+        indexed_chunk_count = len(chunk_events)
+        latest_chunk_event = chunk_events[-1] if chunk_events else {}
+        source_digest = str(
+            latest_chunk_event.get("source_digest")
+            or (dedup_events[-1].get("source_digest") if dedup_events else "")
+            or ""
+        )
         raw_source_record = await _store_raw_source_record(
             source_type=source_type,
             source_key=source_key,
@@ -7791,6 +7918,9 @@ async def _ingest_large_paste_messages(
             "rag_active": bool(ingest_result.get("rag_active")),
             "content_chars": len(body),
             "indexed_content_chars": len(ingest_content),
+            "chunk_count": chunk_count,
+            "indexed_chunk_count": indexed_chunk_count,
+            "source_digest": source_digest,
             "instruction_text_stripped_from_index": paste_intent == "mixed" and ingest_content != body,
             "raw_source_record": raw_source_record,
             "elapsed_seconds": elapsed,
@@ -7804,6 +7934,9 @@ async def _ingest_large_paste_messages(
             "content_type": source_metadata.get("content_type"),
             "content_chars": len(body),
             "indexed_content_chars": len(ingest_content),
+            "chunk_count": chunk_count,
+            "indexed_chunk_count": indexed_chunk_count,
+            "source_digest": source_digest,
             "index_status": ingest_result.get("index_status", ""),
             "indexed_backends": list(ingest_result.get("indexed_backends") or []),
             "queued_backends": list(ingest_result.get("queued_backends") or []),
@@ -9543,6 +9676,10 @@ def _compression_debug_profile(result: CompressionResult | None, *, prefix: str,
         f"{prefix}_workflow_tool_call_count": metadata.get("workflow_tool_call_count"),
         f"{prefix}_workflow_tool_result_count": metadata.get("workflow_tool_result_count"),
         f"{prefix}_workflow_event_chars": metadata.get("workflow_event_chars"),
+        f"{prefix}_workflow_event_preview": _truncate_text(
+            str(metadata.get("workflow_event_compaction") or "").strip(),
+            1200,
+        ),
     }
     return {key: value for key, value in fields.items() if value not in (None, "")}
 
@@ -10432,6 +10569,11 @@ def _active_rag_prefetch_query(text: str) -> bool:
     return stripped.lower() not in {"hi", "hallo", "hello", "ok", "okay", "danke", "thanks", "weiter"}
 
 
+def _archive_only_rag_file_ids(values: list[str] | None) -> bool:
+    items = [str(value) for value in values or [] if str(value)]
+    return bool(items) and all(item.startswith("archive:") for item in items)
+
+
 def _format_active_rag_context_packet(packet: dict[str, Any]) -> str:
     chunks = packet.get("chunks") if isinstance(packet, dict) else []
     if not isinstance(chunks, list) or not chunks:
@@ -10472,12 +10614,17 @@ async def active_rag_prefetch_node(state: AlphaRavisState, runtime: Any | None =
     rag_active = bool(state.get("rag_active") or pinned.get("rag_active") or source_keys or rag_file_ids)
     archive_rag_mode = str(pinned.get("archive_rag_mode") or state.get("archive_rag_mode") or "tool_only")
     archive_keys = _merge_unique_strings(state.get("archived_context_keys"), state.get("archive_keys"))
-    archive_auto_candidate = archive_rag_mode == "auto_on_intent" and bool(archive_keys)
+    archive_auto_candidate = bool(archive_keys) and (
+        archive_rag_mode == "auto_on_intent"
+        or (archive_rag_mode != "manual" and _archive_auto_on_intent_agent_default_enabled())
+    )
     if not rag_active and not archive_auto_candidate:
         return {"run_profile": _profile_update(state, active_rag_prefetch_status="disabled_or_inactive")}
     if not source_keys and not rag_file_ids and not archive_auto_candidate:
         return {"run_profile": _profile_update(state, active_rag_prefetch_status="no_active_sources")}
-    if archive_rag_mode == "tool_only" and not source_keys:
+    if archive_rag_mode == "manual" and not source_keys:
+        return {"run_profile": _profile_update(state, active_rag_prefetch_status="archive_tool_only")}
+    if archive_rag_mode == "tool_only" and not source_keys and _archive_only_rag_file_ids(rag_file_ids):
         return {"run_profile": _profile_update(state, active_rag_prefetch_status="archive_tool_only")}
 
     if not _active_rag_prefetch_query(raw_query):

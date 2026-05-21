@@ -37,6 +37,7 @@ class ServiceRoute:
     tailscale_url: str
     port: int
     path: str
+    local_target_path: str = ""
 
 
 def run(
@@ -133,11 +134,11 @@ def is_local_http_url(url: str) -> bool:
     return parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1"} and parsed.port is not None
 
 
-def normalize_local_target(host_url: str) -> tuple[str, int, str]:
+def normalize_local_target(host_url: str, *, target_path: str = "") -> tuple[str, int, str]:
     parsed = urlparse(host_url)
     if parsed.port is None:
         raise ValueError(f"Local URL has no port: {host_url}")
-    path = parsed.path or ""
+    path = target_path or ""
     target = urlunparse(("http", f"{LOCAL_PROXY_HOST}:{parsed.port}", path, "", "", ""))
     return target, parsed.port, path
 
@@ -165,18 +166,21 @@ def build_routes(
     routes: list[ServiceRoute] = []
     seen_ports: set[int] = set()
     for service in services:
+        if service.get("non_http"):
+            continue
         host_url = str(service.get("host_url", ""))
         if not is_local_http_url(host_url):
             continue
         service_name = str(service.get("service", ""))
         if not include_self and service_name == "service-dashboard":
             continue
-        target, port, path = normalize_local_target(host_url)
+        target_path = str(service.get("tailscale_target_path") or "")
+        public_path = str(service.get("tailscale_public_path") or urlparse(host_url).path or "")
+        target, port, local_target_path = normalize_local_target(host_url, target_path=target_path)
         if port in seen_ports:
             continue
         seen_ports.add(port)
-        parsed = urlparse(host_url)
-        public_url = urlunparse(("https", f"{tailscale_host}:{port}", parsed.path or "", "", "", ""))
+        public_url = urlunparse(("https", f"{tailscale_host}:{port}", public_path, "", "", ""))
         routes.append(
             ServiceRoute(
                 name=str(service.get("name", service_name or f"Port {port}")),
@@ -186,7 +190,8 @@ def build_routes(
                 local_target=target,
                 tailscale_url=public_url,
                 port=port,
-                path=path,
+                path=public_path,
+                local_target_path=local_target_path,
             )
         )
     return routes
@@ -224,6 +229,7 @@ def route_payload(routes: list[ServiceRoute], *, tailscale_host: str) -> dict[st
                 "local_target": route.local_target,
                 "port": route.port,
                 "path": route.path,
+                "local_target_path": route.local_target_path,
             }
             for route in routes
         ],

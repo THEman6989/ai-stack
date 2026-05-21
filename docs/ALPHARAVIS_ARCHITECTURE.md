@@ -39,7 +39,13 @@ The current Docker architecture is split into these main roles:
 - `redis`: optional LLM cache, not the primary checkpointer in this phase.
 - `deep-agents-ui`: visual UI for DeepAgents/LangGraph-style inspection.
 - `service-dashboard`: lightweight local redirector UI on port `8090` that
-  lists host and Docker URLs for the stack services.
+  lists host and Docker URLs for the stack services, separating Web Interfaces,
+  APIs, and Infrastructure. API cards expose copyable Tailscale HTTPS, local
+  HTTP, and Tailnet HTTP addresses when the Tailscale override payload is
+  present. Cards are directly clickable. LiteLLM and Pixelle are represented as
+  separate Web UI and API/MCP endpoint cards where appropriate. Experimental
+  LangGraph specialist visual ports are infrastructure/TCP entries, not normal
+  click-to-open web cards.
 - `librechat`: the normal chat UI for the user.
 - `rag_api`: local document search backend when available. Its LangChain
   PGVector tables live in the separate `rag_api` Postgres database.
@@ -66,6 +72,10 @@ Docker start/recreate step publishes application ports on all host interfaces.
 Use `TAILSCALE_AUTO=keep` when a run should leave the current network exposure
 mode untouched. The helper's sudo mode defaults to `auto`, so it requests sudo
 only after the non-sudo Tailscale CLI attempt fails with a permissions error.
+For visible URLs that include a path, `tailscale_https_routes.py` keeps that
+path in the public dashboard link but uses the service root as the default
+Tailscale Serve upstream target. This avoids mounting a whole UI behind an
+upstream `/gallery` or `/v1` path and breaking sub-links.
 
 ## Install And Runtime Profiles
 
@@ -1258,7 +1268,8 @@ outputs, and long action logs are collapsed into a separate
 middle-message section. The compact log is stored in archive metadata and in
 the raw archive record beside the redacted original messages. This keeps action
 history inspectable without making tool logs behave like ordinary user/assistant
-conversation.
+conversation. Observer `Shrinking` cards expose the compact event counts and a
+bounded `Workflow / Tool Events` preview for the selected compression scope.
 
 `compression.precompact` is emitted after the graph has selected
 head/middle/tail and before the summary model is called. It records the reason,
@@ -1397,7 +1408,10 @@ list_alpha_ravis_artifacts
 
 Artifacts are thread-scoped by default, with optional cross-thread listing only
 when explicitly requested. The artifact index stores metadata and a small
-preview; the full content stays on disk.
+preview; the full content stays on disk. Artifact writes route through
+`retrieval_router.ingest_source(source_type="artifact", preferred_backend="auto")`
+after the file/store record is created, so artifact metadata uses the same
+normalized RAG fields as documents and large pasted sources.
 
 ### Semantic Vector Memory And Source Catalog
 
@@ -1500,15 +1514,21 @@ archive_rag_mode
 `ingest_source(...)` sets these fields for explicit document and large-paste
 sources so later graph nodes can auto-retrieve bounded chunks from those
 sources. Compression archives set `rag_active=false` and
-`archive_rag_mode=tool_only`, preserving the rule that archives are searched
-only through explicit retrieval intent or tools.
+`archive_rag_mode=tool_only`. On the Agent path, archive auto-intent is enabled
+by default by `ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_AGENT_DEFAULT=true`, so
+current-thread archives can still be checked by the small classifier when no
+active document/source prefetch is taking precedence. Fast Path bypasses this
+node. Set `archive_rag_mode=manual` to keep archives strictly tool-only for a
+thread.
 Important architecture rule: large-paste, RAG, and compression policy is owned
 by LangGraph. The Bridge, Deep Agents UI, ACP clients, and direct callers should
 forward input and surface metadata; they must not become the place that decides
 whether a large paste is RAG/source/summary. The central LangGraph flow is:
 
 1. Paired manual markers (`/rag ... /rag`, `/rake ... /rake`,
-   `/index ... /index`, `/ingest ... /ingest`) force immediate source ingest.
+   `/index ... /index`, `/ingest ... /ingest`, `/big-context ... /big-context`)
+   and fenced `<big-context name="...">...</big-context>` blocks force
+   immediate source ingest.
 2. Plain large human pastes are not automatically indexed just because they are
    long. With the default
    `ALPHARAVIS_LARGE_PASTE_RAG_AUTO_STAGE=post_compression`, old context first
@@ -1521,9 +1541,11 @@ whether a large paste is RAG/source/summary. The central LangGraph flow is:
 4. Successful or queued ingest replaces the full active paste with a compact
    source marker. The marker contains the source key, optional RAG file id,
    title, retrieval instruction, and a short `Source manifest` line with content
-   type, character counts, and indexed/queued backends. The original raw text is
-   preserved in raw-source storage and/or the selected ingest backend, not kept
-   as full active prompt text.
+   type, character counts, chunk stats, source digest, and indexed/queued
+   backends. The original raw text is preserved in raw-source storage and/or the
+   selected ingest backend, not kept as full active prompt text. If no explicit
+   question/task is detected, the marker tells the model to ask what to extract
+   or analyze instead of doing broad unsupported analysis.
 5. If the marker replacement still leaves too much non-document chatter active,
    the same node can run one follow-up compression pass at
    `ALPHARAVIS_LARGE_PASTE_POST_RAG_COMPRESSION_TRIGGER_RATIO`, default `0.80`.
@@ -1551,17 +1573,22 @@ when a document/data section can be separated. This prevents prompt
 instructions from becoming ordinary search material while still keeping the
 important source content retrievable by source key.
 `active_rag_prefetch_node` later consumes the active source/file ids and injects
-only bounded retrieved chunks in an `<active-rag-context>` system message.
-Archive-only state remains passive while `archive_rag_mode=tool_only`.
-If a thread explicitly sets `archive_rag_mode=auto_on_intent`, LangGraph asks
-the safe Qwen3.5 2B classifier whether the latest request is archive recall and
-which bounded `search_query` to use. Confirmed recall requests can prefetch
-bounded chunks from the most recent
-`ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_MAX_ARCHIVES` archives. The classifier is
-only a structure/query helper; invalid JSON, endpoint errors, timeouts, or low
-confidence fall back to the local archive-recall condenser/heuristic. This mode
-is opt-in so compression archives do not become automatic context injections by
-default.
+only bounded retrieved chunks in an `<active-rag-context>` system message. If
+there are only current-thread archive keys, Agent-path runs also ask the safe
+Qwen3.5 2B classifier whether the latest request is archive recall and which
+bounded `search_query` to use. Confirmed recall requests can prefetch bounded
+chunks from the most recent `ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_MAX_ARCHIVES`
+archives. The classifier is only a structure/query helper; invalid JSON,
+endpoint errors, timeouts, or low confidence fall back to the local
+archive-recall condenser/heuristic. The prompt tells the classifier to reject
+new current-source/media tasks, including uploads, files, images, videos, URLs,
+Pixelle outputs, and active sources, unless the user explicitly asks for
+older/archive context. This prevents old archive hits from polluting a concrete
+"use this video/file/source now" task.
+The Bridge Test UI includes a classifier probe for this small-model path. It
+can run local fallback checks for short direct, long noisy, instruction-only,
+document-only, mixed, and simulated down/invalid/timeout cases, or call the
+configured Qwen endpoint for the semantic cases.
 LibreChat document uploads use the same activation path: the Bridge registers
 downloadable `file` / `input_file` document parts with media-gallery, maps the
 stored media path into the LangGraph workspace, sends it as
@@ -1888,7 +1915,9 @@ Media is safe-by-default:
   fields and exposes `/gallery?view=all|original|processed` for grouped
   operator inspection with copyable stable media URLs. Gallery/API listing can
   filter by `thread_id`, `thread_key`, or `group_id`, sort by date/name/type,
-  and group by day+group, thread, group, date, or media type.
+  and group by day+group, thread, group, date, or media type. The gallery UI is
+  responsive and serves its own `/favicon.svg` so browser tabs and mobile
+  shortcuts show a Media Gallery identity instead of the default browser icon.
 - Media-gallery Mongo state is split conceptually:
   - `assets`: one row per file/media asset
   - `references`: where that asset appeared in chat/tool context
@@ -1947,6 +1976,9 @@ ALPHARAVIS_VISION_EMBEDDING_MODEL=<model-name>
   `alpharavis_embedding_jobs`.
 - `inspect_embedding_queue_status` exposes the shared queue status for text,
   archive, artifact, memory, session-turn, and media-analysis indexing work.
+- The Bridge Observer polls the same queue status endpoint for operator
+  visibility, showing pending/running/failed/done counts and recent active
+  queued source jobs while large-source embeddings drain asynchronously.
 - `prepare_media_for_model(mode="index")` creates durable `media_analysis`
   jobs in the same queue that text/context indexing already uses, so
   `run_embedding_memory_jobs` can drain both text and video work.

@@ -37,6 +37,7 @@ if "fastapi" not in sys.modules and importlib.util.find_spec("fastapi") is None:
 
     responses_stub = types.ModuleType("fastapi.responses")
     responses_stub.HTMLResponse = str
+    responses_stub.Response = str
     sys.modules["fastapi.responses"] = responses_stub
 
     staticfiles_stub = types.ModuleType("fastapi.staticfiles")
@@ -181,3 +182,7 @@ def test_gallery_can_group_by_thread_and_sort_by_name(monkeypatch) -> None:
     assert html.index("Image") < html.index("Video")
     assert "name='group_by'" in html
     assert "name='sort'" in html
+    assert "href='/favicon.svg'" in html
+    assert "<div class='mark'>MG</div>" in html
+    assert "@media(max-width:760px)" in html
+    assert "class='thumb'" in html
