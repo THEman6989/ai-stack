@@ -796,6 +796,8 @@ def render_index() -> bytes:
     const input = document.getElementById("filter");
     const cards = Array.from(document.querySelectorAll("[data-card]"));
     const count = document.getElementById("visible-count");
+    let pointerDownAt = 0;
+    let suppressCardOpen = false;
     input.addEventListener("input", () => {{
       const q = input.value.trim().toLowerCase();
       let visible = 0;
@@ -807,6 +809,16 @@ def render_index() -> bytes:
       }}
       count.textContent = String(visible);
     }});
+    document.addEventListener("pointerdown", () => {{
+      pointerDownAt = Date.now();
+      suppressCardOpen = false;
+    }}, {{ passive: true }});
+    document.addEventListener("pointerup", () => {{
+      const selected = window.getSelection ? String(window.getSelection()).trim() : "";
+      if (Date.now() - pointerDownAt > 450 || selected) {{
+        suppressCardOpen = true;
+      }}
+    }}, {{ passive: true }});
     document.addEventListener("click", (event) => {{
       const button = event.target.closest("[data-copy-url]");
       if (button) {{
@@ -818,7 +830,12 @@ def render_index() -> bytes:
         window.setTimeout(() => {{ button.textContent = "Copy"; }}, 900);
         return;
       }}
-      if (event.target.closest("a, button, input, select, textarea, summary")) return;
+      const selected = window.getSelection ? String(window.getSelection()).trim() : "";
+      if (suppressCardOpen || selected) {{
+        suppressCardOpen = false;
+        return;
+      }}
+      if (event.target.closest("a, button, input, select, textarea, summary, [data-no-card-open]")) return;
       const card = event.target.closest("[data-open-url]");
       const url = card?.dataset.openUrl || "";
       if (url) window.open(url, "_blank", "noreferrer");
@@ -848,7 +865,7 @@ def render_card(service: dict[str, Any], *, address_picker: bool = False) -> str
     mode_html = f'<span class="url-mode">{html.escape(mode)}</span>'
     local_row = ""
     if host_url != local_url:
-        local_row = f'<div class="row"><span class="label">Local</span><code>{html.escape(local_url)}</code></div>'
+        local_row = f'<div class="row" data-no-card-open><span class="label">Local</span><code>{html.escape(local_url)}</code></div>'
     open_href = "" if disabled else f'<a class="open" href="{html.escape(host_url, quote=True)}" target="_blank" rel="noreferrer">{open_label}</a>'
     if disabled:
         open_href = f'<span class="open">{open_label}</span>'
@@ -864,7 +881,7 @@ def render_card(service: dict[str, Any], *, address_picker: bool = False) -> str
                 continue
             badge = " *" if preferred else ""
             address_rows.append(
-                "<div class=\"address\">"
+                "<div class=\"address\" data-no-card-open>"
                 f"<span class=\"label\">{html.escape(label + badge)}</span>"
                 f"<a href=\"{html.escape(url, quote=True)}\" target=\"_blank\" rel=\"noreferrer\">{html.escape(url)}</a>"
                 f"<button class=\"mini\" type=\"button\" data-copy-url=\"{html.escape(url, quote=True)}\">Copy</button>"
@@ -883,10 +900,10 @@ def render_card(service: dict[str, Any], *, address_picker: bool = False) -> str
         </div>
         <p class="description">{html.escape(str(service["description"]))}</p>
         <div class="meta">
-          <div class="row"><span class="label">URL</span><code>{html.escape(host_url)}</code></div>
+          <div class="row" data-no-card-open><span class="label">URL</span><code>{html.escape(host_url)}</code></div>
           {local_row}
-          <div class="row"><span class="label">Docker</span><code>{html.escape(str(service["docker_url"]))}</code></div>
-          <div class="row"><span class="label">Port</span><code>{html.escape(str(service["port"]))}</code></div>
+          <div class="row" data-no-card-open><span class="label">Docker</span><code>{html.escape(str(service["docker_url"]))}</code></div>
+          <div class="row" data-no-card-open><span class="label">Port</span><code>{html.escape(str(service["port"]))}</code></div>
           {addresses}
         </div>
         <div class="actions">

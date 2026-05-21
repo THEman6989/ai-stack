@@ -18,6 +18,8 @@ def test_dashboard_separates_web_apis_and_infrastructure() -> None:
     assert "<h2>APIs</h2>" in html
     assert "Infrastructure" in html
     assert "data-copy-url" in html
+    assert "data-no-card-open" in html
+    assert "suppressCardOpen" in html
     assert "Local" in html
     assert "Tailnet" in html
     assert "/favicon.svg" in html

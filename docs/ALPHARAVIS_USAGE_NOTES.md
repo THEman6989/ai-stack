@@ -57,6 +57,8 @@ and Tailnet HTTP addresses when the override JSON contains the Tailnet host, so
 operators can choose the direct local/Tailnet HTTP endpoint for backend testing
 without digging through code.
 Dashboard cards are directly clickable; the visible action label is `Öffnen`.
+Long-pressing or selecting text on URL/code rows does not trigger the card
+navigation, so local/Tailnet/API addresses can be copied safely.
 LiteLLM appears twice because it is both a browser UI at `http://localhost:4000`
 and an OpenAI-compatible API at `http://localhost:4000/v1`. Pixelle appears as
 a Web UI at `http://localhost:9004`, while its streamable HTTP MCP endpoint is

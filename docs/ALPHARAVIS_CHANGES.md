@@ -1182,7 +1182,9 @@ interfaces from collapsible API/backend and infrastructure sections. API cards
 show copyable Tailscale HTTPS, local HTTP, and Tailnet HTTP addresses when the
 Tailscale override payload is present, while Web UI cards keep HTTPS as the
 primary mobile/external link. Cards are directly clickable again and the action
-label uses `Öffnen`. LiteLLM is represented as both Web UI (`/`) and API
+label uses `Öffnen`, but address/code rows suppress card navigation so long
+press or text selection can copy local/Tailnet/API URLs without opening the
+card. LiteLLM is represented as both Web UI (`/`) and API
 (`/v1`); Pixelle is represented as the Web UI root plus a separate streamable
 HTTP MCP endpoint at `/pixelle/mcp`; LangGraph specialist ports are grouped as
 Infrastructure/TCP endpoints instead of primary Web UI cards or automatic
