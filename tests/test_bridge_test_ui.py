@@ -234,6 +234,10 @@ def test_observer_page_is_full_table_view() -> None:
     assert "Context Budget" in test_ui_server.OBSERVER_HTML
     assert "budgetOf(record)" in test_ui_server.OBSERVER_HTML
     assert "context_budget" in test_ui_server.OBSERVER_HTML
+    assert "Source Ingest" in test_ui_server.OBSERVER_HTML
+    assert "source_ingests" in test_ui_server.OBSERVER_HTML
+    assert "function renderSourceIngests()" in test_ui_server.OBSERVER_HTML
+    assert "Marker aktiv" in test_ui_server.OBSERVER_HTML
     assert "provider_reported_context_limit" in test_ui_server.OBSERVER_HTML
     assert "final_budget_rescue_budget_met" in test_ui_server.OBSERVER_HTML
     assert "Restbudget" in test_ui_server.OBSERVER_HTML
@@ -247,6 +251,7 @@ def test_observer_page_is_full_table_view() -> None:
     assert "Chunk Payload" in test_ui_server.OBSERVER_HTML
     assert "Prompt Overhead" in test_ui_server.OBSERVER_HTML
     assert "Synth Payload" in test_ui_server.OBSERVER_HTML
+    assert "Compact Focus" in test_ui_server.OBSERVER_HTML
     assert "Compress Limit" in test_ui_server.OBSERVER_HTML
     assert "Summary Context" in test_ui_server.OBSERVER_HTML
     assert "Head/Middle/Tail" in test_ui_server.OBSERVER_HTML
@@ -254,6 +259,8 @@ def test_observer_page_is_full_table_view() -> None:
     assert "compressionTab" in test_ui_server.OBSERVER_HTML
     assert "Chunking Lab" in test_ui_server.OBSERVER_HTML
     assert "runChunking" in test_ui_server.OBSERVER_HTML
+    assert "chunkCompactInstructions" in test_ui_server.OBSERVER_HTML
+    assert "compact_instructions" in test_ui_server.OBSERVER_HTML
     assert "/api/chunking/runs" in test_ui_server.OBSERVER_HTML
     assert "summary_chunk_omitted_chars_zero" in test_ui_server.OBSERVER_HTML
     assert "Tool-Spuren" in test_ui_server.OBSERVER_HTML
@@ -298,6 +305,7 @@ def test_chunking_diagnostic_uses_real_compressor_with_tool_and_prompt_load() ->
         include_tools=True,
         variable_prompt_load=True,
         summary_mode="stub",
+        compact_instructions="preserve chunk acceptance criteria",
     )
 
     result = asyncio.run(test_ui_server._run_chunking_diagnostic(request))
@@ -309,13 +317,19 @@ def test_chunking_diagnostic_uses_real_compressor_with_tool_and_prompt_load() ->
     assert metadata["summary_chunk_omitted_chars"] == 0
     assert metadata["summary_chunk_payload_token_limit"] < metadata["summary_chunk_prompt_token_limit"]
     assert metadata["summary_chunk_prompt_overhead_tokens"] > 0
+    assert metadata["compact_instructions"] == "preserve chunk acceptance criteria"
     assert result["tool_stats"]["pruned_tool_count"] > 0
     assert result["tool_stats"]["deduped_tool_count"] > 0
+    assert result["tool_stats"]["workflow_event_count"] > 0
+    assert result["tool_stats"]["workflow_event_chars"] > 0
     assert result["acceptance"]["summary_failed_false"] is True
     assert result["acceptance"]["summary_chunking_used_true"] is True
     assert result["acceptance"]["summary_chunk_omitted_chars_zero"] is True
     assert result["config"]["summary_mode"] == "stub"
     assert result["config"]["summary_model"] == "stub"
+    assert result["config"]["compact_instructions_chars"] > 0
+    assert any(action["event"] == "compression.workflow_events.compacted" for action in result["actions"])
+    assert any(action["event"] == "compression.chunk.completed" for action in result["actions"])
     assert all(call["summary_mode"] == "stub" for call in result["summary_calls"])
     comparison = result["comparison"]
     assert comparison["before_prepared_summary_input"]["text"]

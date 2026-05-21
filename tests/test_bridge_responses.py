@@ -860,6 +860,101 @@ def test_context_activity_extracts_compaction_and_hard_trim() -> None:
     assert "entfernt=12" in hard[2]
 
 
+def test_context_activity_extracts_compression_progress_events() -> None:
+    progress = bridge_server._extract_context_activity(
+        {
+            "event": "updates",
+            "data": {
+                "pre_run_context_guard": {
+                    "run_profile": {
+                        "pre_run_compression_events": [
+                            {"event": "compression.started"},
+                            {
+                                "event": "compression.chunk.completed",
+                                "chunk_number": 2,
+                                "chunk_count": 4,
+                            },
+                        ]
+                    }
+                }
+            },
+        }
+    )
+
+    assert progress[0] == "context_compaction"
+    assert "Chunk 2/4 abgeschlossen" in progress[2]
+
+
+def test_context_activity_extracts_pre_post_compact_events() -> None:
+    precompact = bridge_server._extract_context_activity(
+        {
+            "event": "updates",
+            "data": {
+                "pre_run_context_guard": {
+                    "run_profile": {
+                        "pre_run_compression_events": [
+                            {
+                                "event": "compression.precompact",
+                                "token_pressure": 1.42,
+                                "head_message_count": 2,
+                                "middle_message_count": 8,
+                                "tail_message_count": 3,
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+    )
+    postcompact = bridge_server._extract_context_activity(
+        {
+            "event": "updates",
+            "data": {
+                "pre_run_context_guard": {
+                    "run_profile": {
+                        "pre_run_compression_events": [
+                            {
+                                "event": "compression.postcompact",
+                                "archive_key": "archive-123",
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+    )
+
+    assert precompact[0] == "context_compaction"
+    assert "PreCompact" in precompact[2]
+    assert "H/M/T=2/8/3" in precompact[2]
+    assert postcompact[0] == "context_compaction"
+    assert "PostCompact abgeschlossen" in postcompact[2]
+    assert "archive-123" in postcompact[2]
+
+
+def test_context_activity_extracts_workflow_event_compaction() -> None:
+    progress = bridge_server._extract_context_activity(
+        {
+            "event": "updates",
+            "data": {
+                "pre_run_context_guard": {
+                    "run_profile": {
+                        "pre_run_compression_events": [
+                            {
+                                "event": "compression.workflow_events.compacted",
+                                "workflow_event_count": 5,
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+    )
+
+    assert progress[0] == "context_compaction"
+    assert "Tool-/Workflow-Events kompakt (5)" in progress[2]
+
+
 def test_bridge_observer_records_context_budget_updates() -> None:
     bridge_server._BRIDGE_OBSERVATIONS.clear()
     bridge_server._BRIDGE_OBSERVATIONS.appendleft({"id": "obs_budget", "receive": {}})
@@ -891,6 +986,45 @@ def test_bridge_observer_records_context_budget_updates() -> None:
     assert budget["final_budget_rescue_budget_met"] is True
     assert budget["provider_reported_context_limit"] == 32768
     assert budget["provider_context_overflow_retry_used"] is True
+
+
+def test_bridge_observer_records_source_ingest_updates() -> None:
+    bridge_server._BRIDGE_OBSERVATIONS.clear()
+    bridge_server._BRIDGE_OBSERVATIONS.appendleft({"id": "obs_ingest", "receive": {}})
+
+    bridge_server._observer_note_budget(
+        "obs_ingest",
+        node_name="large_paste_post_compression",
+        profile={
+            "large_paste_ingests": [
+                {
+                    "source_key": "large_paste:thread:abc",
+                    "source_type": "large_paste",
+                    "source_manifest": {
+                        "source_key": "large_paste:thread:abc",
+                        "source_type": "large_paste",
+                        "title": "Large paste abc",
+                        "content_type": "code",
+                        "content_chars": 120000,
+                        "indexed_content_chars": 119000,
+                        "index_status": "indexed",
+                        "indexed_backends": ["alpharavis_pgvector"],
+                        "rag_active": True,
+                    },
+                    "message_replaced": True,
+                    "events": [{"event": "large_ingest.completed", "status": "indexed", "t": 1.25}],
+                }
+            ]
+        },
+    )
+
+    ingests = bridge_server._BRIDGE_OBSERVATIONS[0]["receive"]["source_ingests"]
+    assert ingests["node"] == "large_paste_post_compression"
+    record = ingests["large_paste_ingests"][0]
+    assert record["source_key"] == "large_paste:thread:abc"
+    assert record["content_type"] == "code"
+    assert record["message_replaced"] is True
+    assert record["indexed_backends"] == ["alpharavis_pgvector"]
 
 
 def test_bridge_observer_prefers_after_compression_budget_fields() -> None:
@@ -934,6 +1068,8 @@ def test_bridge_observer_extracts_compression_debug_profile() -> None:
             "pre_run_compression_summary_chunk_count": 4,
             "pre_run_compression_summary_chunk_payload_token_limit": 44000,
             "pre_run_compression_summary_chunk_prompt_overhead_tokens": 1600,
+            "pre_run_compression_workflow_event_count": 7,
+            "pre_run_compression_workflow_event_chars": 1800,
             "pre_run_compression_archive_key": "archive123",
         }
     )
@@ -950,6 +1086,8 @@ def test_bridge_observer_extracts_compression_debug_profile() -> None:
     assert pre_run["summary_chunk_count"] == 4
     assert pre_run["summary_chunk_payload_token_limit"] == 44000
     assert pre_run["summary_chunk_prompt_overhead_tokens"] == 1600
+    assert pre_run["workflow_event_count"] == 7
+    assert pre_run["workflow_event_chars"] == 1800
     assert pre_run["archive_key"] == "archive123"
 
 

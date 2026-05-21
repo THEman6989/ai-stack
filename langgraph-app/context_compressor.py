@@ -18,6 +18,7 @@ from model_metadata import (
 
 
 SummaryFn = Callable[[str, int], Awaitable[str]]
+ProgressFn = Callable[[dict[str, Any]], None]
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,11 @@ class SummaryPrep:
     pruned_tool_count: int = 0
     deduped_tool_count: int = 0
     tool_args_truncated_count: int = 0
+    workflow_event_compaction: str = ""
+    workflow_event_count: int = 0
+    workflow_tool_call_count: int = 0
+    workflow_tool_result_count: int = 0
+    workflow_event_chars: int = 0
 
 
 @dataclass(frozen=True)
@@ -74,6 +80,10 @@ class CompressionResult:
     pruned_tool_count: int = 0
     deduped_tool_count: int = 0
     tool_args_truncated_count: int = 0
+    workflow_event_count: int = 0
+    workflow_tool_call_count: int = 0
+    workflow_tool_result_count: int = 0
+    workflow_event_chars: int = 0
 
 
 PROTECTED_SECTION_NAMES = [
@@ -477,6 +487,9 @@ def prepare_messages_for_summary(messages: list[Any]) -> SummaryPrep:
     head_chars = _env_int("ALPHARAVIS_COMPRESSION_TOOL_OUTPUT_HEAD_CHARS", 4000)
     tail_chars = _env_int("ALPHARAVIS_COMPRESSION_TOOL_OUTPUT_TAIL_CHARS", 1500)
     dedup_min_chars = _env_int("ALPHARAVIS_COMPRESSION_DEDUP_MIN_CHARS", 200)
+    workflow_max_chars = _env_int("ALPHARAVIS_WORKFLOW_EVENT_OUTPUT_MAX_CHARS", 900)
+    workflow_head_chars = _env_int("ALPHARAVIS_WORKFLOW_EVENT_OUTPUT_HEAD_CHARS", 620)
+    workflow_tail_chars = _env_int("ALPHARAVIS_WORKFLOW_EVENT_OUTPUT_TAIL_CHARS", 180)
     call_map = _build_tool_call_map(messages)
 
     newest_by_hash: dict[str, int] = {}
@@ -494,6 +507,9 @@ def prepare_messages_for_summary(messages: list[Any]) -> SummaryPrep:
     pruned_tool_count = 0
     deduped_tool_count = 0
     tool_args_truncated_count = 0
+    workflow_events: list[str] = []
+    workflow_tool_call_count = 0
+    workflow_tool_result_count = 0
 
     for index, message in enumerate(messages, start=1):
         role = message_role(message)
@@ -505,18 +521,32 @@ def prepare_messages_for_summary(messages: list[Any]) -> SummaryPrep:
             newest_index = newest_by_hash.get(digest)
             if newest_index is not None and newest_index != index - 1:
                 deduped_tool_count += 1
-                sections.append(
-                    f"[{index}] [tool-output duplicate] {call_info.get('name', 'tool')} -> "
+                workflow_tool_result_count += 1
+                workflow_events.append(
+                    f"- message {index}: [tool-output duplicate] {call_info.get('name', 'tool')} "
                     f"same content as newer tool output at message {newest_index + 1}; hash={digest[:12]}."
+                )
+                sections.append(
+                    f"[{index}] [workflow-event compacted] duplicate tool output for "
+                    f"{call_info.get('name', 'tool')}; see Workflow / Tool Event Compact Log."
                 )
                 continue
 
             summary = summarize_tool_result(call_info.get("name", "tool"), call_info.get("args", ""), content)
-            preview = content
             if len(content) > max_chars:
                 pruned_tool_count += 1
-                preview = _truncate_middle(content, max_chars=max_chars, head_chars=head_chars, tail_chars=tail_chars)
-            sections.append(f"[{index}] {summary}\n{preview}".strip())
+            workflow_tool_result_count += 1
+            workflow_preview = _truncate_middle(
+                content,
+                max_chars=workflow_max_chars,
+                head_chars=workflow_head_chars,
+                tail_chars=workflow_tail_chars,
+            )
+            workflow_events.append(f"- message {index}: {summary}\n  preview: {workflow_preview}".strip())
+            sections.append(
+                f"[{index}] [workflow-event compacted] tool result for "
+                f"{call_info.get('name', 'tool')}: {summary}; see Workflow / Tool Event Compact Log."
+            )
             continue
 
         if has_tool_call_request(message):
@@ -525,7 +555,13 @@ def prepare_messages_for_summary(messages: list[Any]) -> SummaryPrep:
             text = message_text(message)
             if len(text) > max_chars:
                 text = _truncate_middle(text, max_chars=max_chars, head_chars=head_chars, tail_chars=tail_chars)
-            sections.append(f"[{index}] {text}\nTool calls:\n" + "\n".join(lines))
+            workflow_tool_call_count += len(lines)
+            workflow_events.extend(f"- message {index}: tool_call {line.lstrip('- ').strip()}" for line in lines)
+            sections.append(
+                f"[{index}] {text}\n"
+                f"[workflow-event compacted] assistant requested {len(lines)} tool call(s); "
+                "details are in Workflow / Tool Event Compact Log."
+            )
             continue
 
         text = message_text(message)
@@ -542,11 +578,28 @@ def prepare_messages_for_summary(messages: list[Any]) -> SummaryPrep:
 
         sections.append(f"[{index}] {text}".strip())
 
+    workflow_text = redact_secrets("\n".join(workflow_events).strip())
+    if workflow_text:
+        sections.append(
+            "\n".join(
+                [
+                    "## Workflow / Tool Event Compact Log",
+                    "Tool calls, tool outputs, and action history are compacted here separately from chat messages.",
+                    workflow_text,
+                ]
+            )
+        )
+
     return SummaryPrep(
         text=redact_secrets("\n\n".join(sections)),
         pruned_tool_count=pruned_tool_count,
         deduped_tool_count=deduped_tool_count,
         tool_args_truncated_count=tool_args_truncated_count,
+        workflow_event_compaction=workflow_text,
+        workflow_event_count=len(workflow_events),
+        workflow_tool_call_count=workflow_tool_call_count,
+        workflow_tool_result_count=workflow_tool_result_count,
+        workflow_event_chars=len(workflow_text),
     )
 
 
@@ -804,6 +857,7 @@ def _summary_prompt_overhead_tokens(
     latest_handoff_packet: str,
     memory_kernel_context: str,
     skill_context: str,
+    compact_instructions: str = "",
 ) -> int:
     prompt = build_summary_prompt(
         mode=mode,
@@ -814,6 +868,7 @@ def _summary_prompt_overhead_tokens(
         latest_handoff_packet=latest_handoff_packet,
         memory_kernel_context=memory_kernel_context,
         skill_context=skill_context,
+        compact_instructions=compact_instructions,
         pruned_middle_text="",
     )
     return estimate_tokens_rough_text(prompt)
@@ -916,6 +971,8 @@ async def _summarize_chunked_input(
     skill_context: str,
     pruned_middle_text: str,
     token_limit: int,
+    compact_instructions: str = "",
+    progress_callback: ProgressFn | None = None,
 ) -> tuple[str, dict[str, Any]]:
     chunk_prompt_overhead_tokens = _summary_prompt_overhead_tokens(
         mode=f"{mode}_chunk",
@@ -926,6 +983,7 @@ async def _summarize_chunked_input(
         latest_handoff_packet=latest_handoff_packet,
         memory_kernel_context=memory_kernel_context,
         skill_context=skill_context,
+        compact_instructions=compact_instructions,
     )
     chunks, chunk_stats = _chunk_summary_input(
         pruned_middle_text,
@@ -942,9 +1000,31 @@ async def _summarize_chunked_input(
             latest_handoff_packet=latest_handoff_packet,
             memory_kernel_context=memory_kernel_context,
             skill_context=skill_context,
+            compact_instructions=compact_instructions,
             pruned_middle_text=chunks[0] if chunks else pruned_middle_text,
         )
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event": "compression.synthesis.started",
+                    "mode": mode,
+                    "chunk_count": len(chunks),
+                    "prompt_chars": len(prompt),
+                    "max_tokens": _summary_token_limit(token_limit),
+                }
+            )
+        synthesis_started = time.perf_counter()
         summary = await summarize_fn(prompt, _summary_token_limit(token_limit))
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event": "compression.synthesis.completed",
+                    "mode": mode,
+                    "chunk_count": len(chunks),
+                    "elapsed_seconds": round(time.perf_counter() - synthesis_started, 3),
+                    "summary_chars": len(str(summary or "")),
+                }
+            )
         return summary, {**chunk_stats, "summary_chunking_used": False}
 
     chunk_output_tokens = _summary_chunk_output_token_limit(token_limit)
@@ -959,17 +1039,42 @@ async def _summarize_chunked_input(
             latest_handoff_packet=latest_handoff_packet,
             memory_kernel_context=memory_kernel_context,
             skill_context=skill_context,
+            compact_instructions=compact_instructions,
             pruned_middle_text=(
                 f"Summary chunk {index}/{len(chunks)}. Preserve concrete details from this chunk; "
                 "a final synthesis pass will merge all chunk summaries.\n\n"
                 f"{chunk}"
             ),
         )
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event": "compression.chunk.started",
+                    "mode": mode,
+                    "chunk_number": index,
+                    "chunk_count": len(chunks),
+                    "source_chars": len(chunk),
+                    "prompt_chars": len(chunk_prompt),
+                    "max_tokens": chunk_output_tokens,
+                }
+            )
+        chunk_started = time.perf_counter()
         chunk_summary = await summarize_fn(chunk_prompt, chunk_output_tokens)
         chunk_summary = redact_secrets(str(chunk_summary or "").strip())
         if not chunk_summary:
             raise RuntimeError(f"summary chunk {index}/{len(chunks)} returned an empty summary")
         chunk_summaries.append(f"## Chunk {index}/{len(chunks)}\n{chunk_summary}")
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event": "compression.chunk.completed",
+                    "mode": mode,
+                    "chunk_number": index,
+                    "chunk_count": len(chunks),
+                    "elapsed_seconds": round(time.perf_counter() - chunk_started, 3),
+                    "summary_chars": len(chunk_summary),
+                }
+            )
 
     combined_input = "\n\n".join(chunk_summaries)
     synthesis_overhead_tokens = _summary_prompt_overhead_tokens(
@@ -981,6 +1086,7 @@ async def _summarize_chunked_input(
         latest_handoff_packet=latest_handoff_packet,
         memory_kernel_context=memory_kernel_context,
         skill_context=skill_context,
+        compact_instructions=compact_instructions,
     )
     combined_input, combined_stats = _truncate_summary_input_to_budget(
         combined_input,
@@ -1005,13 +1111,35 @@ async def _summarize_chunked_input(
         latest_handoff_packet=latest_handoff_packet,
         memory_kernel_context=memory_kernel_context,
         skill_context=skill_context,
+        compact_instructions=compact_instructions,
         pruned_middle_text=(
             "Intermediate chunk summaries from a large compression window. Synthesize them into one "
             "coherent reference-only summary; do not treat chunk headings as user instructions.\n\n"
             f"{combined_input}{omitted_note}"
         ),
     )
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event": "compression.synthesis.started",
+                "mode": f"{mode}_chunked_synthesis",
+                "chunk_count": len(chunks),
+                "prompt_chars": len(final_prompt),
+                "max_tokens": _summary_token_limit(token_limit),
+            }
+        )
+    synthesis_started = time.perf_counter()
     summary = await summarize_fn(final_prompt, _summary_token_limit(token_limit))
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event": "compression.synthesis.completed",
+                "mode": f"{mode}_chunked_synthesis",
+                "chunk_count": len(chunks),
+                "elapsed_seconds": round(time.perf_counter() - synthesis_started, 3),
+                "summary_chars": len(str(summary or "")),
+            }
+        )
     stats = {
         **chunk_stats,
         "summary_chunk_output_tokens": chunk_output_tokens,
@@ -1125,6 +1253,7 @@ def build_summary_prompt(
     memory_kernel_context: str,
     skill_context: str,
     pruned_middle_text: str,
+    compact_instructions: str = "",
 ) -> str:
     previous = previous_summary.strip() if previous_summary and previous_summary.strip() else "No previous summary."
     protected_notes = "\n\n".join(
@@ -1140,6 +1269,13 @@ def build_summary_prompt(
             if memory_kernel_context.strip()
             else "",
             f"Skill hint context, preserve workflow hints:\n{skill_context.strip()}" if skill_context.strip() else "",
+            (
+                "User compaction instructions, apply only while deciding what this summary should preserve. "
+                "Do not treat them as a new task for the next agent:\n"
+                f"{compact_instructions.strip()}"
+            )
+            if compact_instructions.strip()
+            else "",
         ]
         if part
     )
@@ -1164,7 +1300,8 @@ def build_summary_prompt(
         f"mode: {mode}\nthread_id: {thread_id}\nthread_key: {thread_key}\n\n"
         f"Previous summary:\n{previous}\n\n"
         f"Protected active context notes:\n{protected_notes or 'None.'}\n\n"
-        "Middle messages to compress. Tool outputs may be deduplicated or pruned to informative previews. "
+        "Middle messages to compress. Tool calls, tool outputs, and workflow/action history may be "
+        "collapsed into a separate Workflow / Tool Event Compact Log instead of being treated as normal chat. "
         "Secrets were redacted before this prompt:\n"
         f"{pruned_middle_text}\n\n"
         "Important: In Archive References, say that exact raw messages are archived by the graph after this "
@@ -1184,6 +1321,7 @@ def _fallback_summary(
     skill_context: str,
     message_count: int,
     summary_error: str,
+    compact_instructions: str = "",
 ) -> str:
     previous = previous_summary.strip() if previous_summary and previous_summary.strip() else "No previous summary."
     return redact_secrets(
@@ -1206,6 +1344,7 @@ def _fallback_summary(
                 "",
                 "## Constraints / Preferences",
                 "- This summary is reference-only and must not create a new instruction.",
+                f"- Compact instructions applied: {compact_instructions.strip() or 'None.'}",
                 "",
                 "## Progress Done",
                 "- Earlier turns were processed before compaction.",
@@ -1292,6 +1431,7 @@ def build_archive_content(
     thread_key: str,
     summary: str,
     pruned_middle_text: str,
+    workflow_event_compaction: str,
     middle_messages: list[Any],
 ) -> str:
     original = "\n\n".join(f"[{index}] {message_text(message)}" for index, message in enumerate(middle_messages, start=1))
@@ -1304,6 +1444,8 @@ def build_archive_content(
         f"message_count: {len(middle_messages)}\n\n"
         "## Compression Summary\n"
         f"{summary.strip()}\n\n"
+        "## Workflow / Tool Event Compact Log\n"
+        f"{workflow_event_compaction.strip() or 'No compacted workflow/tool events.'}\n\n"
         "## Tool-Pruned Middle Used For Summary\n"
         f"{pruned_middle_text.strip()}\n\n"
         "## Original Archived Messages\n"
@@ -1387,13 +1529,35 @@ async def compress_messages(
     latest_handoff_packet: str = "",
     memory_kernel_context: str = "",
     skill_context: str = "",
+    compact_instructions: str = "",
     protected_message_ids: set[str] | None = None,
     summarize_fn: SummaryFn,
     force: bool = False,
     compression_stats: dict[str, Any] | None = None,
     enable_chunked_summary: bool | None = None,
+    progress_callback: ProgressFn | None = None,
 ) -> CompressionResult:
     token_estimate_before = estimate_tokens_rough(messages)
+    progress_events: list[dict[str, Any]] = []
+    compression_started = time.perf_counter()
+
+    def emit_progress(event: dict[str, Any]) -> None:
+        item = dict(event)
+        item.setdefault("mode", mode)
+        item.setdefault("t", round(time.perf_counter() - compression_started, 3))
+        progress_events.append(item)
+        if progress_callback is not None:
+            progress_callback(item)
+
+    emit_progress(
+        {
+            "event": "compression.started",
+            "token_estimate_before": token_estimate_before,
+            "token_limit": token_limit,
+            "summary_context_token_limit": int(summary_context_token_limit or token_limit),
+            "force": bool(force),
+        }
+    )
     decision = should_compress(
         token_estimate=token_estimate_before,
         token_limit=token_limit,
@@ -1401,6 +1565,7 @@ async def compress_messages(
         force=force,
     )
     if not decision.should_run:
+        emit_progress({"event": "compression.skipped", "reason": decision.reason})
         return _skipped_result(
             mode=mode,
             thread_id=thread_id,
@@ -1418,6 +1583,7 @@ async def compress_messages(
         protected_message_ids=protected_message_ids or set(),
     )
     if not selection.middle:
+        emit_progress({"event": "compression.skipped", "reason": "no_middle_messages"})
         return _skipped_result(
             mode=mode,
             thread_id=thread_id,
@@ -1430,6 +1596,20 @@ async def compress_messages(
         )
 
     prep = prepare_messages_for_summary(selection.middle)
+    if prep.workflow_event_count:
+        emit_progress(
+            {
+                "event": "compression.workflow_events.compacted",
+                "scope": mode,
+                "workflow_event_count": prep.workflow_event_count,
+                "workflow_tool_call_count": prep.workflow_tool_call_count,
+                "workflow_tool_result_count": prep.workflow_tool_result_count,
+                "workflow_event_chars": prep.workflow_event_chars,
+                "pruned_tool_count": prep.pruned_tool_count,
+                "deduped_tool_count": prep.deduped_tool_count,
+                "tool_args_truncated_count": prep.tool_args_truncated_count,
+            }
+        )
     summary_token_limit = max(1, int(summary_context_token_limit or token_limit))
     summary_input_text, summary_prompt_stats = _truncate_summary_input_to_budget(
         prep.text,
@@ -1442,6 +1622,31 @@ async def compress_messages(
     )
     chunking_forced_by_oversized_tail = bool(selection.oversized_tail_force_latest_user_to_middle)
     chunking_enabled = chunking_enabled or chunking_forced_by_oversized_tail
+    middle_token_estimate = estimate_tokens_rough(selection.middle)
+    chunking_will_run = bool(chunking_enabled and summary_prompt_stats.get("summary_prompt_pruned"))
+    emit_progress(
+        {
+            "event": "compression.precompact",
+            "scope": mode,
+            "reason": decision.reason,
+            "token_estimate_before": token_estimate_before,
+            "token_limit": token_limit,
+            "token_pressure": round(token_estimate_before / max(1, token_limit), 4),
+            "summary_context_token_limit": summary_token_limit,
+            "head_message_count": len(selection.head),
+            "middle_message_count": len(selection.middle),
+            "tail_message_count": len(selection.tail),
+            "head_indexes": selection.head_indexes,
+            "middle_indexes": selection.middle_indexes,
+            "tail_indexes": selection.tail_indexes,
+            "middle_token_estimate": middle_token_estimate,
+            "summary_prompt_pruned": bool(summary_prompt_stats.get("summary_prompt_pruned")),
+            "chunking_enabled": bool(chunking_enabled),
+            "chunking_will_run": chunking_will_run,
+            "chunking_forced_by_oversized_tail": chunking_forced_by_oversized_tail,
+            "oversized_tail_rebalanced": bool(selection.oversized_tail_rebalanced),
+        }
+    )
 
     summary_failed = False
     summary_error = ""
@@ -1459,6 +1664,8 @@ async def compress_messages(
                 skill_context=skill_context,
                 pruned_middle_text=prep.text,
                 token_limit=summary_token_limit,
+                compact_instructions=compact_instructions,
+                progress_callback=emit_progress,
             )
             summary_prompt_stats.update(chunk_stats)
         else:
@@ -1472,8 +1679,26 @@ async def compress_messages(
                 memory_kernel_context=memory_kernel_context,
                 skill_context=skill_context,
                 pruned_middle_text=summary_input_text,
+                compact_instructions=compact_instructions,
             )
+            emit_progress(
+                {
+                    "event": "compression.synthesis.started",
+                    "summary_mode": "one_shot",
+                    "prompt_chars": len(prompt),
+                    "max_tokens": _summary_token_limit(summary_token_limit),
+                }
+            )
+            synthesis_started = time.perf_counter()
             summary = await summarize_fn(prompt, _summary_token_limit(summary_token_limit))
+            emit_progress(
+                {
+                    "event": "compression.synthesis.completed",
+                    "summary_mode": "one_shot",
+                    "elapsed_seconds": round(time.perf_counter() - synthesis_started, 3),
+                    "summary_chars": len(str(summary or "")),
+                }
+            )
             summary_prompt_stats.setdefault("summary_chunking_used", False)
         summary = redact_secrets(str(summary or "").strip())
         if not summary:
@@ -1481,6 +1706,7 @@ async def compress_messages(
     except Exception as exc:
         summary_failed = True
         summary_error = str(exc)
+        emit_progress({"event": "compression.synthesis.failed", "error": summary_error[:500]})
         summary = _fallback_summary(
             mode=mode,
             thread_id=thread_id,
@@ -1492,6 +1718,7 @@ async def compress_messages(
             skill_context=skill_context,
             message_count=len(selection.middle),
             summary_error=summary_error,
+            compact_instructions=compact_instructions,
         )
 
     summary_shell = build_summary_message_content(
@@ -1515,6 +1742,7 @@ async def compress_messages(
         thread_key=thread_key,
         summary=summary,
         pruned_middle_text=prep.text,
+        workflow_event_compaction=prep.workflow_event_compaction,
         middle_messages=selection.middle,
     )
     archive_metadata = {
@@ -1526,7 +1754,7 @@ async def compress_messages(
         "message_count": len(selection.middle),
         "token_estimate_before": token_estimate_before,
         "token_estimate_after": token_estimate_after,
-        "middle_token_estimate": estimate_tokens_rough(selection.middle),
+        "middle_token_estimate": middle_token_estimate,
         "head_message_count": len(selection.head),
         "tail_message_count": len(selection.tail),
         "head_indexes": selection.head_indexes,
@@ -1540,13 +1768,31 @@ async def compress_messages(
         "oversized_tail_force_middle_target": selection.oversized_tail_force_middle_target,
         "summary_failed": summary_failed,
         "summary_error": summary_error[:500],
+        "compact_instructions": compact_instructions.strip(),
+        "compact_instructions_chars": len(compact_instructions.strip()),
         **summary_prompt_stats,
         "summary_chunking_forced_by_oversized_tail": chunking_forced_by_oversized_tail,
         "pruned_tool_count": prep.pruned_tool_count,
         "deduped_tool_count": prep.deduped_tool_count,
         "tool_args_truncated_count": prep.tool_args_truncated_count,
+        "workflow_event_count": prep.workflow_event_count,
+        "workflow_tool_call_count": prep.workflow_tool_call_count,
+        "workflow_tool_result_count": prep.workflow_tool_result_count,
+        "workflow_event_chars": prep.workflow_event_chars,
+        "workflow_event_compaction": prep.workflow_event_compaction,
         "compression_stats": stats,
+        "events": progress_events,
     }
+    emit_progress(
+        {
+            "event": "compression.completed",
+            "summary_failed": summary_failed,
+            "summary_chunking_used": summary_prompt_stats.get("summary_chunking_used", False),
+            "summary_chunk_count": summary_prompt_stats.get("summary_chunk_count", 0),
+            "token_estimate_after": token_estimate_after,
+        }
+    )
+    archive_metadata["events"] = progress_events
 
     return CompressionResult(
         mode=mode,
@@ -1569,4 +1815,8 @@ async def compress_messages(
         pruned_tool_count=prep.pruned_tool_count,
         deduped_tool_count=prep.deduped_tool_count,
         tool_args_truncated_count=prep.tool_args_truncated_count,
+        workflow_event_count=prep.workflow_event_count,
+        workflow_tool_call_count=prep.workflow_tool_call_count,
+        workflow_tool_result_count=prep.workflow_tool_result_count,
+        workflow_event_chars=prep.workflow_event_chars,
     )

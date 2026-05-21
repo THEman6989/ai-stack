@@ -143,6 +143,39 @@ def test_vector_chunk_text_uses_langchain_splitter_for_large_paste(monkeypatch) 
     assert calls[0]["chunk_overlap"] == 100
 
 
+def test_archive_chunk_text_splits_mixed_sections_by_profile(monkeypatch) -> None:
+    monkeypatch.delenv("ALPHARAVIS_PGVECTOR_CHUNK_MAX_CHARS", raising=False)
+    monkeypatch.delenv("ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_CHARS", raising=False)
+    monkeypatch.setenv("ALPHARAVIS_PGVECTOR_SECTION_LEVEL_ARCHIVE_SPLITTING", "true")
+
+    text = "\n".join(
+        [
+            "Conversation summary",
+            "We discussed deployment rollback and archive recall.",
+            "",
+            "2026-05-21 ERROR api-bridge failed to answer",
+            "2026-05-21 INFO api-bridge recovered",
+            "",
+            "```python",
+            "def archive_marker():",
+            "    return 'ARCHIVE_MIXED_SPLIT'",
+            "```",
+            "",
+            "Final prose note about the fix.",
+        ]
+    )
+
+    chunks = vector_memory.chunk_text(text, source_type="archive", title="mixed archive")
+
+    assert len(chunks) >= 3
+    assert "Conversation summary" in chunks[0]
+    assert any("ERROR api-bridge" in chunk for chunk in chunks)
+    assert any("archive_marker" in chunk for chunk in chunks)
+    assert chunks.index(next(chunk for chunk in chunks if "ERROR api-bridge" in chunk)) < chunks.index(
+        next(chunk for chunk in chunks if "archive_marker" in chunk)
+    )
+
+
 def test_vector_chunk_text_can_force_alpharavis_splitter(monkeypatch) -> None:
     class FailingRecursiveCharacterTextSplitter:
         def __init__(self, **kwargs):

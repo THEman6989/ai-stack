@@ -164,6 +164,14 @@ def test_store_compression_archive_uses_ingest_router(monkeypatch: pytest.Monkey
     assert record["archive_rag_mode"] == "tool_only"
     assert record["metadata"]["ingest_status"] == "indexed"
     assert record["metadata"]["archive_rag_mode"] == "tool_only"
+    events = record["metadata"]["events"]
+    assert events[-1]["event"] == "compression.postcompact"
+    assert events[-1]["archive_key"] == archive_key
+    assert events[-1]["scope"] == "PRE_RUN"
+    assert events[-1]["token_estimate_before"] == 2000
+    assert events[-1]["token_estimate_after"] == 800
+    assert result.archive_metadata["events"] == events
+    assert calls["ingest"]["metadata"]["events"][-1]["event"] == "compression.postcompact"
     assert len(writes) == 2
 
 
@@ -205,6 +213,20 @@ def test_rag_state_update_from_archive_ingest_stays_passive() -> None:
     )
 
     assert update == {"archive_rag_mode": "tool_only"}
+
+
+def test_compact_instructions_parse_chat_tags(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPHARAVIS_COMPACT_INSTRUCTIONS_MAX_CHARS", "200")
+    text = """
+Bitte weiterarbeiten.
+<focus_topic>RAG archive recall and source manifests</focus_topic>
+/compact preserve exact file paths and commands
+"""
+
+    extracted = agent_graph._extract_compact_instructions(text)
+
+    assert "focus_topic: RAG archive recall and source manifests" in extracted
+    assert "preserve exact file paths and commands" in extracted
 
 
 def test_run_profile_start_ingests_large_paste_and_replaces_active_context(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -260,9 +282,12 @@ def test_run_profile_start_ingests_large_paste_and_replaces_active_context(monke
     assert isinstance(replacement_messages[0], agent_graph.RemoveMessage)
     replacement_text = replacement_messages[1]["content"]
     assert "Large paste indexed for bounded RAG retrieval" in replacement_text
+    assert "Source manifest:" in replacement_text
     assert content not in replacement_text
     ingest_record = updates["run_profile"]["large_paste_ingests"][0]
     assert ingest_record["index_status"] == "indexed"
+    assert ingest_record["source_manifest"]["source_key"] == calls["ingest"]["source_key"]
+    assert ingest_record["source_manifest"]["message_index"] == 0
     assert ingest_record["events"][0]["event"] == "large_ingest.started"
     assert ingest_record["events"][-1]["event"] == "large_ingest.completed"
     assert ingest_record["events"][-1]["status"] == "indexed"
@@ -475,6 +500,7 @@ def test_run_profile_start_replaces_queued_large_paste_with_source_handle(monkey
     assert updates["rag_active"] is True
     replacement_text = updates["messages"][1]["content"]
     assert "Large paste queued for bounded RAG retrieval" in replacement_text
+    assert "Source manifest:" in replacement_text
     assert content not in replacement_text
 
 
@@ -1148,6 +1174,133 @@ def test_active_rag_prefetch_falls_back_when_classifier_fails(monkeypatch: pytes
 
     assert calls["query"]
     assert updates["run_profile"]["active_rag_prefetch_query_warning"].startswith("classifier_failed")
+
+
+def test_active_rag_prefetch_auto_queries_archives_on_intent(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_archive_classifier(messages):
+        return {
+            "archive_recall": True,
+            "query": "Qwen3 reranker deterministic fallback",
+            "confidence": 0.92,
+            "strategy": "small_model_archive_intent",
+        }
+
+    async def fake_agentic_rag_retrieve(**kwargs):
+        calls.update(kwargs)
+        return {
+            "final_query": kwargs["query"],
+            "context_packet": {
+                "query": kwargs["query"],
+                "chunk_count": 1,
+                "chunks": [
+                    {
+                        "rank": 1,
+                        "source_key": "archive-1",
+                        "retrieval_backend": "alpharavis_pgvector",
+                        "relevance_score": 0.9,
+                        "chunk_text": "Qwen3 reranker fallback detail from archive.",
+                    }
+                ],
+            },
+            "graph_trace": [],
+        }
+
+    monkeypatch.setattr(agent_graph, "_archive_auto_intent_profile_for_messages", fake_archive_classifier)
+    monkeypatch.setattr(agent_graph, "_router_agentic_rag_retrieve", fake_agentic_rag_retrieve)
+
+    updates = asyncio.run(
+        agent_graph.active_rag_prefetch_node(
+            {
+                "messages": [
+                    {"role": "human", "content": "Wie war das nochmal mit dem Qwen3 Reranker fallback?"}
+                ],
+                "thread_id": "thread-1",
+                "rag_active": False,
+                "archive_rag_mode": "auto_on_intent",
+                "archived_context_keys": ["archive-1"],
+            }
+        )
+    )
+
+    assert calls["source_type"] == "archive"
+    assert calls["source_keys"] == ["archive-1"]
+    assert calls["query"] == "Qwen3 reranker deterministic fallback"
+    assert updates["run_profile"]["active_rag_prefetch_status"] == "injected"
+    assert updates["run_profile"]["active_rag_prefetch_archive_auto_on_intent"] is True
+    assert updates["run_profile"]["active_rag_prefetch_query_strategy"] == "small_model_archive_intent"
+    assert "Qwen3 reranker fallback detail" in updates["messages"][0].content
+
+
+def test_active_rag_prefetch_archive_auto_skips_when_2b_says_no(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_archive_classifier(messages):
+        return {
+            "archive_recall": False,
+            "query": "new unrelated task",
+            "confidence": 0.88,
+            "strategy": "small_model_archive_intent",
+            "reason": "new task",
+        }
+
+    async def fake_agentic_rag_retrieve(**kwargs):
+        raise AssertionError("archive retrieval must not run when 2B rejects recall")
+
+    monkeypatch.setattr(agent_graph, "_archive_auto_intent_profile_for_messages", fake_archive_classifier)
+    monkeypatch.setattr(agent_graph, "_router_agentic_rag_retrieve", fake_agentic_rag_retrieve)
+
+    updates = asyncio.run(
+        agent_graph.active_rag_prefetch_node(
+            {
+                "messages": [{"role": "human", "content": "Mach bitte eine neue Aufgabe zu Reranking."}],
+                "thread_id": "thread-1",
+                "archive_rag_mode": "auto_on_intent",
+                "archived_context_keys": ["archive-1"],
+            }
+        )
+    )
+
+    assert updates["run_profile"]["active_rag_prefetch_status"] == "archive_auto_no_intent"
+    assert updates["run_profile"]["active_rag_prefetch_classifier"]["archive_recall"] is False
+
+
+def test_archive_auto_intent_profile_falls_back_when_2b_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def failing_classifier(query, context):
+        raise RuntimeError("offline")
+
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_ARCHIVE_AUTO_INTENT_CLASSIFIER", "true")
+    monkeypatch.setattr(agent_graph, "_classify_archive_recall_with_small_model", failing_classifier)
+
+    profile = asyncio.run(
+        agent_graph._archive_auto_intent_profile_for_messages(
+            [{"role": "human", "content": "Wie war das nochmal mit dem Reranker fallback?"}]
+        )
+    )
+
+    assert profile["archive_recall"] is True
+    assert profile["strategy"] == "archive_recall_condenser_fallback"
+    assert profile["classifier_warning"].startswith("classifier_failed")
+    assert "Reranker" in profile["query"] or "reranker" in profile["query"]
+
+
+def test_active_rag_prefetch_keeps_archives_passive_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_agentic_rag_retrieve(**kwargs):
+        raise AssertionError("archive retrieval must stay passive in tool_only mode")
+
+    monkeypatch.setattr(agent_graph, "_router_agentic_rag_retrieve", fake_agentic_rag_retrieve)
+
+    updates = asyncio.run(
+        agent_graph.active_rag_prefetch_node(
+            {
+                "messages": [{"role": "human", "content": "Wie war das nochmal mit dem Reranker?"}],
+                "thread_id": "thread-1",
+                "archive_rag_mode": "tool_only",
+                "archived_context_keys": ["archive-1"],
+            }
+        )
+    )
+
+    assert updates["run_profile"]["active_rag_prefetch_status"] == "disabled_or_inactive"
 
 
 def test_rag_pin_tools_persist_thread_active_sources(monkeypatch: pytest.MonkeyPatch) -> None:

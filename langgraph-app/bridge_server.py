@@ -949,6 +949,9 @@ def _compression_profile_from_run_profile(profile: dict[str, Any]) -> dict[str, 
         "archive_key",
         "summary_failed",
         "summary_error",
+        "compact_instructions",
+        "compact_instructions_chars",
+        "events",
         "middle_message_count",
         "head_message_count",
         "tail_message_count",
@@ -982,6 +985,10 @@ def _compression_profile_from_run_profile(profile: dict[str, Any]) -> dict[str, 
         "pruned_tool_count",
         "deduped_tool_count",
         "tool_args_truncated_count",
+        "workflow_event_count",
+        "workflow_tool_call_count",
+        "workflow_tool_result_count",
+        "workflow_event_chars",
     )
     for prefix in prefixes:
         item = {suffix: profile.get(f"{prefix}_{suffix}") for suffix in suffixes if profile.get(f"{prefix}_{suffix}") is not None}
@@ -993,15 +1000,58 @@ def _compression_profile_from_run_profile(profile: dict[str, Any]) -> dict[str, 
     return result
 
 
+def _large_ingest_profile_from_run_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(profile, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for field in ("document_ingests", "large_paste_ingests"):
+        records = profile.get(field)
+        if not isinstance(records, list):
+            continue
+        compact_records: list[dict[str, Any]] = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            manifest = record.get("source_manifest") if isinstance(record.get("source_manifest"), dict) else {}
+            events = record.get("events") if isinstance(record.get("events"), list) else []
+            latest_event = events[-1] if events and isinstance(events[-1], dict) else {}
+            compact: dict[str, Any] = {
+                "source_key": manifest.get("source_key") or record.get("source_key") or latest_event.get("source_key") or "",
+                "source_type": manifest.get("source_type") or record.get("source_type") or "",
+                "title": manifest.get("title") or record.get("source_title") or "",
+                "content_type": manifest.get("content_type") or record.get("content_type") or "",
+                "index_status": manifest.get("index_status") or record.get("index_status") or latest_event.get("status") or "",
+                "rag_file_id": manifest.get("rag_file_id") or record.get("rag_file_id") or "",
+                "rag_active": bool(manifest.get("rag_active") if "rag_active" in manifest else record.get("rag_active")),
+                "message_replaced": bool(record.get("message_replaced")),
+                "manual_rag_block": bool(manifest.get("manual_rag_block") if "manual_rag_block" in manifest else record.get("manual_rag_block")),
+                "paste_intent": manifest.get("paste_intent") or record.get("paste_intent") or "",
+                "content_chars": manifest.get("content_chars") or record.get("content_chars") or latest_event.get("content_chars") or 0,
+                "indexed_content_chars": manifest.get("indexed_content_chars") or record.get("indexed_content_chars") or 0,
+                "indexed_backends": list(manifest.get("indexed_backends") or record.get("indexed_backends") or []),
+                "queued_backends": list(manifest.get("queued_backends") or record.get("queued_backends") or []),
+                "skip_reason": record.get("skip_reason") or latest_event.get("reason") or "",
+                "elapsed_seconds": record.get("elapsed_seconds") or latest_event.get("t") or 0,
+                "latest_event": latest_event,
+            }
+            compact_records.append(compact)
+        if compact_records:
+            result[field] = compact_records
+    return result
+
+
 def _observer_note_budget(observation_id: str, *, node_name: str, profile: dict[str, Any]) -> None:
     budget = _budget_profile_from_run_profile(profile)
     compression = _compression_profile_from_run_profile(profile)
-    if not budget and not compression:
+    ingests = _large_ingest_profile_from_run_profile(profile)
+    if not budget and not compression and not ingests:
         return
     if budget:
         budget["node"] = node_name
     if compression:
         compression["node"] = node_name
+    if ingests:
+        ingests["node"] = node_name
     for record in _BRIDGE_OBSERVATIONS:
         if record.get("id") == observation_id:
             receive = record.setdefault("receive", {})
@@ -1010,6 +1060,8 @@ def _observer_note_budget(observation_id: str, *, node_name: str, profile: dict[
                     receive["context_budget"] = _observer_safe(budget)
                 if compression:
                     receive["compression"] = _observer_safe(compression)
+                if ingests:
+                    receive["source_ingests"] = _observer_safe(ingests)
             return
 
 
@@ -1998,6 +2050,9 @@ def _extract_context_activity(part: Any) -> tuple[str, str, str]:
         ingest_text = _extract_ingest_activity(profile)
         if ingest_text:
             return "large_ingest", node_name, ingest_text
+        compression_progress = _extract_compression_progress_activity(profile)
+        if compression_progress:
+            return "context_compaction", node_name, compression_progress
 
         if (
             node_name == "hard_context_stop"
@@ -2079,6 +2134,60 @@ def _extract_ingest_activity(profile: dict[str, Any]) -> str:
                 return f"{label}: gestartet ({source_key})"
             if event_name.endswith(".failed") or event_name.endswith(".blocked"):
                 return f"{label}: fehlgeschlagen ({source_key}, status={status or event_name})"
+    return ""
+
+
+def _extract_compression_progress_activity(profile: dict[str, Any]) -> str:
+    if not isinstance(profile, dict):
+        return ""
+    for prefix, label in (
+        ("pre_run_compression", "Compression"),
+        ("final_budget_rescue", "Final rescue"),
+        ("large_paste_post_rag_compression", "Post-RAG compression"),
+        ("post_run_compression", "Post-run compression"),
+        ("handoff_context", "Handoff compression"),
+    ):
+        events = profile.get(f"{prefix}_events")
+        if not isinstance(events, list) or not events:
+            continue
+        latest = events[-1] if isinstance(events[-1], dict) else {}
+        event_name = str(latest.get("event") or "")
+        chunk_number = latest.get("chunk_number")
+        chunk_count = latest.get("chunk_count")
+        if event_name == "compression.chunk.started" and chunk_number and chunk_count:
+            return f"{label}: Chunk {chunk_number}/{chunk_count} gestartet"
+        if event_name == "compression.chunk.completed" and chunk_number and chunk_count:
+            return f"{label}: Chunk {chunk_number}/{chunk_count} abgeschlossen"
+        if event_name == "compression.synthesis.started":
+            return f"{label}: Synthese gestartet"
+        if event_name == "compression.synthesis.completed":
+            return f"{label}: Synthese abgeschlossen"
+        if event_name == "compression.workflow_events.compacted":
+            count = latest.get("workflow_event_count")
+            return f"{label}: Tool-/Workflow-Events kompakt ({count or 0})"
+        if event_name == "compression.precompact":
+            pressure = latest.get("token_pressure")
+            hmt = (
+                latest.get("head_message_count"),
+                latest.get("middle_message_count"),
+                latest.get("tail_message_count"),
+            )
+            hmt_text = f", H/M/T={hmt[0]}/{hmt[1]}/{hmt[2]}" if all(value is not None for value in hmt) else ""
+            pressure_text = f", Druck={pressure}" if pressure not in (None, "") else ""
+            return f"{label}: PreCompact{pressure_text}{hmt_text}"
+        if event_name == "compression.postcompact":
+            archive_key = str(latest.get("archive_key") or "")
+            archive_text = f", Archiv={archive_key}" if archive_key else ""
+            return f"{label}: PostCompact abgeschlossen{archive_text}"
+        if event_name == "compression.completed":
+            summary = "Chunking" if latest.get("summary_chunking_used") else "One-shot"
+            return f"{label}: abgeschlossen ({summary})"
+        if event_name == "compression.skipped":
+            return f"{label}: uebersprungen ({latest.get('reason', '')})"
+        if event_name == "compression.synthesis.failed":
+            return f"{label}: Summary fehlgeschlagen"
+        if event_name == "compression.started":
+            return f"{label}: gestartet"
     return ""
 
 

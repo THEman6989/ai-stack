@@ -1,6 +1,6 @@
 # AlphaRavis RAG / Retrieval Handoff
 
-Date: 2026-05-20
+Date: 2026-05-21
 
 This handoff captures the intent behind the current RAG work so a new context
 window can continue without re-deriving the design.
@@ -21,8 +21,15 @@ Runtime endpoints and model roles:
   AlphaRavis derives `http://100.71.57.22:8001/v1` from `BIG_BOSS_API_BASE`.
 - The Qwen3.5 2B classifier is only for structure/query work: long/noisy
   retrieval-query condensation, mixed prompt line ranges, and large-paste ingest
-  refinement. It is not the answer model, not the reranker, not the embedding
-  model, and not a FastPass replacement.
+  refinement, long-prompt route classification, and archive auto-on-intent
+  recall classification. It is not the answer model, not the reranker, not the
+  embedding model, and not a FastPass replacement.
+- The current classifier server context was recently set to 8k. Recommendation:
+  test serving Qwen3.5 2B at 16k context, because archive auto-on-intent and
+  mixed large-paste line-range classification benefit from more recent thread
+  context. Keep classifier output small (`384`-`512` tokens), preserve bounded
+  classifier windows, and compare 8k vs 16k latency/JSON validity before
+  making 16k the assumed runtime.
 - The active reranker endpoint is still configured separately as llama.cpp
   Qwen3-Reranker-0.6B at `http://192.168.178.140:8000/reranking`.
 - The user tested CPU reranking and reported it about 4x slower. Current working
@@ -77,6 +84,10 @@ Classifier behavior:
 - For mixed large-paste prompts, classifier line ranges can remove instruction
   and question lines from the indexed document body while preserving the active
   current task in the marker.
+- Archive `auto_on_intent` uses the same Qwen3.5 2B classifier for strict JSON:
+  `archive_recall`, `search_query`, `confidence`, and `reason`. If the
+  classifier is down, times out, low-confidence, or returns invalid JSON,
+  AlphaRavis falls back to the local archive-recall condenser/heuristic.
 - The JSON parser has been hardened for truncated outputs, but the classifier
   path still needs a dedicated Test UI/Observer probe.
 
@@ -118,11 +129,15 @@ Next work agreed with the user:
 
 1. Add a Test UI/Observer probe for the small-model classifier path. It should
    cover short direct, long noisy, instruction-only, document-only, mixed, and
-   endpoint-down/invalid/timeout fallback cases.
-2. Browser/live-test the new deterministic source metadata and long-prompt route
+   archive auto-on-intent, endpoint-down, invalid-JSON, low-confidence, and
+   timeout fallback cases.
+2. Run an 8k-vs-16k Qwen3.5 2B classifier context comparison. Measure latency,
+   JSON validity, archive-recall query quality, and mixed large-paste
+   line-range quality before assuming 16k as the practical default.
+3. Browser/live-test the new deterministic source metadata and long-prompt route
    classifier behavior with real LibreChat examples before changing any user UI
    defaults.
-3. Do not add a separate RAG sufficiency model call for now. The user decided
+4. Do not add a separate RAG sufficiency model call for now. The user decided
    the big Agent model can decide whether chunks are enough, as long as the
    raw-source/archive tools and prompt hint are always available in Agent mode.
 
@@ -172,11 +187,50 @@ Latest local follow-up in this working tree:
   "wie war das nochmal mit X". Planner hints now include a stronger suggested
   archive/RAG search query from recent thread context, and the context retrieval
   agent has `condense_archive_recall_query`.
+- `archive_rag_mode=auto_on_intent` now asks the safe Qwen3.5 2B classifier
+  whether the latest request is archive recall and which bounded `search_query`
+  to use. The local archive-recall condenser remains the fallback for endpoint,
+  timeout, low-confidence, or JSON failures.
+- section-level mixed archive splitting is implemented without an LLM call:
+  archive/archive-collection text is segmented into ordered prose/log/code/config
+  sections and chunked with the matching profile while preserving order.
 - large-paste ingest now records a run-profile event timeline for Observer and
   later UI progress plumbing: `large_ingest.started`,
   `large_ingest.completed`, `large_ingest.failed`, or
   `large_ingest.skipped`. Direct pgvector writes can also append
   `large_ingest.chunk_indexed` / `document_ingest.chunk_indexed`.
+- large-paste replacement now also records a compact `source_manifest` in
+  `large_paste_ingests`, includes a short `Source manifest` line in the active
+  marker, and the Bridge Observer renders a small `Source Ingest` section from
+  LangGraph metadata. The Bridge only surfaces the graph decision; LangGraph
+  still owns the large-message/RAG/compression policy.
+- focused compression instructions are implemented as a bounded chat-tag path:
+  `<focus_topic>...</focus_topic>`, `<compact_instructions>...</compact_instructions>`,
+  `/compact ...`, `@compact ...`, or `@focus ...` feed the one-shot/chunked
+  summary prompt and archive metadata as compaction-selection hints. They do
+  not become new agent tasks. The Observer `Shrinking` cards show `Compact
+  Focus`; `/compact clear` or `compression focus off` clears stored focus. The
+  Chunking Lab now has a `Compact Instructions` field for the same path.
+- compression now records structured progress events in archive metadata and
+  run-profile debug fields: `compression.started`, `compression.precompact`,
+  `compression.workflow_events.compacted`, `compression.chunk.started/completed`,
+  `compression.synthesis.started/completed`, `compression.synthesis.failed`,
+  `compression.skipped`, `compression.completed`, and
+  `compression.postcompact`. PreCompact carries reason/scope/token pressure,
+  selected H/M/T, and chunking decision; workflow compaction carries compacted
+  tool/action event counts; PostCompact carries the archive key and final
+  before/after result metadata. Bridge streaming summarizes the latest event as
+  compact `context_compaction` status/reasoning activity; the full event list
+  stays available in Observer JSON.
+- tool/workflow telemetry is compacted separately from normal chat messages.
+  Tool-call requests, tool outputs, duplicate outputs, and long action logs go
+  into `Workflow / Tool Event Compact Log` in archive metadata/content. Redacted
+  original messages remain in the raw archive for exact reads.
+- Memory tiers are now documented as an AlphaRavis policy: latest task tail,
+  active compaction summary, raw archive, archive collection, source/RAG record,
+  vector recall, MemoryKernel facts, temporary workflow state, and Observer
+  telemetry stay separate. Exact old text should come from bounded raw archive
+  or raw-source reads after vector/RAG has found the relevant source.
 - queued pgvector ingest is now represented explicitly as
   `index_status=queued` with `queued_backends=["alpharavis_pgvector"]`.
   Large Paste can still replace the active text with a source handle while the
@@ -245,7 +299,12 @@ ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_RATIO=0.60
 ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_FORCE_MIDDLE_RATIO=0.80
 ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=false
 ALPHARAVIS_PGVECTOR_SPLITTER=auto
+ALPHARAVIS_PGVECTOR_SECTION_LEVEL_ARCHIVE_SPLITTING=true
 ALPHARAVIS_DOCUMENT_INGEST_ROOT=
+ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_MAX_ARCHIVES=5
+ALPHARAVIS_ENABLE_ARCHIVE_AUTO_INTENT_CLASSIFIER=true
+ALPHARAVIS_ARCHIVE_AUTO_INTENT_MIN_CONFIDENCE=0.6
+ALPHARAVIS_ARCHIVE_AUTO_INTENT_CLASSIFIER_MAX_TOKENS=384
 ALPHARAVIS_ENABLE_RAG_RERANKING=true
 ALPHARAVIS_RAG_RERANKER_MODE=model
 ALPHARAVIS_RAG_RERANKER_URL=http://192.168.178.140:8000
@@ -644,12 +703,12 @@ Current reranking direction:
    separate progress channel or polling surface before the UI can show live
    progress for large queued uploads/pastes.
 
-5. Add section-level mixed archive splitting.
+5. Live-check section-level mixed archive splitting.
 
-   Archive/profile detection now chooses one profile per source. The next
-   improvement is to segment mixed archives into ordered prose/log/code
-   sections, then apply the matching splitter/profile per section while keeping
-   stable source metadata and exact reconstruction semantics.
+   Implemented locally: archive/archive-collection chunking can segment ordered
+   prose/log/code/config sections and apply the matching profile per section.
+   Remaining work is live quality comparison on real mixed archives and tuning
+   the heuristics if section boundaries are too aggressive.
 
 6. Measure reranker + Big-Boss LLM-grading together, then choose the default
    policy.
@@ -660,9 +719,24 @@ Current reranking direction:
    production default is model reranking on and LLM grading off unless the extra
    precision is worth the latency.
 
-7. Add optional archive auto-on-intent behavior. Keep compression archives
-   passive by default; only enable archive auto-retrieval when
-   `archive_rag_mode=auto_on_intent` and intent heuristics are proven.
+7. Live-check optional archive auto-on-intent behavior.
+
+   Implemented locally behind explicit `archive_rag_mode=auto_on_intent`.
+   Compression archives remain passive by default. The path asks the safe
+   Qwen3.5 2B classifier for strict JSON (`archive_recall`, `search_query`,
+   `confidence`, `reason`) and falls back to local archive-recall condensation
+   on endpoint/timeout/JSON failures. Remaining work is measuring latency,
+   answer quality, and false positives on real LibreChat recall examples before
+   enabling this mode anywhere by default.
+
+8. Compare Qwen3.5 2B classifier context at 8k vs 16k.
+
+   Current local note: the operator set the classifier context to 8k. 16k is
+   likely useful for archive recall and mixed-paste line ranges if latency and
+   JSON validity remain acceptable. Do not just raise AlphaRavis limits; the
+   llama.cpp/Qwen server itself must be served with the larger context. Keep
+   classifier response budgets small and compare the same prompts under both
+   contexts.
 
 ## Verification Commands
 

@@ -858,12 +858,17 @@ ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MIN_TOKENS=8192
 ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MAX_TOKENS=0
 ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_CHARS_PER_TOKEN=2.0
 ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_OVERHEAD_RESERVE_TOKENS=512
+ALPHARAVIS_ENABLE_COMPACT_INSTRUCTIONS=true
+ALPHARAVIS_COMPACT_INSTRUCTIONS_MAX_CHARS=1200
 ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=false
 ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_RATIO=0.03
 ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_MIN_TOKENS=300
 ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_MAX_TOKENS=0
 ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_OVERLAP_CHARS=1000
 ALPHARAVIS_COMPRESSION_SUMMARY_MAX_CHUNKS=12
+ALPHARAVIS_WORKFLOW_EVENT_OUTPUT_MAX_CHARS=900
+ALPHARAVIS_WORKFLOW_EVENT_OUTPUT_HEAD_CHARS=620
+ALPHARAVIS_WORKFLOW_EVENT_OUTPUT_TAIL_CHARS=180
 ```
 
 The bridge cutoff is disabled by default. LangGraph owns the normal hard
@@ -883,6 +888,21 @@ want to pin a smaller operator safety cap for slow or expensive summary models.
 In the Observer Shrinking cards, `Compress Limit` is the active-state shrink
 target and `Summary Context` is the model context used to size the internal
 summary call.
+When a run should preserve one topic more strongly during compaction, include a
+bounded focus hint in the latest user message:
+
+```text
+<focus_topic>RAG archive recall and source manifests</focus_topic>
+/compact preserve exact file paths, commands, and unresolved decisions
+```
+
+Supported forms are `<focus_topic>...</focus_topic>`,
+`<compact_instructions>...</compact_instructions>`, `/compact ...`,
+`@compact ...`, and `@focus ...`. These hints feed only the compression summary
+prompt; they do not become a new agent task. The extracted text is bounded by
+`ALPHARAVIS_COMPACT_INSTRUCTIONS_MAX_CHARS`, stored in compression archive
+metadata, and shown as `Compact Focus` in Observer `Shrinking` cards. Use
+`/compact clear` or `compression focus off` to clear a stored focus.
 `ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY` is an experimental opt-in for
 very large compression windows: if the summary prompt would otherwise be
 pruned, LangGraph summarizes the middle in chunks and then synthesizes the chunk
@@ -920,6 +940,24 @@ optional variable prompt load. It does not mean the Bridge itself chunks normal
 requests. Treat a lab run as healthy when `summary_failed=false`,
 `summary_chunking_used=true`, `summary_chunk_omitted_chars=0`, and the rendered
 acceptance status is OK.
+Use the lab's `Compact Instructions` field to test focused compaction without
+chat tags. It feeds the same `compact_instructions` value into the compressor,
+records it in `archive_metadata.compact_instructions`, and shows the character
+count in the lab stats. The lab action log also includes structured compression
+progress events such as `compression.started`, `compression.precompact`,
+`compression.workflow_events.compacted`, `compression.chunk.started`,
+`compression.chunk.completed`, `compression.synthesis.started`,
+`compression.synthesis.completed`, `compression.completed`, and
+`compression.postcompact`. PreCompact shows why compression is running and the
+selected head/middle/tail pressure; workflow compaction shows how many tool or
+action events were collapsed into the compact event log; PostCompact shows the
+archive key and final result metadata.
+
+Tool and workflow events are not treated as ordinary chat during compression.
+Tool-call requests, tool outputs, duplicate outputs, and long action logs are
+collapsed into a separate `Workflow / Tool Event Compact Log`. The raw archive
+still keeps redacted original messages, so exact old tool output can be read
+from the archive when needed.
 
 Use the lab's `Summary Mode` selector carefully:
 
@@ -1103,6 +1141,24 @@ only when you explicitly ask for cross-thread archive search.
 The MemoryKernel is the small learning layer inspired by Hermes.
 
 It runs only on the normal agent path. It does not run on Fast Path.
+
+It is not raw thread history and not document RAG. AlphaRavis keeps memory tiers
+separate so old context is loaded only at the right size:
+
+| Tier | Normal operator expectation |
+| --- | --- |
+| Latest task tail | Active every run; this is the current request and recent turns. |
+| Active compaction summary | Active after compression; use it as high-level context with archive references. |
+| Raw archive | Passive until archive tools read a bounded window or search hit. |
+| Archive collection | Passive table of contents; inspect child raw archives for exact details. |
+| Document / large paste source | Active only as a small marker; read chunks or raw slices for exact code/log/prose. |
+| Vector recall | Search aid only; do not treat snippets as the complete source of truth. |
+| MemoryKernel facts | Small durable preferences, environment facts, and recurring lessons. |
+| Temporary workflow state | Current-run state only unless explicitly archived or recorded. |
+
+When old exact text matters, prefer bounded `read_archive_record` or
+`read_raw_source` after vector/RAG has found the relevant source. Do not expect
+the active summary or MemoryKernel hint to contain every neighboring line.
 
 What it does:
 
@@ -1332,6 +1388,13 @@ thread is still above `ALPHARAVIS_LARGE_PASTE_POST_RAG_COMPRESSION_TRIGGER_RATIO
 of the active budget. To force indexing anyway, wrap the exact text in paired
 `/rag` markers:
 
+When AlphaRavis replaces a large paste, the active message keeps a compact
+source marker with a `Source manifest` line. The Bridge Observer also shows a
+small `Source Ingest` section for the selected request. Use it to confirm the
+source key, content type, indexed/queued backend, character counts, RAG-active
+state, and whether the original paste was replaced by a marker. The Bridge only
+surfaces this metadata; LangGraph owns the decision.
+
 ```text
 /rag
 large source text
@@ -1361,12 +1424,21 @@ document backend, active threads keep `active_source_keys` but do not add
 source was actually mirrored there.
 When `ALPHARAVIS_ENABLE_ACTIVE_RAG_PREFETCH=true`, active document/large-paste
 threads automatically prefetch bounded chunks into `<active-rag-context>`.
-Archive-only threads remain tool-only unless a future `auto_on_intent` archive
-mode is enabled.
+Archive-only threads remain tool-only by default. If a thread or pin explicitly
+sets `archive_rag_mode=auto_on_intent`, AlphaRavis asks the safe Qwen3.5 2B
+classifier whether the latest request is an archive-recall request and what
+bounded `search_query` to use. If the classifier is down, times out, or returns
+bad JSON, the local archive-recall condenser remains the fallback. Confirmed
+recall requests can trigger a bounded archive prefetch over the most recent
+`ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_MAX_ARCHIVES` archive keys. Keep this mode
+opt-in until live quality, latency, and false-positive behavior are measured.
 If weak pgvector hits are too noisy, set
 `ALPHARAVIS_PGVECTOR_DISTANCE_THRESHOLD` for AlphaRavis's own pgvector table.
 This is separate from `rag_api`'s `RAG_DISTANCE_THRESHOLD`, but uses the same
 distance-cutoff idea: lower pgvector distance means a stronger match.
+Mixed compression archives can also be chunked section-by-section when
+`ALPHARAVIS_PGVECTOR_SECTION_LEVEL_ARCHIVE_SPLITTING=true` so prose, logs, code,
+and config sections keep their order while using profile-specific chunk sizes.
 After enabling pgvector memory, new records are indexed automatically. Old
 MongoDB/store history is not bulk-backfilled by default, to avoid a surprise
 embedding job over many chats.

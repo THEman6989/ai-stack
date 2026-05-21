@@ -354,6 +354,7 @@ class AlphaRavisState(MessagesState):
     planner_context: NotRequired[str]
     planner_last_key: NotRequired[str]
     current_task_brief: NotRequired[str]
+    compact_instructions: NotRequired[str]
     handoff_context_summary: NotRequired[str]
     handoff_packet: NotRequired[str]
     handoff_packet_key: NotRequired[str]
@@ -6729,6 +6730,76 @@ def _compression_forced_by_user(messages: list[Any]) -> bool:
     return any(pattern in latest for pattern in patterns)
 
 
+def _compact_instructions_max_chars() -> int:
+    return max(0, int(os.getenv("ALPHARAVIS_COMPACT_INSTRUCTIONS_MAX_CHARS", "1200")))
+
+
+def _extract_compact_instructions(text: str) -> str:
+    if not _env_bool("ALPHARAVIS_ENABLE_COMPACT_INSTRUCTIONS", "true"):
+        return ""
+    max_chars = _compact_instructions_max_chars()
+    if max_chars <= 0:
+        return ""
+    content = str(text or "")
+    blocks: list[str] = []
+    tag_pattern = re.compile(
+        r"<(?P<tag>compact[-_]instructions|compact[-_]focus|focus[-_]topic|focus)\b[^>]*>"
+        r"(?P<body>.*?)</(?P=tag)>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    for match in tag_pattern.finditer(content):
+        body = str(match.group("body") or "").strip()
+        if body:
+            label = "focus_topic" if "focus" in str(match.group("tag")).lower() else "compact_instructions"
+            blocks.append(f"{label}: {body}")
+
+    line_pattern = re.compile(
+        r"^\s*(?:/compact(?:[-_ ]instructions)?|@compact|@focus|focus\s*:|compact\s*:)\s*(?P<body>.+?)\s*$",
+        re.IGNORECASE,
+    )
+    for line in content.splitlines():
+        match = line_pattern.match(line)
+        if match:
+            body = str(match.group("body") or "").strip(" :-")
+            if body and body.lower() not in {"clear", "off", "aus", "loeschen", "löschen"}:
+                blocks.append(body)
+
+    seen: set[str] = set()
+    clean: list[str] = []
+    for block in blocks:
+        normalized = re.sub(r"\s+", " ", block).strip()
+        key = normalized.lower()
+        if normalized and key not in seen:
+            seen.add(key)
+            clean.append(normalized)
+    return _truncate_text("\n".join(f"- {item}" for item in clean), max_chars)
+
+
+def _compact_instructions_cleared_by_user(messages: list[Any]) -> bool:
+    latest = _latest_user_query(messages).lower()
+    return any(
+        pattern in latest
+        for pattern in (
+            "/compact clear",
+            "/compact off",
+            "compact instructions off",
+            "compression focus off",
+            "kompressionsfokus löschen",
+            "kompressionsfokus loeschen",
+        )
+    )
+
+
+def _compact_instructions_from_state(state: dict[str, Any], messages: list[Any]) -> tuple[str, bool]:
+    if _compact_instructions_cleared_by_user(messages):
+        return "", True
+    extracted = _extract_compact_instructions(_latest_user_query(messages))
+    if extracted:
+        return extracted, True
+    existing = str(state.get("compact_instructions") or "").strip()
+    return _truncate_text(existing, _compact_instructions_max_chars()) if existing else "", False
+
+
 def _looks_like_archive_recall_request(text: str) -> bool:
     lowered = (text or "").lower()
     patterns = (
@@ -6740,6 +6811,10 @@ def _looks_like_archive_recall_request(text: str) -> bool:
         "damals",
         "frueher",
         "früher",
+        "nochmal",
+        "noch mal",
+        "wie war das",
+        "was war nochmal",
         "letzte nachricht",
         "letzten nachrichten",
         "old context",
@@ -6800,6 +6875,108 @@ def _archive_recall_query_for_messages(messages: list[Any]) -> dict[str, Any]:
     latest = _latest_user_query(messages)
     context = _recent_turn_window_text(messages, int(os.getenv("ALPHARAVIS_ARCHIVE_RECALL_CONTEXT_TURNS", "3")))
     return _condense_archive_recall_query_from_text(latest, context)
+
+
+def _archive_auto_intent_classifier_enabled() -> bool:
+    return _env_bool("ALPHARAVIS_ENABLE_ARCHIVE_AUTO_INTENT_CLASSIFIER", "true")
+
+
+def _archive_auto_intent_min_confidence() -> float:
+    return max(0.0, min(1.0, float(os.getenv("ALPHARAVIS_ARCHIVE_AUTO_INTENT_MIN_CONFIDENCE", "0.6"))))
+
+
+async def _classify_archive_recall_with_small_model(query: str, context: str) -> dict[str, Any]:
+    system_prompt = (
+        "You are AlphaRavis' archive-recall intent classifier. Return strict JSON only. "
+        "Do not answer the user. Decide whether the latest user request asks to recall "
+        "older compressed conversation/archive context. Use the recent context only to "
+        "build a stronger archive search query. Do not mark normal new tasks, greetings, "
+        "or document questions as archive recall unless the user refers to prior/old/archived "
+        "conversation context. Return exactly these keys: archive_recall, search_query, "
+        "confidence, reason. search_query must be concise German/English search text under "
+        "1200 characters with entities, filenames, error names, model names, and topic terms."
+    )
+    payload = {
+        "model": _small_classifier_model(),
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "task": "classify_archive_recall_intent",
+                        "latest_user_request": str(query or "")[:6000],
+                        "recent_thread_context": str(context or "")[:8000],
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ],
+        "temperature": 0,
+        "max_tokens": int(os.getenv("ALPHARAVIS_ARCHIVE_AUTO_INTENT_CLASSIFIER_MAX_TOKENS", "384")),
+        "stream": False,
+        "response_format": {"type": "json_object"},
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    url = f"{_small_classifier_default_base_url().rstrip('/')}/chat/completions"
+    started = time.perf_counter()
+    async with httpx.AsyncClient(timeout=_small_classifier_timeout()) as client:
+        response = await client.post(
+            url,
+            json=payload,
+            headers={"Authorization": f"Bearer {os.getenv('LOCAL_LLM_API_KEY', 'sk-local-dev')}"},
+        )
+        response.raise_for_status()
+        body = response.json()
+    choice = (body.get("choices") or [{}])[0] if isinstance(body, dict) else {}
+    message = choice.get("message") if isinstance(choice, dict) else {}
+    parsed = _parse_classifier_json(str(message.get("content") if isinstance(message, dict) else ""))
+    confidence = round(max(0.0, min(1.0, float(parsed.get("confidence") or 0.0))), 3)
+    return {
+        "archive_recall": bool(parsed.get("archive_recall")),
+        "query": str(parsed.get("search_query") or parsed.get("retrieval_query") or "").strip()[: _retrieval_query_max_chars()],
+        "confidence": confidence,
+        "reason": str(parsed.get("reason") or "")[:500],
+        "strategy": "small_model_archive_intent",
+        "model": _small_classifier_model(),
+        "base_url": _small_classifier_default_base_url(),
+        "elapsed_seconds": round(time.perf_counter() - started, 3),
+    }
+
+
+async def _archive_auto_intent_profile_for_messages(messages: list[Any]) -> dict[str, Any]:
+    latest = _latest_user_query(messages)
+    context = _recent_turn_window_text(messages, int(os.getenv("ALPHARAVIS_ARCHIVE_RECALL_CONTEXT_TURNS", "3")))
+    fallback = _condense_archive_recall_query_from_text(latest, context)
+    fallback = {
+        **fallback,
+        "archive_recall": _looks_like_archive_recall_request(latest),
+        "strategy": "archive_recall_condenser",
+    }
+    if not _archive_auto_intent_classifier_enabled():
+        return fallback
+    try:
+        model_profile = await _classify_archive_recall_with_small_model(latest, context)
+    except Exception as exc:
+        return {
+            **fallback,
+            "strategy": "archive_recall_condenser_fallback",
+            "classifier_warning": f"classifier_failed: {type(exc).__name__}: {exc}"[:500],
+        }
+    confidence = float(model_profile.get("confidence") or 0.0)
+    if confidence < _archive_auto_intent_min_confidence():
+        return {
+            **fallback,
+            "archive_recall": bool(fallback.get("archive_recall")) and bool(model_profile.get("archive_recall")),
+            "strategy": "small_model_archive_intent_low_confidence",
+            "small_model": model_profile,
+        }
+    query = str(model_profile.get("query") or fallback.get("query") or latest).strip()
+    return {
+        **fallback,
+        **model_profile,
+        "query": query[: _retrieval_query_max_chars()],
+    }
 
 
 @tool
@@ -7244,17 +7421,30 @@ def _large_paste_marker(
     paste_intent: str = "document",
     classification: dict[str, Any] | None = None,
     index_status: str = "indexed",
+    content_type: str = "",
+    indexed_content_chars: int = 0,
+    indexed_backends: list[str] | None = None,
 ) -> str:
     preview_chars = max(0, int(os.getenv("ALPHARAVIS_LARGE_PASTE_RAG_MARKER_PREVIEW_CHARS", "900")))
     preview = content[:preview_chars].strip() if preview_chars else ""
     classification = classification if isinstance(classification, dict) else {}
     status_phrase = "queued for bounded RAG retrieval" if str(index_status or "").lower() == "queued" else "indexed for bounded RAG retrieval"
     lookup_phrase = "queued for exact lookup" if str(index_status or "").lower() == "queued" else "indexed for exact lookup"
+    manifest_parts = [
+        f"content_type={content_type or 'mixed'}",
+        f"chars={len(content)}",
+    ]
+    if indexed_content_chars and indexed_content_chars != len(content):
+        manifest_parts.append(f"indexed_chars={indexed_content_chars}")
+    if indexed_backends:
+        manifest_parts.append(f"backends={','.join(str(item) for item in indexed_backends if item)}")
+    manifest = "; ".join(manifest_parts)
     if paste_intent == "instruction":
         brief = _large_paste_instruction_brief(content, classification)
         return "\n\n".join(
             [
                 f"[Large paste classified as instruction-like and {lookup_phrase}: source_key={source_key}; title={title}]",
+                f"Source manifest: {manifest}.",
                 "Follow the condensed instruction brief below as the active user instruction. "
                 "Use query_source against this source only when exact omitted instruction text is needed.",
                 f"Classification: intent=instruction; confidence={classification.get('confidence', '')}.",
@@ -7265,6 +7455,7 @@ def _large_paste_marker(
         brief = _large_paste_instruction_brief(content, classification)
         lines = [
             f"[Large paste classified as mixed instructions plus document/data and {status_phrase}: source_key={source_key}; rag_file_id={rag_file_id}; title={title}]",
+            f"Source manifest: {manifest}.",
             "Follow the condensed instruction brief below. Use active RAG/query_source against this source for document/data details.",
             f"Classification: intent=mixed; confidence={classification.get('confidence', '')}.",
             f"Condensed instruction brief:\n{brief}",
@@ -7278,6 +7469,7 @@ def _large_paste_marker(
         return "\n\n".join(lines)
     lines = [
         f"[Large paste {status_phrase}: source_key={source_key}; rag_file_id={rag_file_id}; title={title}]",
+        f"Source manifest: {manifest}.",
         "Use agentic_rag_retrieve or query_source against this source when details from the pasted text are needed.",
     ]
     if paste_intent == "unknown":
@@ -7605,6 +7797,23 @@ async def _ingest_large_paste_messages(
             "events": ingest_events,
             **auto_budget,
         }
+        ingest_record["source_manifest"] = {
+            "source_key": source_key,
+            "source_type": source_type,
+            "title": title,
+            "content_type": source_metadata.get("content_type"),
+            "content_chars": len(body),
+            "indexed_content_chars": len(ingest_content),
+            "index_status": ingest_result.get("index_status", ""),
+            "indexed_backends": list(ingest_result.get("indexed_backends") or []),
+            "queued_backends": list(ingest_result.get("queued_backends") or []),
+            "rag_file_id": ingest_result.get("rag_file_id", ""),
+            "rag_active": bool(ingest_result.get("rag_active")),
+            "paste_intent": paste_intent,
+            "manual_rag_block": manual,
+            "message_index": message_index,
+            "block_index": block_index,
+        }
         local_rag_update = _rag_state_update_from_ingest({**state, **rag_update}, ingest_result)
         if ingest_result.get("index_status") in {"indexed", "partial", "queued"} and (
             ingest_result.get("rag_active") or paste_intent == "instruction"
@@ -7617,6 +7826,9 @@ async def _ingest_large_paste_messages(
                 paste_intent=paste_intent,
                 classification=classification,
                 index_status=str(ingest_result.get("index_status") or ""),
+                content_type=str(source_metadata.get("content_type") or ""),
+                indexed_content_chars=len(ingest_content),
+                indexed_backends=list(ingest_result.get("indexed_backends") or ingest_result.get("queued_backends") or []),
             )
             return replacement, ingest_record, local_rag_update
         return None, ingest_record, local_rag_update
@@ -8851,6 +9063,19 @@ def _compression_summary_message(mode: str, result: CompressionResult, archive_k
     )
 
 
+def _append_compression_archive_event(result: CompressionResult, event: dict[str, Any]) -> None:
+    metadata = result.archive_metadata
+    events = metadata.get("events")
+    if not isinstance(events, list):
+        events = []
+        metadata["events"] = events
+    item = dict(event)
+    item.setdefault("mode", result.mode)
+    if "t" not in item and events and isinstance(events[-1], dict):
+        item["t"] = events[-1].get("t", 0)
+    events.append(item)
+
+
 def _archive_policy_message() -> SystemMessage:
     return SystemMessage(content=build_archive_policy_message(), id=ARCHIVE_POLICY_MESSAGE_ID)
 
@@ -8878,6 +9103,22 @@ async def _store_compression_archive(
     archive_key = hashlib.sha256(
         f"{mode}:{time.time()}:{result.summary}:{len(result.middle)}".encode("utf-8")
     ).hexdigest()[:24]
+    _append_compression_archive_event(
+        result,
+        {
+            "event": "compression.postcompact",
+            "scope": mode,
+            "archive_key": archive_key,
+            "token_estimate_before": result.token_estimate_before,
+            "token_estimate_after": result.token_estimate_after,
+            "head_message_count": len(result.head),
+            "middle_message_count": len(result.middle),
+            "tail_message_count": len(result.tail),
+            "summary_failed": result.summary_failed,
+            "summary_chunking_used": bool(result.archive_metadata.get("summary_chunking_used")),
+            "summary_chunk_count": int(result.archive_metadata.get("summary_chunk_count") or 0),
+        },
+    )
     if store is None:
         return archive_key, None
 
@@ -9030,6 +9271,7 @@ async def _run_hermes_style_compression(
     current_task_brief = _current_task_brief_from_state(state)
     latest_packet = _latest_handoff_packet(list(state.get("messages", []))) or str(state.get("handoff_packet") or "")
     raw_input_messages = [*list(state.get("messages", [])), *(inject_messages or [])]
+    compact_instructions, compact_instructions_changed = _compact_instructions_from_state(state, raw_input_messages)
     existing_ids = {_message_id(message) for message in raw_input_messages}
     if current_task_brief and CURRENT_TASK_BRIEF_MESSAGE_ID not in existing_ids:
         raw_input_messages.append(SystemMessage(content=current_task_brief, id=CURRENT_TASK_BRIEF_MESSAGE_ID))
@@ -9062,6 +9304,7 @@ async def _run_hermes_style_compression(
         latest_handoff_packet=latest_packet,
         memory_kernel_context=compression_memory_context,
         skill_context=str(state.get("active_skill_context") or ""),
+        compact_instructions=compact_instructions,
         protected_message_ids=_compression_protected_message_ids(),
         summarize_fn=_compression_summary_from_prompt,
         force=force,
@@ -9091,6 +9334,8 @@ async def _run_hermes_style_compression(
         "handoff_packet_key": hashlib.sha256(latest_packet.encode("utf-8")).hexdigest()[:16] if latest_packet else "",
         "compression_stats": result.compression_stats,
     }
+    if compact_instructions_changed:
+        updates["compact_instructions"] = compact_instructions
     if mode == "handoff":
         updates["handoff_context_summary"] = result.summary
     else:
@@ -9252,6 +9497,9 @@ def _compression_debug_profile(result: CompressionResult | None, *, prefix: str,
     fields: dict[str, Any] = {
         f"{prefix}_summary_failed": result.summary_failed,
         f"{prefix}_summary_error": result.summary_error[:500],
+        f"{prefix}_compact_instructions": metadata.get("compact_instructions"),
+        f"{prefix}_compact_instructions_chars": metadata.get("compact_instructions_chars"),
+        f"{prefix}_events": metadata.get("events"),
         f"{prefix}_middle_message_count": len(result.middle),
         f"{prefix}_head_message_count": len(result.head),
         f"{prefix}_tail_message_count": len(result.tail),
@@ -9291,6 +9539,10 @@ def _compression_debug_profile(result: CompressionResult | None, *, prefix: str,
         f"{prefix}_pruned_tool_count": metadata.get("pruned_tool_count"),
         f"{prefix}_deduped_tool_count": metadata.get("deduped_tool_count"),
         f"{prefix}_tool_args_truncated_count": metadata.get("tool_args_truncated_count"),
+        f"{prefix}_workflow_event_count": metadata.get("workflow_event_count"),
+        f"{prefix}_workflow_tool_call_count": metadata.get("workflow_tool_call_count"),
+        f"{prefix}_workflow_tool_result_count": metadata.get("workflow_tool_result_count"),
+        f"{prefix}_workflow_event_chars": metadata.get("workflow_event_chars"),
     }
     return {key: value for key, value in fields.items() if value not in (None, "")}
 
@@ -10212,29 +10464,63 @@ async def active_rag_prefetch_node(state: AlphaRavisState, runtime: Any | None =
     if _router_agentic_rag_retrieve is None:
         return {"run_profile": _profile_update(state, active_rag_prefetch_status="router_unavailable")}
 
+    messages = list(state.get("messages", []))
+    raw_query = _latest_user_query(messages).strip()
     pinned = await _load_thread_rag_pins(_state_thread_id(state))
     source_keys = _merge_unique_strings(state.get("active_source_keys"), pinned.get("active_source_keys"))
     rag_file_ids = _merge_unique_strings(state.get("active_rag_file_ids"), pinned.get("active_rag_file_ids"))
     rag_active = bool(state.get("rag_active") or pinned.get("rag_active") or source_keys or rag_file_ids)
     archive_rag_mode = str(pinned.get("archive_rag_mode") or state.get("archive_rag_mode") or "tool_only")
-    if not rag_active:
+    archive_keys = _merge_unique_strings(state.get("archived_context_keys"), state.get("archive_keys"))
+    archive_auto_candidate = archive_rag_mode == "auto_on_intent" and bool(archive_keys)
+    if not rag_active and not archive_auto_candidate:
         return {"run_profile": _profile_update(state, active_rag_prefetch_status="disabled_or_inactive")}
-    if not source_keys and not rag_file_ids:
+    if not source_keys and not rag_file_ids and not archive_auto_candidate:
         return {"run_profile": _profile_update(state, active_rag_prefetch_status="no_active_sources")}
     if archive_rag_mode == "tool_only" and not source_keys:
         return {"run_profile": _profile_update(state, active_rag_prefetch_status="archive_tool_only")}
 
-    raw_query = _latest_user_query(list(state.get("messages", []))).strip()
     if not _active_rag_prefetch_query(raw_query):
         return {"run_profile": _profile_update(state, active_rag_prefetch_status="trivial_query")}
-    query_profile = await _prepare_retrieval_query(raw_query)
+    source_type = "all"
+    rag_source_keys: list[str] | None = rag_file_ids or None
+    archive_auto_intent = False
+    if archive_auto_candidate and not source_keys:
+        archive_query_profile = await _archive_auto_intent_profile_for_messages(messages)
+        archive_auto_intent = bool(archive_query_profile.get("archive_recall"))
+        if not archive_auto_intent:
+            return {
+                "run_profile": _profile_update(
+                    state,
+                    active_rag_prefetch_status="archive_auto_no_intent",
+                    active_rag_prefetch_archive_auto_on_intent=False,
+                    active_rag_prefetch_classifier=archive_query_profile,
+                    active_rag_prefetch_query_strategy=archive_query_profile.get("strategy", ""),
+                    active_rag_prefetch_query_warning=archive_query_profile.get("classifier_warning", ""),
+                )
+            }
+        archive_limit = max(1, min(int(os.getenv("ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_MAX_ARCHIVES", "5")), 20))
+        source_keys = archive_keys[-archive_limit:]
+        rag_file_ids = await _rag_file_ids_for_archives(source_keys)
+        rag_source_keys = rag_file_ids or None
+        source_type = "archive"
+        query_profile = {
+            "query": archive_query_profile.get("query", raw_query),
+            "strategy": archive_query_profile.get("strategy", "archive_auto_on_intent"),
+            "original_chars": len(raw_query),
+            "query_chars": len(str(archive_query_profile.get("query", ""))),
+            "classifier": archive_query_profile,
+            "warning": archive_query_profile.get("classifier_warning", ""),
+        }
+    else:
+        query_profile = await _prepare_retrieval_query(raw_query)
     query = str(query_profile.get("query") or raw_query).strip()
 
     try:
         payload = await _router_agentic_rag_retrieve(
             query=query,
             source_keys=source_keys or rag_file_ids,
-            source_type="all",
+            source_type=source_type,
             limit=_active_rag_prefetch_limit(),
             include_other_threads=False,
             thread_id=_state_thread_id(state),
@@ -10242,7 +10528,7 @@ async def active_rag_prefetch_node(state: AlphaRavisState, runtime: Any | None =
             pgvector_available=_vector_memory_available(),
             pgvector_import_error=PGVECTOR_IMPORT_ERROR,
             rag_query_func=_rag_query_sources,
-            rag_source_keys=rag_file_ids or None,
+            rag_source_keys=rag_source_keys,
             allow_rewrite=True,
             max_context_chars=_active_rag_prefetch_context_chars(),
             llm_grade_func=_llm_grade_retrieval_hits if _env_bool("ALPHARAVIS_AGENTIC_RAG_LLM_GRADING", "false") else None,
@@ -10276,6 +10562,8 @@ async def active_rag_prefetch_node(state: AlphaRavisState, runtime: Any | None =
             active_rag_prefetch_chunk_count=int(packet.get("chunk_count") or 0) if isinstance(packet, dict) else 0,
             active_rag_prefetch_source_keys=source_keys,
             active_rag_prefetch_rag_file_ids=rag_file_ids,
+            active_rag_prefetch_source_type=source_type,
+            active_rag_prefetch_archive_auto_on_intent=archive_auto_intent,
             active_rag_prefetch_final_query=payload.get("final_query", "") if isinstance(payload, dict) else "",
             active_rag_prefetch_query_strategy=query_profile.get("strategy", ""),
             active_rag_prefetch_query_chars=query_profile.get("query_chars", 0),

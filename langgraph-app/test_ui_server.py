@@ -61,6 +61,7 @@ class ChunkingRunRequest(BaseModel):
     include_tools: bool = True
     variable_prompt_load: bool = True
     summary_mode: str = "stub"
+    compact_instructions: str = ""
     corpus_text: str = ""
 
 
@@ -492,6 +493,7 @@ async def _run_chunking_diagnostic(request: ChunkingRunRequest, run: dict[str, A
     )
     max_chunks = _bounded_int(request.max_chunks, minimum=1, maximum=64, default=12)
     summary_mode = _summary_mode(request.summary_mode)
+    compact_instructions = str(request.compact_instructions or "").strip()[:1200]
     summary_base_url, summary_model, _summary_api_key, _summary_timeout = _real_llm_summary_config()
     _chunking_log(
         run,
@@ -503,6 +505,7 @@ async def _run_chunking_diagnostic(request: ChunkingRunRequest, run: dict[str, A
         include_tools=bool(request.include_tools),
         variable_prompt_load=bool(request.variable_prompt_load),
         summary_mode=summary_mode,
+        compact_instructions_chars=len(compact_instructions),
     )
     await asyncio.sleep(0)
 
@@ -528,6 +531,8 @@ async def _run_chunking_diagnostic(request: ChunkingRunRequest, run: dict[str, A
         pruned_tools=prepared.pruned_tool_count,
         deduped_tools=prepared.deduped_tool_count,
         truncated_tool_args=prepared.tool_args_truncated_count,
+        workflow_events=prepared.workflow_event_count,
+        workflow_event_chars=prepared.workflow_event_chars,
     )
     await asyncio.sleep(0)
 
@@ -573,7 +578,6 @@ async def _run_chunking_diagnostic(request: ChunkingRunRequest, run: dict[str, A
     previous_max_chunks = os.environ.get("ALPHARAVIS_COMPRESSION_SUMMARY_MAX_CHUNKS")
     os.environ["ALPHARAVIS_COMPRESSION_SUMMARY_MAX_CHUNKS"] = str(max_chunks)
     try:
-        _chunking_log(run, "compression.started")
         result = await compress_messages(
             messages,
             mode="bridge_test_ui_chunking",
@@ -585,6 +589,10 @@ async def _run_chunking_diagnostic(request: ChunkingRunRequest, run: dict[str, A
             summarize_fn=summarize,
             force=True,
             enable_chunked_summary=True,
+            compact_instructions=compact_instructions,
+            progress_callback=lambda event: _chunking_log(run, str(event.get("event") or "compression.progress"), **{
+                key: value for key, value in event.items() if key != "event"
+            }),
             **prompt_context,
         )
     finally:
@@ -620,6 +628,7 @@ async def _run_chunking_diagnostic(request: ChunkingRunRequest, run: dict[str, A
             "include_tools": bool(request.include_tools),
             "variable_prompt_load": bool(request.variable_prompt_load),
             "summary_mode": summary_mode,
+            "compact_instructions_chars": len(compact_instructions),
             "summary_api_base": summary_base_url if summary_mode == "real_llm" else "",
             "summary_model": summary_model if summary_mode == "real_llm" else "stub",
         },
@@ -634,9 +643,14 @@ async def _run_chunking_diagnostic(request: ChunkingRunRequest, run: dict[str, A
             "pruned_tool_count": result.pruned_tool_count,
             "deduped_tool_count": result.deduped_tool_count,
             "tool_args_truncated_count": result.tool_args_truncated_count,
+            "workflow_event_count": result.workflow_event_count,
+            "workflow_tool_call_count": result.workflow_tool_call_count,
+            "workflow_tool_result_count": result.workflow_tool_result_count,
+            "workflow_event_chars": result.workflow_event_chars,
         },
         "summary_calls": summary_calls,
         "summary_call_count": len(summary_calls),
+        "actions": list(run.get("actions") or []),
         "archive_metadata": metadata,
         "token_estimate_before": result.token_estimate_before,
         "token_estimate_after": result.token_estimate_after,
@@ -1560,6 +1574,12 @@ OBSERVER_HTML = """<!doctype html>
     .budget { border: 1px solid #2b3240; border-radius: 8px; background: #11151d; padding: 10px; display: grid; gap: 8px; }
     .budget-title { display: flex; align-items: center; justify-content: space-between; color: #cbd5e1; font-weight: 650; font-size: 13px; }
     .budget-grid { display: grid; grid-template-columns: repeat(12, minmax(96px, 1fr)); gap: 8px; }
+    .source-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+    .source-card { border: 1px solid #252d3b; border-radius: 7px; background: #0c1017; padding: 9px; display: grid; gap: 8px; min-width: 0; }
+    .source-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .source-card h3 { margin: 0; font-size: 13px; color: #eef1f5; overflow-wrap: anywhere; }
+    .source-card p { margin: 0; color: #9aa4b2; font-size: 12px; overflow-wrap: anywhere; }
+    .source-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
     .shrink { border: 1px solid #2b3240; border-radius: 8px; background: #11151d; padding: 10px; display: grid; gap: 8px; }
     .shrink-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; }
     .shrink-card { border: 1px solid #252d3b; border-radius: 7px; background: #0c1017; padding: 9px; display: grid; gap: 8px; min-width: 0; }
@@ -1649,6 +1669,13 @@ OBSERVER_HTML = """<!doctype html>
       </div>
       <div id="budgetGrid" class="budget-grid"></div>
     </section>
+    <section class="budget" aria-label="Source Ingest">
+      <div class="budget-title">
+        <span>Source Ingest</span>
+        <span id="sourceStatus" class="status">Keine Quellen-Events.</span>
+      </div>
+      <div id="sourceGrid" class="source-grid"></div>
+    </section>
     <section class="shrink" aria-label="Compression Shrinking">
       <div class="budget-title">
         <span>Shrinking</span>
@@ -1683,6 +1710,11 @@ OBSERVER_HTML = """<!doctype html>
           </select>
         </label>
         <button id="runChunking" class="run" type="button">Test Chunking</button>
+      </div>
+      <div class="chunk-form archive-rag-form">
+        <label style="grid-column: 1 / -1;">Compact Instructions
+          <textarea id="chunkCompactInstructions" placeholder="optional: preserve exact file paths, commands, unresolved decisions"></textarea>
+        </label>
       </div>
       <div id="chunkingStats" class="chunk-stats"></div>
       <div id="chunkingActions" class="chunk-actions"></div>
@@ -1886,6 +1918,8 @@ OBSERVER_HTML = """<!doctype html>
     const fullMode = document.getElementById('fullMode');
     const budgetGrid = document.getElementById('budgetGrid');
     const budgetStatus = document.getElementById('budgetStatus');
+    const sourceGrid = document.getElementById('sourceGrid');
+    const sourceStatus = document.getElementById('sourceStatus');
     const shrinkGrid = document.getElementById('shrinkGrid');
     const shrinkStatus = document.getElementById('shrinkStatus');
     const chunkingStatus = document.getElementById('chunkingStatus');
@@ -1896,6 +1930,7 @@ OBSERVER_HTML = """<!doctype html>
     const chunkTools = document.getElementById('chunkTools');
     const chunkVariablePrompt = document.getElementById('chunkVariablePrompt');
     const chunkSummaryMode = document.getElementById('chunkSummaryMode');
+    const chunkCompactInstructions = document.getElementById('chunkCompactInstructions');
     const runChunking = document.getElementById('runChunking');
     const chunkingStats = document.getElementById('chunkingStats');
     const chunkingActions = document.getElementById('chunkingActions');
@@ -1978,6 +2013,9 @@ OBSERVER_HTML = """<!doctype html>
     }
     function compressionOf(record) {
       return record?.receive?.compression || {};
+    }
+    function sourceIngestsOf(record) {
+      return record?.receive?.source_ingests || {};
     }
     function num(value) {
       const parsed = Number(value);
@@ -2094,6 +2132,7 @@ OBSERVER_HTML = """<!doctype html>
           ['Request', data.request_tokens_after ? `${fmtNumber(data.request_tokens)} -> ${fmtNumber(data.request_tokens_after)}` : ''],
           ['Passes', data.max_passes ? `${data.passes || 0}/${data.max_passes}` : (data.passes || '')],
           ['Budget OK', data.budget_met === undefined ? '' : (data.budget_met ? 'ja' : 'nein')],
+          ['Compact Focus', data.compact_instructions ? short(data.compact_instructions, 80) : ''],
           ['Compress Limit', fmtNumber(data.compression_token_limit || '')],
           ['Summary Context', fmtNumber(data.summary_context_token_limit || '')],
           ['Head/Middle/Tail', `${data.head_message_count ?? ''}/${data.middle_message_count ?? ''}/${data.tail_message_count ?? ''}`],
@@ -2119,6 +2158,54 @@ OBSERVER_HTML = """<!doctype html>
         shrinkGrid.appendChild(card);
       }
     }
+    function renderSourceIngests() {
+      sourceGrid.innerHTML = '';
+      const record = selectedRecord();
+      const ingests = sourceIngestsOf(record);
+      const groups = ['large_paste_ingests', 'document_ingests']
+        .flatMap((field) => (Array.isArray(ingests[field]) ? ingests[field].map((item) => ({ field, item })) : []));
+      if (!record || !groups.length) {
+        sourceStatus.textContent = 'Keine Quellen-Events fuer diese Anfrage.';
+        sourceStatus.className = 'status';
+        return;
+      }
+      sourceStatus.textContent = ingests.node ? `${groups.length} Quelle(n); letzter Knoten: ${ingests.node}` : `${groups.length} Quelle(n)`;
+      sourceStatus.className = 'status ok';
+      for (const { field, item } of groups) {
+        const card = document.createElement('div');
+        card.className = 'source-card';
+        const head = document.createElement('div');
+        head.className = 'source-card-head';
+        const title = document.createElement('h3');
+        title.textContent = item.title || item.source_key || field;
+        const badge = document.createElement('span');
+        const status = String(item.index_status || item.latest_event?.event || '');
+        badge.className = status === 'failed' ? 'pill hard' : (status === 'skipped' ? 'pill warn' : 'pill ok');
+        badge.textContent = item.message_replaced ? 'Marker aktiv' : (status || 'Quelle');
+        head.append(title, badge);
+        const source = document.createElement('p');
+        source.textContent = item.source_key || '';
+        const backends = [...(item.indexed_backends || []), ...(item.queued_backends || [])].filter(Boolean).join(', ');
+        const grid = document.createElement('div');
+        grid.className = 'source-metrics';
+        [
+          ['Status', status],
+          ['Typ', item.content_type || item.source_type || ''],
+          ['Intent', item.paste_intent || ''],
+          ['Chars', fmtNumber(item.content_chars || '')],
+          ['Indexed', fmtNumber(item.indexed_content_chars || '')],
+          ['Backends', backends],
+          ['RAG aktiv', item.rag_active === undefined ? '' : (item.rag_active ? 'ja' : 'nein')],
+          ['Manual', item.manual_rag_block ? 'ja' : 'nein'],
+          ['Elapsed', item.elapsed_seconds ? `${item.elapsed_seconds}s` : ''],
+          ['Reason', item.skip_reason || ''],
+        ].forEach(([name, value]) => {
+          if (value !== '') grid.appendChild(metric(name, value));
+        });
+        card.append(head, source, grid);
+        sourceGrid.appendChild(card);
+      }
+    }
     function chunkMetric(label, value, className = '') {
       return metric(label, value, className);
     }
@@ -2135,6 +2222,7 @@ OBSERVER_HTML = """<!doctype html>
       [
         ['Status', run?.status || '', run?.status === 'failed' ? 'hard' : (result.acceptance_ok ? 'ok' : 'warn')],
         ['Summary Mode', result.config?.summary_mode || ''],
+        ['Compact Focus', result.config?.compact_instructions_chars ? `${fmtNumber(result.config.compact_instructions_chars)} chars` : ''],
         ['Summary Model', result.config?.summary_model || ''],
         ['Input Tokens', fmtNumber(result.input?.estimated_tokens || '')],
         ['Prepared Tokens', fmtNumber(result.input?.prepared_summary_tokens || '')],
@@ -2150,6 +2238,8 @@ OBSERVER_HTML = """<!doctype html>
         ['Tool Pruned', fmtNumber(result.tool_stats?.pruned_tool_count || 0)],
         ['Tool Dedup', fmtNumber(result.tool_stats?.deduped_tool_count || 0)],
         ['Args Trunc', fmtNumber(result.tool_stats?.tool_args_truncated_count || 0)],
+        ['Workflow Events', fmtNumber(result.tool_stats?.workflow_event_count || 0)],
+        ['Workflow Chars', fmtNumber(result.tool_stats?.workflow_event_chars || 0)],
         ['Acceptance', result.acceptance_ok === undefined ? '' : (result.acceptance_ok ? 'ok' : 'prüfen'), result.acceptance_ok ? 'ok' : 'warn'],
       ].forEach(([label, value, className]) => chunkingStats.appendChild(chunkMetric(label, value, className || '')));
       chunkingActions.innerHTML = '';
@@ -2234,6 +2324,7 @@ OBSERVER_HTML = """<!doctype html>
             include_tools: chunkTools.checked,
             variable_prompt_load: chunkVariablePrompt.checked,
             summary_mode: chunkSummaryMode.value || 'stub',
+            compact_instructions: chunkCompactInstructions.value || '',
           }),
         });
         if (!response.ok) throw new Error(await response.text());
@@ -2560,6 +2651,7 @@ OBSERVER_HTML = """<!doctype html>
           renderRows();
           renderDetail();
           renderBudget();
+          renderSourceIngests();
           renderShrinking();
         });
         rowsEl.appendChild(tr);
@@ -2582,6 +2674,7 @@ OBSERVER_HTML = """<!doctype html>
               model_context_token_estimate: send.model_context_token_estimate,
               langgraph_state_profile: send.langgraph_state_profile || {},
               context_budget: budgetOf(record),
+              source_ingests: sourceIngestsOf(record),
               shrinking: shrinkSummary(record),
               model_context_messages: send.model_context_messages || [],
               model_context: send.model_context || {},
@@ -2592,6 +2685,7 @@ OBSERVER_HTML = """<!doctype html>
         if (activeTab === 'compression') {
           detailEl.textContent = pretty({
             context_budget: budgetOf(record),
+            source_ingests: sourceIngestsOf(record),
             shrinking: shrinkSummary(record),
             compression: receive.compression || {},
             memory_notice: receive.output_text || '',
@@ -2604,6 +2698,7 @@ OBSERVER_HTML = """<!doctype html>
               output_text: receive.output_text || '',
               reasoning_text: receive.reasoning_text || '',
               context_budget: receive.context_budget || {},
+              source_ingests: sourceIngestsOf(record),
               shrinking: shrinkSummary(record),
               compression: receive.compression || {},
               event_counts: receive.event_counts || {},
@@ -2652,6 +2747,7 @@ OBSERVER_HTML = """<!doctype html>
       renderRows();
       renderDetail();
       renderBudget();
+      renderSourceIngests();
       renderShrinking();
       statusEl.textContent = `${records.length} Requests`;
     }
@@ -2676,6 +2772,7 @@ OBSERVER_HTML = """<!doctype html>
       renderRows();
       renderDetail();
       renderBudget();
+      renderSourceIngests();
       renderShrinking();
       statusEl.textContent = 'geleert';
     });

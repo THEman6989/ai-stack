@@ -40,6 +40,12 @@ ASSET_SORT_FIELDS = {"created_at", "title", "media_type", "asset_kind", "thread_
 GALLERY_GROUP_BY = {"day_group", "thread", "group", "day", "media_type"}
 
 app = FastAPI(title="AlphaRavis Media Gallery", openapi_version="3.1.0")
+
+@app.get("/", include_in_schema=False)
+async def root_redirect():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/gallery")
+
 ensure_write_allowed(MEDIA_ROOT, allowed_root=MEDIA_ROOT)
 MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
 app.mount("/media", StaticFiles(directory=str(MEDIA_ROOT)), name="media")

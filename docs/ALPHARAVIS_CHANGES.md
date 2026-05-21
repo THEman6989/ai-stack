@@ -4,6 +4,96 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-21 - Archive RAG Intent And Mixed Section Splitting
+
+- AlphaRavis pgvector archive chunking can now split mixed archives by section
+  before chunking. For `archive` and `archive_collection` sources, the splitter
+  detects ordered prose, log, code, and config sections, applies the matching
+  chunk profile per section, and preserves original section order. The feature
+  is controlled by `ALPHARAVIS_PGVECTOR_SECTION_LEVEL_ARCHIVE_SPLITTING=true`
+  and can be disabled per source with `section_level_splitting=false` metadata.
+- Active RAG prefetch now supports the explicit archive mode
+  `archive_rag_mode=auto_on_intent`. Compression archives remain passive by
+  default (`tool_only`), but when the mode is set AlphaRavis asks the same safe
+  Qwen3.5 2B classifier for strict JSON: `archive_recall`, `search_query`,
+  `confidence`, and `reason`. If the classifier confirms recall intent above
+  `ALPHARAVIS_ARCHIVE_AUTO_INTENT_MIN_CONFIDENCE`, AlphaRavis runs source-scoped
+  archive retrieval over the latest
+  `ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_MAX_ARCHIVES` archive keys using the
+  classifier's query. If the classifier is down, times out, or returns invalid
+  JSON, AlphaRavis falls back to the local archive-recall condenser/heuristic.
+- The recall detector now recognizes vague phrasing such as "nochmal",
+  "noch mal", and "wie war das" in addition to explicit archive/previous-context
+  terms.
+- Large-paste source replacement now writes a compact `source_manifest` into
+  each `large_paste_ingests` run-profile record and includes a short source
+  manifest line in the active replacement marker. The marker stays small but
+  records content type, source key, character counts, status, and indexed or
+  queued backends so agents and operators can see that the paste became a
+  bounded source rather than active prompt text.
+- The Bridge Observer now extracts source-ingest metadata from LangGraph
+  run-profile updates into `receive.source_ingests` and renders a small
+  `Source Ingest` section with status, source key, content type, chars, backend,
+  RAG-active state, and whether a marker replaced the original paste. The
+  Bridge only displays LangGraph's decision; it does not decide the ingest
+  policy.
+- Compression now accepts bounded user/operator compaction hints. The latest
+  user message can include `<focus_topic>...</focus_topic>`,
+  `<compact_instructions>...</compact_instructions>`, `/compact ...`,
+  `@compact ...`, or `@focus ...`; AlphaRavis passes the extracted instructions
+  into one-shot and chunked summary prompts, records them in compression archive
+  metadata/run profiles, and shows them in the Observer `Shrinking` card. These
+  hints influence what old context should be preserved; they are explicitly not
+  treated as a new task for the next agent. The feature is controlled by
+  `ALPHARAVIS_ENABLE_COMPACT_INSTRUCTIONS=true` and bounded by
+  `ALPHARAVIS_COMPACT_INSTRUCTIONS_MAX_CHARS=1200`.
+- The Chunking Lab now has a `Compact Instructions` field that feeds the same
+  compact-instructions path into diagnostic compression runs, so operators can
+  compare focused vs. unfocused compaction without editing chat prompts. Lab
+  run JSON now includes the live action timeline.
+- Compression emits a structured progress timeline through an optional
+  compressor callback and archive metadata: `compression.started`,
+  `compression.precompact`, `compression.chunk.started`,
+  `compression.workflow_events.compacted`, `compression.chunk.completed`,
+  `compression.synthesis.started`, `compression.synthesis.completed`,
+  `compression.synthesis.failed`, `compression.skipped`,
+  `compression.completed`, and
+  `compression.postcompact`. PreCompact records reason, scope, token pressure,
+  selected head/middle/tail, and chunking decision before the summary model
+  call. Workflow compaction records how many tool/action events were collapsed
+  into the separate compact event log. PostCompact records the allocated archive
+  key and final before/after result metadata. Bridge streaming can summarize
+  the latest event as `context_compaction` reasoning/status activity, and
+  Observer raw compression metadata keeps the exact event list. Existing
+  large-ingest events remain on `large_paste_ingests`.
+- Tool/workflow telemetry now has a separate compression surface: tool-call
+  requests, tool outputs, duplicate outputs, and long action logs are compacted
+  into `Workflow / Tool Event Compact Log` instead of being treated as ordinary
+  chat text. The compact log is stored in archive metadata and archive content;
+  redacted original messages remain in the raw archive for exact reads.
+- Architecture now defines the AlphaRavis memory-tier policy: latest task tail,
+  active compaction summary, raw archive, archive collection, document/source
+  record, vector recall chunks, MemoryKernel facts, temporary workflow state,
+  and Observer/run telemetry each have separate load/retrieval/compaction
+  rules. Usage notes include the short operator version.
+- Focused verification: `py_compile` for `agent_graph.py` and
+  `vector_memory.py`, plus
+  `pytest -q tests/test_agent_context_budget.py tests/test_media_analysis.py`
+  passed with `61 passed`. The broader RAG-related suite
+  `tests/test_agent_context_budget.py tests/test_media_analysis.py
+  tests/test_retrieval_router.py tests/test_source_scoped_retrieval.py` passed
+  with `86 passed`. Follow-up verification for the source-manifest/Observer
+  slice passed `py_compile` for `agent_graph.py`, `bridge_server.py`, and
+  `test_ui_server.py`, plus
+  `pytest -q tests/test_agent_context_budget.py tests/test_bridge_responses.py
+  tests/test_bridge_test_ui.py` with `108 passed`. The compact-instructions
+  slice passed `py_compile` for `context_compressor.py`, `agent_graph.py`,
+  `bridge_server.py`, and `test_ui_server.py`, plus
+  `pytest -q tests/test_context_compressor.py tests/test_agent_context_budget.py
+  tests/test_bridge_responses.py tests/test_bridge_test_ui.py` with
+  `134 passed`; after the Chunking Lab/progress-event slice, the same focused
+  pytest set passed with `136 passed`.
+
 ## 2026-05-20 - Current Local RAG Follow-Up Summary
 
 This working-tree slice updates the RAG, memory, upload, grading, reranking, and

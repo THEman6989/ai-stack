@@ -125,6 +125,91 @@ def test_compression_target_and_summary_model_context_are_separate(monkeypatch) 
     assert max_tokens_seen == [25600]
 
 
+def test_compact_instructions_feed_summary_prompt_and_metadata() -> None:
+    prompts: list[str] = []
+
+    async def summary(prompt: str, _max_tokens: int) -> str:
+        prompts.append(prompt)
+        assert "User compaction instructions" in prompt
+        assert "preserve database migration details" in prompt
+        return "## Active Task\n- compact with focus\n\n## Archive References\n- source_type=archive"
+
+    messages = [{"role": "user", "content": f"head {index}"} for index in range(3)]
+    messages.extend({"role": "assistant", "content": f"middle database migration evidence {index}"} for index in range(8))
+    messages.extend({"role": "assistant", "content": f"tail {index}"} for index in range(3))
+
+    result = asyncio.run(
+        compress_messages(
+            messages,
+            mode="pre_run",
+            thread_id="thread",
+            thread_key="thread",
+            token_limit=100,
+            previous_summary=None,
+            compact_instructions="- preserve database migration details",
+            summarize_fn=summary,
+            force=True,
+        )
+    )
+
+    assert prompts
+    assert result.archive_metadata["compact_instructions"] == "- preserve database migration details"
+    assert result.archive_metadata["compact_instructions_chars"] > 0
+
+
+def test_compression_progress_events_include_chunk_lifecycle(monkeypatch) -> None:
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MAX_TOKENS", "1200")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MIN_TOKENS", "1000")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_CHARS_PER_TOKEN", "1")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_OVERLAP_CHARS", "0")
+    monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_MAX_CHUNKS", "20")
+    events: list[dict] = []
+
+    async def summary(prompt: str, _max_tokens: int) -> str:
+        if "chunked_synthesis" in prompt:
+            return "## Active Task\n- synthesized\n\n## Archive References\n- source_type=archive"
+        return "## Active Task\n- chunk\n\n## Archive References\n- source_type=archive"
+
+    messages = [{"role": "user", "content": f"head {index}"} for index in range(3)]
+    messages.extend({"role": "assistant", "content": "middle evidence " * 600} for _ in range(20))
+    messages.extend({"role": "assistant", "content": f"tail {index}"} for index in range(3))
+
+    result = asyncio.run(
+        compress_messages(
+            messages,
+            mode="pre_run",
+            thread_id="thread",
+            thread_key="thread",
+            token_limit=100,
+            summary_context_token_limit=8000,
+            previous_summary=None,
+            summarize_fn=summary,
+            force=True,
+            enable_chunked_summary=True,
+            progress_callback=events.append,
+        )
+    )
+
+    event_names = [event["event"] for event in events]
+    assert "compression.started" in event_names
+    assert "compression.precompact" in event_names
+    assert "compression.chunk.started" in event_names
+    assert "compression.chunk.completed" in event_names
+    assert "compression.synthesis.started" in event_names
+    assert "compression.synthesis.completed" in event_names
+    assert event_names[-1] == "compression.completed"
+    precompact = next(event for event in events if event["event"] == "compression.precompact")
+    assert precompact["reason"] == "forced"
+    assert precompact["scope"] == "pre_run"
+    assert precompact["token_pressure"] > 1
+    assert precompact["head_message_count"] >= 0
+    assert precompact["middle_message_count"] > 0
+    assert precompact["tail_message_count"] >= 0
+    assert precompact["chunking_enabled"] is True
+    assert precompact["chunking_will_run"] is True
+    assert result.archive_metadata["events"] == events
+
+
 def test_chunked_summary_is_opt_in_for_pruned_summary_prompt(monkeypatch) -> None:
     monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MAX_TOKENS", "1200")
     monkeypatch.setenv("ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MIN_TOKENS", "1000")
@@ -312,6 +397,10 @@ def test_tool_output_deduplication_for_summary_prompt() -> None:
     prep = prepare_messages_for_summary(messages)
     assert prep.deduped_tool_count == 1
     assert "same content as newer tool output" in prep.text
+    assert "## Workflow / Tool Event Compact Log" in prep.text
+    assert prep.workflow_event_count == 4
+    assert prep.workflow_tool_call_count == 2
+    assert prep.workflow_tool_result_count == 2
 
 
 def test_informative_tool_result_summary() -> None:
@@ -325,6 +414,61 @@ def test_informative_tool_result_summary() -> None:
 
     prep = prepare_messages_for_summary(messages)
     assert "ran `docker ps` -> exit 0" in prep.text
+    assert "workflow-event compacted" in prep.text
+    assert prep.workflow_event_compaction
+    assert prep.workflow_event_count == 2
+    assert prep.workflow_event_chars > 0
+
+
+def test_workflow_event_compaction_records_metadata_and_progress() -> None:
+    events: list[dict] = []
+
+    async def summary(prompt: str, _max_tokens: int) -> str:
+        assert "Workflow / Tool Event Compact Log" in prompt
+        assert "ran `pytest -q tests` -> exit 0" in prompt
+        return "## Active Task\n- tool workflow compacted\n\n## Archive References\n- source_type=archive"
+
+    messages = [{"role": "user", "content": f"head {index}"} for index in range(3)]
+    messages.extend(
+        [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "name": "shell_command",
+                        "args": {"command": "pytest -q tests"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "Exit code: 0\n" + ("passed\n" * 80)},
+            {"role": "assistant", "content": "middle result"},
+        ]
+    )
+    messages.extend({"role": "assistant", "content": f"tail {index}"} for index in range(3))
+
+    result = asyncio.run(
+        compress_messages(
+            messages,
+            mode="pre_run",
+            thread_id="thread",
+            thread_key="thread",
+            token_limit=100,
+            previous_summary=None,
+            summarize_fn=summary,
+            force=True,
+            progress_callback=events.append,
+        )
+    )
+
+    event_names = [event["event"] for event in events]
+    assert "compression.workflow_events.compacted" in event_names
+    assert result.workflow_event_count == 2
+    assert result.workflow_tool_call_count == 1
+    assert result.workflow_tool_result_count == 1
+    assert result.archive_metadata["workflow_event_count"] == 2
+    assert "Workflow / Tool Event Compact Log" in result.archive_content
+    assert "pytest -q tests" in result.archive_metadata["workflow_event_compaction"]
 
 
 def test_head_middle_tail_keeps_handoff_packet_protected() -> None:

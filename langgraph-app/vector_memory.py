@@ -319,6 +319,96 @@ def _langchain_chunk_text(text: str, *, max_chars: int, overlap: int) -> list[st
     return [chunk.strip() for chunk in splitter.split_text(text) if chunk.strip()]
 
 
+def _section_level_archive_splitting_enabled(metadata: dict[str, Any] | None = None) -> bool:
+    metadata = metadata or {}
+    explicit = str(metadata.get("section_level_splitting") or metadata.get("mixed_archive_splitting") or "").strip().lower()
+    if explicit in {"0", "false", "no", "off", "disabled"}:
+        return False
+    if explicit in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    return _env_bool("ALPHARAVIS_PGVECTOR_SECTION_LEVEL_ARCHIVE_SPLITTING", "true")
+
+
+def _is_archive_source_type(source_type: str) -> bool:
+    return str(source_type or "").strip().lower().replace("-", "_") in {"archive", "archive_collection"}
+
+
+def _archive_line_profile(line: str, *, in_fence: bool) -> str:
+    stripped = line.strip()
+    if in_fence or stripped.startswith("```"):
+        return "code"
+    if re.search(r"^\s*(?:\d{4}-\d{2}-\d{2}[T\s]|\[[^\]]+\]\s*)?(?:INFO|WARN|WARNING|ERROR|DEBUG|TRACE)\b", line):
+        return "log"
+    if re.search(r"^\s*(?:Traceback|Exception|Caused by:|at\s+[\w.$]+\(.*\))", line):
+        return "log"
+    if re.search(r"^\s*(?:async\s+def|def|class|function|import|from|const|let|var|SELECT|CREATE TABLE)\b", line):
+        return "code"
+    if re.search(r"^\s*[\w.-]+\s*[:=]\s*[^=].*$", line) and len(stripped) < 240:
+        return "config"
+    return "prose"
+
+
+def _archive_section_chunk_profile(section_profile: str) -> str:
+    if section_profile == "log":
+        return "log"
+    if section_profile in {"code", "config"}:
+        return "code"
+    return "chat"
+
+
+def _mixed_archive_sections(text: str) -> list[tuple[str, str]]:
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines(keepends=True)
+    if not lines:
+        return []
+    sections: list[tuple[str, str]] = []
+    buffer: list[str] = []
+    current_profile = ""
+    in_fence = False
+
+    for line in lines:
+        stripped = line.strip()
+        profile = _archive_line_profile(line, in_fence=in_fence)
+        if not stripped and current_profile:
+            profile = current_profile
+        if buffer and profile != current_profile:
+            sections.append((current_profile, "".join(buffer).strip()))
+            buffer = []
+        current_profile = profile
+        buffer.append(line)
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+
+    if buffer:
+        sections.append((current_profile or "prose", "".join(buffer).strip()))
+    sections = [(profile, section) for profile, section in sections if section]
+    meaningful_profiles = {
+        profile
+        for profile, section in sections
+        if section.strip() and profile in {"code", "log", "config", "prose"}
+    }
+    if len(meaningful_profiles) < 2:
+        return []
+    return sections
+
+
+def _chunk_mixed_archive_sections(
+    text: str,
+    *,
+    source_type: str,
+    title: str,
+    metadata: dict[str, Any] | None = None,
+) -> list[str]:
+    chunks: list[str] = []
+    for section_profile, section in _mixed_archive_sections(text):
+        chunk_profile = _archive_section_chunk_profile(section_profile)
+        section_metadata = {**(metadata or {}), "chunk_profile": chunk_profile, "section_profile": section_profile}
+        max_chars = _chunk_max_chars(source_type=source_type, title=title, metadata=section_metadata, text=section)
+        overlap = _chunk_overlap_chars(max_chars, source_type=source_type, title=title, metadata=section_metadata, text=section)
+        for semantic_section in _semantic_sections(section):
+            chunks.extend(_split_large_section(semantic_section, max_chars, overlap))
+    return [chunk for chunk in chunks if chunk]
+
+
 def _embedding_models() -> list[str]:
     models = [os.getenv("ALPHARAVIS_PGVECTOR_EMBEDDING_MODEL", "memory-embed").strip()]
     fallback = os.getenv("ALPHARAVIS_PGVECTOR_FALLBACK_EMBEDDING_MODEL", "memory-embed-fallback").strip()
@@ -540,6 +630,11 @@ def chunk_text(
     text = (text or "").strip()
     if not text:
         return []
+
+    if _is_archive_source_type(source_type) and _section_level_archive_splitting_enabled(metadata):
+        mixed_chunks = _chunk_mixed_archive_sections(text, source_type=source_type, title=title, metadata=metadata)
+        if mixed_chunks:
+            return mixed_chunks
 
     max_chars = _chunk_max_chars(source_type=source_type, title=title, metadata=metadata, text=text)
     overlap = _chunk_overlap_chars(max_chars, source_type=source_type, title=title, metadata=metadata, text=text)

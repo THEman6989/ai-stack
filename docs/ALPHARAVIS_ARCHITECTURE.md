@@ -654,6 +654,28 @@ source of truth. Source digest dedup is active by default for identical scoped
 source keys, so repeated identical source content can reuse an existing
 pgvector catalog/chunk set instead of embedding the same source again.
 
+### Memory Tier Policy
+
+AlphaRavis treats memory as explicit tiers. LangGraph owns the policy decision
+for which tier is active in a run; the Bridge and Observer only display the
+resulting metadata.
+
+| Tier | Source of truth | Loaded every turn | Retrieved on demand | Compaction rule |
+| --- | --- | --- | --- | --- |
+| Latest task tail | LangGraph checkpoint `messages` | Yes | No | Protected by head/middle/tail selection; can only be reduced by hard rescue when the request would not fit. |
+| Active compaction summary | LangGraph checkpoint summary message plus `context_summary` / `handoff_context_summary` | Yes, after compression | No | Can be summarized again, but must keep archive references and current-task constraints. |
+| Raw compression archive | LangGraph Store / Mongo thread archive record | No | `read_archive_record`, `query_archive`, bounded archive tools | Never inject the full raw archive automatically; use windows/search slices for exact old context. |
+| Archive collection | LangGraph Store archive-collection record and pgvector catalog | No | Archive collection tools and vector recall | It is a table of contents over child archives; answer exact details only after reading relevant child raw archives. |
+| Document / large-paste source | Raw source store plus AlphaRavis pgvector chunks, optional `rag_api` mirror | Only as a compact source marker | `read_source_chunks`, `read_raw_source`, RAG tools | Source marker stays in active context; exact neighboring code/log/prose comes from bounded raw-source reads. |
+| Vector recall chunks | AlphaRavis pgvector | No | Semantic/vector search | Retrieval snippets are pointers and evidence, not the source of truth when exact wording or neighboring lines matter. |
+| MemoryKernel facts | LangGraph Store curated memories and small matching hints | Only tiny matched hints | `search_curated_memory` / MemoryKernel lookup | Store stable preferences, environment facts, and recurring lessons; do not store raw logs, pasted docs, or one-off task state. |
+| Temporary workflow state | LangGraph checkpoint state and run profile | Current run only | No | May be overwritten by graph nodes; durable only if explicitly archived, indexed, or recorded as curated memory. |
+| Observer / run telemetry | Bridge observations and run-profile metadata | No | Observer/debug APIs | Debug/status surface only; not model memory and not an answer source. |
+
+The active model should prefer the smallest tier that can answer safely: current
+task tail first, active summary for old high-level context, vector recall for
+finding candidates, then bounded raw archive/source reads for exact evidence.
+
 Relevant settings:
 
 ```text
@@ -1027,7 +1049,13 @@ instead of inventing small static context assumptions.
 The Bridge test UI Observer shows the latest recorded context-budget snapshot in
 a dedicated `Context Budget` section for each request, including message tokens,
 reserve, request estimate, active/effective limits, and hard/effective limits.
-It also has a `Shrinking` section that turns compression metadata into
+It also has a `Source Ingest` section that renders LangGraph-owned source
+conversion metadata from `receive.source_ingests`: source key, title, content
+type, source status, character counts, indexed/queued backend, RAG-active state,
+and whether the active prompt was replaced by a marker. This is display-only;
+the Bridge does not own the large-message decision.
+
+The Observer has a `Shrinking` section that turns compression metadata into
 operator-readable cards. Each card represents one compression scope
 (`pre_run_compression`, `final_budget_rescue`, `post_run_compression`, or
 `handoff_context`) and shows:
@@ -1077,6 +1105,9 @@ ALPHARAVIS_COMPRESSION_TOOL_ARGS_MAX_CHARS=1500
 ALPHARAVIS_COMPRESSION_TOOL_ARGS_HEAD_CHARS=1000
 ALPHARAVIS_COMPRESSION_TOOL_ARGS_TAIL_CHARS=300
 ALPHARAVIS_COMPRESSION_DEDUP_MIN_CHARS=200
+ALPHARAVIS_WORKFLOW_EVENT_OUTPUT_MAX_CHARS=900
+ALPHARAVIS_WORKFLOW_EVENT_OUTPUT_HEAD_CHARS=620
+ALPHARAVIS_WORKFLOW_EVENT_OUTPUT_TAIL_CHARS=180
 ALPHARAVIS_COMPRESSION_IMAGE_TOKEN_ESTIMATE=1600
 ALPHARAVIS_COMPRESSION_ANTI_THRASHING_ENABLED=true
 ALPHARAVIS_COMPRESSION_MIN_SAVINGS_RATIO=0.10
@@ -1089,6 +1120,8 @@ ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MIN_TOKENS=8192
 ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_MAX_TOKENS=0
 ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_CHARS_PER_TOKEN=2.0
 ALPHARAVIS_COMPRESSION_SUMMARY_PROMPT_OVERHEAD_RESERVE_TOKENS=512
+ALPHARAVIS_ENABLE_COMPACT_INSTRUCTIONS=true
+ALPHARAVIS_COMPACT_INSTRUCTIONS_MAX_CHARS=1200
 ALPHARAVIS_COMPRESSION_ENABLE_CHUNKED_SUMMARY=false
 ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_RATIO=0.03
 ALPHARAVIS_COMPRESSION_SUMMARY_CHUNK_MIN_TOKENS=300
@@ -1115,6 +1148,19 @@ when the active compression target is 64k. The same derived values are exposed
 in `inspect_context_budget` under `compression_summary_budget` so downstream
 agents can see `summary_prompt_tokens`, `summary_output_tokens`, and
 `summary_chunk_output_tokens` without duplicating the math.
+
+Focused compaction is a bounded summary-selection hint, not a new runtime task.
+When enabled by `ALPHARAVIS_ENABLE_COMPACT_INSTRUCTIONS=true`, the latest user
+message can include `<focus_topic>...</focus_topic>`,
+`<compact_instructions>...</compact_instructions>`, `/compact ...`,
+`@compact ...`, or `@focus ...`. AlphaRavis extracts up to
+`ALPHARAVIS_COMPACT_INSTRUCTIONS_MAX_CHARS` and passes that text into one-shot
+and chunked compression prompts as "User compaction instructions." The prompt
+explicitly says these instructions only decide what the summary should preserve.
+They are also recorded in compression archive metadata/run profiles and rendered
+as `Compact Focus` in Observer `Shrinking` cards. This keeps compression
+transparent and local; AlphaRavis does not use opaque provider-native compact
+items as the primary format.
 
 Chunked summary compression is experimental and off by default for ordinary
 over-budget runs. It exists for the case where normal active compression
@@ -1179,6 +1225,49 @@ active summary may be less complete. Increase the max chunks or reduce chunk
 size/overlap only after checking model latency. The Observer Shrinking section
 exposes these fields directly so a live llama.cpp run can be inspected without
 reading raw JSON first.
+
+Compression also has a structured progress event surface. `compress_messages`
+can receive a callback and records the same event list in archive metadata and
+run-profile compression debug fields. The event names are:
+
+```text
+compression.started
+compression.precompact
+compression.workflow_events.compacted
+compression.chunk.started
+compression.chunk.completed
+compression.synthesis.started
+compression.synthesis.completed
+compression.synthesis.failed
+compression.skipped
+compression.completed
+compression.postcompact
+```
+
+The Bridge maps the latest compression event from LangGraph updates to compact
+`context_compaction` reasoning/status activity. The full timeline remains in
+Observer raw compression metadata. This is intentionally a status surface; it
+does not change the active summary contract or make the Bridge own compression.
+Large-source ingest uses the separate `large_ingest.*` / `document_ingest.*`
+event namespace.
+
+Tool and workflow telemetry is compacted before the summary prompt receives the
+middle context. Assistant tool-call requests, tool results, duplicate tool
+outputs, and long action logs are collapsed into a separate
+`Workflow / Tool Event Compact Log`; normal chat messages stay in the normal
+middle-message section. The compact log is stored in archive metadata and in
+the raw archive record beside the redacted original messages. This keeps action
+history inspectable without making tool logs behave like ordinary user/assistant
+conversation.
+
+`compression.precompact` is emitted after the graph has selected
+head/middle/tail and before the summary model is called. It records the reason,
+scope, token pressure, H/M/T counts and indexes, summary prompt pressure, and
+whether chunked summary will run. `compression.postcompact` is appended after
+an archive key is allocated and records the archive key, before/after token
+estimates, H/M/T counts, summary failure state, and chunking result.
+`compression.workflow_events.compacted` records the compacted workflow event
+counts and compact-log size.
 
 `compression_stats` is stored in LangGraph state and currently contains:
 
@@ -1360,8 +1449,12 @@ retrievable without becoming one oversized embedding input.
 Archive and archive-collection sources choose that profile from their content:
 code fences/common source syntax use the code profile, log/traceback lines use
 the log profile, and normal conversation archives stay on the chat profile.
-Mixed section-level archive splitting remains future work; the current choice
-is one profile per indexed source.
+When `ALPHARAVIS_PGVECTOR_SECTION_LEVEL_ARCHIVE_SPLITTING=true`, mixed archive
+and archive-collection sources are split by ordered prose/log/code/config
+sections before chunking. Each section uses the matching chunk profile while
+preserving original order. This keeps one compressed archive searchable across
+conversation, log, config, and code parts without flattening everything into one
+profile.
 
 The tool exposed to agents is:
 
@@ -1409,28 +1502,66 @@ sources so later graph nodes can auto-retrieve bounded chunks from those
 sources. Compression archives set `rag_active=false` and
 `archive_rag_mode=tool_only`, preserving the rule that archives are searched
 only through explicit retrieval intent or tools.
-For large pasted human messages, `run_profile_start_node` checks context budget
-before pre-run context compression. Automatic paste-to-RAG only calls
-`ingest_source(source_type="large_paste")` when the estimated active context is
-within `ALPHARAVIS_LARGE_PASTE_RAG_COMPRESSION_MARGIN_TOKENS` tokens of the
-compression trigger, default `5000`; otherwise the paste stays active and
-compression can handle it normally later. Operators can force source indexing
-with paired `/rag ... /rag` blocks. If indexing succeeds, the full pasted text
-or marked block is replaced in active context by a small retrieval marker with
-the source id and preview.
+Important architecture rule: large-paste, RAG, and compression policy is owned
+by LangGraph. The Bridge, Deep Agents UI, ACP clients, and direct callers should
+forward input and surface metadata; they must not become the place that decides
+whether a large paste is RAG/source/summary. The central LangGraph flow is:
+
+1. Paired manual markers (`/rag ... /rag`, `/rake ... /rake`,
+   `/index ... /index`, `/ingest ... /ingest`) force immediate source ingest.
+2. Plain large human pastes are not automatically indexed just because they are
+   long. With the default
+   `ALPHARAVIS_LARGE_PASTE_RAG_AUTO_STAGE=post_compression`, old context first
+   goes through normal pre-run compression.
+3. After that compression pass, `large_paste_post_compression_node`
+   re-estimates the active request. Only if the request is still above
+   `ALPHARAVIS_LARGE_PASTE_RAG_POST_COMPRESSION_TRIGGER_RATIO` of the active
+   compression budget, default `0.80`, does LangGraph call
+   `ingest_source(source_type="large_paste")` for the document/code/log body.
+4. Successful or queued ingest replaces the full active paste with a compact
+   source marker. The marker contains the source key, optional RAG file id,
+   title, retrieval instruction, and a short `Source manifest` line with content
+   type, character counts, and indexed/queued backends. The original raw text is
+   preserved in raw-source storage and/or the selected ingest backend, not kept
+   as full active prompt text.
+5. If the marker replacement still leaves too much non-document chatter active,
+   the same node can run one follow-up compression pass at
+   `ALPHARAVIS_LARGE_PASTE_POST_RAG_COMPRESSION_TRIGGER_RATIO`, default `0.80`.
+6. Independently, the compressor protects a recent tail but rebalances it when
+   that tail exceeds `ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_RATIO`, default
+   `0.60`, of the compression budget: older tail messages move back into the
+   compressible middle while the latest user message stays anchored by default.
+7. If the protected tail is still critically oversized above
+   `ALPHARAVIS_COMPRESSION_OVERSIZED_TAIL_FORCE_MIDDLE_RATIO`, default `0.80`,
+   even the latest user message can be released into the compressible
+   middle/archive. For a huge latest paste, the Large-Paste RAG post-compression
+   path is deferred to first; if compression still has to summarize a too-large
+   middle block, chunked summary is forced so the summary model prompt itself
+   does not overflow.
+
 Before ingest, AlphaRavis classifies the large paste as `document`,
-`instruction`, `mixed`, or `unknown` using deterministic markers and heuristics
-instead of a second model call. Instruction-like pastes are indexed as
-`large_instruction` in AlphaRavis pgvector for exact lookup but do not activate
-automatic document RAG; the replacement message contains a condensed
-instruction brief. Mixed pastes keep active document RAG, include the condensed
-instruction brief beside the source handle, and strip obvious instruction text
-from the indexed document body when a document/data section can be separated.
-This prevents prompt instructions from becoming ordinary search material while
-still keeping the important source content retrievable by source key.
+`instruction`, `mixed`, or `unknown` using deterministic markers/heuristics and,
+for long mixed/noisy pastes, the safe Qwen3.5 2B classifier as a bounded
+structure helper. Instruction-like pastes are indexed as `large_instruction` in
+AlphaRavis pgvector for exact lookup but do not activate automatic document RAG;
+the replacement message contains a condensed instruction brief. Mixed pastes
+keep active document RAG, include the condensed instruction brief beside the
+source handle, and strip obvious instruction text from the indexed document body
+when a document/data section can be separated. This prevents prompt
+instructions from becoming ordinary search material while still keeping the
+important source content retrievable by source key.
 `active_rag_prefetch_node` later consumes the active source/file ids and injects
 only bounded retrieved chunks in an `<active-rag-context>` system message.
 Archive-only state remains passive while `archive_rag_mode=tool_only`.
+If a thread explicitly sets `archive_rag_mode=auto_on_intent`, LangGraph asks
+the safe Qwen3.5 2B classifier whether the latest request is archive recall and
+which bounded `search_query` to use. Confirmed recall requests can prefetch
+bounded chunks from the most recent
+`ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_MAX_ARCHIVES` archives. The classifier is
+only a structure/query helper; invalid JSON, endpoint errors, timeouts, or low
+confidence fall back to the local archive-recall condenser/heuristic. This mode
+is opt-in so compression archives do not become automatic context injections by
+default.
 LibreChat document uploads use the same activation path: the Bridge registers
 downloadable `file` / `input_file` document parts with media-gallery, maps the
 stored media path into the LangGraph workspace, sends it as

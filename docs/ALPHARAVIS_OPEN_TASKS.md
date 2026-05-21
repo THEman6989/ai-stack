@@ -82,6 +82,31 @@ Still needed:
 - Live-test `tailscale serve --bg --https=<port>` from another allowed Tailnet
   device after Tailscale HTTPS certificates are enabled for the tailnet. This
   is now an operator/live-network validation, not an implementation blocker.
+- Dashboard UX refinement: Separate "Web Interfaces" from "APIs/Backends" in the
+  Service Dashboard.
+  - Add tabs (e.g., "GUIs", "APIs") or collapsible sections to keep the primary
+    view focused on human-usable web surfaces (LibreChat, ComfyUI, Media
+    Gallery, etc.).
+  - Pure APIs (LiteLLM, Hermes Agent, AlphaRavis Bridge) should move to the
+    secondary view to reduce clutter.
+- Dashboard Visual Polish & Branding:
+  - Ensure every service card has a high-quality, consistent logo or icon.
+  - Fix services currently missing logos (e.g., Media Gallery, yellow-accented
+    cards).
+  - Standardize icon sizes and placement for a more professional "Gallery" feel.
+- Dual-Protocol/Dual-URL Support:
+  - Ensure services remain accessible via both HTTP (local LAN/Tailnet IP) and
+    HTTPS (Tailscale MagicDNS + Serve) where possible.
+  - The Dashboard should allow switching or viewing both URL types, especially
+    for APIs where the operator might prefer a direct IP/HTTP connection to
+    avoid Tailscale Serve proxy overhead or MagicDNS resolution issues.
+  - Tailscale HTTPS remains the primary choice for mobile/external use to
+    guarantee encryption and valid certificates (no browser "untrusted"
+    warnings), especially when viewing photos/media in the Gallery.
+- Tailscale Serve Automation: Update `tailscale_https_routes.py` and the
+  dashboard to handle services that don't need a `/gallery` or `/v1` prefix
+  at the proxy level, preventing "Not Found" errors when clicking sub-links
+  in the UI.
 
 ## Responses Streaming Follow-up
 
@@ -1560,8 +1585,8 @@ External context-management learnings to evaluate:
     replace AlphaRavis readable summaries and raw/retrievable archives.
   - Use Letta-style archival/RAG chunking as the default answer for large pasted
     documents instead of lossy conversation compression.
-  - Add ADK-style event-log compaction for tool/action telemetry so UI history
-    can stay inspectable without bloating model context.
+  - Implemented first ADK-style event-log compaction for tool/action telemetry
+    so UI/archive history can stay inspectable without bloating model context.
   - Add progress events for chunked compression and RAG ingest so users see
     `chunk 1/N`, `chunk 2/N`, synthesis, and completion states in the chat/UI.
 - Planned: compare `rag_api` document chunking with AlphaRavis' own pgvector
@@ -1932,57 +1957,73 @@ External context-management learnings to evaluate:
   answer in those chunks. Semantic search is the retrieval part of RAG; an
   embedding model plus pgvector backend is enough to build a local RAG retrieval
   system when paired with ingestion and chunk management.
-- Planned: add an operator/user-provided `focus_topic` or `compact_instructions`
-  path to AlphaRavis compression. This should feed the summary prompt, the
-  Chunking Lab, manual diagnostics, and archive metadata so focused compaction
-  can preserve one task/topic more strongly instead of treating all middle
-  context equally.
-- Planned: evaluate `PreCompact` / `PostCompact` runtime events for AlphaRavis.
-  The first implementation can be Observer/debug-only: emit reason, scope,
-  token pressure, selected head/middle/tail counts, whether chunking will run,
-  and archive key/result. Later this can become a local hook surface for
-  operators, but do not run arbitrary hooks in the main path until there is a
-  clear sandbox/timeout story.
+- Implemented first slice: operator/user-provided `focus_topic` and
+  `compact_instructions` can now guide AlphaRavis compression. The latest user
+  message may include `<focus_topic>...</focus_topic>`,
+  `<compact_instructions>...</compact_instructions>`, `/compact ...`,
+  `@compact ...`, or `@focus ...`; the bounded extraction feeds both one-shot
+  and chunked summary prompts, is recorded in archive metadata/run profiles, and
+  is shown in Observer `Shrinking` as `Compact Focus`. Implemented follow-up:
+  the Bridge Test UI `Chunking Lab` now has a `Compact Instructions` field and
+  includes that value plus progress actions in its diagnostic JSON.
+- Implemented: `PreCompact` / `PostCompact` runtime events for AlphaRavis.
+  `compression.precompact` records reason, scope, token pressure, selected
+  head/middle/tail counts and indexes, summary prompt pressure, and whether
+  chunking will run before the summary model call. `compression.postcompact`
+  records the archive key, before/after token estimates, H/M/T counts, summary
+  failure state, and chunking result after the archive key is allocated. This is
+  Observer/debug-only for now; do not run arbitrary hooks in the main path until
+  there is a clear sandbox/timeout story.
 - Planned: keep AlphaRavis transparent rather than adopting OpenAI-style opaque
   compaction items as the primary local format. If an opaque/provider-native
   compaction item is ever used, wrap it beside the existing readable summary and
   raw archive record, not instead of them.
-- Planned: add a Letta-style memory-tier review for compressed context:
-  distinguish active summary, raw archive records, archive collections,
-  semantic/vector recall, durable MemoryKernel facts, and temporary workflow
-  state. The outcome should be a small policy table that says what is loaded
-  every turn, what is retrieved on demand, what is archived only, and what can be
-  compacted again.
-- Planned: evaluate Google-ADK-style workflow event compaction separately from
-  chat-message compression. Tool/action telemetry may need its own compacted
-  event log so the active LLM context can stay small while the UI still shows an
-  inspectable action history.
+- Implemented first policy table: AlphaRavis now has a documented memory-tier
+  policy in `docs/ALPHARAVIS_ARCHITECTURE.md` and a shorter operator version in
+  `docs/ALPHARAVIS_USAGE_NOTES.md`. It separates latest task tail, active
+  compaction summary, raw archive records, archive collections, document/source
+  records, vector recall chunks, durable MemoryKernel facts, temporary workflow
+  state, and Observer/run telemetry.
+- Implemented first Google-ADK-style workflow event compaction separately from
+  chat-message compression. Tool-call requests, tool outputs, duplicates, and
+  long action logs are collapsed into a `Workflow / Tool Event Compact Log`
+  before the summary prompt. The compact log is stored in archive metadata and
+  the raw archive record, while redacted original messages remain available for
+  exact archive reads. Remaining polish: richer Observer rendering for the
+  compact workflow log beyond raw compression metadata.
 - Planned: add a quality rubric for promoting chunked summary from opt-in to a
   default profile. Minimum evidence should include live over-budget runs,
   static prompt plus variable prompt load, real LLM latency, before/after manual
   inspection, archive-recall success for omitted details, and no silent loss
   when `summary_chunk_omitted_chars > 0`.
-- Planned: stream fine-grained compression and ingest progress to the chat UI.
+- Partly implemented: stream/surface fine-grained compression and ingest
+  progress without making normal chat noisy.
   The Bridge already has a status path through Responses reasoning deltas and
-  Chat Completions `reasoning_content` activity chunks, but the compressor does
-  not yet emit per-chunk lifecycle events while it is running. Add a progress
-  callback/event channel that can report:
+  Chat Completions `reasoning_content` activity chunks. The compressor now has
+  a progress callback/event channel and records the timeline in archive metadata
+  and run-profile debug fields. Implemented event names:
   - `compression.started`
+  - `compression.precompact` with reason, scope, token pressure, H/M/T counts,
+    prompt pressure, and chunking decision
+  - `compression.workflow_events.compacted` with compacted tool/action event
+    counts and compact-log character size
   - `compression.chunk.started` / `compression.chunk.completed` with
     `index`, `total`, source char/token estimates, elapsed time, and output
     summary chars
   - `compression.synthesis.started` / `compression.synthesis.completed`
+  - `compression.postcompact` with archive key, before/after token estimates,
+    H/M/T counts, summary failure state, and chunking result
   - `large_ingest.started`, `large_ingest.chunk_indexed`, and
     `large_ingest.completed` for RAG-backed big-message ingest
   - failure/fallback events when summary generation fails or the system switches
     to archive/RAG-only behavior.
-- Planned: prefer non-final-answer status surfaces first. For Responses streams,
-  emit these as `response.reasoning.delta` with `alpha_reasoning_kind=status` or
-  a more specific `context_compaction` / `large_ingest` kind. For Chat
-  Completions streams, emit `reasoning_content` activity deltas when LibreChat
-  renders them cleanly. Keep a profile-controlled fallback that injects visible
-  plaintext progress lines such as `[Compression] Chunk 4/5 abgeschlossen` only
-  when the UI/client cannot display status/reasoning events.
+- Implemented first status surface: Bridge streaming summarizes the latest
+  compression event from LangGraph updates as `context_compaction`
+  reasoning/status activity, and large-ingest events already surface as
+  `large_ingest`. The exact event list remains in Observer raw compression or
+  source-ingest metadata. Remaining feature polish: add profile-controlled
+  fallback plaintext progress lines only for clients that cannot display
+  reasoning/status events.
 - Planned: make status emission configurable and not too noisy:
   `ALPHARAVIS_STREAM_COMPRESSION_PROGRESS=true`, max update frequency, and a
   plaintext fallback flag. Observer/Test UI should show the same events in the
@@ -1990,21 +2031,34 @@ External context-management learnings to evaluate:
 - Planned: do not copy Cursor/OpenAI automatic truncation behavior that silently
   drops old context. AlphaRavis should prefer explicit compression, explicit
   hard-trim notices, archive lookup instructions, and Observer-visible stats.
-- Planned: design a separate "large single-message ingest" path for the case
-  where the first/latest user message itself contains a huge pasted document
-  such as 130k tokens. This must not be treated as ordinary conversation
-  compression because the latest user message is intentionally protected by the
-  current Hermes-style compressor and hard-trim logic. Treat it as document
-  ingestion plus retrieval:
-  - Bridge-level MVP: detect a large latest user message before LangGraph sees
-    it, split the large body into archived chunks, index it for retrieval, and
-    replace the active user message with the user's actual question plus a small
-    manifest/source handle.
+- Partly implemented: handle the case where the first/latest user message itself
+  contains a huge pasted document such as 130k tokens. The current LangGraph
+  path already avoids immediately indexing every large paste: plain large
+  messages first run through pre-run compression, then
+  `large_paste_post_compression_node` indexes/replaces the document/code/log
+  body only if the active request is still above the configured
+  post-compression trigger ratio. If the protected recent tail is still too
+  large, oversized-tail rebalancing can move older tail messages, and in the
+  critical rescue case the latest user message can be released into the
+  compressible middle. Chunked summary is forced when that rescue would
+  otherwise overrun the summary model prompt. Remaining work is to turn this
+  into a cleaner LangGraph-owned product path for extremely large first-message
+  documents:
+  - LangGraph-owned policy still open: make the large-message decision fully
+    graph/orchestrator-owned for every client path, including LibreChat through
+    the Bridge, Deep Agents UI, or any direct LangGraph caller. The Bridge
+    should forward requests and surface compact status/Observer metadata, not
+    decide whether a paste becomes RAG/source/summary.
+  - Remaining graph behavior: split the large body into archived chunks, index
+    it for retrieval, and replace the active user message with the user's actual
+    question plus a small manifest/source handle when post-compression pressure
+    proves the full body cannot stay active.
   - Preferred backend: use AlphaRavis pgvector for large pasted documents by
     default, through the same `ingest_source(...)` router used by LangGraph.
     Keep `rag_api` selectable as an adapter/reference path for comparison. The
-    Bridge ingest layer should create a stable source key, index the text through
-    the router, then keep only the manifest and user question in active context.
+    LangGraph ingest layer should create a stable source key, index the text
+    through the router, then keep only the manifest and user question in active
+    context.
   - Archive relationship: do not duplicate the full document into both RAG and
     AlphaRavis active archives by default. Store a small AlphaRavis manifest
     archive with the RAG `file_id`, source title, chunk/index stats, and raw-text
@@ -2015,10 +2069,14 @@ External context-management learnings to evaluate:
     so operators can opt into ingestion from normal LibreChat without a custom
     UI. "Protect" should mean preserve exact raw text in archive, not keep the
     whole body in active model context.
-  - Automatic fallback: if a single latest user message exceeds a configurable
-    threshold and no marker is present, either auto-ingest with a visible notice
-    or ask the user whether to ingest, depending on a profile flag. Never silently
-    truncate the latest user text.
+  - Implemented follow-up: auto-ingest status is now compactly visible. Large
+    paste replacement records a `source_manifest` in `large_paste_ingests`, the
+    active marker includes a short `Source manifest` line, and the Bridge
+    Observer renders a small `Source Ingest` section from LangGraph metadata.
+    Do not add an ask-before-ingest step for the normal auto path: auto-ingest
+    only happens after compression/budget checks show the full paste does not
+    fit. Still open: optional profile control for how loudly the UI surfaces
+    the conversion. Never silently truncate the latest user text.
   - Query handling: if the huge pasted text includes an explicit question, keep
     that question active and retrieve relevant chunks before answering. If there
     is no task/question, create only a lightweight manifest/table-of-contents and
@@ -2028,9 +2086,8 @@ External context-management learnings to evaluate:
     any overview summary must point back to chunk/archive keys.
   - UI follow-up: a custom Big Message / Document Ingest panel can later provide
     upload/paste progress, token/chunk stats, source handles, before/after active
-    prompt view, and retrieval previews. Deep Agents UI may be a useful base, but
-    the first implementation should work through the Bridge so LibreChat users
-    are not blocked.
+    prompt view, and retrieval previews. This is display/control polish only;
+    LangGraph remains the source of truth for the decision and metadata.
   - Tools/API: expose source-key lookup for agents, e.g. reuse
     `semantic_memory_search` plus `read_archive_record(...)` where possible, or
     add a narrower `read_large_context_chunk(source_key, chunk_id)` tool if raw
@@ -2912,3 +2969,31 @@ Lower priority / future:
   weiterhin möglich.
 
 *Hinweis: Diese Zusammenfassung sollte regelmäßig aktualisiert und verfeinert werden, um den Projektfortschritt präzise abzubilden.*
+
+## RAG Feature-Konzentrat (Stand: 21. Mai 2026)
+
+Diese Liste ist der kurze Arbeitszettel fuer die naechsten RAG-Feature-Updates.
+Grosse LibreChat-/Browser-/Live-Lasttests kommen danach separat; beim
+Implementieren trotzdem weiter fokussierte Unit-/Smoke-Tests laufen lassen.
+
+1. **Section-level Mixed Archive Splitting: implementiert, Live-Qualitaet offen**
+
+   `vector_memory.chunk_text(...)` segmentiert `archive` und
+   `archive_collection` Quellen jetzt in geordnete Prosa-/Log-/Code-/Config-
+   Abschnitte und verwendet pro Abschnitt das passende Chunk-Profil. Der Schalter
+   ist `ALPHARAVIS_PGVECTOR_SECTION_LEVEL_ARCHIVE_SPLITTING=true`; pro Quelle
+   kann `section_level_splitting=false` gesetzt werden. Noch offen: echte
+   Archiv-Retrieval-Qualitaet mit gemischten Chat/Log/Code-Archiven vergleichen.
+
+2. **Archive `auto_on_intent`: implementiert, Default bleibt passiv**
+
+   `active_rag_prefetch_node` kann jetzt bei
+   `archive_rag_mode=auto_on_intent` den sicheren Qwen3.5-2B-Classifier fragen,
+   ob die aktuelle Anfrage alte/compressed Archive meint. Der Classifier liefert
+   strict JSON mit `archive_recall`, `search_query`, `confidence` und `reason`;
+   bei Ausfall/Timeout/ungueltigem JSON greift der lokale Archive-Recall-
+   Condenser als Fallback. Nur bei bestaetigtem Intent werden die letzten
+   `ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_MAX_ARCHIVES` Archive source-scoped
+   durchsucht. `tool_only` bleibt der Default. Noch offen: grosse
+   LibreChat-/Browser-/Live-Beispiele messen, bevor `auto_on_intent` irgendwo
+   zum Standard wird.
