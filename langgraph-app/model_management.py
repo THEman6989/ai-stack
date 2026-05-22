@@ -5,6 +5,7 @@ import os
 import time
 from dataclasses import asdict, dataclass
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -28,6 +29,18 @@ def env_bool(name: str, default: str = "false") -> bool:
 
 def _clean_base_url(value: str) -> str:
     return value.strip().rstrip("/")
+
+
+def _host_to_http_url(host: str, *, port: int | str | None = None) -> str:
+    host = host.strip()
+    if not host:
+        return ""
+    if host.startswith(("http://", "https://")):
+        return _clean_base_url(host)
+    if ":" in host and not host.startswith("[") and host.count(":") > 1:
+        host = f"[{host}]"
+    suffix = f":{port}" if port not in (None, "") else ""
+    return f"http://{host}{suffix}"
 
 
 def _strip_openai_v1(value: str) -> str:
@@ -76,6 +89,24 @@ def _default_ollama_base_url() -> str:
     return "http://192.168.178.140:11434"
 
 
+def _default_ubuntu_manager_url() -> str:
+    configured = os.getenv("ALPHARAVIS_UBUNTU_LLAMA_MANAGER_URL", "").strip()
+    if configured:
+        return _clean_base_url(configured)
+    host = os.getenv("ALPHARAVIS_UBUNTU_LLAMA_MANAGER_IP", "").strip()
+    port = os.getenv("ALPHARAVIS_UBUNTU_LLAMA_MANAGER_PORT", "8099").strip()
+    return _host_to_http_url(host, port=port)
+
+
+def _default_ubuntu_esp_url() -> str:
+    configured = os.getenv("ALPHARAVIS_UBUNTU_LLAMA_ESP_URL", "").strip()
+    if configured:
+        return _clean_base_url(configured)
+    host = os.getenv("ALPHARAVIS_UBUNTU_LLAMA_ESP_IP", "").strip()
+    port = os.getenv("ALPHARAVIS_UBUNTU_LLAMA_ESP_PORT", "80").strip()
+    return _host_to_http_url(host, port="" if port in {"", "80"} else port)
+
+
 @dataclass(frozen=True)
 class ModelManagementConfig:
     enabled: bool
@@ -93,6 +124,16 @@ class ModelManagementConfig:
     ollama_embedding_fallback_model: str
     action_url: str
     action_api_key: str
+    ubuntu_llama_manager_ip: str
+    ubuntu_llama_manager_port: int
+    ubuntu_llama_manager_url: str
+    ubuntu_llama_manager_api_key: str
+    ubuntu_llama_esp_ip: str
+    ubuntu_llama_esp_port: int
+    ubuntu_llama_esp_url: str
+    ubuntu_llama_esp_api_key: str
+    ubuntu_llama_context_min: int
+    ubuntu_llama_context_max: int
     probe_timeout_seconds: float
     comfy_wake_wait_seconds: float
 
@@ -116,9 +157,28 @@ def load_config(remote_pcs: dict[str, Any] | None = None) -> ModelManagementConf
         ollama_embedding_fallback_model=os.getenv("ALPHARAVIS_OLLAMA_EMBED_FALLBACK_MODEL", os.getenv("EMBEDDING_FALLBACK_LITELLM_MODEL", "openai/bge-m3")).replace("openai/", ""),
         action_url=os.getenv("ALPHARAVIS_MODEL_MGMT_ACTION_URL", "").strip(),
         action_api_key=os.getenv("ALPHARAVIS_MODEL_MGMT_API_KEY", "").strip(),
+        ubuntu_llama_manager_ip=os.getenv("ALPHARAVIS_UBUNTU_LLAMA_MANAGER_IP", "").strip(),
+        ubuntu_llama_manager_port=int(os.getenv("ALPHARAVIS_UBUNTU_LLAMA_MANAGER_PORT", "8099")),
+        ubuntu_llama_manager_url=_default_ubuntu_manager_url(),
+        ubuntu_llama_manager_api_key=os.getenv("ALPHARAVIS_UBUNTU_LLAMA_MANAGER_API_KEY", "").strip()
+        or os.getenv("ALPHARAVIS_MODEL_MGMT_API_KEY", "").strip(),
+        ubuntu_llama_esp_ip=os.getenv("ALPHARAVIS_UBUNTU_LLAMA_ESP_IP", "").strip(),
+        ubuntu_llama_esp_port=int(os.getenv("ALPHARAVIS_UBUNTU_LLAMA_ESP_PORT", "80")),
+        ubuntu_llama_esp_url=_default_ubuntu_esp_url(),
+        ubuntu_llama_esp_api_key=os.getenv("ALPHARAVIS_UBUNTU_LLAMA_ESP_API_KEY", "").strip(),
+        ubuntu_llama_context_min=int(os.getenv("ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MIN", "512")),
+        ubuntu_llama_context_max=int(os.getenv("ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MAX", "262144")),
         probe_timeout_seconds=float(os.getenv("ALPHARAVIS_MODEL_MGMT_PROBE_TIMEOUT_SECONDS", "5")),
         comfy_wake_wait_seconds=float(os.getenv("ALPHARAVIS_COMFY_WAKE_WAIT_SECONDS", "0")),
     )
+
+
+def _public_config(config: ModelManagementConfig) -> dict[str, Any]:
+    public_config = asdict(config)
+    for key in ("action_api_key", "ubuntu_llama_manager_api_key", "ubuntu_llama_esp_api_key"):
+        if public_config.get(key):
+            public_config[key] = "***"
+    return public_config
 
 
 async def probe_http(url: str, *, timeout_seconds: float) -> dict[str, Any]:
@@ -184,11 +244,8 @@ async def inspect_runtime(remote_pcs: dict[str, Any] | None = None) -> dict[str,
     ollama_task = _ollama_running_models(config)
     queue_task = _embedding_queue_status()
     big_llm, comfy, ollama, embedding_queue = await asyncio.gather(big_task, comfy_task, ollama_task, queue_task)
-    public_config = asdict(config)
-    if public_config.get("action_api_key"):
-        public_config["action_api_key"] = "***"
     return {
-        "config": public_config,
+        "config": _public_config(config),
         "remote_pcs": {
             "big_llm_pc": {"name": config.big_llm_pc, **_public_remote_pc(remote_pcs, config.big_llm_pc)},
             "comfy_pc": {"name": config.comfy_pc, **_public_remote_pc(remote_pcs, config.comfy_pc)},
@@ -310,6 +367,382 @@ async def call_management_action(
         }
     except Exception as exc:
         return {"ok": False, "dry_run": False, "error": str(exc), **safe_payload}
+
+
+def _ubuntu_manager_not_configured(config: ModelManagementConfig) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "reason": "ubuntu_llama_manager_not_configured",
+        "message": "Set ALPHARAVIS_UBUNTU_LLAMA_MANAGER_URL to the Ubuntu Llama Manager API base URL.",
+        "config": _public_config(config),
+    }
+
+
+async def _ubuntu_manager_request(
+    config: ModelManagementConfig,
+    method: str,
+    path: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    action_required: bool = False,
+) -> dict[str, Any]:
+    if not config.ubuntu_llama_manager_url:
+        return _ubuntu_manager_not_configured(config)
+
+    url = f"{config.ubuntu_llama_manager_url}{path}"
+    safe_result = {"method": method.upper(), "url": url, "payload": payload or {}}
+    if action_required and not config.allow_actions:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "reason": "actions_disabled",
+            "message": "Set ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=true before executing Ubuntu Llama Manager changes.",
+            **safe_result,
+        }
+
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+    if config.ubuntu_llama_manager_api_key:
+        headers["Authorization"] = f"Bearer {config.ubuntu_llama_manager_api_key}"
+
+    started = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=max(config.probe_timeout_seconds, 5)) as client:
+            response = await client.request(method.upper(), url, headers=headers, json=payload)
+        try:
+            body: Any = response.json()
+        except ValueError:
+            body = response.text[:2000]
+        return {
+            "ok": response.status_code < 400,
+            "dry_run": False,
+            "status_code": response.status_code,
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "response": body,
+            **safe_result,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "dry_run": False,
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "error": str(exc),
+            **safe_result,
+        }
+
+
+async def _ubuntu_esp_direct_request(
+    config: ModelManagementConfig,
+    method: str,
+    path: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    action_required: bool = True,
+) -> dict[str, Any]:
+    if not config.ubuntu_llama_esp_url:
+        return {
+            "ok": False,
+            "reason": "ubuntu_llama_esp_not_configured",
+            "message": "Set ALPHARAVIS_UBUNTU_LLAMA_ESP_URL to use direct ESP power control.",
+            "config": _public_config(config),
+        }
+    if action_required and not config.allow_actions:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "reason": "actions_disabled",
+            "method": method.upper(),
+            "url": f"{config.ubuntu_llama_esp_url}{path}",
+            "payload": payload or {},
+            "message": "Set ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=true before executing direct ESP actions.",
+        }
+
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+    if config.ubuntu_llama_esp_api_key:
+        headers["Authorization"] = f"Bearer {config.ubuntu_llama_esp_api_key}"
+
+    url = f"{config.ubuntu_llama_esp_url}{path}"
+    started = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=max(config.probe_timeout_seconds, 5)) as client:
+            response = await client.request(method.upper(), url, headers=headers, json=payload)
+        try:
+            body: Any = response.json()
+        except ValueError:
+            body = response.text[:2000]
+        return {
+            "ok": response.status_code < 400,
+            "dry_run": False,
+            "method": method.upper(),
+            "url": url,
+            "payload": payload or {},
+            "status_code": response.status_code,
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "response": body,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "dry_run": False,
+            "method": method.upper(),
+            "url": url,
+            "payload": payload or {},
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "error": str(exc),
+        }
+
+
+async def inspect_ubuntu_llama_manager(remote_pcs: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Inspect the external Ubuntu Llama Manager API and known llama.cpp instances."""
+
+    config = load_config(remote_pcs or {})
+    if not config.ubuntu_llama_manager_url:
+        return _ubuntu_manager_not_configured(config)
+    health_task = _ubuntu_manager_request(config, "GET", "/health")
+    status_task = _ubuntu_manager_request(config, "GET", "/status")
+    instances_task = _ubuntu_manager_request(config, "GET", "/llama/instances")
+    models_task = _ubuntu_manager_request(config, "GET", "/models")
+    health, status, instances, models = await asyncio.gather(health_task, status_task, instances_task, models_task)
+    return {
+        "ok": bool(health.get("ok")) and bool(instances.get("ok")),
+        "config": _public_config(config),
+        "health": health,
+        "status": status,
+        "instances": instances,
+        "models": models,
+    }
+
+
+def _validate_llama_instance(instance_id: str) -> str:
+    normalized = instance_id.strip().lower()
+    aliases = {
+        "primary": "primary",
+        "main": "primary",
+        "1": "primary",
+        "llama": "primary",
+        "secondary": "secondary",
+        "second": "secondary",
+        "2": "secondary",
+        "8001": "secondary",
+        "llama-secondary": "secondary",
+    }
+    if normalized not in aliases:
+        raise ValueError("instance_id must be primary or secondary")
+    return aliases[normalized]
+
+
+def _validate_context_size(config: ModelManagementConfig, context_size: int | str | None) -> int | None:
+    if context_size in (None, ""):
+        return None
+    try:
+        value = int(str(context_size).strip())
+    except ValueError as exc:
+        raise ValueError("context_size must be an integer") from exc
+    if value < config.ubuntu_llama_context_min or value > config.ubuntu_llama_context_max:
+        raise ValueError(
+            f"context_size must be between {config.ubuntu_llama_context_min} and {config.ubuntu_llama_context_max}"
+        )
+    return value
+
+
+async def configure_ubuntu_llama_instance(
+    instance_id: str,
+    *,
+    model: str = "",
+    model_flag: str = "auto",
+    context_size: int | str | None = None,
+    command: str = "",
+    restart: bool = True,
+    remote_pcs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Patch model/context/command for a Ubuntu Llama Manager llama.cpp instance."""
+
+    config = load_config(remote_pcs or {})
+    try:
+        instance = _validate_llama_instance(instance_id)
+        validated_context_size = _validate_context_size(config, context_size)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    payload: dict[str, Any] = {"restart": bool(restart)}
+    if model.strip():
+        payload["model"] = model.strip()
+        payload["model_flag"] = (model_flag or "auto").strip()
+    if validated_context_size is not None:
+        payload["context_size"] = validated_context_size
+    if command.strip():
+        payload["command"] = command.strip()
+    if set(payload) == {"restart"}:
+        return {"ok": False, "error": "send model, context_size, or command"}
+
+    path = f"/llama/instances/{quote(instance, safe='')}/config"
+    return await _ubuntu_manager_request(config, "POST", path, payload=payload, action_required=True)
+
+
+async def control_ubuntu_llama_service(
+    instance_id: str,
+    action: str,
+    *,
+    confirmed: bool = False,
+    remote_pcs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Start, stop, restart, or force-kill a managed Ubuntu Llama Manager llama.cpp service."""
+
+    config = load_config(remote_pcs or {})
+    try:
+        instance = _validate_llama_instance(instance_id)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    normalized = action.strip().lower().replace("_", "-")
+    if normalized not in {"start", "stop", "restart", "force-kill"}:
+        return {"ok": False, "error": "action must be start, stop, restart, or force-kill"}
+    if normalized in {"stop", "force-kill"} and not confirmed:
+        return {
+            "ok": False,
+            "needs_confirmation": True,
+            "action": normalized,
+            "instance_id": instance,
+            "message": "Confirm the exact target before stopping or force-killing a llama.cpp service.",
+        }
+    if normalized == "force-kill" and instance != "primary":
+        return {"ok": False, "error": "force-kill is only exposed by Ubuntu Llama Manager for the primary instance"}
+
+    if normalized == "force-kill":
+        path = "/llama/force-kill"
+    elif instance == "primary":
+        path = f"/llama/{normalized}"
+    else:
+        path = f"/llama-secondary/{normalized}"
+    return await _ubuntu_manager_request(config, "POST", path, payload={}, action_required=True)
+
+
+def _power_payload(
+    action: str,
+    *,
+    reason: str = "",
+    hold_seconds: int | None = None,
+    wait_seconds: int | None = None,
+    delay_before_action_seconds: int | None = None,
+    requested_by: str = "alpharavis",
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "action": action,
+        "reason": reason or "alpharavis-server-management",
+        "requested_by": requested_by,
+    }
+    if hold_seconds is not None:
+        payload["hold_seconds"] = int(hold_seconds)
+    if wait_seconds is not None:
+        payload["wait_seconds"] = int(wait_seconds)
+    if delay_before_action_seconds is not None:
+        payload["delay_before_action_seconds"] = int(delay_before_action_seconds)
+    return payload
+
+
+async def request_ubuntu_server_power_action(
+    action: str,
+    *,
+    reason: str = "",
+    direct_esp: bool = False,
+    confirmed: bool = False,
+    hold_seconds: int | None = None,
+    wait_seconds: int | None = None,
+    delay_before_action_seconds: int | None = None,
+    remote_pcs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run a gated Ubuntu Llama Manager server or ESP power action."""
+
+    config = load_config(remote_pcs or {})
+    normalized = action.strip().lower().replace("_", "-")
+    aliases = {
+        "power-on": "power-on",
+        "on": "power-on",
+        "start-pc": "power-on",
+        "power-off": "power-off",
+        "off": "power-off",
+        "power-cycle": "power-cycle",
+        "cycle": "power-cycle",
+        "reset": "reset",
+        "esp-cancel": "esp-cancel",
+        "cancel": "esp-cancel",
+        "shutdown": "shutdown",
+        "power-shutdown": "shutdown",
+        "reboot": "reboot-now",
+        "reboot-now": "reboot-now",
+        "reboot-enable": "reboot-enable",
+        "reboot-disable": "reboot-disable",
+        "gpu-fault": "gpu-fault",
+    }
+    mapped = aliases.get(normalized)
+    if mapped is None:
+        return {
+            "ok": False,
+            "error": (
+                "action must be one of power-on, power-off, power-cycle, reset, "
+                "esp-cancel, shutdown, reboot-now, reboot-enable, reboot-disable, gpu-fault"
+            ),
+        }
+    destructive = {"power-off", "power-cycle", "reset", "shutdown", "reboot-now", "gpu-fault"}
+    if mapped in destructive and not confirmed:
+        target = "direct ESP" if direct_esp and mapped in {"power-off", "power-cycle", "reset"} else "Ubuntu Llama Manager"
+        return {
+            "ok": False,
+            "needs_confirmation": True,
+            "action": mapped,
+            "target": target,
+            "message": (
+                "Confirm the exact server/power target before running this destructive action. "
+                "Power-on, service start, reboot timer enable/disable, and ESP cancel do not require this extra flag."
+            ),
+        }
+
+    if mapped in {"power-on", "power-off", "power-cycle", "reset"}:
+        payload = _power_payload(
+            mapped,
+            reason=reason,
+            hold_seconds=hold_seconds,
+            wait_seconds=wait_seconds,
+            delay_before_action_seconds=delay_before_action_seconds,
+        )
+        if direct_esp:
+            return await _ubuntu_esp_direct_request(config, "POST", "/action", payload=payload, action_required=True)
+        return await _ubuntu_manager_request(config, "POST", "/esp/action", payload=payload, action_required=True)
+
+    if mapped == "esp-cancel":
+        if direct_esp:
+            return await _ubuntu_esp_direct_request(config, "POST", "/cancel", payload={}, action_required=True)
+        return await _ubuntu_manager_request(config, "POST", "/esp/cancel", payload={}, action_required=True)
+
+    paths = {
+        "shutdown": "/power/shutdown",
+        "reboot-now": "/reboot/now",
+        "reboot-enable": "/reboot/enable",
+        "reboot-disable": "/reboot/disable",
+        "gpu-fault": "/diagnostics/handle-gpu-fault",
+    }
+    payload = {"reason": reason or "alpharavis-server-management"} if mapped == "gpu-fault" else {}
+    return await _ubuntu_manager_request(config, "POST", paths[mapped], payload=payload, action_required=True)
+
+
+async def recover_ubuntu_llama_no_response(
+    reason: str = "alpharavis-crisis",
+    *,
+    diagnose_only: bool = True,
+    probe_timeout_seconds: int | None = None,
+    remote_pcs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Ask Ubuntu Llama Manager to diagnose or recover a stuck primary llama.cpp server."""
+
+    config = load_config(remote_pcs or {})
+    payload: dict[str, Any] = {"reason": reason}
+    if probe_timeout_seconds is not None:
+        payload["probe_timeout_seconds"] = int(probe_timeout_seconds)
+    path = "/ai-stack/diagnose-llama" if diagnose_only else "/ai-stack/llama-no-response"
+    return await _ubuntu_manager_request(config, "POST", path, payload=payload, action_required=not diagnose_only)
 
 
 async def _ollama_generate_control(

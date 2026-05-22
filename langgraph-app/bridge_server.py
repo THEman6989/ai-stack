@@ -52,6 +52,7 @@ if _setup_operational_logging is not None:
 LANGGRAPH_API_URL = os.getenv("LANGGRAPH_API_URL", "http://langgraph-api:2024")
 LANGGRAPH_ASSISTANT_ID = os.getenv("LANGGRAPH_ASSISTANT_ID", "alpha_ravis")
 OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "my-agent")
+SERVER_MODEL_MANAGER_MODEL_NAME = os.getenv("SERVER_MODEL_MANAGER_MODEL_NAME", "server-model-manager")
 BRIDGE_RUN_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_RUN_TIMEOUT_SECONDS", "180"))
 BRIDGE_STREAM_MODE = os.getenv("BRIDGE_STREAM_MODE", "events").lower()
 BRIDGE_STREAM_SUBGRAPHS = _env_bool("BRIDGE_STREAM_SUBGRAPHS", "true")
@@ -88,6 +89,20 @@ BRIDGE_DOCUMENT_RAG_AUTO_INGEST = _env_bool("BRIDGE_DOCUMENT_RAG_AUTO_INGEST", "
 BRIDGE_DOCUMENT_RAG_INGEST_ROOT = os.getenv("BRIDGE_DOCUMENT_RAG_INGEST_ROOT", "/workspace/media-data")
 BRIDGE_MEDIA_GALLERY_CONTAINER_ROOT = os.getenv("BRIDGE_MEDIA_GALLERY_CONTAINER_ROOT", "/media-data")
 BRIDGE_MEDIA_GALLERY_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_MEDIA_GALLERY_TIMEOUT_SECONDS", "45"))
+
+
+def _is_server_model_manager_model(model: str) -> bool:
+    normalized = (model or "").strip().lower()
+    aliases = {
+        SERVER_MODEL_MANAGER_MODEL_NAME.strip().lower(),
+        "server-model-manager",
+        "server_model_manager",
+        "model-manager",
+        "model_manager",
+        "server-manager",
+        "server_manager",
+    }
+    return normalized in aliases
 ALPHARAVIS_MEDIA_GALLERY_URL = os.getenv(
     "ALPHARAVIS_MEDIA_GALLERY_URL",
     "http://media-gallery:8130",
@@ -1428,6 +1443,7 @@ async def _build_input_payload(
     *,
     thread_id: str,
     thread_key: str,
+    model: str = "",
     trace: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     await _mirror_video_parts_in_messages(raw_messages, thread_id=thread_id, thread_key=thread_key)
@@ -1449,6 +1465,16 @@ async def _build_input_payload(
         "thread_key": thread_key,
         "bridge_context_references": reference_profiles,
     }
+    if _is_server_model_manager_model(model):
+        payload.update(
+            {
+                "active_agent": "power_management_agent",
+                "selected_toolsets": ["agent/power"],
+                "fast_path_locked": True,
+                "fast_path_lock_reason": "server_model_manager_endpoint",
+                "server_model_manager_mode": True,
+            }
+        )
     if pending_document_ingests:
         payload["pending_document_ingests"] = pending_document_ingests
     if isinstance(trace, dict):
@@ -1779,6 +1805,7 @@ async def _prepare_run_payload(
     thread_id: str,
     thread_key: str,
     messages: list[dict[str, Any]],
+    model: str = "",
     trace: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
@@ -1803,6 +1830,7 @@ async def _prepare_run_payload(
         state,
         thread_id=thread_id,
         thread_key=thread_key,
+        model=model,
         trace=trace,
     )
     return {"input": input_payload, "state_profile": state_profile}
@@ -2483,7 +2511,7 @@ async def _stream_chat(body: dict[str, Any], request: Request) -> AsyncIterator[
     client = _client()
     thread_key = _extract_thread_key(body, request)
     thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
-    run_payload = await _prepare_run_payload(client, thread_id, thread_key, messages)
+    run_payload = await _prepare_run_payload(client, thread_id, thread_key, messages, model=model)
     _observer_prepared(observation_id, thread_key=thread_key, thread_id=thread_id, run_payload=run_payload)
     _log_event(
         logging.INFO,
@@ -3443,7 +3471,7 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
     client = _client()
     thread_key = _extract_thread_key(chat_body, request)
     thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
-    run_payload = await _prepare_run_payload(client, thread_id, thread_key, chat_body.get("messages", []))
+    run_payload = await _prepare_run_payload(client, thread_id, thread_key, chat_body.get("messages", []), model=model)
     _observer_prepared(observation_id, thread_key=thread_key, thread_id=thread_id, run_payload=run_payload)
     _log_event(
         logging.INFO,
@@ -3869,7 +3897,15 @@ async def langgraph_tool_run(request: Request):
 async def models():
     return {
         "object": "list",
-        "data": [{"id": OPENAI_MODEL_NAME, "object": "model", "created": 0, "owned_by": "alpharavis"}],
+        "data": [
+            {"id": OPENAI_MODEL_NAME, "object": "model", "created": 0, "owned_by": "alpharavis"},
+            {
+                "id": SERVER_MODEL_MANAGER_MODEL_NAME,
+                "object": "model",
+                "created": 0,
+                "owned_by": "alpharavis",
+            },
+        ],
     }
 
 
@@ -3911,7 +3947,7 @@ async def responses(request: Request):
     thread_key = _extract_thread_key(chat_body, request)
     thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
     _trace_step(trace, "bridge.thread.ready", started, thread_id=thread_id, thread_key=thread_key)
-    run_payload = await _prepare_run_payload(client, thread_id, thread_key, messages, trace=trace)
+    run_payload = await _prepare_run_payload(client, thread_id, thread_key, messages, model=model, trace=trace)
     _observer_prepared(observation_id, thread_key=thread_key, thread_id=thread_id, run_payload=run_payload)
     _trace_step(trace, "bridge.run_payload.prepared", started)
     _log_event(
@@ -4089,7 +4125,7 @@ async def chat_completions(request: Request):
     thread_key = _extract_thread_key(body, request)
     thread_id = await _ensure_thread(client, _thread_id_for_key(thread_key), thread_key)
     _trace_step(trace, "bridge.thread.ready", started, thread_id=thread_id, thread_key=thread_key)
-    run_payload = await _prepare_run_payload(client, thread_id, thread_key, body.get("messages", []), trace=trace)
+    run_payload = await _prepare_run_payload(client, thread_id, thread_key, body.get("messages", []), model=model, trace=trace)
     _observer_prepared(observation_id, thread_key=thread_key, thread_id=thread_id, run_payload=run_payload)
     _trace_step(trace, "bridge.run_payload.prepared", started)
     _log_event(

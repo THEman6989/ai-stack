@@ -1,0 +1,6 @@
+[project]
+name = "ubuntu-llama-manager"
+version = "0.2.0"
+description = "Standalone llama.cpp manager with systemd reboot timer, API, model scan, and ESP preparation."
+requires-python = ">=3.10"
+dependencies = []

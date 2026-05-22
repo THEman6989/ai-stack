@@ -3,9 +3,60 @@
 This is the running backlog for features that are intentionally prepared but
 not fully wired yet.
 
+## Ubuntu Llama Manager Integration
+
+Status: LangGraph tool surface implemented; live manager validation still
+needed.
+
+Implemented:
+
+- AlphaRavis can be configured with `ALPHARAVIS_UBUNTU_LLAMA_MANAGER_URL` and
+  `ALPHARAVIS_UBUNTU_LLAMA_MANAGER_API_KEY` to call the external
+  `ubuntu-llama-manager` API. Operators can now enter
+  `ALPHARAVIS_UBUNTU_LLAMA_MANAGER_IP` / `..._PORT` and
+  `ALPHARAVIS_UBUNTU_LLAMA_ESP_IP` / `..._PORT`; full URL settings remain
+  optional overrides.
+- LangGraph exposes tools to inspect manager health/status/models/instances,
+  diagnose a no-response llama.cpp server, start/stop/restart managed llama
+  services, run gated ESP/server power actions, run gated recovery, and patch
+  `primary` or `secondary` instance model/context/command settings.
+- Real recovery/config writes are dry-runs unless
+  `ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=true`.
+- The power/model-management agent gets the full tool set. The crisis manager
+  gets inspect, diagnose, service control, ESP power-cycle, and gated recovery,
+  so it can restore the big backend without changing model context.
+- LibreChat exposes a dedicated `Server Model Manager` preset using Bridge model
+  id `server-model-manager`; the Bridge routes it to native LangGraph
+  `power_management_agent` with `agent/power` selected. Native LangGraph callers
+  can pass the same `active_agent` / `selected_toolsets` fields directly.
+- The dedicated manager uses `ALPHARAVIS_SERVER_MODEL_MANAGER_MODEL` first
+  (`openai/server-model-manager` by default), a LiteLLM route intended to
+  prefer BigBoss and fall back to Edge Gemma.
+- Destructive server/ESP tools require an extra `confirmed=true` after the
+  agent states the exact target and tool; start/restart/power-on remain direct
+  once actions are enabled.
+- Crisis-manager enablement no longer depends on owner SSH tools when advanced
+  model management is enabled; Ubuntu Llama Manager can provide the recovery
+  surface.
+- Focused unit coverage verifies dry-run gating, context bounds, and protected
+  diagnose payloads.
+
+Still needed:
+
+- Configure the real manager URL/token in private `.env` and live-test:
+  `inspect_ubuntu_llama_manager`,
+  `diagnose_ubuntu_llama_no_response`, and a controlled dry-run/real
+  `request_ubuntu_server_power_action`, `control_ubuntu_llama_service`, and
+  `configure_ubuntu_llama_instance` context change.
+- Decide later model-manager policy for automatic context escalation and
+  rollback, including when the secondary 2B model should move between 8K and
+  16K and when the primary can be raised toward 200K.
+- Add the later Ollama/Edge-Gemma embedding unload/reload policy for the Model
+  Manager fallback path after the big llama.cpp server is unavailable.
+
 ## Operator Config UI
 
-Status: implemented for root `.env` editing.
+Status: implemented for root `.env` editing and dashboard runtime settings.
 
 Implemented:
 
@@ -21,10 +72,57 @@ Implemented:
 - `make install` and `make update` keep the existing terminal prompts as a
   fallback path, while `make config` is the intended central place for broader
   configuration changes.
+- The Service Dashboard now exposes `/settings` as a modern mobile/PWA-friendly
+  Settings WebUI and primary dashboard card.
+- `/settings` loads all keys from `.env(exaple)`, shows current `.env` values
+  plus active runtime overrides, and infers toggles, dropdowns, number fields,
+  URL fields, and password fields from defaults/comments/key names.
+- The Settings WebUI uses compact setting rows, quieter accents, equal-size
+  temporary/permanent actions, local favorites, and generated fallback
+  descriptions for undocumented `.env(exaple)` keys.
+- Filters support search, category chips,
+  important/normal/low/changed/runtime/favorite views, and sorting by
+  importance, alphabet, section, or changed state.
+- `Temporary anwenden` stores overrides in
+  `service-dashboard-data/runtime_settings.json`; LangGraph reloads this file
+  before each new run so new chat turns pick up temporary values without
+  rewriting `.env`.
+- `Permanent speichern` writes validated template keys to `.env` after browser
+  confirmation, with a local "nicht mehr fragen" option.
 
 Still needed:
 
 - Done: Live browser polish pass on the owner machine for very narrow mobile-sized windows.
+- Done: Tailscale HTTPS route was live-tested at
+  `https://cachyos-comfyui.tail852b38.ts.net:8090/settings` with `200 OK`.
+- Still recommended: open `/settings` from an iOS Safari home-screen shortcut
+  and check the actual standalone PWA chrome/safe-area behavior on-device.
+
+## Agent Run State And Resume
+
+Status: first durable run-state layer implemented.
+
+Implemented:
+
+- `langgraph-app/run_state_manager.py` stores one latest Mongo-backed
+  `current` checkpoint per thread with phase/status, task brief, planner
+  context, selected toolsets, active agent, compact run profile, and provider
+  error classification.
+- The graph saves checkpoints at run start, planner success/failure, swarm
+  start/failure/completion, and run finish. Completed runs are marked
+  `completed`; interrupted provider/llama.cpp runs remain `awaiting_resume`.
+- On a later message in the same thread, open checkpoints restore the plan/task
+  brief and trigger a same-thread prompt asking whether to continue. Manual
+  confirmation is the default; `ALPHARAVIS_RUN_STATE_AUTO_RESUME=true` enables
+  automatic continuation.
+- Focused verification: `pytest -q tests/test_run_state_manager.py` passed.
+
+Still needed:
+
+- Live-test a forced llama.cpp/LiteLLM disconnect during a long swarm run and
+  confirm the user-facing resume prompt and `ja, weiter` path in LibreChat.
+- Add an operator/debug endpoint or dashboard panel for listing saved
+  `awaiting_resume` jobs if multiple long-running threads are active.
 
 ## Service Dashboard And Tailscale HTTPS
 
@@ -102,8 +200,17 @@ Implemented follow-up:
 - Media Gallery visual refresh completed:
   - `/gallery` now has a modern dark responsive layout, sticky desktop header,
     mobile-friendly filters, a visible `MG` brand mark, and `/favicon.svg`.
-  - Asset cards keep image/video previews, copy/open actions, metadata, and the
-    existing grouping/filter/sort behavior.
+  - The 2026-05-22 follow-up made date sections the default, kept collapsible
+    sections optional, removed technical file/source metadata from card bodies,
+    and tuned the grid/cards for smaller iPhone-sized screens.
+  - The filter Apply action no longer wraps below the first select on medium
+    widths; it stays at the row end on desktop and becomes a full-width action
+    below filters on mobile.
+  - A native Upload control now posts to `/assets/upload`, stores selected
+    browser/mobile files as original `gallery_upload` assets in `media-data`,
+    records them in MongoDB, and returns to the date-sorted Gallery.
+  - Asset cards keep image/video previews and copy/open actions; operator
+    filters and alternate grouping modes remain available when needed.
 - Tailscale path handling fixed:
   - `tailscale_https_routes.py` keeps the public click path, for example
     `/gallery`, but proxies Tailscale Serve to the service root

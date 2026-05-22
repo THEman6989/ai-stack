@@ -87,7 +87,7 @@ make up TAILSCALE_AUTO=keep
 | Target | Purpose |
 | --- | --- |
 | `make help` | Print the built-in Makefile help. |
-| `make config` | Open the local browser UI for editing `.env` from `.env(exaple)` defaults. |
+| `make config` | Open the local browser UI for editing `.env` from `.env(exaple)` defaults. The running dashboard also exposes `http://localhost:8090/settings` for mobile runtime/permanent settings. |
 | `make install` | Sync missing `.env` defaults, choose runtime settings, optionally update submodules, build, and start. Defaults to Tailscale HTTPS mode. |
 | `make update` | Run `git pull --ff-only`, update runtime settings, optionally update submodules, build, and restart. Defaults to Tailscale HTTPS mode. |
 | `make update-no-start` | Same update path, but builds without starting/recreating the full stack. |
@@ -312,6 +312,7 @@ Local URLs are still useful in both modes from the host machine itself:
 | Service | Local URL |
 | --- | --- |
 | Service Dashboard | `http://localhost:8090` |
+| Settings WebUI | `http://localhost:8090/settings` |
 | LibreChat | `http://localhost:3080` |
 | LangGraph API | `http://localhost:2024` |
 | OpenAI-compatible AlphaRavis bridge | `http://localhost:8123/v1` |

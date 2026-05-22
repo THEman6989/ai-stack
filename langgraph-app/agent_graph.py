@@ -139,17 +139,27 @@ else:
 
 try:
     from model_management import (
+        configure_ubuntu_llama_instance as _model_mgmt_configure_ubuntu_llama_instance,
+        control_ubuntu_llama_service as _model_mgmt_control_ubuntu_llama_service,
         embedding_maintenance_decision as _model_mgmt_embedding_decision,
         inspect_runtime as _model_mgmt_inspect_runtime,
+        inspect_ubuntu_llama_manager as _model_mgmt_inspect_ubuntu_llama_manager,
         prepare_comfy_for_pixelle as _model_mgmt_prepare_comfy,
         request_power_action as _model_mgmt_request_power_action,
+        request_ubuntu_server_power_action as _model_mgmt_request_ubuntu_server_power_action,
+        recover_ubuntu_llama_no_response as _model_mgmt_recover_ubuntu_llama_no_response,
         run_embedding_lifecycle as _model_mgmt_run_embedding_lifecycle,
     )
 except Exception as exc:  # pragma: no cover - optional local module/deps
+    _model_mgmt_configure_ubuntu_llama_instance = None
+    _model_mgmt_control_ubuntu_llama_service = None
     _model_mgmt_embedding_decision = None
     _model_mgmt_inspect_runtime = None
+    _model_mgmt_inspect_ubuntu_llama_manager = None
     _model_mgmt_prepare_comfy = None
     _model_mgmt_request_power_action = None
+    _model_mgmt_request_ubuntu_server_power_action = None
+    _model_mgmt_recover_ubuntu_llama_no_response = None
     _model_mgmt_run_embedding_lifecycle = None
     MODEL_MANAGEMENT_IMPORT_ERROR: Exception | None = exc
 else:
@@ -253,6 +263,28 @@ except Exception as exc:  # pragma: no cover - optional local module/deps
 
 else:
     RESPONSES_CLIENT_IMPORT_ERROR = None
+
+try:
+    from run_state_manager import (
+        load_run_checkpoint as _load_run_checkpoint,
+        resume_updates_from_checkpoint as _resume_updates_from_checkpoint,
+        save_run_checkpoint as _save_run_checkpoint,
+    )
+except Exception as exc:  # pragma: no cover - state manager must not block graph import
+    _load_run_checkpoint = None
+    _resume_updates_from_checkpoint = None
+    _save_run_checkpoint = None
+    RUN_STATE_MANAGER_IMPORT_ERROR: Exception | None = exc
+else:
+    RUN_STATE_MANAGER_IMPORT_ERROR = None
+
+try:
+    from runtime_settings import apply_runtime_overrides as _apply_runtime_overrides
+except Exception as exc:  # pragma: no cover - runtime settings must not block graph import
+    _apply_runtime_overrides = None
+    RUNTIME_SETTINGS_IMPORT_ERROR: Exception | None = exc
+else:
+    RUNTIME_SETTINGS_IMPORT_ERROR = None
 
 try:
     from provider_hardening import chat_fallback_allowed as _chat_fallback_allowed
@@ -366,6 +398,7 @@ class AlphaRavisState(MessagesState):
     hard_context_error: NotRequired[str]
     crisis_route: NotRequired[str]
     crisis_recovery_attempted: NotRequired[bool]
+    server_model_manager_mode: NotRequired[bool]
     bridge_context_references: NotRequired[list[dict[str, Any]]]
     alpha_trace: NotRequired[dict[str, Any]]
     alpha_trace_steps: NotRequired[list[dict[str, Any]]]
@@ -395,6 +428,8 @@ class AlphaRavisState(MessagesState):
     memory_notice_key: NotRequired[str]
     memory_notice_seen_key: NotRequired[str]
     skill_candidate_keys: NotRequired[list[str]]
+    run_resume_checkpoint: NotRequired[dict[str, Any]]
+    run_resume_prompt_required: NotRequired[bool]
 
 
 class DebuggerState(MessagesState):
@@ -665,8 +700,12 @@ def _owner_power_tools_enabled() -> bool:
     return _advanced_model_management_enabled() and _env_bool("ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS", "false")
 
 
+def _server_model_manager_enabled() -> bool:
+    return _env_bool("ALPHARAVIS_ENABLE_SERVER_MODEL_MANAGER", "true")
+
+
 def _crisis_manager_enabled() -> bool:
-    return _owner_power_tools_enabled() and _env_bool("ALPHARAVIS_ENABLE_CRISIS_MANAGER", "false")
+    return _advanced_model_management_enabled() and _env_bool("ALPHARAVIS_ENABLE_CRISIS_MANAGER", "false")
 
 
 def _available_agent_names() -> str:
@@ -678,7 +717,7 @@ def _available_agent_names() -> str:
         "hermes_coding_agent",
         "context_retrieval_agent",
     ]
-    if _advanced_model_management_enabled():
+    if _advanced_model_management_enabled() or _server_model_manager_enabled():
         agents.append("power_management_agent")
     if _crisis_manager_enabled():
         agents.append("crisis_manager_agent")
@@ -905,6 +944,24 @@ def _deep_agent_model(
     if responses_model is not None:
         return responses_model
     return _model(model_name=model_name, timeout_seconds=timeout_seconds, model_kwargs=kwargs)
+
+
+def _server_model_manager_model() -> Any:
+    primary_model = os.getenv("ALPHARAVIS_SERVER_MODEL_MANAGER_MODEL", "openai/server-model-manager")
+    model_kwargs = {
+        "chat_template_kwargs": {"enable_thinking": False, "preserve_thinking": False},
+        "temperature": float(os.getenv("ALPHARAVIS_SERVER_MODEL_MANAGER_TEMPERATURE", "0")),
+    }
+    return _budget_guarded_agent_model(
+        _text_only_agent_model(
+            _deep_agent_model(
+                model_name=primary_model,
+                timeout_seconds=float(os.getenv("ALPHARAVIS_SERVER_MODEL_MANAGER_TIMEOUT_SECONDS", "90")),
+                model_kwargs=model_kwargs,
+            )
+        ),
+        purpose="server_model_manager_agent",
+    )
 
 
 def _plain_text_content(content: Any) -> str:
@@ -2562,6 +2619,117 @@ async def run_embedding_memory_jobs(reason: str = "", job_limit: int = 10, last_
             remote_pcs=REMOTE_PCS,
             job_limit=job_limit,
             last_activity_age_seconds=last_activity_age_seconds,
+        )
+    )
+
+
+@tool
+async def inspect_ubuntu_llama_manager():
+    """Inspect the external Ubuntu Llama Manager API, llama instances, and local models."""
+
+    if _model_mgmt_inspect_ubuntu_llama_manager is None:
+        return _model_management_unavailable() or "Model management module not loaded."
+    return _json_tool_result(await _model_mgmt_inspect_ubuntu_llama_manager(REMOTE_PCS))
+
+
+@tool
+async def diagnose_ubuntu_llama_no_response(reason: str = "alpharavis-crisis", probe_timeout_seconds: int | None = None):
+    """Ask Ubuntu Llama Manager to diagnose a stuck llama.cpp server without executing recovery."""
+
+    if _model_mgmt_recover_ubuntu_llama_no_response is None:
+        return _model_management_unavailable() or "Model management module not loaded."
+    return _json_tool_result(
+        await _model_mgmt_recover_ubuntu_llama_no_response(
+            reason=reason,
+            diagnose_only=True,
+            probe_timeout_seconds=probe_timeout_seconds,
+            remote_pcs=REMOTE_PCS,
+        )
+    )
+
+
+@tool
+async def recover_ubuntu_llama_no_response(reason: str = "alpharavis-crisis", probe_timeout_seconds: int | None = None):
+    """Ask Ubuntu Llama Manager to recover a stuck primary llama.cpp server; gated by model-management action settings."""
+
+    if _model_mgmt_recover_ubuntu_llama_no_response is None:
+        return _model_management_unavailable() or "Model management module not loaded."
+    return _json_tool_result(
+        await _model_mgmt_recover_ubuntu_llama_no_response(
+            reason=reason,
+            diagnose_only=False,
+            probe_timeout_seconds=probe_timeout_seconds,
+            remote_pcs=REMOTE_PCS,
+        )
+    )
+
+
+@tool
+async def control_ubuntu_llama_service(instance_id: str, action: str, confirmed: bool = False):
+    """Start, stop, restart, or force-kill a Ubuntu Llama Manager llama.cpp service; gated by model-management action settings."""
+
+    if _model_mgmt_control_ubuntu_llama_service is None:
+        return _model_management_unavailable() or "Model management module not loaded."
+    return _json_tool_result(
+        await _model_mgmt_control_ubuntu_llama_service(
+            instance_id,
+            action,
+            confirmed=confirmed,
+            remote_pcs=REMOTE_PCS,
+        )
+    )
+
+
+@tool
+async def request_ubuntu_server_power_action(
+    action: str,
+    reason: str = "",
+    direct_esp: bool = False,
+    confirmed: bool = False,
+    hold_seconds: int | None = None,
+    wait_seconds: int | None = None,
+    delay_before_action_seconds: int | None = None,
+):
+    """Run a gated Ubuntu Llama Manager server/ESP action such as power-on, power-cycle, reboot, or shutdown."""
+
+    if _model_mgmt_request_ubuntu_server_power_action is None:
+        return _model_management_unavailable() or "Model management module not loaded."
+    return _json_tool_result(
+        await _model_mgmt_request_ubuntu_server_power_action(
+            action,
+            reason=reason,
+            direct_esp=direct_esp,
+            confirmed=confirmed,
+            hold_seconds=hold_seconds,
+            wait_seconds=wait_seconds,
+            delay_before_action_seconds=delay_before_action_seconds,
+            remote_pcs=REMOTE_PCS,
+        )
+    )
+
+
+@tool
+async def configure_ubuntu_llama_instance(
+    instance_id: str,
+    model: str = "",
+    model_flag: str = "auto",
+    context_size: int | None = None,
+    command: str = "",
+    restart: bool = True,
+):
+    """Patch a Ubuntu Llama Manager llama.cpp instance model/context/command; gated by model-management action settings."""
+
+    if _model_mgmt_configure_ubuntu_llama_instance is None:
+        return _model_management_unavailable() or "Model management module not loaded."
+    return _json_tool_result(
+        await _model_mgmt_configure_ubuntu_llama_instance(
+            instance_id,
+            model=model,
+            model_flag=model_flag,
+            context_size=context_size,
+            command=command,
+            restart=restart,
+            remote_pcs=REMOTE_PCS,
         )
     )
 
@@ -7060,6 +7228,89 @@ def _profile_update(state: AlphaRavisState, **updates: Any) -> dict[str, Any]:
     return profile
 
 
+def _apply_runtime_settings_for_run() -> dict[str, Any]:
+    if _apply_runtime_overrides is None:
+        return {}
+    try:
+        return dict(_apply_runtime_overrides())
+    except Exception as exc:
+        _log_exception("runtime_settings.apply_failed", exc, level=logging.WARNING)
+        return {"error": str(exc)[:300]}
+
+
+def _run_state_enabled() -> bool:
+    return _save_run_checkpoint is not None and _env_bool("ALPHARAVIS_RUN_STATE_MANAGER_ENABLED", "true")
+
+
+def _run_state_auto_resume_enabled() -> bool:
+    return _env_bool("ALPHARAVIS_RUN_STATE_AUTO_RESUME", "false")
+
+
+def _looks_like_resume_confirmation(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    confirmations = [
+        "ja",
+        "yes",
+        "weiter",
+        "weitermachen",
+        "mach weiter",
+        "resume",
+        "continue",
+        "go on",
+        "fortsetzen",
+        "setze fort",
+    ]
+    return any(token in lowered for token in confirmations)
+
+
+def _save_run_state_checkpoint(
+    state: AlphaRavisState,
+    *,
+    phase: str,
+    status: str = "running",
+    error: str = "",
+    error_classification: dict[str, Any] | None = None,
+) -> None:
+    if not _run_state_enabled():
+        return
+    try:
+        _save_run_checkpoint(
+            thread_id=_state_thread_id(state),
+            thread_key=_state_thread_key(state),
+            phase=phase,
+            status=status,
+            state=dict(state),
+            error=error,
+            error_classification=error_classification,
+        )
+    except Exception as exc:
+        _log_exception("run_state.save_failed", exc, level=logging.WARNING, phase=phase, status=status)
+
+
+def _load_open_run_state_updates(state: AlphaRavisState, latest: str) -> dict[str, Any]:
+    if _load_run_checkpoint is None or _resume_updates_from_checkpoint is None:
+        return {}
+    try:
+        checkpoint = _load_run_checkpoint(_state_thread_id(state))
+    except Exception as exc:
+        _log_exception("run_state.load_failed", exc, level=logging.WARNING)
+        return {}
+    updates = _resume_updates_from_checkpoint(checkpoint)
+    if not updates:
+        return {}
+    auto_resume = _run_state_auto_resume_enabled()
+    user_confirmed = _looks_like_resume_confirmation(latest)
+    updates["run_resume_prompt_required"] = not (auto_resume or user_confirmed)
+    run_resume = dict(updates.get("run_resume_checkpoint") or {})
+    run_resume["auto_resume"] = auto_resume
+    run_resume["user_confirmed_resume"] = user_confirmed
+    run_resume["prompt_timeout_seconds"] = int(os.getenv("ALPHARAVIS_RUN_STATE_RESUME_PROMPT_TIMEOUT_SECONDS", "300"))
+    updates["run_resume_checkpoint"] = run_resume
+    return updates
+
+
 def _merge_unique_strings(*values: Any, limit: int = 50) -> list[str]:
     items: list[str] = []
     for value in values:
@@ -8370,6 +8621,7 @@ async def _long_prompt_direct_route_decision(state: AlphaRavisState, base_reason
 
 async def run_profile_start_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
     global LAST_GRAPH_ACTIVITY_AT
+    runtime_settings = _apply_runtime_settings_for_run()
     LAST_GRAPH_ACTIVITY_AT = time.time()
     trace_started = time.perf_counter()
     trace_id = _state_trace_id(state)
@@ -8381,6 +8633,7 @@ async def run_profile_start_node(state: AlphaRavisState, runtime: Any | None = N
     bridge_refs = [item for item in list(state.get("bridge_context_references") or []) if isinstance(item, dict)]
     selected_toolsets, toolset_context = _toolset_context_for_request(latest)
     stable_context = _stable_prompt_context()
+    resume_updates = _load_open_run_state_updates(state, latest)
     token_estimate = _estimate_tokens(messages)
     static_reserve = _static_context_reserve_tokens({"selected_toolsets": selected_toolsets})
     profile = {
@@ -8395,6 +8648,8 @@ async def run_profile_start_node(state: AlphaRavisState, runtime: Any | None = N
         "bridge_context_reference_count": sum(int(item.get("reference_count", 0)) for item in bridge_refs),
         "document_ingests": document_ingests,
         "large_paste_ingests": large_paste_ingests,
+        "run_resume_checkpoint": resume_updates.get("run_resume_checkpoint"),
+        "run_resume_prompt_required": bool(resume_updates.get("run_resume_prompt_required")),
         "rag_active": bool(rag_update.get("rag_active", state.get("rag_active"))),
         "active_source_keys": list(rag_update.get("active_source_keys") or state.get("active_source_keys") or []),
         "active_rag_file_ids": list(rag_update.get("active_rag_file_ids") or state.get("active_rag_file_ids") or []),
@@ -8402,6 +8657,7 @@ async def run_profile_start_node(state: AlphaRavisState, runtime: Any | None = N
         "archive_rag_mode": str(rag_update.get("archive_rag_mode") or state.get("archive_rag_mode") or "tool_only"),
         "selected_toolsets": selected_toolsets,
         "loaded_toolsets": GRAPH_TOOLSET_PROFILE,
+        "runtime_settings_applied": runtime_settings,
     }
     _log_event(
         logging.INFO,
@@ -8434,10 +8690,45 @@ async def run_profile_start_node(state: AlphaRavisState, runtime: Any | None = N
             )
         ],
         **rag_update,
+        **resume_updates,
     }
-    if any(bool(item.get("message_replaced")) for item in large_paste_ingests):
+    if resume_updates.get("run_resume_prompt_required"):
+        checkpoint = dict(resume_updates.get("run_resume_checkpoint") or {})
+        updates["messages"] = [
+            AIMessage(
+                content=(
+                    "Resume-Hinweis: Ein vorheriger Agentlauf in diesem Thread wurde nicht sauber beendet "
+                    f"(letzte Phase: {checkpoint.get('phase', 'unknown')}). Der Plan und Task-State sind gespeichert. "
+                    "Soll ich genau dort weitermachen? Antworte mit `ja, weiter`. "
+                    f"Wenn keine Antwort kommt, bleibt der Job gespeichert und ich frage beim naechsten Aktivwerden erneut. "
+                    f"Auto-Resume kann per `ALPHARAVIS_RUN_STATE_AUTO_RESUME=true` aktiviert werden."
+                ),
+                id=f"alpharavis_resume_prompt_{int(time.time())}",
+            )
+        ]
+    if not resume_updates.get("run_resume_prompt_required") and any(bool(item.get("message_replaced")) for item in large_paste_ingests):
         updates["messages"] = [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages]
+    _save_run_state_checkpoint(
+        {**state, **updates},
+        phase="awaiting_resume_confirmation" if resume_updates.get("run_resume_prompt_required") else "run_profile_start",
+        status="awaiting_resume" if resume_updates.get("run_resume_prompt_required") else "running",
+    )
     return updates
+
+
+async def resume_prompt_node(state: AlphaRavisState) -> dict[str, Any]:
+    checkpoint = dict(state.get("run_resume_checkpoint") or {})
+    return {
+        "run_profile": _profile_update(
+            state,
+            run_resume_prompted=True,
+            run_resume_checkpoint=checkpoint,
+        )
+    }
+
+
+def route_after_run_profile_start(state: AlphaRavisState) -> str:
+    return "resume_prompt" if state.get("run_resume_prompt_required") else "continue"
 
 
 async def large_paste_post_compression_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
@@ -8664,11 +8955,14 @@ async def hard_context_stop_node(state: AlphaRavisState) -> dict[str, Any]:
 async def crisis_preflight_node(state: AlphaRavisState) -> dict[str, Any]:
     if not _crisis_manager_enabled() or state.get("crisis_recovery_attempted"):
         return {"crisis_route": "normal"}
-    if _owner_check_llama_server is None:
-        return {"crisis_route": "normal"}
 
     try:
-        status = await _owner_check_llama_server()
+        if _owner_check_llama_server is not None:
+            status = await _owner_check_llama_server()
+        elif _model_mgmt_inspect_ubuntu_llama_manager is not None:
+            status = await _model_mgmt_inspect_ubuntu_llama_manager(REMOTE_PCS)
+        else:
+            return {"crisis_route": "normal"}
     except Exception as exc:
         return {
             "crisis_route": "normal",
@@ -8683,7 +8977,7 @@ async def crisis_preflight_node(state: AlphaRavisState) -> dict[str, Any]:
             ),
         }
 
-    if status.get("ok"):
+    if status.get("ok") and not _ubuntu_manager_status_indicates_primary_down(status):
         return {
             "crisis_route": "normal",
             "run_profile": _profile_update(state, crisis_preflight="big_llm_ready"),
@@ -8699,6 +8993,20 @@ async def crisis_preflight_node(state: AlphaRavisState) -> dict[str, Any]:
         "messages": [AIMessage(content=notice, id=f"alpharavis_crisis_notice_{int(time.time())}")],
         "run_profile": _profile_update(state, crisis_preflight="big_llm_unavailable", crisis_status=status),
     }
+
+
+def _ubuntu_manager_status_indicates_primary_down(status: dict[str, Any]) -> bool:
+    response = status.get("instances", {}).get("response") if isinstance(status.get("instances"), dict) else None
+    if not isinstance(response, dict):
+        response = status.get("status", {}).get("response") if isinstance(status.get("status"), dict) else None
+    if not isinstance(response, dict):
+        return False
+    instance = response.get("by_id", {}).get("primary") if isinstance(response.get("by_id"), dict) else None
+    if instance is None and isinstance(response.get("llama"), dict):
+        instance = response.get("llama")
+    if not isinstance(instance, dict):
+        return False
+    return not bool(instance.get("active") and instance.get("port_open"))
 
 
 def route_after_crisis_preflight(state: AlphaRavisState) -> str:
@@ -8862,7 +9170,7 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
             context_length=_hard_context_token_limit(),
             num_messages=1,
         )
-        return {
+        updates = {
             "planner_last_key": plan_key,
             **_trace_updates(
                 state,
@@ -8881,9 +9189,11 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
                 planner_error_classification=classified,
             ),
         }
+        _save_run_state_checkpoint({**state, **updates}, phase="planner", status="failed", error=str(exc), error_classification=classified)
+        return updates
 
     if not plan:
-        return {
+        updates = {
             "planner_last_key": plan_key,
             **_trace_updates(
                 state,
@@ -8896,6 +9206,8 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
                 ),
             ),
         }
+        _save_run_state_checkpoint({**state, **updates}, phase="planner", status="running")
+        return updates
 
     content = (
         "<execution-plan>\n"
@@ -8912,7 +9224,7 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
         f"{content}\n"
         "</current-task-brief>"
     )
-    return {
+    updates = {
         "messages": [
             *([SystemMessage(content=stable_context, id=STABLE_PROMPT_CONTEXT_MESSAGE_ID)] if stable_context else []),
             *([SystemMessage(content=toolset_context, id=TOOLSET_CONTEXT_MESSAGE_ID)] if toolset_context else []),
@@ -8948,6 +9260,8 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
             **({"provider_hardening_profile": planner_provider_profile} if planner_provider_profile else {}),
         ),
     }
+    _save_run_state_checkpoint({**state, **updates}, phase="planner", status="running")
+    return updates
 
 
 def _fast_path_bind_kwargs(*, allow_chat_template_kwargs: bool) -> dict[str, Any]:
@@ -10936,6 +11250,9 @@ async def run_profile_finish_node(state: AlphaRavisState) -> dict[str, Any]:
     if isinstance(started_at, (int, float)):
         profile["total_seconds"] = round(time.time() - started_at, 3)
     profile["finished_at"] = time.time()
+    checkpoint_status = "awaiting_resume" if profile.get("run_interrupted") else "completed"
+    checkpoint_phase = str(profile.get("run_interrupted_phase") or "run_profile_finish")
+    _save_run_state_checkpoint({**state, "run_profile": profile}, phase=checkpoint_phase, status=checkpoint_status)
     _log_event(
         logging.INFO,
         "run.finished",
@@ -11143,12 +11460,31 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     )
     model_management_enabled = _model_management_enabled()
     advanced_model_management_enabled = _advanced_model_management_enabled()
+    server_model_manager_enabled = _server_model_manager_enabled()
     owner_power_tools_enabled = _owner_power_tools_enabled()
     crisis_manager_enabled = _crisis_manager_enabled()
-    model_management_tools = (
-        [inspect_model_management_status, plan_embedding_maintenance, run_embedding_memory_jobs, queue_vector_memory_backfill]
-        if model_management_enabled
+    server_management_tools = (
+        [
+            inspect_model_management_status,
+            inspect_ubuntu_llama_manager,
+            diagnose_ubuntu_llama_no_response,
+            recover_ubuntu_llama_no_response,
+            control_ubuntu_llama_service,
+            request_ubuntu_server_power_action,
+            configure_ubuntu_llama_instance,
+        ]
+        if server_model_manager_enabled or model_management_enabled
         else []
+    )
+    model_management_tools = (
+        [
+            *server_management_tools,
+            plan_embedding_maintenance,
+            run_embedding_memory_jobs,
+            queue_vector_memory_backfill,
+        ]
+        if model_management_enabled
+        else server_management_tools
     )
     pixelle_management_tools = [prepare_comfy_for_pixelle] if advanced_model_management_enabled else []
     power_management_tools = [request_power_management_action] if advanced_model_management_enabled else []
@@ -11171,11 +11507,15 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         if owner_power_tools_enabled
         else []
     )
-    if advanced_model_management_enabled:
+    if advanced_model_management_enabled or server_model_manager_enabled:
         model_management_prompt = (
             "For ComfyUI readiness, Ollama embedding windows, or PC power "
             "lifecycle questions, use the model-management tools or transfer "
-            "to power_management_agent. "
+            "to power_management_agent. Ubuntu Llama Manager tools can inspect "
+            "server/API/ESP state, control llama.cpp services, run gated ESP "
+            "power actions, and safely reconfigure llama.cpp instances through "
+            "the configured API; executing recovery, service, power, or config "
+            "changes is gated by model-management action settings. "
         )
     elif model_management_enabled:
         model_management_prompt = (
@@ -11231,7 +11571,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         ),
     )
     transfer_to_power = None
-    if advanced_model_management_enabled:
+    if advanced_model_management_enabled or server_model_manager_enabled:
         transfer_to_power = create_handoff_tool(
             agent_name="power_management_agent",
             description=(
@@ -11776,19 +12116,18 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         hermes_worker,
         context_worker,
     ]
-    if advanced_model_management_enabled:
-        power_llm = _budget_guarded_agent_model(_text_only_agent_model(_deep_agent_model(
-            model_name=os.getenv(
-                "ALPHARAVIS_POWER_MANAGER_MODEL",
-                os.getenv("ALPHARAVIS_CRISIS_MANAGER_MODEL", "openai/edge-gemma"),
-            ),
-            timeout_seconds=float(os.getenv("ALPHARAVIS_POWER_MANAGER_TIMEOUT_SECONDS", "90")),
-            model_kwargs={"chat_template_kwargs": {"enable_thinking": False}},
-        )), purpose="power_management_agent")
+    if advanced_model_management_enabled or server_model_manager_enabled:
+        power_llm = _server_model_manager_model()
         power_worker = _create_budgeted_deep_agent(
             model=power_llm,
             tools=_agent_tools("power_management_agent", [
                 inspect_model_management_status,
+                inspect_ubuntu_llama_manager,
+                diagnose_ubuntu_llama_no_response,
+                recover_ubuntu_llama_no_response,
+                control_ubuntu_llama_service,
+                request_ubuntu_server_power_action,
+                configure_ubuntu_llama_instance,
                 check_external_service,
                 plan_embedding_maintenance,
                 run_embedding_memory_jobs,
@@ -11821,6 +12160,17 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 "AlphaRavis aware of local hardware state without taking unsafe "
                 "actions. Inspect big llama.cpp availability, Ollama running models, "
                 "ComfyUI readiness, and the embedding-maintenance window. "
+                "Use Ubuntu Llama Manager tools for the external llama.cpp manager "
+                "API: inspect instances/models, diagnose no-response failures, "
+                "recover the primary server when actions are enabled, start/stop/"
+                "restart managed llama services, run ESP/server power actions, "
+                "or patch primary/secondary model and context size. "
+                "Keep prompts and tool arguments small. For start requests, you may "
+                "start the named server or all requested servers. For shutdown, "
+                "power-off, reboot, reset, force-kill, or ambiguous destructive "
+                "requests, first state the exact target and tool you intend to use "
+                "and ask for confirmation unless the tool itself returns a human "
+                "approval interrupt. Never substitute a different server target. "
                 "You may use wake_on_lan for configured PCs when the user asks or "
                 "a Pixelle/Comfy job needs it. Shutdowns, service starts/stops, "
                 "Ollama model switching, and embedding-job runs must go through "
@@ -11845,6 +12195,12 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         crisis_worker = _create_budgeted_deep_agent(
             model=crisis_llm,
             tools=_agent_tools("crisis_manager_agent", [
+                inspect_model_management_status,
+                inspect_ubuntu_llama_manager,
+                diagnose_ubuntu_llama_no_response,
+                recover_ubuntu_llama_no_response,
+                control_ubuntu_llama_service,
+                request_ubuntu_server_power_action,
                 *owner_safe_power_tools,
                 build_specialist_report,
             ], [
@@ -11855,8 +12211,11 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             name="crisis_manager_agent",
             system_prompt=(
                 "You are AlphaRavis Crisis Manager. Keep context tiny. Use only "
-                "safe owner tools: check status, read logs, wake/start/restart. "
-                "Do not shutdown, reboot, kill processes, or delete files. "
+                "safe recovery tools: inspect status, diagnose Ubuntu Llama Manager, "
+                "read logs, wake/start/restart, run ESP power-on or power-cycle "
+                "when explicitly needed, and call Ubuntu Llama Manager recovery "
+                "only when model-management actions are enabled. Do not shutdown, "
+                "delete files, or change model context during crisis recovery. "
                 "Goal: restore the big llama.cpp backend, then report whether "
                 "it is ready. Return a short status and next step."
             ),
@@ -11875,7 +12234,11 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
 
     async def run_swarm_with_context_retry(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
         try:
-            return await swarm.ainvoke(state)
+            _save_run_state_checkpoint(state, phase="alpha_ravis_swarm", status="running")
+            result = await swarm.ainvoke(state)
+            if isinstance(result, dict):
+                _save_run_state_checkpoint({**state, **result}, phase="alpha_ravis_swarm", status="running")
+            return result
         except Exception as exc:
             current_budget = _context_budget_snapshot(state)
             classified = _classified_error_profile(
@@ -11891,7 +12254,42 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 and classified.get("should_compress")
                 and classified.get("reason") in {"context_overflow", "payload_too_large"}
             ):
-                raise
+                interrupted_profile = _profile_update(
+                    state,
+                    run_interrupted=True,
+                    run_interrupted_phase="alpha_ravis_swarm",
+                    run_interrupted_error=str(exc)[:500],
+                    run_interrupted_error_classification=classified,
+                )
+                interrupted_state = {**state, "run_profile": interrupted_profile}
+                _save_run_state_checkpoint(
+                    interrupted_state,
+                    phase="alpha_ravis_swarm",
+                    status="awaiting_resume",
+                    error=str(exc),
+                    error_classification=classified,
+                )
+                return {
+                    "messages": [
+                        AIMessage(
+                            content=(
+                                "Resume-Hinweis: Der Agentlauf wurde unterbrochen, wahrscheinlich durch einen "
+                                "Provider-/Verbindungsfehler. Der aktuelle Plan und Task-State sind gespeichert. "
+                                "Soll ich dort weitermachen? Antworte mit `ja, weiter`. Wenn keine Antwort kommt, "
+                                "bleibt der Job gespeichert und ich frage beim naechsten Aktivwerden erneut."
+                            ),
+                            id=f"alpharavis_interrupted_resume_prompt_{int(time.time())}",
+                        )
+                    ],
+                    "run_profile": interrupted_profile,
+                    "run_resume_prompt_required": True,
+                    "run_resume_checkpoint": {
+                        "phase": "alpha_ravis_swarm",
+                        "status": "awaiting_resume",
+                        "error": str(exc)[:500],
+                        "error_classification": classified,
+                    },
+                }
 
             _log_exception(
                 "swarm.context_overflow_retry.started",
@@ -11915,6 +12313,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                     provider_reported_context_limit=provider_limit,
                     provider_context_overflow_retry_classification=classified,
                 )
+            _save_run_state_checkpoint({**retry_state, **(result if isinstance(result, dict) else {})}, phase="alpha_ravis_swarm", status="running")
             return result
 
     async def run_crisis_manager(state: AlphaRavisState) -> dict[str, Any]:
@@ -11962,6 +12361,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
 
     builder = StateGraph(AlphaRavisState)
     builder.add_node("run_profile_start", run_profile_start_node)
+    builder.add_node("resume_prompt", resume_prompt_node)
     builder.add_node("pre_run_context_guard", pre_run_context_guard_node)
     builder.add_node("large_paste_post_compression", large_paste_post_compression_node)
     builder.add_node("route_decision", route_decision_node)
@@ -11985,7 +12385,12 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     builder.add_node("memory_notice", memory_notice_node)
     builder.add_node("run_profile_finish", run_profile_finish_node)
     builder.add_edge(START, "run_profile_start")
-    builder.add_edge("run_profile_start", "pre_run_context_guard")
+    builder.add_conditional_edges(
+        "run_profile_start",
+        route_after_run_profile_start,
+        {"resume_prompt": "resume_prompt", "continue": "pre_run_context_guard"},
+    )
+    builder.add_edge("resume_prompt", END)
     builder.add_edge("pre_run_context_guard", "large_paste_post_compression")
     builder.add_edge("large_paste_post_compression", "route_decision")
     builder.add_conditional_edges(

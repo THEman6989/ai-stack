@@ -33,6 +33,21 @@ The current Docker architecture is split into these main roles:
 - `litellm`: model gateway. Routes AlphaRavis model calls to configured
   backends such as llama.cpp or Ollama. Its proxy metadata lives in the
   `litellm` Postgres database.
+- External `ubuntu-llama-manager`: optional owner-run API for a Ubuntu
+  llama.cpp host. LangGraph can inspect its `/health`, `/status`, `/models`,
+  and `/llama/instances` endpoints and, when model-management actions are
+  enabled, request no-response recovery, control managed llama services, run
+  ESP/server power actions, or patch a `primary`/`secondary` llama.cpp instance
+  model/context through `/llama/instances/{id}/config`. Optional direct ESP
+  mode can call the ESP `/action` or `/cancel` endpoints when the Ubuntu host
+  itself is off.
+- `Server Model Manager`: a dedicated LangGraph/Bridge access mode for
+  `power_management_agent`. LibreChat sees it as the `server-model-manager`
+  model/preset on the existing AlphaRavis Bridge, while native LangGraph
+  callers can pass `active_agent="power_management_agent"` and
+  `selected_toolsets=["agent/power"]`. Its default LangGraph model is
+  `openai/server-model-manager`, a LiteLLM route intended to prefer BigBoss and
+  fall back to Edge Gemma.
 - `mongodb`: LangGraph checkpointing and long-term store backing.
 - `vectordb`: Postgres with pgvector. It can act as an optional semantic
   search sidecar for AlphaRavis memory; it does not replace MongoDB.
@@ -45,7 +60,9 @@ The current Docker architecture is split into these main roles:
   present. Cards are directly clickable. LiteLLM and Pixelle are represented as
   separate Web UI and API/MCP endpoint cards where appropriate. Experimental
   LangGraph specialist visual ports are infrastructure/TCP entries, not normal
-  click-to-open web cards.
+  click-to-open web cards. It also serves `/settings`, a mobile/PWA-friendly
+  settings UI generated from `.env(exaple)` that can write temporary runtime
+  overrides or persist validated keys to `.env`.
 - `librechat`: the normal chat UI for the user.
 - `rag_api`: local document search backend when available. Its LangChain
   PGVector tables live in the separate `rag_api` Postgres database.
@@ -106,6 +123,19 @@ values as True/False controls, and saves through the same root `.env` file that
 Docker Compose and setup commands read. Per-field reset restores the documented
 default for that key; reset-all asks for confirmation before restoring every
 shown setting to `.env(exaple)`.
+
+For day-to-day runtime control after the stack is up, the Service Dashboard
+exposes `/settings`. The Settings UI parses every key from `.env(exaple)`,
+annotates it with current `.env` values and any temporary runtime override, and
+offers search, category chips, importance filters, changed/runtime filters, and
+mobile-first controls. The UI uses compact setting rows, local browser
+favorites, generated fallback descriptions for undocumented keys, and inferred
+dropdowns for common mode/profile settings. `Temporary anwenden` writes
+`service-dashboard-data/runtime_settings.json`; LangGraph reads that file before
+each new run and applies the values into `os.environ`, so new chat turns can
+pick up runtime changes without rewriting `.env`. `Permanent speichern` writes
+validated keys back to `.env` after browser confirmation. The dashboard card and
+Tailscale helper both treat `/settings` as a normal dashboard Web Interface.
 
 `make install` now does more than copy `.env`: it syncs missing defaults from
 `.env(exaple)`, lets the operator choose a runtime API/streaming profile,
@@ -701,6 +731,27 @@ LangGraph checkpointing stores thread state. This includes message state,
 active agent state, compression summaries, and other graph state fields.
 
 The checkpointer is configured through `langgraph.json` and MongoDB.
+
+### Run-State Resume Manager
+
+LangGraph checkpoints persist graph state at checkpoint boundaries. AlphaRavis
+also keeps a smaller operator-facing run-state checkpoint in MongoDB through
+`langgraph-app/run_state_manager.py`. This is the recovery record for disrupted
+agent runs where the operator needs the latest plan/task state after a
+llama.cpp/LiteLLM disconnect or LangGraph process restart.
+
+The run-state manager stores one latest `current` record per thread in
+`ALPHARAVIS_RUN_STATE_DB` / `ALPHARAVIS_RUN_STATE_COLLECTION` and replaces it
+atomically as a full Mongo document. The record includes phase, status,
+`current_task_brief`, `planner_context`, `planner_last_key`, selected toolsets,
+active agent, compact run profile, and provider error classification. Completed
+runs are marked `completed`; interrupted provider/swarm runs stay
+`awaiting_resume`.
+
+On the next message in the same thread, an open checkpoint restores the planner
+context and task brief. By default AlphaRavis asks the user whether to continue
+and keeps the job saved if no answer arrives; operators can enable automatic
+continuation with `ALPHARAVIS_RUN_STATE_AUTO_RESUME=true`.
 
 ### LangMem Memories
 
@@ -1912,12 +1963,18 @@ Media is safe-by-default:
   image/video blocks. Inline payloads are written to disk but not copied back
   into MongoDB asset metadata.
 - The media-gallery service stores optional original/processed derivation
-  fields and exposes `/gallery?view=all|original|processed` for grouped
-  operator inspection with copyable stable media URLs. Gallery/API listing can
+  fields and exposes `/gallery?view=all|original|processed` for operator
+  inspection with copyable stable media URLs. Gallery/API listing can
   filter by `thread_id`, `thread_key`, or `group_id`, sort by date/name/type,
-  and group by day+group, thread, group, date, or media type. The gallery UI is
-  responsive and serves its own `/favicon.svg` so browser tabs and mobile
-  shortcuts show a Media Gallery identity instead of the default browser icon.
+  and group by date, no section, thread, group, or media type. The gallery UI
+  defaults to collapsible date sections and hides technical source/thread/group
+  metadata from cards so the mobile view stays focused on previews, date/time,
+  copy, open, and upload actions. The Gallery also accepts direct browser
+  uploads through `POST /assets/upload`, stores them in `media-data`, records
+  them as original `gallery_upload` assets in MongoDB, and redirects back to the
+  chronological view. It serves its own `/favicon.svg` so browser tabs and
+  mobile shortcuts show a Media Gallery identity instead of the default browser
+  icon.
 - Media-gallery Mongo state is split conceptually:
   - `assets`: one row per file/media asset
   - `references`: where that asset appeared in chat/tool context

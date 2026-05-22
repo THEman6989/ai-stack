@@ -12,8 +12,8 @@ from typing import Any
 from urllib.parse import urlencode, unquote_to_bytes, urlparse
 
 import httpx
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -37,14 +37,31 @@ MONGO_REFERENCES_COLLECTION = os.getenv("ALPHARAVIS_MEDIA_MONGO_REFERENCES_COLLE
 DOWNLOAD_ENABLED = os.getenv("ALPHARAVIS_MEDIA_DOWNLOAD_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 MAX_DOWNLOAD_BYTES = int(os.getenv("ALPHARAVIS_MEDIA_MAX_DOWNLOAD_BYTES", str(2 * 1024 * 1024 * 1024)))
 ASSET_SORT_FIELDS = {"created_at", "title", "media_type", "asset_kind", "thread_key", "group_id"}
-GALLERY_GROUP_BY = {"day_group", "thread", "group", "day", "media_type"}
+GALLERY_GROUP_BY = {"day", "none", "thread", "group", "media_type"}
 FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#0b1018"/><path d="M12 44V20h40v24H12Z" fill="#ff8a58"/><path d="M18 38l8-9 6 6 5-7 9 10H18Z" fill="#101620"/><circle cx="42" cy="25" r="4" fill="#101620"/></svg>"""
+UPLOAD_MIME_TYPES = {
+    "image/jpeg": "image",
+    "image/png": "image",
+    "image/gif": "image",
+    "image/webp": "image",
+    "image/heic": "image",
+    "image/heif": "image",
+    "video/mp4": "video",
+    "video/quicktime": "video",
+    "video/webm": "video",
+    "audio/mpeg": "audio",
+    "audio/mp4": "audio",
+    "audio/wav": "audio",
+    "audio/x-wav": "audio",
+    "application/pdf": "document",
+    "text/plain": "document",
+    "text/markdown": "document",
+}
 
 app = FastAPI(title="AlphaRavis Media Gallery", openapi_version="3.1.0")
 
 @app.get("/", include_in_schema=False)
 async def root_redirect():
-    from fastapi.responses import RedirectResponse
     return RedirectResponse(url="/gallery")
 
 
@@ -143,6 +160,29 @@ def _extension_from_url(url: str, media_type: str) -> str:
     return {"image": ".png", "video": ".mp4", "audio": ".wav", "document": ".bin"}.get(media_type, ".bin")
 
 
+def _media_type_from_upload(filename: str, mime_type: str) -> str:
+    lowered_mime = (mime_type or "").split(";", 1)[0].strip().lower()
+    if lowered_mime in UPLOAD_MIME_TYPES:
+        return UPLOAD_MIME_TYPES[lowered_mime]
+    suffix = Path(filename or "").suffix.lower()
+    if suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif"}:
+        return "image"
+    if suffix in {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}:
+        return "video"
+    if suffix in {".mp3", ".m4a", ".wav", ".ogg", ".flac"}:
+        return "audio"
+    if suffix:
+        return "document"
+    return "unknown"
+
+
+def _extension_from_upload(filename: str, media_type: str) -> str:
+    suffix = Path(filename or "").suffix.lower()
+    if suffix and len(suffix) <= 12:
+        return suffix
+    return {"image": ".png", "video": ".mp4", "audio": ".wav", "document": ".bin"}.get(media_type, ".bin")
+
+
 def _stored_source_url(source_url: str) -> str:
     if source_url.lower().startswith("data:"):
         header = source_url.partition(",")[0]
@@ -189,6 +229,117 @@ async def _download_asset(source_url: str, target: Path) -> dict[str, Any]:
     return {"bytes": size, "path": str(target)}
 
 
+def _parse_content_disposition(value: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for part in value.split(";"):
+        key, separator, raw = part.strip().partition("=")
+        if not separator:
+            continue
+        cleaned = raw.strip().strip('"').replace('\\"', '"')
+        result[key.lower()] = cleaned
+    return result
+
+
+def _parse_gallery_upload_multipart(content_type: str, body: bytes) -> tuple[dict[str, str], dict[str, Any]]:
+    if "multipart/form-data" not in content_type.lower():
+        raise HTTPException(status_code=400, detail="multipart/form-data is required")
+    match = re.search(r"boundary=(?P<boundary>[^;]+)", content_type, flags=re.IGNORECASE)
+    if not match:
+        raise HTTPException(status_code=400, detail="multipart boundary is missing")
+    boundary = match.group("boundary").strip().strip('"').encode("utf-8")
+    fields: dict[str, str] = {}
+    uploaded: dict[str, Any] = {}
+    for raw_part in body.split(b"--" + boundary):
+        part = raw_part.strip(b"\r\n")
+        if not part or part == b"--" or b"\r\n\r\n" not in part:
+            continue
+        raw_headers, payload = part.split(b"\r\n\r\n", 1)
+        if payload.endswith(b"\r\n"):
+            payload = payload[:-2]
+        headers: dict[str, str] = {}
+        for line in raw_headers.decode("utf-8", "replace").split("\r\n"):
+            key, separator, value = line.partition(":")
+            if separator:
+                headers[key.strip().lower()] = value.strip()
+        disposition = _parse_content_disposition(headers.get("content-disposition", ""))
+        name = disposition.get("name", "")
+        if not name:
+            continue
+        filename = disposition.get("filename", "")
+        if filename:
+            uploaded = {
+                "field": name,
+                "filename": Path(filename).name,
+                "content_type": headers.get("content-type", "application/octet-stream"),
+                "content": payload,
+            }
+        else:
+            fields[name] = payload.decode("utf-8", "replace").strip()
+    if not uploaded.get("content"):
+        raise HTTPException(status_code=400, detail="file upload is required")
+    return fields, uploaded
+
+
+def _store_uploaded_asset(*, filename: str, content_type: str, content: bytes, title: str = "") -> dict[str, Any]:
+    if not content:
+        raise HTTPException(status_code=400, detail="uploaded file is empty")
+    if len(content) > MAX_DOWNLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"upload exceeds limit {MAX_DOWNLOAD_BYTES} bytes")
+    media_type = _media_type_from_upload(filename, content_type)
+    digest = hashlib.sha256(content).hexdigest()
+    asset_id = hashlib.sha256(f"gallery-upload|{digest}|{filename}".encode("utf-8")).hexdigest()[:24]
+    created_at = int(time.time())
+    day = time.strftime("%Y-%m-%d", time.localtime(created_at))
+    safe_title = _safe_segment(title or filename or media_type, "upload")
+    extension = _extension_from_upload(filename, media_type)
+    target = MEDIA_ROOT / day / "gallery-upload" / "input" / f"{asset_id}-{safe_title}{extension}"
+    ensure_write_allowed(target, allowed_root=MEDIA_ROOT)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.tmp")
+    with tmp.open("wb") as fh:
+        fh.write(content)
+    os.replace(tmp, target)
+    relative_path = str(target.relative_to(MEDIA_ROOT))
+    public_url = _public_url(relative_path)
+    record = {
+        "_id": asset_id,
+        "asset_id": asset_id,
+        "source_url": public_url,
+        "file_id": "",
+        "source_key": f"gallery-upload-{asset_id}",
+        "thread_id": "",
+        "thread_key": "",
+        "group_id": "gallery-upload",
+        "asset_kind": "original",
+        "origin": "gallery_upload",
+        "parent_asset_id": "",
+        "root_asset_id": asset_id,
+        "derivation_group_id": "gallery-upload",
+        "source_message_id": "",
+        "result_message_id": "",
+        "tool_call_id": "",
+        "processing_provider": "",
+        "processing_prompt": "",
+        "role": "input",
+        "media_type": media_type,
+        "mime_type": content_type,
+        "title": title or filename or asset_id,
+        "prompt": "",
+        "caption": "",
+        "metadata": {"original_filename": filename, "bytes": len(content), "sha256": digest},
+        "relative_path": relative_path,
+        "local_path": str(target),
+        "public_url": public_url,
+        "download_url": public_url,
+        "thumbnail_path": "",
+        "preview_path": "",
+        "download_error": "",
+        "created_at": created_at,
+    }
+    _collection().replace_one({"_id": asset_id}, record, upsert=True)
+    return record
+
+
 def _public_url(relative_path: str) -> str:
     return f"{PUBLIC_BASE_URL}/media/{relative_path.replace(os.sep, '/')}"
 
@@ -222,7 +373,7 @@ def _asset_query(
 
 
 def _gallery_group_key(row: dict[str, Any], group_by: str) -> str:
-    day = time.strftime("%Y-%m-%d", time.localtime(int(row.get("created_at") or 0)))
+    day, _ = _gallery_display_date(row.get("created_at"))
     thread = str(row.get("thread_key") or row.get("thread_id") or "no-thread")
     group = str(row.get("derivation_group_id") or row.get("group_id") or "ungrouped")
     media_type = str(row.get("media_type") or "unknown")
@@ -230,11 +381,44 @@ def _gallery_group_key(row: dict[str, Any], group_by: str) -> str:
         return thread
     if group_by == "group":
         return group
-    if group_by == "day":
-        return day
     if group_by == "media_type":
         return media_type
-    return f"{day} / {group}"
+    if group_by == "none":
+        return "Alle Medien"
+    return day
+
+
+def _gallery_display_date(timestamp: Any) -> tuple[str, str]:
+    try:
+        created_at = int(timestamp or 0)
+    except (TypeError, ValueError):
+        created_at = 0
+    if created_at <= 0:
+        return "Ohne Datum", ""
+    return (
+        time.strftime("%d.%m.%Y", time.localtime(created_at)),
+        time.strftime("%H:%M", time.localtime(created_at)),
+    )
+
+
+def _gallery_media_label(media_type: Any) -> str:
+    return {
+        "image": "Bild",
+        "video": "Video",
+        "audio": "Audio",
+        "document": "Dokument",
+    }.get(str(media_type or "").lower(), "Media")
+
+
+def _gallery_kind_label(asset_kind: Any, role: Any) -> str:
+    value = str(asset_kind or role or "unknown").lower()
+    return {
+        "original": "Original",
+        "processed": "Bearbeitet",
+        "reference": "Referenz",
+        "input": "Original",
+        "output": "Bearbeitet",
+    }.get(value, "Media")
 
 
 def _asset_kind_from_request(request: MediaRegisterRequest) -> str:
@@ -370,6 +554,21 @@ async def register_asset(request: MediaRegisterRequest):
     return record
 
 
+@app.post("/assets/upload", include_in_schema=False)
+async def upload_asset(request: Request):
+    content_length = int(request.headers.get("content-length") or "0")
+    if content_length and content_length > MAX_DOWNLOAD_BYTES + 1024 * 1024:
+        raise HTTPException(status_code=413, detail=f"upload exceeds limit {MAX_DOWNLOAD_BYTES} bytes")
+    fields, uploaded = _parse_gallery_upload_multipart(request.headers.get("content-type", ""), await request.body())
+    _store_uploaded_asset(
+        filename=str(uploaded.get("filename") or "upload.bin"),
+        content_type=str(uploaded.get("content_type") or "application/octet-stream"),
+        content=uploaded.get("content") or b"",
+        title=fields.get("title", ""),
+    )
+    return RedirectResponse(url="/gallery?view=all&group_by=day&sort=created_at&order=desc", status_code=303)
+
+
 @app.get("/assets")
 async def list_assets(
     limit: int = 200,
@@ -425,12 +624,12 @@ async def gallery(
     thread_id: str = "",
     thread_key: str = "",
     group_id: str = "",
-    group_by: str = "day_group",
+    group_by: str = "day",
     sort: str = "created_at",
     order: str = "desc",
 ):
     view = view if view in {"all", "original", "processed"} else "all"
-    group_by = group_by if group_by in GALLERY_GROUP_BY else "day_group"
+    group_by = group_by if group_by in GALLERY_GROUP_BY else "day"
     query = _asset_query(
         media_type=media_type,
         thread_id=thread_id,
@@ -459,58 +658,58 @@ async def gallery(
         "<!doctype html><html lang='de'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>"
         "<title>AlphaRavis Media Gallery</title><link rel='icon' href='/favicon.svg' type='image/svg+xml'>",
         "<style>"
-        ":root{color-scheme:dark;--bg:#080b10;--panel:#101620;--panel2:#151d29;--line:#253144;--text:#eef4ff;--muted:#94a3b8;--soft:#c7d2e4;--accent:#ff8a58}"
-        "*{box-sizing:border-box}body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;background:linear-gradient(145deg,#080b10 0%,#0d1118 52%,#10151d 100%);color:var(--text);min-height:100vh}"
-        "header{position:sticky;top:0;background:rgba(8,11,16,.94);backdrop-filter:blur(12px);border-bottom:1px solid var(--line);z-index:2}"
-        ".shell{width:min(1440px,calc(100vw - 40px));margin:0 auto}.hero{display:grid;gap:12px;padding:22px 0 16px}.brand{display:flex;align-items:center;gap:12px}.mark{display:grid;place-items:center;width:44px;height:44px;border-radius:8px;background:var(--accent);color:#101620;font-weight:900;letter-spacing:0}.eyebrow{color:var(--accent);font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.08em}.titleline{display:grid;gap:2px}h1{font-size:clamp(26px,5vw,54px);line-height:1;margin:0;letter-spacing:0}.subhead{max-width:860px;margin:0;color:var(--soft);font-size:15px;line-height:1.4}"
-        ".tabs{display:flex;gap:8px;flex-wrap:wrap}.tabs a{color:var(--soft);text-decoration:none;border:1px solid var(--line);border-radius:8px;padding:8px 11px;background:rgba(255,255,255,.03);font-size:13px}.tabs a.active{background:var(--accent);color:#101620;border-color:var(--accent);font-weight:800}"
-        ".filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:8px;padding:0 0 18px;max-width:1080px}.filters input,.filters select{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px;min-height:40px;font:inherit;font-size:14px}.filters button{background:#e8eef8;color:#101620;border:1px solid #e8eef8;border-radius:8px;padding:9px 12px;cursor:pointer;font-weight:800}"
-        "main{padding:20px 0 44px}details{margin:0 0 18px;border-top:1px solid var(--line);padding-top:14px}summary{cursor:pointer;font-weight:800;font-size:17px;list-style:none;display:flex;align-items:center;justify-content:space-between;gap:10px}summary::-webkit-details-marker{display:none}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px;margin-top:12px}"
-        ".card{position:relative;background:linear-gradient(180deg,rgba(21,29,41,.96),rgba(12,17,25,.98));border:1px solid var(--line);border-radius:8px;padding:12px;min-height:240px;display:flex;flex-direction:column;gap:10px;overflow:hidden}.thumb{display:block;border-radius:7px;background:#05070a;border:1px solid rgba(255,255,255,.06);overflow:hidden}img,video{width:100%;aspect-ratio:16/9;object-fit:contain;display:block;background:#000}.file-link{display:flex;align-items:center;min-height:120px;padding:12px;color:var(--soft);overflow-wrap:anywhere;text-decoration:none}.meta{font-size:12px;color:var(--muted);word-break:break-word;display:grid;gap:3px;padding-bottom:36px}.badge{display:inline-flex;width:max-content;font-size:11px;text-transform:uppercase;letter-spacing:.04em;border:1px solid rgba(255,255,255,.14);border-radius:6px;padding:3px 7px;color:var(--soft);background:rgba(255,255,255,.04)}.asset-head{display:flex;align-items:start;justify-content:space-between;gap:8px}h3{font-size:15px;margin:0;line-height:1.25;letter-spacing:0}.actions{position:absolute;right:12px;bottom:12px;display:flex;gap:6px}.actions button,.actions a{font-size:12px;background:#202838;color:var(--text);border:1px solid #344055;border-radius:7px;padding:6px 8px;text-decoration:none;cursor:pointer}.empty{color:var(--muted);border:1px dashed var(--line);border-radius:8px;padding:22px;background:rgba(255,255,255,.03)}"
-        "@media(max-width:760px){.shell{width:calc(100% - 28px)}header{position:static}.hero{padding-top:18px}.grid{grid-template-columns:1fr}.filters{grid-template-columns:1fr 1fr}.subhead{font-size:14px}.card{min-height:auto}}@media(max-width:460px){.shell{width:calc(100% - 20px)}.filters{grid-template-columns:1fr}.brand{align-items:flex-start}.mark{width:38px;height:38px}}"
+        ":root{color-scheme:dark;--bg:#0a0d0f;--surface:#11171d;--surface2:#161d24;--line:#26313b;--text:#f3f7f2;--muted:#9aa8a6;--soft:#d2ddd8;--accent:#7dd3c7;--accent2:#f4b95f;--danger:#ef8b8b}"
+        "*{box-sizing:border-box}body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;background:radial-gradient(circle at 18% 0%,rgba(125,211,199,.16),transparent 30%),linear-gradient(160deg,#0a0d0f 0%,#12171b 48%,#0d1113 100%);color:var(--text);min-height:100vh}"
+        "header{position:sticky;top:0;background:rgba(10,13,15,.88);backdrop-filter:blur(18px);border-bottom:1px solid rgba(255,255,255,.08);z-index:2}"
+        ".shell{width:min(1480px,calc(100vw - 40px));margin:0 auto}.topbar{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:18px 0 12px}.brand{display:flex;align-items:center;gap:12px;min-width:0}.mark{display:grid;place-items:center;width:42px;height:42px;border-radius:8px;background:linear-gradient(135deg,var(--accent),#d7f7ee);color:#08100f;font-weight:900;letter-spacing:0}.eyebrow{color:var(--accent);font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em}.titleline{display:grid;gap:2px;min-width:0}h1{font-size:28px;line-height:1;margin:0;letter-spacing:0}.count-pill{border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:8px 10px;background:rgba(255,255,255,.04);color:var(--soft);font-size:13px;white-space:nowrap}"
+        ".controls{display:grid;grid-template-columns:auto auto 1fr;gap:12px;align-items:start;padding:0 0 16px}.tabs{display:flex;gap:6px;flex-wrap:wrap}.tabs a{color:var(--soft);text-decoration:none;border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:9px 11px;background:rgba(255,255,255,.035);font-size:13px;min-height:38px}.tabs a.active{background:var(--text);color:#11171d;border-color:var(--text);font-weight:800}"
+        ".upload-form label{display:flex;align-items:center;justify-content:center;min-height:38px;border-radius:8px;border:1px solid rgba(125,211,199,.4);background:rgba(125,211,199,.1);color:#d7f7ee;padding:9px 12px;font-size:13px;font-weight:850;cursor:pointer;white-space:nowrap}.upload-form input{position:absolute;inline-size:1px;block-size:1px;opacity:0;pointer-events:none}.filters{display:grid;grid-template-columns:repeat(6,minmax(0,1fr)) auto;gap:8px}.filters input,.filters select{width:100%;background:var(--surface);color:var(--text);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:9px 10px;min-height:38px;font:inherit;font-size:13px}.filters button{background:var(--accent);color:#08100f;border:1px solid var(--accent);border-radius:8px;padding:9px 14px;cursor:pointer;font-weight:900;min-height:38px;white-space:nowrap}"
+        "main{padding:22px 0 50px}.day{margin:0 0 28px}.day summary{cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:0 0 12px;border-bottom:1px solid rgba(255,255,255,.08)}.day summary::-webkit-details-marker{display:none}.day-title{display:flex;align-items:baseline;gap:10px;min-width:0}.day-title strong{font-size:22px;letter-spacing:0}.day-title span,.section-meta{color:var(--muted);font-size:13px;white-space:nowrap}.section-meta:after{content:'Hide';color:var(--soft)}.day:not([open]) .section-meta:after{content:'Show'}"
+        ".grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px;margin-top:14px}.card{position:relative;background:rgba(17,23,29,.84);border:1px solid rgba(255,255,255,.09);border-radius:8px;overflow:hidden;min-height:250px;display:flex;flex-direction:column;box-shadow:0 18px 38px rgba(0,0,0,.22)}.thumb{display:block;background:#050708;overflow:hidden}img,video{width:100%;aspect-ratio:4/5;object-fit:contain;display:block;background:#050708}.file-link{display:grid;place-items:center;aspect-ratio:4/5;padding:20px;color:var(--soft);text-decoration:none;background:linear-gradient(160deg,#1b242b,#10161b)}.file-link strong{font-size:18px}.asset-info{display:grid;gap:9px;padding:11px}.asset-top{display:flex;align-items:center;justify-content:space-between;gap:8px}.asset-title{margin:0;font-size:14px;line-height:1.2;letter-spacing:0;color:var(--soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.badge{display:inline-flex;width:max-content;font-size:11px;border:1px solid rgba(125,211,199,.35);border-radius:7px;padding:4px 7px;color:#d7f7ee;background:rgba(125,211,199,.1);white-space:nowrap}.meta{display:flex;align-items:center;justify-content:space-between;gap:10px;color:var(--muted);font-size:12px}.actions{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:1px}.actions button,.actions a{font-size:12px;background:#202a31;color:var(--text);border:1px solid rgba(255,255,255,.11);border-radius:7px;padding:8px 9px;text-decoration:none;cursor:pointer;text-align:center;font-weight:750}.empty{color:var(--muted);border:1px dashed rgba(255,255,255,.14);border-radius:8px;padding:22px;background:rgba(255,255,255,.03)}"
+        "@media(max-width:1100px){.controls{grid-template-columns:1fr}.filters{grid-template-columns:repeat(2,minmax(0,1fr))}.filters button{grid-column:span 2}.upload-form label{width:100%}}@media(max-width:980px){header{position:static}.grid{grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:10px}.shell{width:calc(100% - 28px)}}@media(max-width:540px){.shell{width:calc(100% - 20px)}.topbar{align-items:flex-start}.count-pill{display:none}h1{font-size:24px}.mark{width:38px;height:38px}.tabs{display:grid;grid-template-columns:repeat(3,1fr)}.tabs a{text-align:center}.filters{grid-template-columns:1fr 1fr}.filters input[name='thread_key'],.filters input[name='group_id']{grid-column:span 2}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.card{min-height:0}img,video,.file-link{aspect-ratio:1}.asset-info{padding:9px}.asset-title{font-size:13px}.actions{grid-template-columns:1fr}.day-title strong{font-size:19px}}"
         "</style>",
         "<script>function copyLink(url){navigator.clipboard&&navigator.clipboard.writeText(url)}</script>",
-        "</head><body><header><div class='shell'><div class='hero'><div class='brand'><div class='mark'>MG</div><div class='titleline'><div class='eyebrow'>AlphaRavis Media</div><h1>Media Gallery</h1></div></div><p class='subhead'>Gespeicherte Uploads, Pixelle-Ergebnisse, Referenzen und Analyse-Assets mit stabilen Media-URLs fuer Chat, RAG und Operator-Checks.</p></div><nav class='tabs'>",
+        f"</head><body><header><div class='shell'><div class='topbar'><div class='brand'><div class='mark'>MG</div><div class='titleline'><div class='eyebrow'>AlphaRavis Media</div><h1>Media Gallery</h1></div></div><div class='count-pill'>{len(rows)} Assets</div></div><div class='controls'><nav class='tabs'>",
         _tab_link("All", "all", view, common_params),
         _tab_link("Original", "original", view, common_params),
         _tab_link("Processed", "processed", view, common_params),
         "</nav>",
+        _upload_form(),
         _filter_form(view, common_params),
-        "</div></header><main><div class='shell'>",
+        "</div></div></header><main><div class='shell'>",
     ]
     for group, assets in groups.items():
-        body.append(f"<details open><summary><span>{html.escape(group)} ({len(assets)})</span><span>{html.escape(str(group_by))}</span></summary><div class='grid'>")
+        body.append(
+            "<details class='day' open>"
+            f"<summary><span class='day-title'><strong>{html.escape(group)}</strong>"
+            f"<span>{len(assets)} Assets</span></span><span class='section-meta'></span></summary><div class='grid'>"
+        )
         for asset in assets:
-            title = html.escape(str(asset.get("title") or asset.get("asset_id")))
             url = html.escape(str(asset.get("public_url") or asset.get("source_url") or ""))
             media_type = asset.get("media_type")
-            asset_kind = html.escape(str(asset.get("asset_kind") or asset.get("role") or "unknown"))
-            metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
-            provider = html.escape(str(asset.get("processing_provider") or metadata.get("provider", "")))
+            media_label = html.escape(_gallery_media_label(media_type))
+            kind_label = html.escape(_gallery_kind_label(asset.get("asset_kind"), asset.get("role")))
+            day_label, time_label = _gallery_display_date(asset.get("created_at"))
             body.append("<div class='card'>")
-            body.append(f"<div class='asset-head'><h3>{title}</h3><span class='badge'>{asset_kind}</span></div>")
             if url and media_type == "image":
                 body.append(f"<a class='thumb' href='{url}'><img src='{url}' loading='lazy' alt=''></a>")
             elif url and media_type == "video":
                 body.append(f"<div class='thumb'><video src='{url}' controls preload='metadata'></video></div>")
             elif url:
-                body.append(f"<a class='file-link' href='{url}'>{url}</a>")
-            body.append(
-                "<div class='meta'>"
-                f"role={html.escape(str(asset.get('role')))}<br>"
-                f"type={html.escape(str(media_type))}<br>"
-                f"source_key={html.escape(str(asset.get('source_key')))}<br>"
-                f"provider={provider}<br>"
-                f"thread={html.escape(str(asset.get('thread_key') or asset.get('thread_id')))}"
-                "</div>"
-            )
+                body.append(f"<a class='file-link' href='{url}'><strong>{media_label}</strong></a>")
+            else:
+                body.append(f"<div class='file-link'><strong>{media_label}</strong></div>")
+            body.append("<div class='asset-info'>")
+            body.append(f"<div class='asset-top'><h3 class='asset-title'>{media_label}</h3><span class='badge'>{kind_label}</span></div>")
+            body.append(f"<div class='meta'><span>{html.escape(day_label)}</span><span>{html.escape(time_label)}</span></div>")
             if url:
                 body.append(
                     "<div class='actions'>"
-                    f"<button data-url='{url}' onclick='copyLink(this.dataset.url)'>Copy Link</button>"
+                    f"<button data-url='{url}' onclick='copyLink(this.dataset.url)'>Copy</button>"
                     f"<a href='{url}' target='_blank' rel='noreferrer'>Open</a>"
                     "</div>"
                 )
+            body.append("</div>")
             body.append("</div>")
         body.append("</div></details>")
     if not groups:
@@ -535,16 +734,25 @@ def _select(name: str, current: str, values: list[tuple[str, str]]) -> str:
     return f"<select name='{html.escape(name)}'>{''.join(options)}</select>"
 
 
+def _upload_form() -> str:
+    return (
+        "<form class='upload-form' method='post' action='/assets/upload' enctype='multipart/form-data'>"
+        "<label><span>Upload</span>"
+        "<input type='file' name='file' accept='image/*,video/*,audio/*,.pdf,.txt,.md,.json,.csv' onchange='this.form.submit()'>"
+        "</label></form>"
+    )
+
+
 def _filter_form(view: str, params: dict[str, str]) -> str:
     media_type = params.get("media_type", "all")
-    group_by = params.get("group_by", "day_group")
+    group_by = params.get("group_by", "day")
     sort = params.get("sort", "created_at")
     order = params.get("order", "desc")
     return (
         "<form class='filters' method='get' action='/gallery'>"
         f"<input type='hidden' name='view' value='{html.escape(view)}'>"
         f"{_select('media_type', media_type, [('all', 'All media'), ('image', 'Images'), ('video', 'Videos'), ('audio', 'Audio'), ('document', 'Documents')])}"
-        f"{_select('group_by', group_by, [('day_group', 'Day + group'), ('thread', 'Thread'), ('group', 'Group'), ('day', 'Date'), ('media_type', 'Type')])}"
+        f"{_select('group_by', group_by, [('day', 'Date sections'), ('none', 'No sections'), ('media_type', 'Type sections'), ('thread', 'Thread sections'), ('group', 'Group sections')])}"
         f"{_select('sort', sort, [('created_at', 'Date'), ('title', 'Name'), ('media_type', 'Type'), ('asset_kind', 'Kind'), ('thread_key', 'Thread'), ('group_id', 'Group')])}"
         f"{_select('order', order, [('desc', 'Descending'), ('asc', 'Ascending')])}"
         f"<input name='thread_key' placeholder='Thread key' value='{html.escape(params.get('thread_key', ''))}'>"

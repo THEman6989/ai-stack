@@ -20,20 +20,32 @@ By default, this whole custom layer is off:
 
 ```text
 ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=false
+ALPHARAVIS_ENABLE_SERVER_MODEL_MANAGER=true
 ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=false
 ALPHARAVIS_ENABLE_CRISIS_MANAGER=false
 ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=false
 ```
 
-The standard stack uses `big-boss` through LiteLLM and does not create the
-Power Management Agent. This keeps the repo usable for normal single-model
-setups.
+The dedicated Server Model Manager agent stays available by default through
+`ALPHARAVIS_ENABLE_SERVER_MODEL_MANAGER=true`. The older broad model-management
+planning layer remains off until `ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true`.
+
+The dashboard Settings UI at `http://localhost:8090/settings` can filter by the
+`model` category or search for `MODEL_MGMT`, `UBUNTU_LLAMA`, `CRISIS`, and
+related keys. Use `Temporary anwenden` for runtime experiments on new chat
+turns, or `Permanent speichern` when the value should be written to `.env`.
 
 When `ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true`, AlphaRavis can inspect and plan:
 
 ```text
 inspect_model_management_status
 plan_embedding_maintenance
+inspect_ubuntu_llama_manager
+diagnose_ubuntu_llama_no_response
+recover_ubuntu_llama_no_response
+control_ubuntu_llama_service
+request_ubuntu_server_power_action
+configure_ubuntu_llama_instance
 prepare_comfy_for_pixelle
 request_power_management_action
 ```
@@ -45,7 +57,8 @@ ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=true
 ```
 
 That enables the `power_management_agent`, Pixelle ComfyUI preflight hooks, and
-the future crisis-manager routing surface.
+the crisis-manager routing surface. The crisis manager no longer requires
+owner SSH tools when the Ubuntu Llama Manager API is configured.
 
 Real power/model actions are still disabled by default:
 
@@ -57,6 +70,96 @@ ALPHARAVIS_MODEL_MGMT_ACTION_URL=
 
 That means shutdowns, service restarts, Ollama unload/load actions, and
 embedding-job runners return dry-run plans until a curated endpoint is provided.
+Ubuntu Llama Manager write/recovery actions are gated by the same
+`ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=true` switch.
+
+## Ubuntu Llama Manager And Server API
+
+AlphaRavis can call the separate private `ubuntu-llama-manager` service when
+configured:
+
+```text
+ALPHARAVIS_UBUNTU_LLAMA_MANAGER_IP=<llama-host-ip>
+ALPHARAVIS_UBUNTU_LLAMA_MANAGER_PORT=8099
+ALPHARAVIS_UBUNTU_LLAMA_MANAGER_URL=http://<llama-host>:8099
+ALPHARAVIS_UBUNTU_LLAMA_MANAGER_API_KEY=<API_TOKEN>
+ALPHARAVIS_UBUNTU_LLAMA_ESP_IP=<esp-ip>
+ALPHARAVIS_UBUNTU_LLAMA_ESP_PORT=80
+ALPHARAVIS_UBUNTU_LLAMA_ESP_URL=http://<esp-ip>
+ALPHARAVIS_UBUNTU_LLAMA_ESP_API_KEY=<ESP_AUTH_TOKEN>
+ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MIN=512
+ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MAX=262144
+```
+
+For normal setup, enter the IP fields. `ALPHARAVIS_UBUNTU_LLAMA_MANAGER_URL`
+and `ALPHARAVIS_UBUNTU_LLAMA_ESP_URL` are optional full-URL overrides; when
+empty, AlphaRavis builds `http://<ip>:<port>` for the manager and
+`http://<esp-ip>` for the ESP default port 80.
+
+This is server management as well as model management. The LangGraph tools map
+to the manager API:
+
+- `inspect_ubuntu_llama_manager`: reads `/health`, `/status`, `/models`, and
+  `/llama/instances`, so the returned `/status` covers llama services, reboot,
+  GPU power/health, API state, and ESP status.
+- `diagnose_ubuntu_llama_no_response`: posts to `/ai-stack/diagnose-llama`
+  without executing recovery.
+- `recover_ubuntu_llama_no_response`: posts to `/ai-stack/llama-no-response`
+  only when model-management actions are enabled.
+- `control_ubuntu_llama_service`: posts to `/llama/start|stop|restart`,
+  `/llama-secondary/start|stop|restart`, or `/llama/force-kill`, gated by
+  action settings.
+- `request_ubuntu_server_power_action`: posts gated server/ESP actions such as
+  `/esp/action`, `/esp/cancel`, `/reboot/now`, `/reboot/enable`,
+  `/reboot/disable`, `/power/shutdown`, or `/diagnostics/handle-gpu-fault`.
+  When `direct_esp=true`, power/reset/cancel actions go directly to the ESP
+  endpoint because the Ubuntu Manager API is unavailable while the host is off.
+- `configure_ubuntu_llama_instance`: patches `primary` or `secondary` via
+  `/llama/instances/{id}/config`, supporting `model`, `model_flag`,
+  `context_size`, `command`, and `restart`.
+
+This is the preferred route for changing llama.cpp context windows, for
+example moving the secondary 2B instance from 8K to 16K or temporarily raising
+the primary instance toward a larger context budget. The crisis manager receives
+status, diagnosis, service restart, ESP power-cycle, and gated recovery tools;
+context/model reconfiguration is reserved for the power/model-management
+surface.
+
+Destructive tools have a second confirmation guard. `power-on`, service
+`start`, service `restart`, reboot timer enable/disable, and ESP cancel can run
+when actions are enabled. `power-off`, `power-cycle`, `reset`, `shutdown`,
+`reboot-now`, `gpu-fault`, service `stop`, and `force-kill` return
+`needs_confirmation=true` unless the caller passes `confirmed=true` after the
+operator has confirmed the exact target and tool.
+
+## Dedicated Server Model Manager
+
+LibreChat exposes a separate `Server Model Manager` preset using Bridge model
+id `server-model-manager`. Bridge requests for that model are routed into the
+same native LangGraph graph with:
+
+```json
+{
+  "active_agent": "power_management_agent",
+  "selected_toolsets": ["agent/power"],
+  "server_model_manager_mode": true
+}
+```
+
+Native LangGraph/DeepAgents callers can pass the same fields directly in graph
+input; the manager is not exclusive to the Bridge.
+
+The manager model policy is:
+
+```text
+ALPHARAVIS_SERVER_MODEL_MANAGER_MODEL=openai/server-model-manager
+ALPHARAVIS_SERVER_MODEL_MANAGER_FALLBACK_MODEL=openai/edge-gemma
+```
+
+`openai/server-model-manager` is a LiteLLM route intended to prefer BigBoss and
+fall back to Edge Gemma. Prompts and tool arguments for this agent are kept
+intentionally small because the fallback model is limited and prone to wrong
+tool choices.
 
 ## Embedding Window Logic
 
@@ -110,6 +213,8 @@ These are intentionally left as interfaces until the safe tools are curated:
 
 - `ALPHARAVIS_MODEL_MGMT_ACTION_URL`: one HTTP endpoint that receives
   `{"action": "...", "payload": {...}}`.
+- Optional: higher-level policies for when `configure_ubuntu_llama_instance`
+  should raise or lower context automatically after a crisis or budget warning.
 - `wake_pc`: wake a configured PC.
 - `shutdown_pc`: safely shut down a configured PC.
 - `start_service` / `stop_service`: service lifecycle controls.

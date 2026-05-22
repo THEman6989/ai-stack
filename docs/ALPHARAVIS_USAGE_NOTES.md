@@ -434,10 +434,12 @@ Important idea:
   llama.cpp server is up, so normal chat does not depend on the small Ollama
   node.
 
-Default controls keep this custom layer completely off:
+Default controls keep the broad custom layer off, while the dedicated Server
+Model Manager remains available:
 
 ```text
 ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=false
+ALPHARAVIS_ENABLE_SERVER_MODEL_MANAGER=true
 ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=false
 ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=false
 ALPHARAVIS_ENABLE_CRISIS_MANAGER=false
@@ -447,19 +449,24 @@ ALPHARAVIS_POWER_MANAGER_MODEL=openai/edge-gemma
 ALPHARAVIS_CRISIS_MANAGER_MODEL=openai/edge-gemma
 ALPHARAVIS_MODEL_IDLE_SECONDS=600
 ALPHARAVIS_EMBEDDING_LOAD_POLICY=idle_or_big_llm_active
+ALPHARAVIS_SERVER_MODEL_MANAGER_MODEL=openai/server-model-manager
+ALPHARAVIS_SERVER_MODEL_MANAGER_FALLBACK_MODEL=openai/edge-gemma
 ```
 
-With these defaults, AlphaRavis uses the normal `big-boss` route and does not
-create the Power Management Agent. Enable the layer only on the custom hardware
-setup that needs it.
+With these defaults, normal AlphaRavis chat uses the normal `big-boss` route,
+and the separate `Server Model Manager` preset is available for bounded
+server/model actions.
 
 The advanced hooks become visible only after:
 
 ```text
 ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true
 ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=true
-ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=true
 ```
+
+`ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=true` is optional and only needed for the
+older SSH/Wake-on-LAN owner tools. The Crisis Manager can run with advanced
+model management plus the Ubuntu Llama Manager API, without owner SSH tools.
 
 Even then, real shutdowns, service changes, Ollama model switching, and
 embedding-job runs stay disabled until you provide:
@@ -469,6 +476,50 @@ ALPHARAVIS_MODEL_MGMT_ACTION_URL=
 ALPHARAVIS_MODEL_MGMT_API_KEY=
 ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=true
 ```
+
+For the separate Ubuntu Llama Manager API, configure:
+
+```text
+ALPHARAVIS_UBUNTU_LLAMA_MANAGER_IP=<llama-host-ip>
+ALPHARAVIS_UBUNTU_LLAMA_MANAGER_PORT=8099
+ALPHARAVIS_UBUNTU_LLAMA_MANAGER_URL=http://<llama-host>:8099
+ALPHARAVIS_UBUNTU_LLAMA_MANAGER_API_KEY=<API_TOKEN>
+ALPHARAVIS_UBUNTU_LLAMA_ESP_IP=<esp-ip>
+ALPHARAVIS_UBUNTU_LLAMA_ESP_PORT=80
+ALPHARAVIS_UBUNTU_LLAMA_ESP_URL=http://<esp-ip>
+ALPHARAVIS_UBUNTU_LLAMA_ESP_API_KEY=<ESP_AUTH_TOKEN>
+ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MAX=262144
+```
+
+Usually you only need the two IP fields and the tokens. The full URL fields are
+overrides for non-standard schemes, hostnames, reverse proxies, or paths.
+
+AlphaRavis can then inspect manager status/models/instances and diagnose a
+stuck llama.cpp server. It can also use the same API for server-management
+actions from `api.md`: start/stop/restart managed llama services, ESP
+power-on/off/cycle/reset, reboot timer actions, immediate reboot, shutdown, and
+GPU-fault recovery. Direct ESP mode is available for power-on or reset when the
+Ubuntu host is off and port `8099` cannot answer.
+
+Recovery, service control, ESP/server power actions, and instance config
+changes, such as raising `secondary` from 8K to 16K context or temporarily
+increasing the primary context window, still require
+`ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=true`. The Crisis Manager can inspect,
+diagnose, restart services, power-cycle through ESP when needed, and run gated
+recovery; context/model changes are for the Power Management Agent or an
+explicit operator request.
+
+LibreChat has a dedicated `Server Model Manager` preset. It routes through the
+normal AlphaRavis Bridge but marks the graph input for
+`power_management_agent`, so the same capability is also available to native
+LangGraph/DeepAgents callers by passing `active_agent="power_management_agent"`
+and `selected_toolsets=["agent/power"]`.
+
+The dedicated manager uses the LiteLLM `server-model-manager` route, intended
+to prefer BigBoss and fall back to Edge Gemma. Because the fallback is
+intentionally small, shutdown, power-off, reset, reboot, force-kill, service
+stop, and power-cycle tools return `needs_confirmation=true` unless the agent
+passes `confirmed=true` after showing the exact target/tool to the operator.
 
 `make model-management` can write these ENV switches interactively. The result
 is still plain `.env`, so you can copy that `.env` to another machine and skip
@@ -1729,6 +1780,86 @@ Typical fields:
 Set `ALPHARAVIS_SHOW_RUN_PROFILE=true` if you want this appended visibly in
 LibreChat. Otherwise inspect it in LangGraph Studio or DeepAgents UI.
 
+## Run Resume
+
+AlphaRavis stores a compact run-state checkpoint for each active thread in
+MongoDB. This is separate from the normal LangGraph checkpointer and is meant
+for operator recovery after a llama.cpp/LiteLLM disconnect, graph process
+restart, or interrupted long agent run.
+
+Default behavior:
+
+- The latest saved job in the same thread keeps the task brief and planner
+  context.
+- If a run is interrupted during the agent swarm, AlphaRavis leaves a visible
+  same-thread message asking whether to continue.
+- On the next message in that thread, AlphaRavis asks again unless the user
+  already answered with a clear confirmation such as `ja, weiter`.
+- If the user does not answer, the job remains saved as `awaiting_resume`.
+
+Useful settings:
+
+```text
+ALPHARAVIS_RUN_STATE_MANAGER_ENABLED=true
+ALPHARAVIS_RUN_STATE_AUTO_RESUME=false
+ALPHARAVIS_RUN_STATE_RESUME_PROMPT_TIMEOUT_SECONDS=300
+ALPHARAVIS_RUN_STATE_DB=alpharavis_state
+ALPHARAVIS_RUN_STATE_COLLECTION=run_checkpoints
+```
+
+Set `ALPHARAVIS_RUN_STATE_AUTO_RESUME=true` only when you want AlphaRavis to
+continue saved jobs without asking first.
+
+## Settings Web UI
+
+The Service Dashboard includes a Settings WebUI:
+
+```text
+http://localhost:8090/settings
+```
+
+When Tailscale HTTPS is enabled for the dashboard, the same UI is reachable at:
+
+```text
+https://<tailnet-host>:8090/settings
+```
+
+The page is designed for mobile browsers and iOS Safari home-screen use. It has
+PWA metadata, large touch targets, safe-area spacing, compact setting rows,
+local browser favorites, category chips, importance filters,
+changed/runtime/favorite filters, and sorting by importance, alphabet, section,
+or changed state. Cards also show focused tags such as `run-state`,
+`server-manager`, `ubuntu-llama`, `security`, `network`, and `storage`; search
+matches those tags as well as key names and descriptions.
+The negative filter can hide `fallback` and `legacy` settings. Fallback cards
+show what they are fallback values for, for example fixed token limits that only
+matter when percent-based context limits are disabled.
+
+Behavior:
+
+- Values come from `.env(exaple)`, current `.env`, and the runtime override file.
+- Boolean settings render as True/False toggles.
+- Settings with documented allowed values render as dropdowns.
+- Common mode/profile settings also render as dropdowns when the template lists
+  options as indented `value = description` comments instead of a comma list.
+- Settings without explicit template comments get generated fallback
+  descriptions based on the key name.
+- Ports, limits, timeouts, URL-like values, and secret-looking keys get matching
+  input types.
+- Secret-looking keys get a password field plus a local show/hide button. Token
+  budget/limit settings are not treated as secrets.
+- `Temporary anwenden` writes
+  `service-dashboard-data/runtime_settings.json`. LangGraph reads this before
+  each new run, so new chat turns pick up the override without rewriting `.env`.
+- `Permanent speichern` writes validated keys into `.env` after a browser
+  confirmation unless the local "nicht mehr fragen" checkbox was used.
+
+Runtime settings file:
+
+```text
+ALPHARAVIS_RUNTIME_SETTINGS_FILE=/workspace/service-dashboard-data/runtime_settings.json
+```
+
 ## Operational Logging
 
 AlphaRavis has a local rotating log layer in addition to LangGraph Studio and
@@ -1919,9 +2050,18 @@ http://localhost:8130/gallery?view=processed
 http://localhost:8130/gallery?group_by=thread&sort=title&order=asc
 ```
 
-The gallery can filter by `thread_key` or `group_id` and sort by date/name/type.
-Images and videos sent in the same chat share thread/group metadata, so
-`group_by=thread` or the default day+group view keeps them together.
+The gallery defaults to collapsible date sections with clean mobile cards. Cards
+show previews, media kind, date/time, and copy/open actions; technical
+`source_key`, thread, and group identifiers are intentionally hidden from the
+card body. The filter bar can still filter by `thread_key` or `group_id`, sort
+by date/name/type, and switch sections to date, none, type, thread, or group
+when operator debugging needs that view.
+
+Use the `Upload` control in `/gallery` to add media directly from a browser.
+It uses the native file picker, so iOS, Android, Linux, Windows, and desktop
+macOS browsers can choose images, videos, audio, PDFs, and common text/data
+files. Uploaded files are stored under `media-data` as original
+`gallery_upload` assets and then appear in the date-sorted gallery.
 
 Video analysis remains explicit, not automatic. For Pixelle input, AlphaRavis
 should pass the copied URL through without downloading unless the downstream

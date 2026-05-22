@@ -1,0 +1,22 @@
+# Runtime config and secrets
+.env
+ubuntu-llama.conf
+rakam-llama.conf
+firmware/nodemcu-v3/.env
+firmware/nodemcu-v3/config.generated.h
+
+# Runtime state and logs
+logs/
+state/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Editors and OS noise
+.DS_Store
+*.swp
+*~

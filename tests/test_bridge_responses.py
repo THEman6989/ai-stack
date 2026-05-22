@@ -676,6 +676,25 @@ def test_run_wait_content_reads_nested_langgraph_values_state() -> None:
     assert content == "RESPONSES_AGENT_OK"
 
 
+def test_prepare_run_payload_routes_server_model_manager_model_to_power_agent() -> None:
+    client = _FakeClient([], state={"values": {"messages": []}})
+
+    payload = asyncio.run(
+        bridge_server._prepare_run_payload(
+            client,
+            "thread_server_manager",
+            "conversation-server-manager",
+            [{"role": "user", "content": "status"}],
+            model="server-model-manager",
+        )
+    )
+
+    assert payload["input"]["active_agent"] == "power_management_agent"
+    assert payload["input"]["selected_toolsets"] == ["agent/power"]
+    assert payload["input"]["fast_path_locked"] is True
+    assert payload["input"]["server_model_manager_mode"] is True
+
+
 def test_previous_response_id_adds_stored_output_context() -> None:
     bridge_server._RESPONSES_STORE.clear()
     previous = bridge_server._response_object(

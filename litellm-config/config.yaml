@@ -23,6 +23,26 @@ model_list:
       stream_timeout: 30
       max_retries: 0
 
+  # Dedicated Server Model Manager route. BigBoss is preferred, with Edge Gemma
+  # as the small fallback deployment when the primary server is unavailable.
+  - model_name: server-model-manager
+    litellm_params:
+      model: os.environ/BIG_BOSS_LITELLM_MODEL
+      api_base: os.environ/BIG_BOSS_API_BASE
+      api_key: os.environ/LOCAL_LLM_API_KEY
+      timeout: 90
+      stream_timeout: 20
+      max_retries: 0
+
+  - model_name: server-model-manager
+    litellm_params:
+      model: os.environ/EDGE_GEMMA_LITELLM_MODEL
+      api_base: os.environ/EDGE_GEMMA_API_BASE
+      api_key: os.environ/LOCAL_LLM_API_KEY
+      timeout: 60
+      stream_timeout: 15
+      max_retries: 0
+
   # Text embedding route for AlphaRavis pgvector memory and rag_api mirrors.
   # Default env uses Ollama-native LiteLLM model ids, for example
   # EMBEDDING_LITELLM_MODEL=ollama/qwen3-embedding:0.6b with

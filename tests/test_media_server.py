@@ -33,11 +33,13 @@ if "fastapi" not in sys.modules and importlib.util.find_spec("fastapi") is None:
 
     fastapi_stub.FastAPI = FastAPI
     fastapi_stub.HTTPException = HTTPException
+    fastapi_stub.Request = object
     sys.modules["fastapi"] = fastapi_stub
 
     responses_stub = types.ModuleType("fastapi.responses")
     responses_stub.HTMLResponse = str
     responses_stub.Response = str
+    responses_stub.RedirectResponse = str
     sys.modules["fastapi.responses"] = responses_stub
 
     staticfiles_stub = types.ModuleType("fastapi.staticfiles")
@@ -103,12 +105,16 @@ class _FakeCollection:
         self.rows = rows
         self.queries: list[dict] = []
         self.cursor: _FakeCursor | None = None
+        self.replacements: list[tuple[dict, dict, bool]] = []
 
     def find(self, query: dict):
         self.queries.append(query)
         cursor = _FakeCursor([dict(row) for row in self.rows])
         self.cursor = cursor
         return cursor
+
+    def replace_one(self, query: dict, record: dict, upsert: bool = False) -> None:
+        self.replacements.append((query, record, upsert))
 
 
 def test_assets_support_thread_group_filters_and_sort(monkeypatch) -> None:
@@ -178,11 +184,98 @@ def test_gallery_can_group_by_thread_and_sort_by_name(monkeypatch) -> None:
 
     html = asyncio.run(media_server.gallery(group_by="thread", sort="title", order="asc"))
 
-    assert "chat-1 (2)" in html
-    assert html.index("Image") < html.index("Video")
+    assert "<strong>chat-1</strong>" in html
+    assert "2 Assets" in html
+    assert html.index("image.png") < html.index("video.mp4")
     assert "name='group_by'" in html
     assert "name='sort'" in html
     assert "href='/favicon.svg'" in html
     assert "<div class='mark'>MG</div>" in html
-    assert "@media(max-width:760px)" in html
+    assert "@media(max-width:540px)" in html
     assert "class='thumb'" in html
+    assert "source_key=" not in html
+    assert "provider=" not in html
+
+
+def test_gallery_defaults_to_date_sections_and_hides_group_ids(monkeypatch) -> None:
+    collection = _FakeCollection(
+        [
+            {
+                "_id": "image",
+                "asset_id": "image",
+                "title": "inferior-file-name.png",
+                "media_type": "image",
+                "asset_kind": "processed",
+                "role": "output",
+                "thread_key": "chat-1",
+                "group_id": "private-group-id",
+                "derivation_group_id": "private-group-id",
+                "source_key": "inferior-source-key",
+                "public_url": "http://localhost:8130/media/image.png",
+                "created_at": 1_700_000_000,
+            },
+        ]
+    )
+    monkeypatch.setattr(media_server, "_collection", lambda: collection)
+
+    html = asyncio.run(media_server.gallery())
+
+    assert "14.11.2023" in html
+    assert "private-group-id" not in html
+    assert "inferior-source-key" not in html
+    assert "inferior-file-name.png" not in html
+    assert "Date sections" in html
+
+
+def test_gallery_upload_form_is_browser_native(monkeypatch) -> None:
+    collection = _FakeCollection([])
+    monkeypatch.setattr(media_server, "_collection", lambda: collection)
+
+    html = asyncio.run(media_server.gallery())
+
+    assert "action='/assets/upload'" in html
+    assert "enctype='multipart/form-data'" in html
+    assert "type='file'" in html
+    assert "accept='image/*,video/*,audio/*" in html
+
+
+def test_store_uploaded_asset_writes_file_and_record(monkeypatch, tmp_path: Path) -> None:
+    collection = _FakeCollection([])
+    monkeypatch.setattr(media_server, "MEDIA_ROOT", tmp_path)
+    monkeypatch.setattr(media_server, "_collection", lambda: collection)
+
+    record = media_server._store_uploaded_asset(
+        filename="photo.jpg",
+        content_type="image/jpeg",
+        content=b"JPEGDATA",
+        title="My Upload",
+    )
+
+    stored = tmp_path / record["relative_path"]
+    assert stored.read_bytes() == b"JPEGDATA"
+    assert record["media_type"] == "image"
+    assert record["asset_kind"] == "original"
+    assert record["origin"] == "gallery_upload"
+    assert record["public_url"].endswith(record["relative_path"].replace(os.sep, "/"))
+    assert collection.replacements[0][0] == {"_id": record["asset_id"]}
+    assert collection.replacements[0][2] is True
+
+
+def test_parse_gallery_upload_multipart_extracts_file_and_fields() -> None:
+    body = (
+        b"--abc\r\n"
+        b'Content-Disposition: form-data; name="title"\r\n\r\n'
+        b"Nice file\r\n"
+        b"--abc\r\n"
+        b'Content-Disposition: form-data; name="file"; filename="clip.mp4"\r\n'
+        b"Content-Type: video/mp4\r\n\r\n"
+        b"MP4DATA\r\n"
+        b"--abc--\r\n"
+    )
+
+    fields, uploaded = media_server._parse_gallery_upload_multipart("multipart/form-data; boundary=abc", body)
+
+    assert fields == {"title": "Nice file"}
+    assert uploaded["filename"] == "clip.mp4"
+    assert uploaded["content_type"] == "video/mp4"
+    assert uploaded["content"] == b"MP4DATA"

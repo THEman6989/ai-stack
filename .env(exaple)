@@ -218,6 +218,19 @@ LITELLM_REQUEST_TIMEOUT_SECONDS=90
 #   mongodb://mongodb:27017/langgraph?replicaSet=rs0
 LS_MONGODB_URI=mongodb://mongodb:27017/langgraph?replicaSet=rs0
 
+# Durable AlphaRavis run-state resume manager. This is separate from the
+# LangGraph checkpointer and stores one latest recoverable job snapshot per
+# thread so interrupted agent runs can ask before continuing.
+ALPHARAVIS_RUN_STATE_MANAGER_ENABLED=true
+ALPHARAVIS_RUN_STATE_AUTO_RESUME=false
+ALPHARAVIS_RUN_STATE_RESUME_PROMPT_TIMEOUT_SECONDS=300
+ALPHARAVIS_RUN_STATE_DB=alpharavis_state
+ALPHARAVIS_RUN_STATE_COLLECTION=run_checkpoints
+
+# Dashboard Settings UI temporary runtime overrides. service-dashboard writes
+# this file for "Temporary anwenden"; LangGraph reloads it before each new run.
+ALPHARAVIS_RUNTIME_SETTINGS_FILE=/workspace/service-dashboard-data/runtime_settings.json
+
 # Optional Docker Compose profiles selected by make install.
 # Common values:
 #   empty            = base stack only
@@ -409,6 +422,12 @@ SSH_PASS_DEFAULT=yourPasswordHere
 # Allowed values: true, false
 ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=false
 
+# Keeps the dedicated Server Model Manager agent available even when the older
+# advanced owner-power layer is off. The dedicated LibreChat model
+# `server-model-manager` routes to this agent through the Bridge.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_SERVER_MODEL_MANAGER=true
+
 # Enables the advanced custom model-management integration inside the graph:
 # power_management_agent, Pixelle ComfyUI preflight, and future crisis manager
 # routing. Requires ALPHARAVIS_ENABLE_MODEL_MANAGEMENT=true.
@@ -420,8 +439,9 @@ ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=false
 # Allowed values: true, false
 ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=false
 
-# Crisis-manager preflight/recovery switch. Keep false unless owner power tools
-# are enabled and the small fallback model is configured.
+# Crisis-manager preflight/recovery switch. Requires advanced model management
+# and a configured small fallback model. Owner power tools are optional when the
+# Ubuntu Llama Manager API is configured.
 # Allowed values: true, false
 ALPHARAVIS_ENABLE_CRISIS_MANAGER=false
 
@@ -437,6 +457,15 @@ ALPHARAVIS_CRISIS_HITL_ACTIONS=shutdown_server|reboot_server|kill_process|delete
 # small and fast; it only decides hardware/model lifecycle actions.
 ALPHARAVIS_POWER_MANAGER_MODEL=openai/edge-gemma
 ALPHARAVIS_POWER_MANAGER_TIMEOUT_SECONDS=90
+
+# Dedicated Server Model Manager model policy. It uses BigBoss by default and
+# falls back to Edge Gemma when the primary model call fails. Keep this agent's
+# prompts/tool arguments small because the fallback model is intentionally tiny.
+ALPHARAVIS_SERVER_MODEL_MANAGER_MODEL=openai/server-model-manager
+ALPHARAVIS_SERVER_MODEL_MANAGER_FALLBACK_MODEL=openai/edge-gemma
+ALPHARAVIS_SERVER_MODEL_MANAGER_TIMEOUT_SECONDS=90
+ALPHARAVIS_SERVER_MODEL_MANAGER_FALLBACK_TIMEOUT_SECONDS=60
+ALPHARAVIS_SERVER_MODEL_MANAGER_TEMPERATURE=0
 
 # Owner-only SSH password fallback for owner_power_tools.py. Prefer setting this
 # in your private .env only. Do not commit a real password.
@@ -459,6 +488,29 @@ ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=false
 # Leave empty until you provide the safe implementation.
 ALPHARAVIS_MODEL_MGMT_ACTION_URL=
 ALPHARAVIS_MODEL_MGMT_API_KEY=
+
+# External Ubuntu Llama Manager API for controlling llama.cpp instances.
+# Public reads use GET /health, /status, /models, /llama/instances,
+# /esp/status, /reboot/status, and /diagnostics/gpu through /status.
+# Protected changes use this API key as Bearer auth and still require
+# ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=true before AlphaRavis executes model,
+# llama service, server power, reboot, or ESP actions.
+# IP/host of the Ubuntu Llama Manager machine. If URL is empty, AlphaRavis uses
+# http://<ALPHARAVIS_UBUNTU_LLAMA_MANAGER_IP>:<PORT>.
+ALPHARAVIS_UBUNTU_LLAMA_MANAGER_IP=
+ALPHARAVIS_UBUNTU_LLAMA_MANAGER_PORT=8099
+ALPHARAVIS_UBUNTU_LLAMA_MANAGER_URL=
+ALPHARAVIS_UBUNTU_LLAMA_MANAGER_API_KEY=
+# Optional direct ESP endpoint for power-on when the Ubuntu host/manager API is
+# offline. Use ESP_AUTH_TOKEN here, not the Ubuntu Manager API_TOKEN.
+# If URL is empty, AlphaRavis uses http://<ALPHARAVIS_UBUNTU_LLAMA_ESP_IP>
+# plus ALPHARAVIS_UBUNTU_LLAMA_ESP_PORT when the port is not 80.
+ALPHARAVIS_UBUNTU_LLAMA_ESP_IP=
+ALPHARAVIS_UBUNTU_LLAMA_ESP_PORT=80
+ALPHARAVIS_UBUNTU_LLAMA_ESP_URL=
+ALPHARAVIS_UBUNTU_LLAMA_ESP_API_KEY=
+ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MIN=512
+ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MAX=262144
 
 # Hardware identity from REMOTE_PCS.
 ALPHARAVIS_BIG_LLM_PC=main_pc
@@ -584,6 +636,10 @@ BRIDGE_ENABLE_RESPONSES_API=true
 # enabled for LibreChat compatibility; Responses has richer output item events.
 # Allowed values: responses, chat_completions
 BRIDGE_PREFERRED_API_MODE=responses
+
+# Bridge-local model id exposed beside OPENAI_MODEL_NAME for LibreChat's
+# dedicated Server Model Manager preset.
+SERVER_MODEL_MANAGER_MODEL_NAME=server-model-manager
 
 # In-process retrieval support for GET/DELETE /v1/responses/{response_id}.
 # This is a bridge-local compatibility cache, not long-term memory.

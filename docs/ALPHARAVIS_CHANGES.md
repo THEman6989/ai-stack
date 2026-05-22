@@ -4,6 +4,148 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-22 - Dashboard Settings Web UI
+
+- The Service Dashboard now exposes a mobile/PWA-friendly `/settings` web UI
+  and lists it as a primary Web Interface card. Tailscale handling works through
+  the existing dashboard port, so `https://<tailnet-host>:8090/settings` is
+  available when dashboard Tailscale routes are enabled.
+- `/settings` parses every key from `.env(exaple)`, compares it with current
+  `.env` values and active runtime overrides, and renders modern searchable
+  setting rows with favorites, category, importance, changed/runtime badges,
+  defaults, current values, and `.env(exaple)` comments.
+- Controls are inferred from the template: booleans become toggles, documented
+  allowed values become dropdowns, ports/timeouts/limits become numeric fields,
+  URL-looking values become URL inputs, and secret-looking keys use password
+  inputs. Common mode keys such as temperature/profile/API-mode settings get
+  dropdowns even when the template documents values as indented `value = ...`
+  comments instead of a comma list.
+- Settings without explicit `.env(exaple)` comments get generated descriptions
+  based on key shape, so important provider URL, API key, model, mode,
+  streaming, timeout, and port settings do not render as unexplained blanks.
+- New runtime/model-management keys are tagged more specifically: run-state,
+  dashboard/runtime settings, Server Model Manager, Ubuntu Llama Manager,
+  bridge, security, network, storage, and power tags are exposed for search and
+  card badges.
+- Follow-up polish: the Settings action bar now wraps only the temporary and
+  permanent action controls, keeps both buttons aligned, and leaves the
+  permanent confirmation checkbox below the permanent button. Secret detection
+  is limited to real secret/key/password/token keys, so token-limit settings are
+  editable as normal numbers. Fallback/legacy settings are tagged, explain what
+  they fall back from, and can be hidden with a negative filter.
+- The page supports search, category chips, important/normal/low/changed/runtime
+  filters, a favorites view, and sorting by importance, alphabet, section, or
+  changed state.
+- `Temporary anwenden` writes validated template keys to
+  `service-dashboard-data/runtime_settings.json`. LangGraph reads that shared
+  file before each new run and applies the values into `os.environ`, so new chat
+  turns pick up temporary settings without overwriting `.env`.
+- `Permanent speichern` writes validated template keys into `.env`; the UI asks
+  for confirmation unless the browser-local "nicht mehr fragen" option was set.
+
+## 2026-05-22 - Agent Run State Manager
+
+- Added a Mongo-backed AlphaRavis run-state manager alongside LangGraph's
+  normal checkpointer. It writes one latest `current` checkpoint per thread
+  with phase, status, current task brief, planner context, selected toolsets,
+  active agent, compact run profile, and provider error classification.
+- Checkpoints are replaced with a complete Mongo document, so the previous
+  latest checkpoint is only superseded after the new record has been written.
+  A helper for atomic JSON writes exists for future local-file snapshots.
+- The graph now saves run-state checkpoints at run start, planner completion or
+  planner failure, swarm start, swarm failure/interruption, swarm completion,
+  and run finish.
+- If the provider/llama.cpp path fails during the swarm, AlphaRavis stores the
+  job as `awaiting_resume` and returns a visible same-thread resume prompt
+  instead of silently losing the plan.
+- On later activity in the same thread, AlphaRavis loads an open
+  `running`/`failed`/`awaiting_resume` checkpoint, restores the task brief and
+  planner context, and asks whether it should continue. The default is manual
+  confirmation with `ja, weiter`; set `ALPHARAVIS_RUN_STATE_AUTO_RESUME=true`
+  to continue automatically.
+
+## 2026-05-22 - Ubuntu Llama Manager LangGraph Tools
+
+- Added a dedicated Ubuntu Llama Manager/server-management client in
+  `langgraph-app/model_management.py`. It can inspect the external manager API
+  (`/health`, `/status`, `/models`, `/llama/instances`), diagnose a stuck
+  llama.cpp server through `/ai-stack/diagnose-llama`, run gated recovery
+  through `/ai-stack/llama-no-response`, control managed llama services, run
+  ESP/server actions from `api.md`, and patch `primary`/`secondary` llama.cpp
+  instance config through `/llama/instances/{id}/config`.
+- New env settings:
+  `ALPHARAVIS_UBUNTU_LLAMA_MANAGER_IP`,
+  `ALPHARAVIS_UBUNTU_LLAMA_MANAGER_PORT`,
+  `ALPHARAVIS_UBUNTU_LLAMA_MANAGER_URL`,
+  `ALPHARAVIS_UBUNTU_LLAMA_MANAGER_API_KEY`,
+  `ALPHARAVIS_UBUNTU_LLAMA_ESP_IP`,
+  `ALPHARAVIS_UBUNTU_LLAMA_ESP_PORT`,
+  `ALPHARAVIS_UBUNTU_LLAMA_ESP_URL`,
+  `ALPHARAVIS_UBUNTU_LLAMA_ESP_API_KEY`,
+  `ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MIN`, and
+  `ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MAX`.
+  Full URL values override IP/port; otherwise AlphaRavis derives the manager
+  and direct ESP URLs from the IP fields.
+- Real recovery/config changes remain gated by
+  `ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=true`; otherwise the tools return
+  dry-run payloads. The same gate applies to service start/stop/restart,
+  reboot, shutdown, GPU-fault handling, and ESP power actions. Diagnose-only
+  requests are allowed to call the protected diagnose endpoint when the API
+  token is configured.
+- Wired the tools into LangGraph model-management bundles. The
+  power/model-management agent can inspect, diagnose, recover, and configure
+  llama instances, plus control services and server/ESP power state. The crisis
+  manager receives inspect, diagnose, gated service/power recovery, and no
+  context/model setting changes during a crisis.
+- Added the dedicated Bridge/LibreChat model id `server-model-manager` and a
+  `Server Model Manager` model spec. Bridge requests using that model are passed
+  to native LangGraph with `active_agent=power_management_agent`,
+  `selected_toolsets=["agent/power"]`, and fast-path disabled. Native LangGraph
+  callers can pass the same fields directly.
+- `power_management_agent` is now available through
+  `ALPHARAVIS_ENABLE_SERVER_MODEL_MANAGER=true` even when the older advanced
+  owner-power layer is off. It uses `openai/server-model-manager` by default,
+  a LiteLLM route intended to prefer BigBoss and fall back to Edge Gemma.
+- Destructive server/ESP tools now return `needs_confirmation=true` unless
+  `confirmed=true` is passed after the exact target/tool is shown to the
+  operator. This applies to shutdown, power-off, power-cycle, reset, reboot,
+  GPU-fault handling, service stop, and force-kill.
+- The crisis manager now requires advanced model management plus
+  `ALPHARAVIS_ENABLE_CRISIS_MANAGER=true`; owner SSH tools are optional when
+  Ubuntu Llama Manager provides the recovery API.
+- Focused verification: `python -m py_compile` for `model_management.py`,
+  `agent_graph.py`, `alpharavis_toolsets.py`, and `bridge_server.py` passed
+  with `PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache`; `pytest -q
+  tests/test_model_management.py tests/test_alpharavis_toolsets.py
+  tests/test_bridge_responses.py` passed with `65 passed`. After recreating
+  `litellm`, `langgraph-api`, and `api-bridge`, `/v1/models` returned both
+  `my-agent` and `server-model-manager`; `/health/llm-generation` returned
+  BigBoss `OK` generation, while Edge-Gemma did not answer within the 10s
+  health window. A real `/v1/chat/completions` request to
+  `model=server-model-manager` routed to `power_management_agent` and returned
+  a bounded status response without executing actions.
+
+## 2026-05-22 - Media Gallery Mobile Refresh
+
+- The media-gallery `/gallery` UI now defaults to date sections instead of
+  day+group buckets, so assets are browsed chronologically without exposing
+  derivation/group ids in the main view.
+- Gallery cards were simplified for mobile: image/video previews are larger,
+  technical file names, `source_key`, provider, and thread metadata are hidden
+  from the card body, and each card keeps only media kind, date/time, copy, and
+  open actions.
+- The group selector remains available for operator filtering/debugging, with
+  date sections, no sections, type sections, thread sections, and group
+  sections as explicit choices.
+- The filter toolbar now keeps the Apply action at the end of the filter row on
+  desktop and full-width below the filters on narrower screens, avoiding the
+  previous awkward wrap beneath the first select.
+- `/gallery` now includes a native Upload control backed by
+  `POST /assets/upload`. Browser, iOS, and Android file pickers can upload
+  image, video, audio, and common document files directly into `media-data`;
+  the service stores them as original `gallery_upload` assets and redirects
+  back to the chronological gallery view.
+
 ## 2026-05-21 - Archive RAG Intent And Mixed Section Splitting
 
 - AlphaRavis pgvector archive chunking can now split mixed archives by section

@@ -9,7 +9,7 @@ endpoints:
       apiKey: "sk-1234" # Dummy Key
       baseURL: "http://api-bridge:8123/v1"
       models:
-        default: ["my-agent"]
+        default: ["my-agent", "server-model-manager"]
         fetch: false
     - name: "Hermes Agent"
       apiKey: "${HERMES_API_KEY}"
@@ -52,4 +52,16 @@ modelSpecs:
         model: "my-agent"
         modelLabel: "AlphaRavis Chat"
         useResponsesApi: false
+        disableStreaming: false
+    - name: "server-model-manager"
+      label: "Server Model Manager"
+      description: "Bounded LangGraph server/model-management agent for llama.cpp, ESP, reboot, and recovery actions."
+      preset:
+        endpoint: "LangGraph Agent"
+        model: "server-model-manager"
+        modelLabel: "Server Model Manager"
+        useResponsesApi: true
+        reasoning_summary: "none"
+        reasoning_effort: "low"
+        verbosity: "low"
         disableStreaming: false
