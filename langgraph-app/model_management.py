@@ -134,6 +134,7 @@ class ModelManagementConfig:
     ubuntu_llama_esp_api_key: str
     ubuntu_llama_context_min: int
     ubuntu_llama_context_max: int
+    ubuntu_llama_parallel_max: int
     probe_timeout_seconds: float
     comfy_wake_wait_seconds: float
 
@@ -168,6 +169,7 @@ def load_config(remote_pcs: dict[str, Any] | None = None) -> ModelManagementConf
         ubuntu_llama_esp_api_key=os.getenv("ALPHARAVIS_UBUNTU_LLAMA_ESP_API_KEY", "").strip(),
         ubuntu_llama_context_min=int(os.getenv("ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MIN", "512")),
         ubuntu_llama_context_max=int(os.getenv("ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MAX", "262144")),
+        ubuntu_llama_parallel_max=int(os.getenv("ALPHARAVIS_UBUNTU_LLAMA_PARALLEL_MAX", "2")),
         probe_timeout_seconds=float(os.getenv("ALPHARAVIS_MODEL_MGMT_PROBE_TIMEOUT_SECONDS", "5")),
         comfy_wake_wait_seconds=float(os.getenv("ALPHARAVIS_COMFY_WAKE_WAIT_SECONDS", "0")),
     )
@@ -609,6 +611,18 @@ def _validate_context_size(config: ModelManagementConfig, context_size: int | st
     return value
 
 
+def _validate_parallel_slots(config: ModelManagementConfig, parallel_slots: int | str | None) -> int | None:
+    if parallel_slots in (None, ""):
+        return None
+    try:
+        value = int(str(parallel_slots).strip())
+    except ValueError as exc:
+        raise ValueError("parallel_slots must be an integer") from exc
+    if value < 1 or value > max(1, config.ubuntu_llama_parallel_max):
+        raise ValueError(f"parallel_slots must be between 1 and {max(1, config.ubuntu_llama_parallel_max)}")
+    return value
+
+
 def _env_int(name: str, default: int) -> int:
     try:
         return int(os.getenv(name, str(default)))
@@ -729,6 +743,7 @@ async def configure_ubuntu_llama_instance(
     model: str = "",
     model_flag: str = "auto",
     context_size: int | str | None = None,
+    parallel_slots: int | str | None = None,
     command: str = "",
     restart: bool = True,
     remote_pcs: dict[str, Any] | None = None,
@@ -739,6 +754,7 @@ async def configure_ubuntu_llama_instance(
     try:
         instance = _validate_llama_instance(instance_id)
         validated_context_size = _validate_context_size(config, context_size)
+        validated_parallel_slots = _validate_parallel_slots(config, parallel_slots)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -748,10 +764,16 @@ async def configure_ubuntu_llama_instance(
         payload["model_flag"] = (model_flag or "auto").strip()
     if validated_context_size is not None:
         payload["context_size"] = validated_context_size
+    if validated_parallel_slots is not None:
+        payload["parallel"] = validated_parallel_slots
+        payload["parallel_vram_note"] = (
+            "Use parallel=2 only during a safe VRAM window. Roll high-context big-boss "
+            "or small 2B instances back to parallel=1 when concurrent context-heavy work starts."
+        )
     if command.strip():
         payload["command"] = command.strip()
     if set(payload) == {"restart"}:
-        return {"ok": False, "error": "send model, context_size, or command"}
+        return {"ok": False, "error": "send model, context_size, parallel_slots, or command"}
 
     path = f"/llama/instances/{quote(instance, safe='')}/config"
     return await _ubuntu_manager_request(config, "POST", path, payload=payload, action_required=True)
@@ -1105,7 +1127,12 @@ async def prepare_comfy_for_pixelle(remote_pcs: dict[str, Any] | None = None) ->
 
     initial = await probe_http(config.comfy_probe_url, timeout_seconds=config.probe_timeout_seconds)
     if initial.get("ok"):
-        return {"ready": True, "comfy_probe": initial, "message": "ComfyUI is reachable."}
+        return {
+            "ready": True,
+            "comfy_probe": initial,
+            "woke_for_request": False,
+            "message": "ComfyUI is reachable.",
+        }
 
     wake_result: dict[str, Any] | None = None
     if config.power_enabled:
@@ -1125,6 +1152,7 @@ async def prepare_comfy_for_pixelle(remote_pcs: dict[str, Any] | None = None) ->
                 "ready": True,
                 "comfy_probe": retry,
                 "wake_result": wake_result,
+                "woke_for_request": bool(wake_result.get("ok")),
                 "message": "ComfyUI became reachable after wake request.",
             }
 
@@ -1132,6 +1160,7 @@ async def prepare_comfy_for_pixelle(remote_pcs: dict[str, Any] | None = None) ->
         "ready": False,
         "comfy_probe": initial,
         "wake_result": wake_result,
+        "woke_for_request": bool(wake_result and wake_result.get("ok")),
         "retry_probe": retry,
         "message": (
             "ComfyUI is not reachable. Pixelle may fail unless the ComfyUI machine is awake. "

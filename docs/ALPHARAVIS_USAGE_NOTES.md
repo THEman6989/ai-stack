@@ -536,6 +536,73 @@ power-on/off/cycle/reset, reboot timer actions, immediate reboot, shutdown, and
 GPU-fault recovery. Direct ESP mode is available for power-on or reset when the
 Ubuntu host is off and port `8099` cannot answer.
 
+For user requests such as "turn BigBoss on" or "mach meinen BigBoss an",
+AlphaRavis should treat BigBoss as the Ubuntu llama.cpp host. If the Ubuntu
+Llama Manager API is reachable, it can call
+`request_ubuntu_server_power_action(action="power-on")`, which routes through
+the Manager to `/esp/action`. If the host is powered off and the Manager API
+cannot answer, it should call the same tool with `direct_esp=true`, which sends
+the ESP `POST /action` directly.
+
+For Pixelle/ComfyUI jobs, AlphaRavis can block Pixelle submission until ComfyUI
+is reachable, wake the ComfyUI machine, and remember whether it woke that host
+only for the current job:
+
+```text
+ALPHARAVIS_PIXELLE_PREPARE_COMFY=true
+ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE=true
+ALPHARAVIS_COMFY_WAKE_WAIT_SECONDS=30
+ALPHARAVIS_PIXELLE_OWNER_WAKE_COMFY=true
+ALPHARAVIS_PIXELLE_OWNER_WAKE_WAIT_SECONDS=30
+ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_COMFY_AFTER_JOB=false
+ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_DELAY_SECONDS=600
+```
+
+If `ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_COMFY_AFTER_JOB=true`, AlphaRavis schedules
+a delayed ComfyUI shutdown after a Pixelle job finishes, but only when the
+preflight actually woke ComfyUI for that job. If ComfyUI was already reachable
+before the request, it is left alone.
+
+For the big llama host, keep the policy explicit:
+
+```text
+ALPHARAVIS_BIG_LLM_AUTO_SHUTDOWN_AFTER_MANAGED_RUN=false
+ALPHARAVIS_BIG_LLM_AUTO_SHUTDOWN_DELAY_SECONDS=600
+```
+
+The Power/Model Manager prompt treats this as a lifecycle policy: shut down
+BigBoss through Ubuntu Llama Manager only when it was powered on only for the
+current request and the idle delay has passed. It must not shut down a host that
+was already in use.
+
+Dynamic llama.cpp context scheduling is separate from those control actions:
+
+```text
+ALPHARAVIS_CONTEXT_SCHEDULER_ENABLED=auto
+ALPHARAVIS_CONTEXT_SAFETY_FACTOR=0.92
+ALPHARAVIS_CONTEXT_DEFAULT_MAX_OUTPUT_TOKENS=2048
+ALPHARAVIS_CONTEXT_LEASE_SAFETY_MARGIN_TOKENS=1024
+ALPHARAVIS_LLAMA_RUNTIME_TIMEOUT_SECONDS=30
+ALPHARAVIS_LLAMA_RUNTIME_HOST_OVERRIDE=
+```
+
+`auto` enables the scheduler only when the Ubuntu Manager URL/IP is configured.
+For hard token budgets, AlphaRavis does not call the Manager and does not use a
+generic tokenizer. It selects the llama-server instance, calls that server's
+`/apply-template`, then calls that same server's `/tokenize`, and reserves:
+
+```text
+prompt_tokens + max_output_tokens + tool_context_tokens + safety_margin
+```
+
+The scheduler treats `--ctx-size`/`-c` as the total instance context pool.
+`--parallel`/`-np` is only the slot count, not extra context per request. If
+the saved command contains `--kv-unified`, leases may share the total pool
+dynamically; otherwise AlphaRavis uses the conservative
+`ctx_total // parallel` per-slot limit. If the Manager reports
+`host=127.0.0.1`, AlphaRavis derives the runtime URL from the Manager host plus
+the instance port, unless `ALPHARAVIS_LLAMA_RUNTIME_HOST_OVERRIDE` is set.
+
 Recovery, service control, ESP/server power actions, and instance config
 changes, such as raising `secondary` from 8K to 16K context or temporarily
 increasing the primary context window, still require
@@ -1900,6 +1967,24 @@ ALPHARAVIS_RUN_STATE_COLLECTION=run_checkpoints
 Set `ALPHARAVIS_RUN_STATE_AUTO_RESUME=true` only when you want AlphaRavis to
 continue saved jobs without asking first.
 
+## Optional Post-Run Reviewer
+
+The post-run reviewer is disabled by default. When
+`ALPHARAVIS_ASYNC_REVIEWER_ENABLED=true`, AlphaRavis schedules a background
+review after completed agent runs. The reviewer does not edit anything. It
+stores only actionable findings in `ALPHARAVIS_ASYNC_REVIEW_STORE_PATH`; on the
+next same-thread turn AlphaRavis shows a `Reviewer-Hinweis` and asks whether it
+should correct the issue.
+
+Useful settings:
+
+```text
+ALPHARAVIS_ASYNC_REVIEWER_ENABLED=false
+ALPHARAVIS_ASYNC_REVIEWER_MODEL=
+ALPHARAVIS_ASYNC_REVIEWER_TIMEOUT_SECONDS=45
+ALPHARAVIS_ASYNC_REVIEWER_MIN_OUTPUT_CHARS=120
+```
+
 ## Settings Web UI
 
 The Service Dashboard includes a Settings WebUI:
@@ -1917,10 +2002,11 @@ https://<tailnet-host>:8090/settings
 The page is designed for mobile browsers and iOS Safari home-screen use. It has
 PWA metadata, large touch targets, safe-area spacing, compact setting rows,
 local browser favorites, category chips, importance filters,
-changed/runtime/favorite filters, and sorting by importance, alphabet, section,
-or changed state. Cards also show focused tags such as `run-state`,
-`server-manager`, `ubuntu-llama`, `security`, `network`, and `storage`; search
-matches those tags as well as key names and descriptions.
+changed/runtime/favorite filters, and sorting by importance, `.env(exaple)`
+order, alphabet, section, or changed state. Cards also show focused tags such
+as `run-state`, `reviewer`, `server-manager`, `ubuntu-llama`, `security`,
+`network`, and `storage`; search matches those tags as well as key names and
+descriptions.
 The negative filter can hide `fallback` and `legacy` settings. Fallback cards
 show what they are fallback values for, for example fixed token limits that only
 matter when percent-based context limits are disabled.

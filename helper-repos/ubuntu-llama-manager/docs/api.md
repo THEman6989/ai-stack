@@ -285,12 +285,16 @@ bleiben erhalten:
 curl -X POST \
   -H "Authorization: Bearer $API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"model":"unsloth/Qwen3.5-2B-GGUF:Q4_1","model_flag":"hf","context_size":16384,"restart":true}' \
+  -d '{"model":"unsloth/Qwen3.5-2B-GGUF:Q4_1","model_flag":"hf","context_size":16384,"parallel":2,"restart":true}' \
   http://127.0.0.1:8099/llama/instances/secondary/config
 ```
 
 `context_size` ersetzt `-c`, `--ctx-size`, `--ctx_size`, `--context` oder
 `--context-size`. Wenn kein Kontext-Flag existiert, wird `-c <wert>` angehaengt.
+`parallel` bzw. `parallel_slots` ersetzt `--parallel`, `-np` oder
+`--parallel-slots`; wenn kein Flag existiert, wird `--parallel <wert>`
+angehaengt. `parallel=2` sollte nur bei sicherem VRAM-Fenster gesetzt und vor
+konkurrierenden High-Context-Jobs wieder auf `1` gesetzt werden.
 
 ### Kompletten Command-Block Ersetzen
 

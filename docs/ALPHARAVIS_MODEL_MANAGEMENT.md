@@ -78,6 +78,26 @@ Ubuntu Llama Manager write/recovery actions are gated by the same
 AlphaRavis can call the separate private `ubuntu-llama-manager` service when
 configured:
 
+The AI-stack now treats that Manager strictly as the control plane. It reads
+instance status and saved commands, and it asks the Manager to change
+model/context/parallel/command config or to stop/restart/recover services. It
+does not proxy tokenization through the Manager.
+
+Runtime information comes from the selected llama-server directly. The
+`LlamaCppRuntimeClient` calls `/apply-template`, `/tokenize`, `/slots`,
+`/v1/models`, `/completion`, and `/v1/chat/completions` on the instance
+`base_url` discovered from `/llama/instances`. Chat token counting renders the
+prompt with `/apply-template` and counts it with `/tokenize` on the same
+server. This path is required for hard context-budget decisions.
+
+`ContextScheduler` parses `--ctx-size`/`-c`, `--parallel`/`-np`, and
+`--kv-unified` from each saved command and creates a lease before async LLM
+calls. With `--kv-unified`, capacity is the shared context pool times
+`ALPHARAVIS_CONTEXT_SAFETY_FACTOR`; without it, capacity is conservatively
+`ctx_total // parallel` times that factor. The current lease store is
+process-local, so a multi-worker deployment still needs a Redis/Postgres lease
+store before it can enforce one global budget across workers.
+
 ```text
 ALPHARAVIS_UBUNTU_LLAMA_MANAGER_IP=<llama-host-ip>
 ALPHARAVIS_UBUNTU_LLAMA_MANAGER_PORT=8099
@@ -114,9 +134,12 @@ to the manager API:
   `/reboot/disable`, `/power/shutdown`, or `/diagnostics/handle-gpu-fault`.
   When `direct_esp=true`, power/reset/cancel actions go directly to the ESP
   endpoint because the Ubuntu Manager API is unavailable while the host is off.
+  Requests like "turn BigBoss on" mean power on the Ubuntu llama.cpp host:
+  use `action="power-on"` through the Manager when it is reachable, or
+  `direct_esp=true` when the host is off and the Manager cannot respond.
 - `configure_ubuntu_llama_instance`: patches `primary` or `secondary` via
   `/llama/instances/{id}/config`, supporting `model`, `model_flag`,
-  `context_size`, `command`, and `restart`.
+  `context_size`, `parallel_slots`, `command`, and `restart`.
 
 This is the preferred route for changing llama.cpp context windows, for
 example moving the secondary 2B instance from 8K to 16K or temporarily raising
@@ -125,12 +148,44 @@ status, diagnosis, service restart, ESP power-cycle, and gated recovery tools;
 context/model reconfiguration is reserved for the power/model-management
 surface.
 
+`parallel_slots=2` maps to llama.cpp `--parallel 2` through the Ubuntu Llama
+Manager and is capped by `ALPHARAVIS_UBUNTU_LLAMA_PARALLEL_MAX` (default `2`).
+Use it only for a safe VRAM window: the small 2B instance and short-context
+BigBoss work can benefit, but high-context concurrent BigBoss work should roll
+affected instances back to `parallel_slots=1` before the context-heavy jobs
+start.
+
 Destructive tools have a second confirmation guard. `power-on`, service
 `start`, service `restart`, reboot timer enable/disable, and ESP cancel can run
 when actions are enabled. `power-off`, `power-cycle`, `reset`, `shutdown`,
 `reboot-now`, `gpu-fault`, service `stop`, and `force-kill` return
 `needs_confirmation=true` unless the caller passes `confirmed=true` after the
 operator has confirmed the exact target and tool.
+
+## Managed Lifecycle
+
+AlphaRavis distinguishes machines that were already online from machines it
+woke only for the current request.
+
+- For Pixelle, `prepare_comfy_for_pixelle` returns `woke_for_request` when it
+  had to wake ComfyUI. If
+  `ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_COMFY_AFTER_JOB=true`, the Pixelle tools
+  schedule a delayed ComfyUI shutdown after job completion or failure. The
+  shutdown is skipped when ComfyUI was already reachable before the job.
+- For BigBoss/the Ubuntu llama.cpp host, the Power/Model Manager prompt treats
+  `ALPHARAVIS_BIG_LLM_AUTO_SHUTDOWN_AFTER_MANAGED_RUN` as a policy marker:
+  only shut down through Ubuntu Llama Manager after a run if the host was
+  powered on specifically for that request and the configured idle delay passed.
+  A host that was already running must be left alone.
+
+Relevant settings:
+
+```text
+ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_COMFY_AFTER_JOB=false
+ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_DELAY_SECONDS=600
+ALPHARAVIS_BIG_LLM_AUTO_SHUTDOWN_AFTER_MANAGED_RUN=false
+ALPHARAVIS_BIG_LLM_AUTO_SHUTDOWN_DELAY_SECONDS=600
+```
 
 ## Dedicated Server Model Manager
 

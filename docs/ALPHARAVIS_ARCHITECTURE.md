@@ -40,7 +40,15 @@ The current Docker architecture is split into these main roles:
   ESP/server power actions, or patch a `primary`/`secondary` llama.cpp instance
   model/context through `/llama/instances/{id}/config`. Optional direct ESP
   mode can call the ESP `/action` or `/cancel` endpoints when the Ubuntu host
-  itself is off.
+  itself is off. This service is the control plane only; AlphaRavis does not use
+  it as a tokenizer proxy.
+- Direct llama.cpp runtime plane: for each Manager-discovered instance,
+  AlphaRavis can call the selected llama-server directly for `/apply-template`,
+  `/tokenize`, `/slots`, `/v1/models`, `/completion`, and
+  `/v1/chat/completions`. The context scheduler uses that runtime plane for
+  hard token counts and process-local context leases before async LLM calls.
+  `--kv-unified` enables dynamic shared-pool planning; without it, planning is
+  conservative per slot.
 - `Server Model Manager`: a dedicated LangGraph/Bridge access mode for
   `power_management_agent`. LibreChat sees it as the `server-model-manager`
   model/preset on the existing AlphaRavis Bridge, while native LangGraph
@@ -128,7 +136,8 @@ For day-to-day runtime control after the stack is up, the Service Dashboard
 exposes `/settings`. The Settings UI parses every key from `.env(exaple)`,
 annotates it with current `.env` values and any temporary runtime override, and
 offers search, category chips, importance filters, changed/runtime filters, and
-mobile-first controls. The UI uses compact setting rows, local browser
+mobile-first controls, including a sort mode that preserves `.env(exaple)`
+insertion order. The UI uses compact setting rows, local browser
 favorites, generated fallback descriptions for undocumented keys, and inferred
 dropdowns for common mode/profile settings. `Temporary anwenden` writes
 `service-dashboard-data/runtime_settings.json`; LangGraph reads that file before

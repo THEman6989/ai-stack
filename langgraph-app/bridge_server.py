@@ -656,7 +656,11 @@ def _sanitize_message_content(content: Any) -> str:
             parts.append(str(part))
             continue
         block_type = str(part.get("type") or "")
-        if block_type in {"text", "input_text"} and isinstance(part.get("text"), str):
+        if block_type in {"code", "input_code", "output_code", "code_window"}:
+            code_block = _code_part_to_markdown(part)
+            if code_block:
+                parts.append(code_block)
+        elif block_type in {"text", "input_text"} and isinstance(part.get("text"), str):
             parts.append(part["text"])
         elif block_type in MEDIA_BLOCK_TYPES:
             if BRIDGE_MEDIA_CONTEXT_MODE != "off":
@@ -664,6 +668,19 @@ def _sanitize_message_content(content: Any) -> str:
         elif isinstance(part.get("content"), str):
             parts.append(part["content"])
     return "\n".join(part for part in parts if part)
+
+
+def _code_part_to_markdown(part: dict[str, Any]) -> str:
+    code = part.get("code")
+    if not isinstance(code, str):
+        code = part.get("text") if isinstance(part.get("text"), str) else part.get("content")
+    if not isinstance(code, str) or not code:
+        return ""
+    language = str(part.get("language") or part.get("lang") or part.get("mime_type") or "").strip()
+    language = re.sub(r"[^A-Za-z0-9_+.#-]", "", language.split("/")[-1])[:32]
+    title = str(part.get("title") or part.get("filename") or "").strip()
+    heading = f"{title}\n" if title else ""
+    return f"{heading}```{language}\n{code.rstrip()}\n```"
 
 
 def _normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2673,6 +2690,10 @@ def _responses_content_to_text(content: Any) -> str:
         return content
     if isinstance(content, dict):
         block_type = str(content.get("type") or "")
+        if block_type in {"code", "input_code", "output_code", "code_window"}:
+            code_block = _code_part_to_markdown(content)
+            if code_block:
+                return code_block
         if isinstance(content.get("text"), str):
             return content["text"]
         if isinstance(content.get("content"), str):

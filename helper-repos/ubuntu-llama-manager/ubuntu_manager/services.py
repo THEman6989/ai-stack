@@ -220,6 +220,7 @@ class Manager:
         model = str(payload.get("model", "")).strip()
         model_flag = str(payload.get("model_flag", "auto")).strip() or "auto"
         context_size = payload.get("context_size", payload.get("ctx_size", ""))
+        parallel = payload.get("parallel", payload.get("parallel_slots", ""))
 
         try:
             if command:
@@ -232,6 +233,7 @@ class Manager:
                     model=model,
                     model_flag=model_flag,
                     context_size=context_size,
+                    parallel=parallel,
                 )
         except ValueError as exc:
             return {"ok": False, "error": str(exc), "instance": spec["id"], "command_key": command_key}

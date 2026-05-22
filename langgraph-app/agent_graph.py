@@ -9,10 +9,16 @@ import logging
 import os
 import re
 import shlex
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
+
+_WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
+if str(_WORKSPACE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_WORKSPACE_ROOT))
 
 import httpx
 from deepagents import create_deep_agent
@@ -118,6 +124,14 @@ except Exception as exc:  # pragma: no cover - optional local module/deps
     RETRIEVAL_ROUTER_IMPORT_ERROR: Exception | None = exc
 else:
     RETRIEVAL_ROUTER_IMPORT_ERROR = None
+
+try:
+    from ai_stack.context_budget.scheduler import get_context_scheduler
+except Exception as exc:  # pragma: no cover - optional local package/deps
+    get_context_scheduler = None  # type: ignore[assignment]
+    CONTEXT_SCHEDULER_IMPORT_ERROR: Exception | None = exc
+else:
+    CONTEXT_SCHEDULER_IMPORT_ERROR = None
 
 try:
     from document_ingest import load_document_file as _document_load_file
@@ -287,6 +301,20 @@ except Exception as exc:  # pragma: no cover - state manager must not block grap
     RUN_STATE_MANAGER_IMPORT_ERROR: Exception | None = exc
 else:
     RUN_STATE_MANAGER_IMPORT_ERROR = None
+
+try:
+    from run_review_manager import (
+        load_pending_run_review as _load_pending_run_review,
+        mark_run_review_delivered as _mark_run_review_delivered,
+        save_run_review as _save_run_review,
+    )
+except Exception as exc:  # pragma: no cover - reviewer must not block graph import
+    _load_pending_run_review = None
+    _mark_run_review_delivered = None
+    _save_run_review = None
+    RUN_REVIEW_MANAGER_IMPORT_ERROR: Exception | None = exc
+else:
+    RUN_REVIEW_MANAGER_IMPORT_ERROR = None
 
 try:
     from rag_pins_manager import (
@@ -545,6 +573,12 @@ ARCHIVE_RETRIEVAL_POLICY_PROMPT = (
     "raw archives before relying on exact old details. Cross-thread retrieval "
     "requires an explicit user request."
 )
+CODE_WINDOW_POLICY_PROMPT = (
+    "Code-window policy: when showing code, patches, shell snippets, logs, JSON, "
+    "YAML, or config, use normal Markdown fenced code blocks with a language tag "
+    "when known. Do not wrap code in HTML or proprietary canvas markers unless "
+    "the user explicitly asks for an artifact file."
+)
 SPECIALIST_LOCAL_PLAN_PROMPT = (
     "Specialist planning policy: when you receive an execution plan or current "
     "task brief, first adapt it into your own short specialist plan before "
@@ -553,7 +587,15 @@ SPECIALIST_LOCAL_PLAN_PROMPT = (
     "is likely. Do not replace the planner's task contract; refine only the "
     "part your specialist role owns."
 )
-AGENT_POLICY_PROMPT = SPECIALIST_LOCAL_PLAN_PROMPT + " " + HANDOFF_POLICY_PROMPT + " " + ARCHIVE_RETRIEVAL_POLICY_PROMPT
+AGENT_POLICY_PROMPT = (
+    SPECIALIST_LOCAL_PLAN_PROMPT
+    + " "
+    + HANDOFF_POLICY_PROMPT
+    + " "
+    + ARCHIVE_RETRIEVAL_POLICY_PROMPT
+    + " "
+    + CODE_WINDOW_POLICY_PROMPT
+)
 FAST_PATH_DENY_PATTERNS = [
     "agent",
     "alpha ravis",
@@ -1329,6 +1371,119 @@ def _log_model_request_budget(
     return budget
 
 
+def _context_scheduler_setting() -> str:
+    return os.getenv("ALPHARAVIS_CONTEXT_SCHEDULER_ENABLED", "auto").strip().lower()
+
+
+def _context_scheduler_enabled() -> bool:
+    setting = _context_scheduler_setting()
+    if setting in {"0", "false", "no", "off", "disabled"}:
+        return False
+    if get_context_scheduler is None:
+        return False
+    if setting in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    return bool(
+        os.getenv("ALPHARAVIS_UBUNTU_LLAMA_MANAGER_URL", "").strip()
+        or os.getenv("ALPHARAVIS_UBUNTU_LLAMA_MANAGER_IP", "").strip()
+    )
+
+
+def _max_output_tokens_from_kwargs(model_kwargs: dict[str, Any] | None) -> int:
+    model_kwargs = model_kwargs or {}
+    for key in ("max_output_tokens", "max_completion_tokens", "max_tokens"):
+        value = model_kwargs.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            continue
+    return int(os.getenv("ALPHARAVIS_CONTEXT_DEFAULT_MAX_OUTPUT_TOKENS", "2048"))
+
+
+def _context_priority_for_purpose(purpose: str) -> str:
+    lowered = purpose.lower()
+    if any(marker in lowered for marker in ("main", "swarm", "planner", "server_model_manager", "crisis")):
+        return "high"
+    if any(marker in lowered for marker in ("review", "classifier", "fast_path", "judge", "router")):
+        return "low"
+    return "medium"
+
+
+def _preferred_llama_instance_for_model(model_name: str | None = None, purpose: str = "") -> str:
+    model = (model_name or os.getenv("ALPHARAVIS_MODEL", "")).lower()
+    lowered_purpose = purpose.lower()
+    if os.getenv("ALPHARAVIS_CONTEXT_PREFERRED_INSTANCE", "").strip():
+        return os.getenv("ALPHARAVIS_CONTEXT_PREFERRED_INSTANCE", "").strip()
+    if any(marker in model or marker in lowered_purpose for marker in ("2b", "gemma", "edge", "judge", "router", "classifier")):
+        return "secondary"
+    return "primary"
+
+
+async def _reserve_llama_context_lease(
+    *,
+    messages: list[Any],
+    purpose: str,
+    model_name: str | None = None,
+    model_kwargs: dict[str, Any] | None = None,
+    tools: list[Any] | tuple[Any, ...] | None = None,
+    trace_id: str = "",
+) -> tuple[Any | None, Any | None]:
+    if not _context_scheduler_enabled():
+        return None, None
+    try:
+        scheduler = await get_context_scheduler() if get_context_scheduler is not None else None
+        if scheduler is None:
+            return None, None
+        lease, admission = await scheduler.estimate_and_reserve(
+            messages=messages,
+            max_output_tokens=_max_output_tokens_from_kwargs(model_kwargs),
+            tool_context_tokens=_estimate_tool_schema_tokens(tools),
+            safety_margin=int(os.getenv("ALPHARAVIS_CONTEXT_LEASE_SAFETY_MARGIN_TOKENS", "1024")),
+            graph_run_id=_state_thread_id(),
+            request_id=trace_id or hashlib.sha256(f"{time.time()}:{purpose}".encode("utf-8")).hexdigest()[:16],
+            agent_name=purpose,
+            priority=_context_priority_for_purpose(purpose),
+            preferred_instance_id=_preferred_llama_instance_for_model(model_name, purpose),
+        )
+        _log_event(
+            logging.INFO if lease else logging.WARNING,
+            "llama_context.lease_admission",
+            purpose=purpose,
+            trace_id=trace_id,
+            admission=admission,
+        )
+        return scheduler, lease
+    except Exception as exc:
+        _log_exception(
+            "llama_context.lease_failed",
+            exc,
+            level=logging.WARNING,
+            purpose=purpose,
+            trace_id=trace_id,
+        )
+        return None, None
+
+
+async def _release_llama_context_lease(scheduler: Any | None, lease: Any | None, *, status: str = "released") -> None:
+    if scheduler is None or lease is None:
+        return
+    try:
+        await scheduler.release_lease(lease.lease_id, status=status)
+    except Exception as exc:
+        _log_exception("llama_context.lease_release_failed", exc, level=logging.WARNING, lease_id=getattr(lease, "lease_id", ""))
+
+
+async def _handle_llama_context_response(scheduler: Any | None, lease: Any | None, response: Any) -> None:
+    if scheduler is None:
+        return
+    try:
+        await scheduler.handle_truncated_response(lease, response)
+    except Exception as exc:
+        _log_exception("llama_context.truncated_check_failed", exc, level=logging.WARNING)
+
+
 def _bound_tools_from_args(args: tuple[Any, ...], kwargs: dict[str, Any]) -> list[Any]:
     candidate = kwargs.get("tools")
     if candidate is None and args:
@@ -1366,9 +1521,26 @@ def _budget_guarded_agent_model(model: Any, *, purpose: str, tools: list[Any] | 
     if callable(original_ainvoke):
         async def ainvoke(input: Any, *args: Any, **kwargs: Any) -> Any:
             messages = _model_input_messages(input)
+            scheduler = None
+            lease = None
             if messages:
                 _log_model_request_budget(purpose=purpose, messages=messages, tools=static_tools)
-            return await original_ainvoke(input, *args, **kwargs)
+                scheduler, lease = await _reserve_llama_context_lease(
+                    messages=messages,
+                    purpose=purpose,
+                    model_kwargs=kwargs,
+                    tools=static_tools,
+                )
+            try:
+                response = await original_ainvoke(input, *args, **kwargs)
+                await _handle_llama_context_response(scheduler, lease, response)
+                return response
+            except Exception:
+                await _release_llama_context_lease(scheduler, lease, status="failed")
+                lease = None
+                raise
+            finally:
+                await _release_llama_context_lease(scheduler, lease)
 
         object.__setattr__(model, "ainvoke", ainvoke)
 
@@ -1384,10 +1556,26 @@ def _budget_guarded_agent_model(model: Any, *, purpose: str, tools: list[Any] | 
     if callable(original_astream):
         async def astream(input: Any, *args: Any, **kwargs: Any) -> Any:
             messages = _model_input_messages(input)
+            scheduler = None
+            lease = None
             if messages:
                 _log_model_request_budget(purpose=purpose, messages=messages, tools=static_tools)
-            async for chunk in original_astream(input, *args, **kwargs):
-                yield chunk
+                scheduler, lease = await _reserve_llama_context_lease(
+                    messages=messages,
+                    purpose=purpose,
+                    model_kwargs=kwargs,
+                    tools=static_tools,
+                )
+            try:
+                async for chunk in original_astream(input, *args, **kwargs):
+                    await _handle_llama_context_response(scheduler, lease, chunk)
+                    yield chunk
+            except Exception:
+                await _release_llama_context_lease(scheduler, lease, status="failed")
+                lease = None
+                raise
+            finally:
+                await _release_llama_context_lease(scheduler, lease)
 
         object.__setattr__(model, "astream", astream)
 
@@ -1523,6 +1711,13 @@ async def _ainvoke_direct_model(
         model_kwargs=model_kwargs,
         trace_id=trace_id,
     )
+    context_scheduler, context_lease = await _reserve_llama_context_lease(
+        messages=messages,
+        purpose=purpose,
+        model_name=model_name,
+        model_kwargs=model_kwargs,
+        trace_id=trace_id,
+    )
     if _responses_direct_calls_enabled():
         started = time.perf_counter()
         responses_model = model_name or os.getenv("ALPHARAVIS_RESPONSES_MODEL", "")
@@ -1561,7 +1756,7 @@ async def _ainvoke_direct_model(
                 provider_profile=provider_profile,
                 trace_id=trace_id,
             )
-            return AIMessage(
+            message = AIMessage(
                 content=result.content,
                 additional_kwargs={
                     "reasoning_content": result.reasoning,
@@ -1572,11 +1767,15 @@ async def _ainvoke_direct_model(
                     "provider_hardening_profile": provider_profile,
                 },
             )
+            await _handle_llama_context_response(context_scheduler, context_lease, message)
+            await _release_llama_context_lease(context_scheduler, context_lease)
+            return message
         except Exception as exc:
             if _env_bool("ALPHARAVIS_RESPONSES_REQUIRE_NATIVE", "false") or not _chat_fallback_allowed(
                 responses_model,
                 responses_base_url,
             ):
+                await _release_llama_context_lease(context_scheduler, context_lease, status="failed")
                 raise
             classified = _classified_error_profile(
                 exc,
@@ -1641,6 +1840,7 @@ async def _ainvoke_direct_model(
             num_messages=len(messages),
             trace_id=trace_id,
         )
+        await _release_llama_context_lease(context_scheduler, context_lease, status="failed")
         raise
     _log_event(
         logging.INFO,
@@ -1654,6 +1854,8 @@ async def _ainvoke_direct_model(
         num_messages=len(messages),
         trace_id=trace_id,
     )
+    await _handle_llama_context_response(context_scheduler, context_lease, response)
+    await _release_llama_context_lease(context_scheduler, context_lease)
     return response
 
 
@@ -1967,6 +2169,78 @@ def _pixelle_preflight_notice(result: dict[str, Any]) -> str:
     return f"Pixelle preflight warning: {message}"
 
 
+PIXELLE_JOB_LIFECYCLE: dict[str, dict[str, Any]] = {}
+
+
+def _pixelle_preflight_woke_comfy(preflight: dict[str, Any]) -> bool:
+    if not preflight:
+        return False
+    if preflight.get("woke_for_request"):
+        return True
+    wake_result = preflight.get("wake_result")
+    if isinstance(wake_result, dict) and wake_result.get("ok"):
+        return True
+    owner_wake_result = preflight.get("owner_wake_result")
+    return isinstance(owner_wake_result, dict) and bool(owner_wake_result.get("ok"))
+
+
+def _remember_pixelle_lifecycle(job_id: str, preflight: dict[str, Any], *, mode: str) -> None:
+    if not job_id or not _pixelle_preflight_woke_comfy(preflight):
+        return
+    PIXELLE_JOB_LIFECYCLE[job_id] = {
+        "job_id": job_id,
+        "mode": mode,
+        "woke_comfy_for_request": True,
+        "created_at": time.time(),
+        "preflight": preflight,
+    }
+
+
+async def _shutdown_comfy_after_pixelle_delay(job_id: str, reason: str) -> None:
+    delay_seconds = max(0, int(os.getenv("ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_DELAY_SECONDS", "600")))
+    if delay_seconds:
+        await asyncio.sleep(delay_seconds)
+    result: Any
+    if _owner_power_tools_enabled() and _owner_shutdown_comfyui_server is not None:
+        result = await _owner_shutdown_comfyui_server()
+        method = "owner_shutdown_comfyui_server"
+    elif _model_mgmt_request_power_action is not None:
+        result = await _model_mgmt_request_power_action(
+            "shutdown_pc",
+            os.getenv("ALPHARAVIS_COMFY_PC", "comfy_server"),
+            reason,
+            remote_pcs=REMOTE_PCS,
+        )
+        method = "request_power_management_action"
+    else:
+        result = {"ok": False, "message": _model_management_unavailable() or "No ComfyUI shutdown tool available."}
+        method = "unavailable"
+    _log_event(
+        logging.INFO if isinstance(result, dict) and result.get("ok") else logging.WARNING,
+        "pixelle.comfy_auto_shutdown.finished",
+        dependency="comfyui",
+        job_id=job_id,
+        method=method,
+        delay_seconds=delay_seconds,
+        result_preview=str(result)[:1000],
+    )
+
+
+def _schedule_comfy_shutdown_if_woke(job_id: str, preflight: dict[str, Any], *, reason: str) -> bool:
+    if not _env_bool("ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_COMFY_AFTER_JOB", "false"):
+        return False
+    if not _pixelle_preflight_woke_comfy(preflight):
+        return False
+    try:
+        asyncio.create_task(
+            _shutdown_comfy_after_pixelle_delay(job_id, reason),
+            name=f"alpharavis_pixelle_comfy_shutdown_{job_id}",
+        )
+        return True
+    except RuntimeError:
+        return False
+
+
 MEDIA_URL_RE = re.compile(r"https?://[^\s)>\]\"']+", re.IGNORECASE)
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif"}
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"}
@@ -2228,8 +2502,10 @@ async def start_pixelle_remote(prompt: str, config: RunnableConfig):
         mode="wait",
         prompt_chars=len(prompt or ""),
     )
+    _remember_pixelle_lifecycle(job_id, preflight, mode="wait")
     result = await monitor_pixelle_job(job_id, current_thread_id)
     prefix = f"{preflight_notice}\n\n" if preflight_notice else ""
+    shutdown_scheduled = False
     if result["status"] == "completed":
         media_notice = await _register_pixelle_media_from_result(
             job_id=job_id,
@@ -2245,7 +2521,18 @@ async def start_pixelle_remote(prompt: str, config: RunnableConfig):
             job_id=job_id,
             elapsed_seconds=round(time.perf_counter() - started, 3),
         )
-        return f"{prefix}Image ready. Job `{job_id}` completed.\n\n{result['message']}{media_notice}"
+        shutdown_scheduled = _schedule_comfy_shutdown_if_woke(
+            job_id,
+            preflight,
+            reason="Pixelle job completed after AlphaRavis woke ComfyUI for this request.",
+        )
+        shutdown_notice = (
+            f"\n\nComfyUI lifecycle: auto-shutdown scheduled in "
+            f"{int(os.getenv('ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_DELAY_SECONDS', '600'))}s."
+            if shutdown_scheduled
+            else ""
+        )
+        return f"{prefix}Image ready. Job `{job_id}` completed.\n\n{result['message']}{media_notice}{shutdown_notice}"
 
     _log_event(
         logging.WARNING if result.get("status") == "failed" else logging.INFO,
@@ -2256,6 +2543,16 @@ async def start_pixelle_remote(prompt: str, config: RunnableConfig):
         status=result.get("status"),
         elapsed_seconds=round(time.perf_counter() - started, 3),
     )
+    shutdown_scheduled = _schedule_comfy_shutdown_if_woke(
+        job_id,
+        preflight,
+        reason=f"Pixelle job ended with status {result.get('status')} after AlphaRavis woke ComfyUI.",
+    )
+    if shutdown_scheduled:
+        result["message"] += (
+            f"\n\nComfyUI lifecycle: auto-shutdown scheduled in "
+            f"{int(os.getenv('ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_DELAY_SECONDS', '600'))}s."
+        )
     return f"{prefix}{result['message']}"
 
 
@@ -2319,6 +2616,7 @@ async def start_pixelle_async(prompt: str):
         prompt_chars=len(prompt or ""),
         elapsed_seconds=round(time.perf_counter() - started, 3),
     )
+    _remember_pixelle_lifecycle(job_id, preflight, mode="async")
     prefix = f"{preflight_notice}\n\n" if preflight_notice else ""
     return (
         f"{prefix}Pixelle job started. job_id: {job_id}\n"
@@ -2343,8 +2641,26 @@ async def check_pixelle_job(job_id: str):
     if status == "completed":
         result = data.get("result", "")
         media_notice = await _register_pixelle_media_from_result(job_id=job_id.strip(), result=result)
-        return f"Pixelle job `{job_id}` completed.\n\n{result}{media_notice}"
+        lifecycle = PIXELLE_JOB_LIFECYCLE.pop(job_id.strip(), {})
+        shutdown_scheduled = _schedule_comfy_shutdown_if_woke(
+            job_id.strip(),
+            lifecycle.get("preflight", {}) if isinstance(lifecycle, dict) else {},
+            reason="Async Pixelle job completed after AlphaRavis woke ComfyUI for this request.",
+        )
+        shutdown_notice = (
+            f"\n\nComfyUI lifecycle: auto-shutdown scheduled in "
+            f"{int(os.getenv('ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_DELAY_SECONDS', '600'))}s."
+            if shutdown_scheduled
+            else ""
+        )
+        return f"Pixelle job `{job_id}` completed.\n\n{result}{media_notice}{shutdown_notice}"
     if status == "failed":
+        lifecycle = PIXELLE_JOB_LIFECYCLE.pop(job_id.strip(), {})
+        _schedule_comfy_shutdown_if_woke(
+            job_id.strip(),
+            lifecycle.get("preflight", {}) if isinstance(lifecycle, dict) else {},
+            reason="Async Pixelle job failed after AlphaRavis woke ComfyUI for this request.",
+        )
         return _format_pixelle_failure(job_id, data.get("logs", "No logs returned."))
     return f"Pixelle job `{job_id}` status: {status}\n\n{data.get('logs', '')}"
 
@@ -2857,7 +3173,12 @@ async def request_ubuntu_server_power_action(
     wait_seconds: int | None = None,
     delay_before_action_seconds: int | None = None,
 ):
-    """Run a gated Ubuntu Llama Manager server/ESP action such as power-on, power-cycle, reboot, or shutdown."""
+    """Run a gated Ubuntu Llama Manager server/ESP action such as power-on, power-cycle, reboot, or shutdown.
+
+    Use action="power-on" for "turn BigBoss/the llama PC on". If the Ubuntu
+    Manager API is offline because the PC is off, set direct_esp=true so the ESP
+    receives POST /action directly.
+    """
 
     if _model_mgmt_request_ubuntu_server_power_action is None:
         return _model_management_unavailable() or "Model management module not loaded."
@@ -3319,6 +3640,91 @@ def read_alpha_ravis_architecture(query: str = "", max_chars: int = 6000):
             + "\n\n[Truncated. Ask for a narrower AlphaRavis architecture topic if more detail is needed.]"
         )
     return content
+
+
+@tool
+def locate_repo_surface(query: str, max_results: int = 20):
+    """Find likely repo files/surfaces for a feature name using fast filename and content search."""
+
+    query = str(query or "").strip()
+    if not query:
+        return "Provide a feature, route, setting, UI label, or symbol to locate."
+    workspace = Path(_workspace_root()).resolve()
+    max_results = max(1, min(int(max_results), 50))
+    terms = [term for term in re.split(r"[^A-Za-z0-9_.-]+", query) if len(term) >= 2][:8]
+    patterns = [query, *terms]
+    seen: set[str] = set()
+    hits: list[str] = []
+
+    def add_hit(value: str) -> None:
+        value = value.strip()
+        if not value or value in seen:
+            return
+        seen.add(value)
+        hits.append(value)
+
+    try:
+        files_proc = subprocess.run(
+            ["rg", "--files", "--hidden", "-g", "!node_modules", "-g", "!.git", "-g", "!*.png", "-g", "!*.jpg"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+        file_list = files_proc.stdout.splitlines()
+    except Exception:
+        file_list = [str(path.relative_to(workspace)) for path in workspace.rglob("*") if path.is_file()]
+
+    lowered_query = query.lower()
+    lowered_terms = [term.lower() for term in terms]
+    for rel in file_list:
+        lowered = rel.lower()
+        if lowered_query in lowered or any(term in lowered for term in lowered_terms):
+            add_hit(f"FILE {rel}")
+        if len(hits) >= max_results:
+            break
+
+    for pattern in patterns:
+        if len(hits) >= max_results:
+            break
+        try:
+            proc = subprocess.run(
+                [
+                    "rg",
+                    "-n",
+                    "--hidden",
+                    "-S",
+                    "-m",
+                    "5",
+                    "-g",
+                    "!node_modules",
+                    "-g",
+                    "!.git",
+                    "-g",
+                    "!*.png",
+                    "-g",
+                    "!*.jpg",
+                    "--",
+                    pattern,
+                ],
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+            )
+        except Exception as exc:
+            add_hit(f"content search failed for `{pattern}`: {exc}")
+            continue
+        for line in proc.stdout.splitlines():
+            add_hit(f"MATCH {line[:500]}")
+            if len(hits) >= max_results:
+                break
+
+    if not hits:
+        return f"No repo surface found for `{query}`."
+    return "\n".join(hits[:max_results])
 
 
 @tool
@@ -9181,6 +9587,11 @@ async def run_profile_start_node(state: AlphaRavisState, runtime: Any | None = N
     selected_toolsets, toolset_context = _toolset_context_for_request(latest)
     stable_context = _stable_prompt_context()
     resume_updates = _load_open_run_state_updates(state, latest)
+    pending_review = (
+        _load_pending_run_review(_state_thread_id(state))
+        if _load_pending_run_review is not None and _mark_run_review_delivered is not None
+        else None
+    )
     token_estimate = _estimate_tokens(messages)
     static_reserve = _static_context_reserve_tokens({"selected_toolsets": selected_toolsets})
     profile = {
@@ -9205,6 +9616,7 @@ async def run_profile_start_node(state: AlphaRavisState, runtime: Any | None = N
         "selected_toolsets": selected_toolsets,
         "loaded_toolsets": GRAPH_TOOLSET_PROFILE,
         "runtime_settings_applied": runtime_settings,
+        "async_reviewer_pending": bool(pending_review),
     }
     _log_event(
         logging.INFO,
@@ -9253,7 +9665,25 @@ async def run_profile_start_node(state: AlphaRavisState, runtime: Any | None = N
                 id=f"alpharavis_resume_prompt_{int(time.time())}",
             )
         ]
-    if not resume_updates.get("run_resume_prompt_required") and any(bool(item.get("message_replaced")) for item in large_paste_ingests):
+    elif pending_review:
+        review_text = str(pending_review.get("review_text") or "").strip()
+        updates["messages"] = [
+            AIMessage(
+                content=(
+                    "Reviewer-Hinweis: Der optionale Hintergrund-Reviewer hat moegliche Probleme "
+                    "im letzten Run gefunden.\n\n"
+                    f"{review_text}\n\n"
+                    "Soll ich das jetzt korrigieren? Antworte mit `ja, korrigieren` oder gib eine andere Anweisung."
+                ),
+                id=f"alpharavis_async_review_{int(time.time())}",
+            )
+        ]
+        _mark_run_review_delivered(_state_thread_id(state))
+    if (
+        not resume_updates.get("run_resume_prompt_required")
+        and not pending_review
+        and any(bool(item.get("message_replaced")) for item in large_paste_ingests)
+    ):
         updates["messages"] = [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages]
     _save_run_state_checkpoint(
         {**state, **updates},
@@ -11789,6 +12219,116 @@ async def memory_notice_node(state: AlphaRavisState) -> dict[str, Any]:
     }
 
 
+def _async_reviewer_enabled() -> bool:
+    return _env_bool("ALPHARAVIS_ASYNC_REVIEWER_ENABLED", "false")
+
+
+def _latest_ai_answer_text(state: AlphaRavisState) -> str:
+    for message in reversed(list(state.get("messages", []))):
+        if _message_role_name(message) in {"ai", "assistant"}:
+            text = _message_text(message).strip()
+            if text:
+                return text
+    return ""
+
+
+def _reviewer_finding_is_actionable(text: str) -> bool:
+    lowered = text.lower()
+    negative_markers = (
+        "no issue",
+        "no issues",
+        "looks correct",
+        "no actionable",
+        "keine fehler",
+        "keine auffaelligen",
+        "passt",
+    )
+    if any(marker in lowered for marker in negative_markers):
+        return False
+    return bool(text.strip())
+
+
+async def _run_async_review_snapshot(snapshot: dict[str, Any]) -> None:
+    if _save_run_review is None:
+        return
+    thread_id = str(snapshot.get("thread_id") or "")
+    if not thread_id:
+        return
+    prompt = SystemMessage(
+        content=(
+            "You are AlphaRavis's optional post-run reviewer. Review whether the "
+            "assistant's final answer appears to satisfy the user's task. Be strict "
+            "about missing requested work, unsafe claims, unverified implementation, "
+            "and ignored constraints. Return either `NO_ACTIONABLE_ISSUES` or a "
+            "short German note with concrete findings and the next correction step. "
+            "Do not make changes yourself."
+        )
+    )
+    user = HumanMessage(
+        content=(
+            f"Task brief:\n{snapshot.get('task_brief', '')}\n\n"
+            f"Final assistant answer:\n{snapshot.get('answer', '')}\n\n"
+            f"Run profile:\n{json.dumps(snapshot.get('profile') or {}, ensure_ascii=False)[:3000]}"
+        )
+    )
+    try:
+        response = await _ainvoke_direct_model(
+            [prompt, user],
+            model_name=str(os.getenv("ALPHARAVIS_ASYNC_REVIEWER_MODEL") or "").strip() or None,
+            timeout_seconds=float(os.getenv("ALPHARAVIS_ASYNC_REVIEWER_TIMEOUT_SECONDS", "45")),
+            model_kwargs={
+                "max_tokens": int(os.getenv("ALPHARAVIS_ASYNC_REVIEWER_MAX_TOKENS", "512")),
+                "temperature": float(os.getenv("ALPHARAVIS_ASYNC_REVIEWER_TEMPERATURE", "0")),
+                "chat_template_kwargs": {"enable_thinking": False, "preserve_thinking": False},
+            },
+            purpose="async_post_run_reviewer",
+            trace_id=str(snapshot.get("trace_id") or ""),
+        )
+        review_text = _message_text(response).strip()
+    except Exception as exc:
+        _log_exception("async_reviewer.failed", exc, level=logging.WARNING, thread_id=thread_id)
+        return
+    if not _reviewer_finding_is_actionable(review_text) or review_text.strip() == "NO_ACTIONABLE_ISSUES":
+        return
+    _save_run_review(
+        thread_id,
+        thread_key=str(snapshot.get("thread_key") or ""),
+        task_brief=str(snapshot.get("task_brief") or ""),
+        review_text=review_text,
+        metadata={"profile": snapshot.get("profile") or {}},
+    )
+    _log_event(logging.INFO, "async_reviewer.finding_saved", thread_id=thread_id, review_chars=len(review_text))
+
+
+def _schedule_async_reviewer(state: AlphaRavisState, profile: dict[str, Any]) -> bool:
+    if not _async_reviewer_enabled() or profile.get("run_interrupted"):
+        return False
+    answer = _latest_ai_answer_text(state)
+    min_chars = int(os.getenv("ALPHARAVIS_ASYNC_REVIEWER_MIN_OUTPUT_CHARS", "120"))
+    if len(answer.strip()) < max(0, min_chars):
+        return False
+    snapshot = {
+        "thread_id": _state_thread_id(state),
+        "thread_key": _state_thread_key(state),
+        "task_brief": str(state.get("current_task_brief") or _latest_user_query(list(state.get("messages", []))))[:4000],
+        "answer": answer[:12000],
+        "profile": {
+            "route": profile.get("route"),
+            "active_agent": profile.get("active_agent"),
+            "selected_toolsets": profile.get("selected_toolsets"),
+            "total_seconds": profile.get("total_seconds"),
+            "context_compressed": profile.get("context_compressed"),
+            "fast_path_fallback_used": profile.get("fast_path_fallback_used"),
+        },
+        "trace_id": _state_trace_id(state),
+    }
+    try:
+        asyncio.create_task(_run_async_review_snapshot(snapshot), name="alpharavis_async_post_run_reviewer")
+        return True
+    except RuntimeError:
+        return False
+
+
 async def run_profile_finish_node(state: AlphaRavisState) -> dict[str, Any]:
     trace_started = _state_trace_started(state)
     node_started = time.perf_counter()
@@ -11799,6 +12339,9 @@ async def run_profile_finish_node(state: AlphaRavisState) -> dict[str, Any]:
     profile["finished_at"] = time.time()
     checkpoint_status = "awaiting_resume" if profile.get("run_interrupted") else "completed"
     checkpoint_phase = str(profile.get("run_interrupted_phase") or "run_profile_finish")
+    reviewer_scheduled = _schedule_async_reviewer(state, profile)
+    if reviewer_scheduled:
+        profile["async_reviewer_scheduled"] = True
     _save_run_state_checkpoint({**state, "run_profile": profile}, phase=checkpoint_phase, status=checkpoint_status)
     _log_event(
         logging.INFO,
@@ -12070,7 +12613,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "server/API/ESP state, control llama.cpp services, run gated ESP "
             "power actions, and safely reconfigure llama.cpp instances through "
             "the configured API; executing recovery, service, power, or config "
-            "changes is gated by model-management action settings. "
+            "changes is gated by model-management action settings. If the user "
+            "asks to turn BigBoss/the llama PC on and the Ubuntu Manager cannot "
+            "answer because that PC is off, use the ESP power-on path instead "
+            "of trying a llama-server runtime call. "
         )
     elif model_management_enabled:
         model_management_prompt = (
@@ -12171,6 +12717,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             deep_web_research,
             ask_documents,
             read_alpha_ravis_architecture,
+            locate_repo_surface,
             list_repo_ai_skills,
             read_repo_ai_skill,
             reload_repo_ai_skills,
@@ -12285,6 +12832,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             read_alpha_ravis_artifact,
             list_alpha_ravis_artifacts,
             read_alpha_ravis_architecture,
+            locate_repo_surface,
             list_repo_ai_skills,
             read_repo_ai_skill,
             reload_repo_ai_skills,
@@ -12311,6 +12859,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "research and ask_documents for local data. Search thoroughly, "
             "Use read_alpha_ravis_architecture only when the user asks about "
             "AlphaRavis itself, its architecture, or its capabilities. "
+            "Use locate_repo_surface before guessing where a named AlphaRavis "
+            "feature, dashboard page, route, setting, or UI label lives in the repo. "
             "Use agent_id=`research_expert` for research-specific memories. "
             "Use semantic_memory_search for meaning-based recall across indexed "
             "memories, archives, artifacts, skills, and session turns. "
@@ -12363,6 +12913,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             fast_web_search,
             describe_optional_tool_registry,
             read_alpha_ravis_architecture,
+            locate_repo_surface,
             list_repo_ai_skills,
             read_repo_ai_skill,
             reload_repo_ai_skills,
@@ -12424,6 +12975,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             f"{model_management_prompt}"
             "Use read_alpha_ravis_architecture only when the user asks what "
             "AlphaRavis is, what it can do, or how the stack works. "
+            "Use locate_repo_surface when the user names a local AlphaRavis "
+            "surface and asks to find, inspect, or change it. "
             "Optional MCP registries are lazy-loaded; call "
             "describe_optional_tool_registry when a task may need optional tools. "
             "Use list_repo_ai_skills/read_repo_ai_skill when the user asks to "
@@ -12499,6 +13052,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
             list_alpha_ravis_artifacts,
+            locate_repo_surface,
             list_repo_ai_skills,
             read_repo_ai_skill,
             reload_repo_ai_skills,
@@ -12549,6 +13103,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
             list_alpha_ravis_artifacts,
+            locate_repo_surface,
             list_repo_ai_skills,
             read_repo_ai_skill,
             reload_repo_ai_skills,
@@ -12575,7 +13130,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "the swarm. Use check_hermes_agent if reachability is uncertain. "
             "Use call_hermes_agent for bounded coding, file analysis, terminal "
             "diagnosis, repo inspection, patch planning, or implementation "
-            "guidance. Never ask Hermes to call LangGraph or AlphaRavis back. "
+            "guidance. Use locate_repo_surface first for AlphaRavis repo surfaces "
+            "when a named UI page, route, or setting needs local orientation. "
+            "Never ask Hermes to call LangGraph or AlphaRavis back. "
             "No recursive loops: if Hermes says it needs LangGraph, transfer "
             "back to general_assistant with a clear reason. Use "
             "build_specialist_report for final handoffs. Use "
@@ -12632,6 +13189,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             accept_curated_memory_candidate,
             reject_curated_memory_candidate,
             read_alpha_ravis_architecture,
+            locate_repo_surface,
             inspect_context_budget,
             build_specialist_report,
         ], [
@@ -12649,7 +13207,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "active peer. By default, search only the current chat thread. "
             "Set include_other_threads=true only when the user explicitly asks "
             "to search other chats or all archives. Use read_alpha_ravis_architecture "
-            "only for questions about AlphaRavis itself. Use agent_id=`context_retrieval_agent` "
+            "only for questions about AlphaRavis itself. "
+            "Use locate_repo_surface for local repo feature/page/symbol discovery "
+            "before broader archive search when the question is about current code. "
+            "Use agent_id=`context_retrieval_agent` "
             "for retrieval-specific memories. Optional MCP registry details are "
             "available through describe_optional_tool_registry. Repo AI skills can "
             "be listed, reloaded, or read on demand when the user asks for reviewed "
@@ -12752,6 +13313,13 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 "recover the primary server when actions are enabled, start/stop/"
                 "restart managed llama services, run ESP/server power actions, "
                 "or patch primary/secondary model and context size. "
+                "When the user asks to turn BigBoss or the llama PC on, first "
+                "treat that as a power-on request for the Ubuntu host. If the "
+                "Ubuntu Manager API is reachable, use request_ubuntu_server_power_action "
+                "with action=`power-on`; if it is unreachable because the PC is "
+                "off, use the same tool with direct_esp=true so the ESP receives "
+                "the power button action directly. Do not call llama-server "
+                "runtime endpoints to power on a machine that is off. "
                 "Keep prompts and tool arguments small. For start requests, you may "
                 "start the named server or all requested servers. For shutdown, "
                 "power-off, reboot, reset, force-kill, or ambiguous destructive "
@@ -12763,6 +13331,13 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 "Ollama model switching, and embedding-job runs must go through "
                 "request_power_management_action; by default it returns a dry-run "
                 "until the curated external management endpoint is configured. "
+                "Track whether a machine was already on or was started only for "
+                "the current user request. If ComfyUI was woken only for Pixelle, "
+                "wait for the Pixelle job to complete before shutdown; if the "
+                "big llama host was powered on only for this request, prefer the "
+                "Ubuntu Llama Manager shutdown path after the request is finished "
+                "and the configured idle delay has passed. Do not shut down a "
+                "machine that was already in use before this request. "
                 "Never invent SSH commands for shutdown or model switching. If raw "
                 "logs or shell diagnostics are needed, transfer to debugger_agent. "
                 "Use agent_id=`power_management_agent` for durable hardware/model "

@@ -73,6 +73,28 @@ def test_configure_ubuntu_llama_instance_rejects_out_of_range_context(monkeypatc
     assert "context_size must be between" in result["error"]
 
 
+def test_configure_ubuntu_llama_instance_supports_bounded_parallel_slots(monkeypatch):
+    monkeypatch.setenv("ALPHARAVIS_UBUNTU_LLAMA_MANAGER_URL", "http://manager.local:8099")
+    monkeypatch.setenv("ALPHARAVIS_UBUNTU_LLAMA_PARALLEL_MAX", "2")
+
+    result = asyncio.run(
+        model_management.configure_ubuntu_llama_instance(
+            "primary",
+            parallel_slots=2,
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["reason"] == "actions_disabled"
+    assert result["payload"]["parallel"] == 2
+    assert "parallel=2" in result["payload"]["parallel_vram_note"]
+
+    rejected = asyncio.run(model_management.configure_ubuntu_llama_instance("primary", parallel_slots=3))
+
+    assert rejected["ok"] is False
+    assert "parallel_slots must be between 1 and 2" in rejected["error"]
+
+
 def test_recover_ubuntu_llama_no_response_uses_diagnose_endpoint_without_action_gate(monkeypatch):
     calls = []
 
@@ -195,6 +217,38 @@ def test_request_ubuntu_server_power_action_requires_confirmation_for_power_off(
     assert result["ok"] is False
     assert result["needs_confirmation"] is True
     assert result["action"] == "power-off"
+
+
+def test_prepare_comfy_marks_woke_for_request(monkeypatch):
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_MODEL_MANAGEMENT", "true")
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_POWER_MANAGEMENT", "true")
+    monkeypatch.setenv("ALPHARAVIS_PIXELLE_PREPARE_COMFY", "true")
+    monkeypatch.setenv("ALPHARAVIS_COMFY_WAKE_WAIT_SECONDS", "1")
+    calls = {"probe": 0}
+
+    async def fake_probe(url, *, timeout_seconds):
+        calls["probe"] += 1
+        return {"ok": calls["probe"] > 1, "url": url}
+
+    async def fake_request_power_action(action, target, reason, *, remote_pcs=None):
+        return {"ok": True, "action": action, "target": target, "reason": reason}
+
+    async def fake_sleep(seconds):
+        return None
+
+    monkeypatch.setattr(model_management, "probe_http", fake_probe)
+    monkeypatch.setattr(model_management, "request_power_action", fake_request_power_action)
+    monkeypatch.setattr(model_management.asyncio, "sleep", fake_sleep)
+
+    result = asyncio.run(
+        model_management.prepare_comfy_for_pixelle(
+            {"comfy_server": {"ip": "comfy.local", "mac": "AA:BB:CC:DD:EE:FF"}}
+        )
+    )
+
+    assert result["ready"] is True
+    assert result["woke_for_request"] is True
+    assert result["wake_result"]["action"] == "wake_pc"
 
 
 def test_check_ollama_models_reads_real_runtime_models(monkeypatch):

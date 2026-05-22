@@ -4,6 +4,58 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-22 - Llama Runtime Context Leases
+
+- Added separate AI-stack clients for the Ubuntu Llama Manager control plane
+  and direct llama.cpp runtime plane:
+  `ai_stack/ubuntu_llama_manager/*`, `ai_stack/llama_runtime/*`, and
+  `ai_stack/context_budget/*`.
+- The Manager client follows the helper repo `docs/api.md`: instance config
+  changes use `POST /llama/instances/{id}/config`; restart/stop map to the
+  documented `POST /llama/restart|stop` and
+  `POST /llama-secondary/restart|stop`. The spec does not currently expose
+  generic `POST /llama/instances/{id}/restart` or `/stop`.
+- Runtime token counting is direct to the selected llama-server. Chat counting
+  calls `/apply-template` first, then `/tokenize` on the same base URL, and hard
+  budget decisions use `len(tokens)`.
+- The context scheduler parses `--ctx-size`/`-c`, `--parallel`/`-np`, and
+  `--kv-unified` from saved manager commands. With `--kv-unified` it admits
+  leases against the shared pool; without it, capacity is conservatively
+  limited to `ctx_total // parallel`.
+- Direct AlphaRavis async LLM calls and guarded async model calls now reserve a
+  process-local `ContextLease` before the provider call when
+  `ALPHARAVIS_CONTEXT_SCHEDULER_ENABLED` is enabled or `auto` with a Manager
+  URL/IP configured. Leases are released after completion and `truncated=true`
+  is logged as a scheduler warning.
+- If the Manager reports `host=127.0.0.1`, the runtime base URL is derived from
+  the Manager host plus the instance port, or from
+  `ALPHARAVIS_LLAMA_RUNTIME_HOST_OVERRIDE`.
+- The Settings UI now keeps `ALPHARAVIS_UBUNTU_LLAMA_MANAGER_API_KEY` in the
+  model/Ubuntu-Llama area while still rendering it as a secret password field.
+  The private `.env` can hold the real Manager `API_TOKEN`; `.env(exaple)` only
+  documents the key.
+- Pixelle/ComfyUI lifecycle now records whether ComfyUI was woken for the
+  current job. When
+  `ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_COMFY_AFTER_JOB=true`, completed or failed
+  Pixelle jobs schedule a delayed ComfyUI shutdown only if AlphaRavis woke that
+  host for the job. New settings also document the BigBoss managed-run
+  shutdown policy. The Settings UI marks the new power lifecycle keys as
+  important model/power settings.
+- Focused verification:
+  `pytest -q tests/test_llama_context_scheduler.py
+  tests/test_model_management.py tests/test_bridge_responses.py
+  tests/test_service_redirector_server.py tests/test_run_review_manager.py`
+  (`86 passed`), plus `py_compile` for the new `ai_stack` modules and an AST
+  parse for `langgraph-app/agent_graph.py`. Direct `py_compile` for
+  `agent_graph.py` is blocked by a local `langgraph-app/__pycache__`
+  permission error. Helper manager verification:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p
+  'test_config.py' -v` (`6 passed`).
+  Follow-up lifecycle verification:
+  `pytest -q tests/test_model_management.py tests/test_service_redirector_server.py`
+  (`25 passed`) and AST parse for `agent_graph.py`, `model_management.py`, and
+  `service_redirector_server.py`.
+
 ## 2026-05-22 - Context Policy And Full Tool Streaming Default
 
 - Added automatic Model Manager context policy. `apply_model_context_policy`
@@ -121,14 +173,42 @@ can tell which patches are intentional and which ones can be removed.
   editable as normal numbers. Fallback/legacy settings are tagged, explain what
   they fall back from, and can be hidden with a negative filter.
 - The page supports search, category chips, important/normal/low/changed/runtime
-  filters, a favorites view, and sorting by importance, alphabet, section, or
-  changed state.
+  filters, a favorites view, and sorting by importance, `.env(exaple)` order,
+  alphabet, section, or changed state.
 - `Temporary anwenden` writes validated template keys to
   `service-dashboard-data/runtime_settings.json`. LangGraph reads that shared
   file before each new run and applies the values into `os.environ`, so new chat
   turns pick up temporary settings without overwriting `.env`.
 - `Permanent speichern` writes validated template keys into `.env`; the UI asks
   for confirmation unless the browser-local "nicht mehr fragen" option was set.
+
+## 2026-05-22 - Optional Async Run Reviewer And Repo Locator
+
+- Added an opt-in post-run reviewer controlled by
+  `ALPHARAVIS_ASYNC_REVIEWER_ENABLED=false`. When enabled, AlphaRavis schedules
+  a background LLM review after completed runs, stores only actionable findings,
+  and shows a same-thread `Reviewer-Hinweis` on the next turn asking whether to
+  correct the issue. It never edits automatically.
+- Added `locate_repo_surface`, a fast local repo-orientation tool that combines
+  filename search and `rg` content search for named AlphaRavis surfaces such as
+  dashboard pages, routes, settings, and UI labels. This mirrors the useful
+  pattern from Codex CLI's file-search path and Hermes's explicit context
+  reference/search helpers: locate concrete files first, then inspect them.
+- Bridge content normalization now preserves structured code content parts
+  (`input_code`, `output_code`, `code`, `code_window`) as Markdown fenced code
+  blocks for both Responses and Chat Completions inputs. LangGraph agent prompts
+  now explicitly prefer normal fenced Markdown code windows for code/config/log
+  output.
+
+## 2026-05-22 - Ubuntu Llama Parallel Slots
+
+- `configure_ubuntu_llama_instance` now accepts bounded `parallel_slots`.
+  `parallel_slots=2` is sent to the Ubuntu Llama Manager as `parallel=2` and is
+  capped by `ALPHARAVIS_UBUNTU_LLAMA_PARALLEL_MAX` (default `2`).
+- The bundled Ubuntu Llama Manager helper can patch llama.cpp commands with
+  `--parallel`, `-np`, or `--parallel-slots`, preserving existing model/context
+  flags. Docs note that `parallel=2` should be rolled back to `1` before
+  concurrent high-context BigBoss work risks VRAM exhaustion.
 
 ## 2026-05-22 - Agent Run State Manager
 

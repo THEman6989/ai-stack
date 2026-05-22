@@ -231,6 +231,17 @@ ALPHARAVIS_RUN_STATE_RESUME_PROMPT_TIMEOUT_SECONDS=300
 ALPHARAVIS_RUN_STATE_DB=alpharavis_state
 ALPHARAVIS_RUN_STATE_COLLECTION=run_checkpoints
 
+# Optional post-run reviewer. Disabled by default; when enabled it runs after a
+# completed agent run, stores only actionable findings, and asks on the next
+# same-thread turn whether the issue should be corrected.
+ALPHARAVIS_ASYNC_REVIEWER_ENABLED=false
+ALPHARAVIS_ASYNC_REVIEWER_MODEL=
+ALPHARAVIS_ASYNC_REVIEWER_TIMEOUT_SECONDS=45
+ALPHARAVIS_ASYNC_REVIEWER_MAX_TOKENS=512
+ALPHARAVIS_ASYNC_REVIEWER_TEMPERATURE=0
+ALPHARAVIS_ASYNC_REVIEWER_MIN_OUTPUT_CHARS=120
+ALPHARAVIS_ASYNC_REVIEW_STORE_PATH=/tmp/alpharavis_run_reviews.json
+
 # Dashboard Settings UI temporary runtime overrides. service-dashboard writes
 # this file for "Temporary anwenden"; LangGraph reloads it before each new run.
 ALPHARAVIS_RUNTIME_SETTINGS_FILE=/workspace/service-dashboard-data/runtime_settings.json
@@ -506,6 +517,9 @@ ALPHARAVIS_MODEL_MGMT_API_KEY=
 ALPHARAVIS_UBUNTU_LLAMA_MANAGER_IP=
 ALPHARAVIS_UBUNTU_LLAMA_MANAGER_PORT=8099
 ALPHARAVIS_UBUNTU_LLAMA_MANAGER_URL=
+# Bearer token for protected Ubuntu Llama Manager API calls. This is the
+# manager API_TOKEN from helper-repos/ubuntu-llama-manager/docs/api.md.
+# Keep real values in private .env, not in this example file.
 ALPHARAVIS_UBUNTU_LLAMA_MANAGER_API_KEY=
 # Optional direct ESP endpoint for power-on when the Ubuntu host/manager API is
 # offline. Use ESP_AUTH_TOKEN here, not the Ubuntu Manager API_TOKEN.
@@ -517,6 +531,22 @@ ALPHARAVIS_UBUNTU_LLAMA_ESP_URL=
 ALPHARAVIS_UBUNTU_LLAMA_ESP_API_KEY=
 ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MIN=512
 ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MAX=262144
+# Upper bound for llama.cpp --parallel slots managed through Ubuntu Llama
+# Manager. parallel=2 is useful for small 2B and short-window big-boss jobs, but
+# operators should roll instances back to parallel=1 before concurrent
+# high-context work to avoid VRAM exhaustion.
+ALPHARAVIS_UBUNTU_LLAMA_PARALLEL_MAX=2
+# Dynamic llama.cpp context scheduler. auto enables leases when the Ubuntu
+# Llama Manager URL/IP is configured. Token counting uses the selected
+# llama-server directly through /apply-template and /tokenize, never the Manager.
+ALPHARAVIS_CONTEXT_SCHEDULER_ENABLED=auto
+ALPHARAVIS_CONTEXT_SAFETY_FACTOR=0.92
+ALPHARAVIS_CONTEXT_DEFAULT_MAX_OUTPUT_TOKENS=2048
+ALPHARAVIS_CONTEXT_LEASE_SAFETY_MARGIN_TOKENS=1024
+ALPHARAVIS_LLAMA_RUNTIME_TIMEOUT_SECONDS=30
+# Optional override when the Manager reports llama-server host=127.0.0.1 but
+# AlphaRavis must reach it over the Manager machine's network IP/name.
+ALPHARAVIS_LLAMA_RUNTIME_HOST_OVERRIDE=
 
 # Automatic Model Manager Policy: Context budget rules for Secondary and Primary.
 # Secondary is the small background manager; Primary is the large chat model.
@@ -546,6 +576,19 @@ ALPHARAVIS_PIXELLE_BLOCK_IF_COMFY_OFFLINE=false
 ALPHARAVIS_COMFY_WAKE_WAIT_SECONDS=0
 ALPHARAVIS_PIXELLE_OWNER_WAKE_COMFY=true
 ALPHARAVIS_PIXELLE_OWNER_WAKE_WAIT_SECONDS=30
+# If AlphaRavis woke ComfyUI only for a Pixelle job, schedule shutdown after the
+# job finishes and this idle delay passes. Uses owner SSH shutdown when enabled,
+# otherwise the curated power-management action endpoint.
+# Allowed values: true, false
+ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_COMFY_AFTER_JOB=false
+ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_DELAY_SECONDS=600
+# Policy marker for the Power/Model Manager: if it powered on the big llama
+# host only for one request, it should shut it down through Ubuntu Llama Manager
+# after the run and this idle delay. Runtime auto-enforcement is intentionally
+# conservative; the agent must not shut down a host that was already in use.
+# Allowed values: true, false
+ALPHARAVIS_BIG_LLM_AUTO_SHUTDOWN_AFTER_MANAGED_RUN=false
+ALPHARAVIS_BIG_LLM_AUTO_SHUTDOWN_DELAY_SECONDS=600
 
 # Ollama model lifecycle. Your Ollama management node can load either the small
 # chat/crisis model or the embedding model, so embedding windows are planned

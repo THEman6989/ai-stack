@@ -43,6 +43,8 @@ def test_settings_page_exposes_positive_and_negative_fallback_filters() -> None:
     assert "Fallback + Legacy" in html
     assert "Fallback ausblenden" in html
     assert "Legacy ausblenden" in html
+    assert "Nach .env Reihenfolge" in html
+    assert "envOrder" in html
 
 
 def test_effective_services_expose_https_local_and_tailnet_http_for_same_port_paths(monkeypatch, tmp_path: Path) -> None:
@@ -159,10 +161,15 @@ def test_settings_model_tags_new_runtime_and_model_manager_keys(monkeypatch, tmp
                 "ALPHARAVIS_RUN_STATE_AUTO_RESUME=false",
                 "ALPHARAVIS_RUN_STATE_DB=alpharavis_state",
                 "ALPHARAVIS_RUNTIME_SETTINGS_FILE=/workspace/service-dashboard-data/runtime_settings.json",
-                "ALPHARAVIS_SERVER_MODEL_MANAGER_TEMPERATURE=0",
-                "ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MAX=262144",
-            ]
-        )
+                "ALPHARAVIS_ASYNC_REVIEWER_ENABLED=false",
+                    "ALPHARAVIS_ASYNC_REVIEW_STORE_PATH=/tmp/alpharavis_run_reviews.json",
+                    "ALPHARAVIS_SERVER_MODEL_MANAGER_TEMPERATURE=0",
+                    "ALPHARAVIS_UBUNTU_LLAMA_MANAGER_API_KEY=",
+                    "ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MAX=262144",
+                    "ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_COMFY_AFTER_JOB=false",
+                    "ALPHARAVIS_BIG_LLM_AUTO_SHUTDOWN_AFTER_MANAGED_RUN=false",
+                ]
+            )
         + "\n",
         encoding="utf-8",
     )
@@ -182,6 +189,16 @@ def test_settings_model_tags_new_runtime_and_model_manager_keys(monkeypatch, tmp
     assert entries["ALPHARAVIS_RUN_STATE_DB"]["category"] == "runtime"
     assert "Mongo-Datenbank" in entries["ALPHARAVIS_RUN_STATE_DB"]["description"]
     assert "storage" in entries["ALPHARAVIS_RUNTIME_SETTINGS_FILE"]["tags"]
+    assert entries["ALPHARAVIS_ASYNC_REVIEWER_ENABLED"]["category"] == "features"
+    assert "reviewer" in entries["ALPHARAVIS_ASYNC_REVIEWER_ENABLED"]["tags"]
+    assert "korrigiert nichts automatisch" in entries["ALPHARAVIS_ASYNC_REVIEWER_ENABLED"]["description"]
+    assert entries["ALPHARAVIS_ASYNC_REVIEW_STORE_PATH"]["envOrder"] > entries["ALPHARAVIS_ASYNC_REVIEWER_ENABLED"]["envOrder"]
+    assert entries["ALPHARAVIS_UBUNTU_LLAMA_MANAGER_API_KEY"]["category"] == "model"
+    assert entries["ALPHARAVIS_UBUNTU_LLAMA_MANAGER_API_KEY"]["secret"] is True
+    assert entries["ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_COMFY_AFTER_JOB"]["importance"] == 90
+    assert "ComfyUI-Shutdown" in entries["ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_COMFY_AFTER_JOB"]["description"]
+    assert entries["ALPHARAVIS_BIG_LLM_AUTO_SHUTDOWN_AFTER_MANAGED_RUN"]["importance"] == 90
+    assert "BigBoss" in entries["ALPHARAVIS_BIG_LLM_AUTO_SHUTDOWN_AFTER_MANAGED_RUN"]["description"]
     assert "Sampling-Temperatur" in entries["ALPHARAVIS_SERVER_MODEL_MANAGER_TEMPERATURE"]["description"]
     assert "ubuntu-llama" in entries["ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MAX"]["tags"]
     assert "Obergrenze" in entries["ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MAX"]["description"]

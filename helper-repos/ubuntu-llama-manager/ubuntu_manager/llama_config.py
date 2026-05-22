@@ -9,6 +9,7 @@ MODEL_FLAGS = {"-hf", "--hf", "--hf-repo", "-m", "--model", "--model-url"}
 HF_FLAGS = {"-hf", "--hf", "--hf-repo"}
 LOCAL_MODEL_FLAGS = {"-m", "--model"}
 CONTEXT_FLAGS = {"-c", "--ctx-size", "--ctx_size", "--context", "--context-size"}
+PARALLEL_FLAGS = {"--parallel", "-np", "--parallel-slots"}
 
 
 def shell_quote(value: str) -> str:
@@ -85,6 +86,13 @@ def switch_context_in_command(command: str, context_size: int | str) -> str:
     return replace_flag_value(command, CONTEXT_FLAGS, value)
 
 
+def switch_parallel_in_command(command: str, parallel: int | str) -> str:
+    value = str(parallel).strip()
+    if not value.isdigit() or int(value) < 1:
+        raise ValueError("parallel must be a positive integer")
+    return replace_flag_value(command, PARALLEL_FLAGS, value)
+
+
 def update_llama_command(config_path: Path, key: str, current_command: str, new_command: str) -> dict[str, Any]:
     if not new_command.strip():
         raise ValueError("command is empty")
@@ -100,6 +108,7 @@ def patch_llama_command(
     model: str = "",
     model_flag: str = "auto",
     context_size: int | str | None = None,
+    parallel: int | str | None = None,
 ) -> dict[str, Any]:
     new_command = current_command
     changed: dict[str, Any] = {}
@@ -110,8 +119,11 @@ def patch_llama_command(
     if context_size not in (None, ""):
         new_command = switch_context_in_command(new_command, context_size)
         changed["context_size"] = int(str(context_size))
+    if parallel not in (None, ""):
+        new_command = switch_parallel_in_command(new_command, parallel)
+        changed["parallel"] = int(str(parallel))
     if not changed:
-        raise ValueError("nothing to update; send command, model, or context_size")
+        raise ValueError("nothing to update; send command, model, context_size, or parallel")
     replace_config_value(config_path, key, new_command)
     return {"key": key, "old_command": current_command, "new_command": new_command, "changed": changed}
 

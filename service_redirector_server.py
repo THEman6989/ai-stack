@@ -529,14 +529,16 @@ def parse_env_template(path: Path = EXAMPLE_PATH) -> list[dict[str, Any]]:
 def setting_category(key: str, section: str, description: str) -> str:
     key_lower = key.lower()
     text = f"{key} {section} {description}".lower()
-    if is_secret_key(key):
-        return "security"
+    if "reviewer" in key_lower or "async_review" in key_lower:
+        return "features"
     if "run_state" in key_lower or "runtime_settings" in key_lower:
         return "runtime"
     if "service_dashboard" in key_lower or "tailscale" in key_lower:
         return "network"
     if "ubuntu_llama" in key_lower or "server_model_manager" in key_lower:
         return "model"
+    if is_secret_key(key):
+        return "security"
     mapping = [
         ("model", ("model", "llm", "litellm", "llama", "ollama", "embedding", "comfy")),
         ("streaming", ("stream", "responses", "deepagents")),
@@ -558,6 +560,7 @@ def setting_tags(key: str, section: str, description: str, category: str) -> lis
     tags: list[str] = [category]
     tag_rules = [
         ("run-state", ("run_state", "resume", "checkpoint")),
+        ("reviewer", ("reviewer", "async_review", "review after run")),
         ("runtime", ("runtime", "temporary", "resume", "timeout")),
         ("dashboard", ("service_dashboard", "dashboard")),
         ("tailscale", ("tailscale", "tailnet")),
@@ -627,7 +630,12 @@ def setting_importance(key: str, section: str, description: str) -> int:
         "model_management",
         "server_model_manager",
         "ubuntu_llama",
+        "big_llm",
+        "comfy",
+        "pixelle",
         "run_state",
+        "reviewer",
+        "async_review",
         "runtime_settings",
         "crisis",
         "curated_memory_auto_accept",
@@ -723,6 +731,18 @@ def fallback_description(key: str, description: str) -> str:
         return "Mongo-Collection fuer den jeweils neuesten wiederaufnehmbaren Job-Checkpoint pro Thread."
     if "runtime_settings_file" in lower:
         return "JSON-Datei fuer temporaere Settings aus der Dashboard-WebUI; LangGraph laedt sie vor neuen Runs."
+    if "async_reviewer_enabled" in lower:
+        return "Aktiviert einen optionalen Hintergrund-Reviewer nach Agent-Runs. Der Reviewer schreibt nur Hinweise und korrigiert nichts automatisch."
+    if "async_reviewer_model" in lower:
+        return "Modell fuer den optionalen Hintergrund-Reviewer. Leer nutzt das primaere AlphaRavis Modell."
+    if "async_reviewer_timeout" in lower:
+        return "Zeitlimit in Sekunden fuer den Hintergrund-Reviewer nach einem Run."
+    if "async_reviewer_min_output_chars" in lower:
+        return "Mindestlaenge der finalen Antwort, ab der der optionale Hintergrund-Reviewer startet."
+    if "async_review_store_path" in lower:
+        return "JSON-Speicher fuer ausstehende Hintergrund-Review-Hinweise pro Thread."
+    if "code_window" in lower or "code_windows" in lower:
+        return "Steuert Markdown-Codefenster-Unterstuetzung fuer Bridge- und LangGraph-Ausgaben."
     if "ubuntu_llama_manager_ip" in lower:
         return "IP-Adresse des Hosts, auf dem der Ubuntu Llama Manager laeuft."
     if "ubuntu_llama_manager_port" in lower:
@@ -737,6 +757,16 @@ def fallback_description(key: str, description: str) -> str:
         return "Untergrenze fuer Kontextfenster-Aenderungen am Ubuntu Llama Manager."
     if "ubuntu_llama_context_max" in lower:
         return "Obergrenze fuer Kontextfenster-Aenderungen am Ubuntu Llama Manager."
+    if "ubuntu_llama_parallel_max" in lower:
+        return "Obergrenze fuer llama.cpp --parallel Slots ueber den Ubuntu Llama Manager; parallel=2 nur bei sicherem VRAM-Fenster nutzen."
+    if "pixelle_auto_shutdown_comfy_after_job" in lower:
+        return "Wenn true, plant AlphaRavis nach einem Pixelle-Job ein ComfyUI-Shutdown, aber nur wenn ComfyUI fuer diesen Job geweckt wurde."
+    if "pixelle_auto_shutdown_delay_seconds" in lower:
+        return "Wartezeit in Sekunden nach abgeschlossenem Pixelle-Job, bevor ein zuvor geweckter ComfyUI-Server heruntergefahren wird."
+    if "big_llm_auto_shutdown_after_managed_run" in lower:
+        return "Policy-Schalter fuer den Power Manager: Einen nur fuer diesen Run eingeschalteten BigBoss/Ubuntu-Llama-Host nach dem Run wieder herunterfahren."
+    if "big_llm_auto_shutdown_delay_seconds" in lower:
+        return "Idle-Wartezeit in Sekunden, bevor ein nur fuer diesen Run eingeschalteter BigBoss/Ubuntu-Llama-Host wieder ausgeschaltet werden darf."
     if "server_model_manager_model_name" in lower:
         return "Modellname, unter dem der Server Model Manager fuer LibreChat sichtbar ist."
     if "server_model_manager_fallback_timeout" in lower:
@@ -829,6 +859,7 @@ def settings_model() -> dict[str, Any]:
         section_title = str(section["title"])
         entries: list[dict[str, Any]] = []
         for raw_entry in section["entries"]:
+            order = sum(len(existing["entries"]) for existing in sections) + len(entries)
             key = str(raw_entry["key"])
             default = str(raw_entry.get("default", ""))
             env_value = current.get(key, default)
@@ -861,6 +892,7 @@ def settings_model() -> dict[str, Any]:
                     "allowedValues": allowed,
                     "secret": is_secret_key(key),
                     "changed": env_value != default,
+                    "envOrder": order,
                 }
             )
         sections.append({"title": section_title, "entries": entries})
@@ -1437,7 +1469,7 @@ def render_settings() -> bytes:
       <select id="importance"><option value="all">Alle Wichtigkeiten</option><option value="important">Nur wichtige</option><option value="normal">Nur normale</option><option value="low">Nur unwichtige</option><option value="changed">Geaendert</option><option value="runtime">Runtime aktiv</option><option value="favorite">Favoriten</option><option value="fallback">Nur Fallback</option><option value="legacy">Nur Legacy</option><option value="fallbackLegacy">Fallback + Legacy</option></select>
       <select id="category"></select>
       <select id="exclude"><option value="none">Nichts ausblenden</option><option value="fallback">Fallback ausblenden</option><option value="legacy">Legacy ausblenden</option><option value="fallbackLegacy">Fallback + Legacy ausblenden</option></select>
-      <select id="sort"><option value="importance">Nach Wichtigkeit</option><option value="alpha">Alphabetisch</option><option value="section">Nach Bereich</option><option value="changed">Geaendert zuerst</option></select>
+      <select id="sort"><option value="importance">Nach Wichtigkeit</option><option value="envOrder">Nach .env Reihenfolge</option><option value="alpha">Alphabetisch</option><option value="section">Nach Bereich</option><option value="changed">Geaendert zuerst</option></select>
     </div>
     <div class="chips" id="chips"></div>
   </div></header>
@@ -1501,14 +1533,14 @@ def render_settings() -> bytes:
         return true;
       }});
       const sort = $("sort").value;
-      list.sort((a,b) => sort === "alpha" ? a.key.localeCompare(b.key) : sort === "section" ? (a.section+a.key).localeCompare(b.section+b.key) : sort === "changed" ? Number(b.changed)-Number(a.changed)||b.importance-a.importance : b.importance-a.importance||a.key.localeCompare(b.key));
+      list.sort((a,b) => sort === "alpha" ? a.key.localeCompare(b.key) : sort === "envOrder" ? (a.envOrder ?? 999999)-(b.envOrder ?? 999999) : sort === "section" ? (a.section+a.key).localeCompare(b.section+b.key) : sort === "changed" ? Number(b.changed)-Number(a.changed)||b.importance-a.importance : b.importance-a.importance||a.key.localeCompare(b.key));
       return list;
     }}
     function render() {{
       const list = filtered();
       $("visible").textContent = list.length; $("total").textContent = entries.length; $("changed").textContent = entries.filter(e=>e.changed).length; $("runtime").textContent = entries.filter(e=>e.hasRuntime).length;
       const grouped = new Map();
-      for (const e of list) {{ const group = $("sort").value === "section" ? e.section : labelCat(e.category); if (!grouped.has(group)) grouped.set(group, []); grouped.get(group).push(e); }}
+      for (const e of list) {{ const group = ["section","envOrder"].includes($("sort").value) ? e.section : labelCat(e.category); if (!grouped.has(group)) grouped.set(group, []); grouped.get(group).push(e); }}
       $("settings").innerHTML = Array.from(grouped.entries()).map(([group, items]) => `<section class="section"><h2>${{esc(group)}} · ${{items.length}}</h2><div class="grid">${{items.map(card).join("")}}</div></section>`).join("") || `<section class="section"><h2>Nichts gefunden</h2></section>`;
     }}
     function card(e) {{

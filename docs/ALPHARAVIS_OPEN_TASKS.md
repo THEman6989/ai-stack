@@ -19,7 +19,7 @@ Implemented:
 - LangGraph exposes tools to inspect manager health/status/models/instances,
   diagnose a no-response llama.cpp server, start/stop/restart managed llama
   services, run gated ESP/server power actions, run gated recovery, and patch
-  `primary` or `secondary` instance model/context/command settings.
+  `primary` or `secondary` instance model/context/parallel/command settings.
 - Real recovery/config writes are dry-runs unless
   `ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=true`.
 - The power/model-management agent gets the full tool set. The crisis manager
@@ -48,6 +48,22 @@ Implemented:
   and a recursive-loop guard.
 - Focused unit coverage verifies dry-run gating, context bounds, and protected
   diagnose payloads.
+- `configure_ubuntu_llama_instance` can set bounded llama.cpp parallel slots
+  (`parallel_slots=2` maps to `--parallel 2`) for the small 2B or BigBoss
+  instance when VRAM headroom is safe. The configured max is
+  `ALPHARAVIS_UBUNTU_LLAMA_PARALLEL_MAX`.
+- The AI-stack now has a separate dynamic context scheduler layer:
+  `UbuntuLlamaManagerClient` is control-plane only, `LlamaCppRuntimeClient`
+  talks directly to each selected llama-server for `/apply-template`,
+  `/tokenize`, `/slots`, `/v1/models`, `/completion`, and
+  `/v1/chat/completions`, and `ContextScheduler` reserves process-local
+  context leases before async LLM calls when
+  `ALPHARAVIS_CONTEXT_SCHEDULER_ENABLED` is active.
+- Runtime config is discovered per instance from Manager response data and the
+  saved command: `host`, `port`, `base_url`, `ctx_total`, `parallel`, and
+  `kv_unified`. When Manager-reported localhost would be unreachable from
+  AlphaRavis, the runtime URL is derived from the Manager host or
+  `ALPHARAVIS_LLAMA_RUNTIME_HOST_OVERRIDE`.
 
 Still needed:
 
@@ -59,6 +75,27 @@ Still needed:
 - Decide later model-manager policy for automatic context escalation and
   rollback, including when the secondary 2B model should move between 8K and
   16K and when the primary can be raised toward 200K.
+- Improve automatic parallel-slot policy: temporarily use `parallel_slots=2`
+  for safe short-context windows, but restore `parallel_slots=1` before
+  concurrent high-context BigBoss work can exhaust VRAM.
+- Extend managed-run lifecycle tracking for the big llama host. The prompt and
+  ENV policy now distinguish "already running" from "powered on for this
+  request"; ComfyUI/Pixelle has concrete delayed shutdown scheduling, while
+  BigBoss automatic post-run shutdown should be live-tested and made durable
+  before enabling it by default.
+- Add Manager API aliases if desired:
+  `POST /llama/instances/{id}/restart` and
+  `POST /llama/instances/{id}/stop`. The current AI-stack client intentionally
+  uses the documented primary/secondary endpoints from helper `docs/api.md`.
+- Promote context leases from process-local memory to Redis/Postgres if
+  multiple `langgraph-api` workers need a shared global budget.
+- Wire the scheduler's "not enough context" decisions into automatic
+  compression/RAG-chunk reduction/max-output lowering/retry routing. The
+  scheduler currently returns a structured decision and blocks admission rather
+  than blindly starting the call.
+- Live-test direct runtime token counting against the real primary and
+  secondary llama-server ports, including `/apply-template`, `/tokenize`,
+  `/slots`, and `/v1/models`.
 - Live-test the new Ollama model actions against the real host once the private
   `.env` points at the target Ollama instance.
 

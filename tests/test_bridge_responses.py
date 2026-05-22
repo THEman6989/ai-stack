@@ -236,6 +236,24 @@ def test_responses_input_supports_instructions_and_content_parts() -> None:
     assert "https://example.test/v.mp4" in messages[1]["content"]
 
 
+def test_responses_and_chat_content_parts_preserve_code_windows() -> None:
+    code_part = {
+        "type": "input_code",
+        "language": "python",
+        "filename": "app.py",
+        "code": "def run():\n    return 1\n",
+    }
+
+    response_messages = bridge_server._responses_input_to_messages(
+        {"input": [{"type": "message", "role": "user", "content": ["Bitte pruefen:", code_part]}]}
+    )
+    chat_text = bridge_server._sanitize_message_content(["Bitte pruefen:", code_part])
+
+    assert "app.py" in response_messages[0]["content"]
+    assert "```python\ndef run():\n    return 1\n```" in response_messages[0]["content"]
+    assert "```python\ndef run():\n    return 1\n```" in chat_text
+
+
 def test_bridge_mirrors_chat_video_parts_to_media_gallery(monkeypatch) -> None:
     requests: list[dict] = []
 

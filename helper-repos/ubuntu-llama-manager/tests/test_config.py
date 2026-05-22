@@ -3,7 +3,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from ubuntu_manager.config import Settings
-from ubuntu_manager.llama_config import switch_context_in_command, switch_model_in_command
+from ubuntu_manager.llama_config import switch_context_in_command, switch_model_in_command, switch_parallel_in_command
 
 
 class SettingsTest(unittest.TestCase):
@@ -54,6 +54,14 @@ class SettingsTest(unittest.TestCase):
         updated = switch_context_in_command(command, "4096")
 
         self.assertIn("-c 4096", updated)
+
+    def test_switch_parallel_sets_parallel_slots(self) -> None:
+        command = "./build/bin/llama-server -hf model/name --port 8001 -c 8192"
+
+        updated = switch_parallel_in_command(command, 2)
+
+        self.assertIn("--parallel 2", updated)
+        self.assertIn("-c 8192", updated)
 
 
 if __name__ == "__main__":
