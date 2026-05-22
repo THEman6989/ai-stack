@@ -232,6 +232,7 @@ services:
       - ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=${ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING:-true}
       - ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=${ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING:-tool_calling}
       - ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=${ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING:-false}
+      - ALPHARAVIS_RUNTIME_SETTINGS_FILE=${ALPHARAVIS_RUNTIME_SETTINGS_FILE:-/workspace/service-dashboard-data/runtime_settings.json}
       - MONGODB_URI=mongodb://mongodb:27017
       - LS_MONGODB_URI=${LS_MONGODB_URI:-mongodb://mongodb:27017/langgraph?replicaSet=rs0}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379}
@@ -378,7 +379,9 @@ services:
       - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:${ALPHARAVIS_SERVICE_DASHBOARD_PORT:-8090}:8090"
     volumes:
       - ./service_redirector_server.py:/app/service_redirector_server.py:ro
-      - ./service-dashboard-data:/app/service-dashboard-data:ro
+      - ./service-dashboard-data:/app/service-dashboard-data
+      - ./.env:/app/.env
+      - ./.env(exaple):/app/.env(exaple):ro
     env_file:
       - .env
     environment:
@@ -387,6 +390,7 @@ services:
       - ALPHARAVIS_SERVICE_DASHBOARD_PUBLIC_PORT=${ALPHARAVIS_SERVICE_DASHBOARD_PORT:-8090}
       - ALPHARAVIS_SERVICE_DASHBOARD_URL_MODE=${ALPHARAVIS_SERVICE_DASHBOARD_URL_MODE:-auto}
       - ALPHARAVIS_TAILSCALE_URLS_FILE=/app/service-dashboard-data/tailscale_service_urls.json
+      - ALPHARAVIS_RUNTIME_SETTINGS_FILE=/app/service-dashboard-data/runtime_settings.json
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=5).read()"]
       interval: 15s
