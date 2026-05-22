@@ -1183,6 +1183,54 @@ def test_stream_responses_uses_librechat_reasoning_events(monkeypatch) -> None:
     assert "reasoning" in output_types
 
 
+def test_stream_responses_two_phase_final_streams_no_tool_final_call(monkeypatch) -> None:
+    parts = [
+        {"event": "messages", "data": (_FakeMessage("ai", "Draft answer"), {})},
+    ]
+    calls = []
+
+    class FakeStreamResponse:
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            yield 'data: {"choices":[{"delta":{"content":"Final"}}]}'
+            yield 'data: {"choices":[{"delta":{"content":" answer"}}]}'
+            yield "data: [DONE]"
+
+    class FakeStreamContext:
+        async def __aenter__(self):
+            return FakeStreamResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeHttpClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, method, url, headers=None, json=None):
+            calls.append({"method": method, "url": url, "headers": headers, "json": json})
+            return FakeStreamContext()
+
+    _patch_stream_env(monkeypatch, parts)
+    monkeypatch.setattr(bridge_server, "BRIDGE_RESPONSES_TWO_PHASE_FINAL_STREAMING", True)
+    monkeypatch.setattr(bridge_server.httpx, "AsyncClient", FakeHttpClient)
+
+    events = asyncio.run(_collect_response_stream({"model": "my-agent", "input": "Hi", "stream": True}, parts))
+    output = "".join(event["data"].get("delta", "") for event in events if event["event"] == "response.output_text.delta")
+
+    assert output == "Final answer"
+    assert calls[0]["json"]["tools"] == []
+    assert "Draft answer" in calls[0]["json"]["messages"][1]["content"]
+
+
 def test_stream_responses_maps_internal_tools_to_function_items(monkeypatch) -> None:
     parts = [
         {

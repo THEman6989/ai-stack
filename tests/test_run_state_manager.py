@@ -24,6 +24,32 @@ class _FakeCollection:
         return dict(record) if record else None
 
 
+class _FakeCursor:
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+
+    def sort(self, key: str, direction: int):
+        self.rows = sorted(self.rows, key=lambda row: row.get(key, 0), reverse=direction < 0)
+        return self
+
+    def limit(self, limit: int):
+        self.rows = self.rows[:limit]
+        return self
+
+    def __iter__(self):
+        return iter(self.rows)
+
+
+class _FakeFindCollection(_FakeCollection):
+    def find(self, query: dict):
+        rows = [
+            dict(record)
+            for record in self.records.values()
+            if all(record.get(key) == value for key, value in query.items())
+        ]
+        return _FakeCursor(rows)
+
+
 def test_save_run_checkpoint_replaces_current_atomically(monkeypatch) -> None:
     collection = _FakeCollection()
     monkeypatch.setattr(run_state_manager, "_collection", lambda: collection)
@@ -81,6 +107,20 @@ def test_resume_updates_restore_plan_fields() -> None:
     assert updates["selected_toolsets"] == ["repo"]
     assert updates["run_resume_checkpoint"]["phase"] == "planner"
     assert updates["run_resume_checkpoint"]["status"] == "failed"
+
+
+def test_list_run_checkpoints_filters_awaiting_resume(monkeypatch) -> None:
+    collection = _FakeFindCollection()
+    collection.records = {
+        "thread-1:current": {"_id": "thread-1:current", "thread_id": "thread-1", "status": "awaiting_resume", "updated_at": 1},
+        "thread-2:current": {"_id": "thread-2:current", "thread_id": "thread-2", "status": "completed", "updated_at": 2},
+        "thread-3:current": {"_id": "thread-3:current", "thread_id": "thread-3", "status": "awaiting_resume", "updated_at": 3},
+    }
+    monkeypatch.setattr(run_state_manager, "_collection", lambda: collection)
+
+    records = run_state_manager.list_run_checkpoints(status="awaiting_resume", limit=10)
+
+    assert [record["thread_id"] for record in records] == ["thread-3", "thread-1"]
 
 
 def test_atomic_write_json_replaces_complete_file(tmp_path: Path) -> None:

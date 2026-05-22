@@ -1651,6 +1651,123 @@ def test_active_rag_prefetch_uses_pinned_sources_without_state_rag_active(monkey
     assert "Pinned source detail." in updates["messages"][0].content
 
 
+def test_queue_current_thread_vector_backfill_without_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeItem:
+        def __init__(self, key, value):
+            self.key = key
+            self.value = value
+
+    class FakeStore:
+        def search(self, namespace, query, limit):
+            assert query == ""
+            return [
+                FakeItem(
+                    "turn-1",
+                    {
+                        "window_content": "User asked about RAG. Assistant answered.",
+                        "thread_id": "thread-1",
+                        "thread_key": "thread-1",
+                    },
+                )
+            ]
+
+    calls = []
+
+    async def fake_index(**kwargs):
+        calls.append(kwargs)
+        return "queued"
+
+    monkeypatch.setattr(agent_graph, "_vector_memory_available", lambda: True)
+    monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", fake_index)
+    monkeypatch.setattr(agent_graph, "_thread_id_from_config", lambda: "thread-1")
+
+    result = asyncio.run(
+        agent_graph._queue_current_thread_vector_backfill_from_store(
+            FakeStore(),
+            source_types=["session_turn"],
+            limit_per_source=5,
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["queued"][0]["source_key"] == "turn-1"
+    assert calls[0]["metadata"]["backfill_reason"] == "current_thread"
+
+
+def test_queue_selected_source_vector_backfill_uses_raw_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    async def fake_load_raw_source_record(source_key, **kwargs):
+        return {
+            "source_key": source_key,
+            "source_type": "large_paste",
+            "title": "Paste",
+            "indexed_content": "Important paste text",
+            "thread_id": "thread-1",
+            "thread_key": "thread-1",
+        }
+
+    async def fake_index(**kwargs):
+        calls.append(kwargs)
+        return "queued"
+
+    monkeypatch.setattr(agent_graph, "_vector_memory_available", lambda: True)
+    monkeypatch.setattr(agent_graph, "_load_raw_source_record", fake_load_raw_source_record)
+    monkeypatch.setattr(agent_graph, "_maybe_index_vector_memory", fake_index)
+
+    result = asyncio.run(
+        agent_graph._queue_selected_source_vector_backfill_from_store(
+            object(),
+            source_keys=["paste-1"],
+            source_type="all",
+            include_other_threads=False,
+        )
+    )
+
+    assert result["queued"][0]["source_type"] == "large_paste"
+    assert calls[0]["source_key"] == "paste-1"
+    assert calls[0]["content"] == "Important paste text"
+
+
+def test_crisis_caps_block_recursive_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPHARAVIS_CRISIS_MAX_ATTEMPTS", "2")
+
+    status = agent_graph._crisis_caps_status(
+        {
+            "crisis_recovery_attempted": True,
+            "run_profile": {"crisis_attempts": 1, "crisis_started_at": 1},
+        }
+    )
+
+    assert status["allowed"] is False
+    assert status["reason"] == "recursive_crisis_loop_blocked"
+
+
+def test_crisis_error_classifier_marks_timeout_recoverable() -> None:
+    assert agent_graph._crisis_error_is_recoverable({"reason": "timeout"}) is True
+    assert agent_graph._crisis_error_is_recoverable({"reason": "context_overflow"}) is False
+
+
+def test_deepagents_responses_streaming_policy_defaults_to_full_guarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING", raising=False)
+    monkeypatch.delenv("ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING_POLICY", raising=False)
+
+    policy = agent_graph._deepagents_responses_streaming_policy()
+
+    assert policy["mode"] == "full_guarded"
+    assert policy["streaming"] is True
+    assert policy["disable_streaming"] is False
+
+
+def test_deepagents_responses_streaming_policy_keeps_explicit_hybrid(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING", "tool_calling")
+
+    policy = agent_graph._deepagents_responses_streaming_policy()
+
+    assert policy["mode"] == "explicit"
+    assert policy["disable_streaming"] == "tool_calling"
+
+
 def test_read_source_chunks_tool_uses_current_thread(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: dict[str, object] = {}
 
@@ -1804,7 +1921,8 @@ def test_ingest_document_file_loads_and_pins_allowed_file(tmp_path, monkeypatch:
     assert calls["source_key"] == "doc-1"
     assert calls["content"] == "Grounded loaded document."
     assert calls["metadata"]["origin"] == "agent_document_file_ingest"
-    assert writes[-1][2]["active_source_keys"] == ["doc-1"]
+    rag_write = next(value for namespace, key, value in writes if key == agent_graph.RAG_THREAD_PINS_KEY)
+    assert rag_write["active_source_keys"] == ["doc-1"]
     assert '"ok": true' in result
     assert '"source_key": "doc-1"' in result
 

@@ -712,6 +712,13 @@ resulting metadata.
 | Temporary workflow state | LangGraph checkpoint state and run profile | Current run only | No | May be overwritten by graph nodes; durable only if explicitly archived, indexed, or recorded as curated memory. |
 | Observer / run telemetry | Bridge observations and run-profile metadata | No | Observer/debug APIs | Debug/status surface only; not model memory and not an answer source. |
 
+Curated-memory review is a separate promotion path. Candidate extraction writes
+review records with `status=pending`; those candidates are not part of
+always-memory. `accept_curated_memory_candidate` is the promotion boundary and
+persists the reviewed memory through the same curated-memory store/index path as
+`record_curated_memory`. `reject_curated_memory_candidate` leaves an auditable
+rejection record without writing memory.
+
 The active model should prefer the smallest tier that can answer safely: current
 task tail first, active summary for old high-level context, vector recall for
 finding candidates, then bounded raw archive/source reads for exact evidence.
@@ -752,6 +759,11 @@ On the next message in the same thread, an open checkpoint restores the planner
 context and task brief. By default AlphaRavis asks the user whether to continue
 and keeps the job saved if no answer arrives; operators can enable automatic
 continuation with `ALPHARAVIS_RUN_STATE_AUTO_RESUME=true`.
+
+The Bridge Observer exposes the same records through `GET /api/resume-runs` and
+an `Awaiting Resume` panel. That panel is intentionally operator-facing: it
+lists the saved thread, phase, task brief, selected toolsets, and resume phrase
+without changing LangGraph's same-thread resume semantics.
 
 ### LangMem Memories
 
@@ -1562,6 +1574,32 @@ rag_activation_reason
 archive_rag_mode
 ```
 
+Manual/operator pins are stored in a shared Mongo collection through
+`langgraph-app/rag_pins_manager.py` when available. The LangGraph pin/unpin
+tools and the Bridge Observer `RAG Pins` panel both read and write that store,
+so UI pin changes affect the same active-RAG prefetch path as agent tool calls.
+
+Vector backfill is available as exact commands in addition to query search:
+
+- `queue_current_thread_vector_backfill` indexes stored session turns,
+  artifacts, archives, and archive collections for the active thread.
+- `queue_recent_artifact_vector_backfill` indexes the last N artifact records.
+- `queue_selected_source_vector_backfill` resolves explicit raw-source,
+  large-paste, artifact, archive, archive-collection, or session-turn keys.
+
+Model-management actions are split between direct primitives and lifecycle
+flows. `check_ollama_models`, `load_embedding_model`,
+`unload_ollama_model`, and `run_embedding_jobs` perform the concrete Ollama or
+pgvector operation. `run_embedding_memory_jobs` wraps those primitives in the
+safe embedding-maintenance policy.
+
+Crisis recovery has two entry points: preflight before the planner and mid-run
+recovery after provider failures. Mid-run recovery classifies timeout,
+connection, 502/server, overload, and rate-limit failures, runs a capped Crisis
+Manager attempt, applies a readiness gate, and retries the swarm only when the
+primary backend is ready. Caps are stored in run profile metadata and include
+attempt count, wall-clock time, and a recursive-loop guard.
+
 `ingest_source(...)` sets these fields for explicit document and large-paste
 sources so later graph nodes can auto-retrieve bounded chunks from those
 sources. Compression archives set `rag_active=false` and
@@ -2034,8 +2072,10 @@ ALPHARAVIS_VISION_EMBEDDING_MODEL=<model-name>
 - `inspect_embedding_queue_status` exposes the shared queue status for text,
   archive, artifact, memory, session-turn, and media-analysis indexing work.
 - The Bridge Observer polls the same queue status endpoint for operator
-  visibility, showing pending/running/failed/done counts and recent active
-  queued source jobs while large-source embeddings drain asynchronously.
+  visibility, showing pending/running/failed/done counts, recent active queued
+  source jobs, and per-source chunk progress while large-source embeddings
+  drain asynchronously. Queue rows store a small progress JSON document that is
+  updated by `run_embedding_jobs` after each indexed chunk.
 - `prepare_media_for_model(mode="index")` creates durable `media_analysis`
   jobs in the same queue that text/context indexing already uses, so
   `run_embedding_memory_jobs` can drain both text and video work.

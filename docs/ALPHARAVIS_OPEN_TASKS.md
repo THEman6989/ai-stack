@@ -38,6 +38,14 @@ Implemented:
 - Crisis-manager enablement no longer depends on owner SSH tools when advanced
   model management is enabled; Ubuntu Llama Manager can provide the recovery
   surface.
+- Model Manager now has real Ollama/queue actions:
+  `check_ollama_models`, `load_embedding_model`, `unload_ollama_model`, and
+  `run_embedding_jobs`.
+- Mid-run crisis recovery catches recoverable provider failures, runs a bounded
+  Crisis Manager attempt, waits for a readiness gate, and retries the swarm
+  only after the primary backend is reported ready.
+- Crisis recovery is capped by max attempts, max wall-clock, per-action timeout,
+  and a recursive-loop guard.
 - Focused unit coverage verifies dry-run gating, context bounds, and protected
   diagnose payloads.
 
@@ -51,8 +59,8 @@ Still needed:
 - Decide later model-manager policy for automatic context escalation and
   rollback, including when the secondary 2B model should move between 8K and
   16K and when the primary can be raised toward 200K.
-- Add the later Ollama/Edge-Gemma embedding unload/reload policy for the Model
-  Manager fallback path after the big llama.cpp server is unavailable.
+- Live-test the new Ollama model actions against the real host once the private
+  `.env` points at the target Ollama instance.
 
 ## Operator Config UI
 
@@ -115,14 +123,16 @@ Implemented:
   brief and trigger a same-thread prompt asking whether to continue. Manual
   confirmation is the default; `ALPHARAVIS_RUN_STATE_AUTO_RESUME=true` enables
   automatic continuation.
+- The Bridge Observer exposes an `Awaiting Resume` panel and
+  `GET /api/resume-runs` endpoint for listing saved `awaiting_resume` runs with
+  thread id/key, phase, task brief, active agent, selected toolsets, and the
+  same-thread resume phrase.
 - Focused verification: `pytest -q tests/test_run_state_manager.py` passed.
 
 Still needed:
 
 - Live-test a forced llama.cpp/LiteLLM disconnect during a long swarm run and
   confirm the user-facing resume prompt and `ja, weiter` path in LibreChat.
-- Add an operator/debug endpoint or dashboard panel for listing saved
-  `awaiting_resume` jobs if multiple long-running threads are active.
 
 ## Service Dashboard And Tailscale HTTPS
 
@@ -492,15 +502,17 @@ Still needed:
 - Implemented first slice: streaming ingest progress for direct large
   documents/pastes. Run-profile start/completion/failure/skip events now include
   chunk-level progress for direct pgvector writes and Bridge activity extraction
-  can surface those events. Remaining follow-up: progress from asynchronously
-  drained queue jobs, because queued embedding jobs finish outside the active
-  chat stream.
-- Partially implemented: add queue-only large document ingest for very large
+  can surface those events.
+- Implemented follow-up: asynchronously drained queue jobs now persist per-job
+  progress JSON while `run_embedding_jobs` indexes chunks. The Bridge Observer
+  `Embedding Queue` panel shows per-source planned chunks, completed chunks,
+  percentage, latest event, status, and thread id.
+- Implemented: add queue-only large document ingest for very large
   sources, with progress and a source handle returned before all chunks are
   embedded. The retrieval router now distinguishes queued pgvector work with
   `index_status=queued` and `queued_backends=["alpharavis_pgvector"]`, and
   Large Paste replacement markers can return a source handle while embeddings
-  are still queued. Live chunk-level progress remains open.
+  are still queued.
 - Implemented first slice: chunk/source digest metadata is now used for scoped
   source dedup. Repeated identical sources with the same scoped source key skip
   embed/upsert and return a `deduped:...` backend result. Large-paste source
@@ -518,12 +530,15 @@ Still needed:
   text without injecting the whole source.
 - Implemented: user/operator RAG pin/unpin controls for thread-level active
   source sets. `pin_active_rag_sources`, `unpin_active_rag_sources`, and
-  `inspect_active_rag_sources` persist per-thread active source/file ids in the
-  LangGraph Store, and `active_rag_prefetch_node` merges those pins with
-  state-derived active RAG metadata. Remaining follow-up: add a user-facing UI
-  surface for pins if needed.
-- Add code-aware LangChain/Tree-sitter splitter options for source-code
-  profiles. Code/log/archive profiles currently keep the AlphaRavis splitter.
+  `inspect_active_rag_sources` persist per-thread active source/file ids in a
+  Mongo-backed shared pin store when available, and
+  `active_rag_prefetch_node` merges those pins with state-derived active RAG
+  metadata. The Bridge Observer exposes a `RAG Pins` panel and
+  `GET/POST /api/rag-pins` so operators can pin/unpin/clear thread sources
+  directly.
+- Implemented: code-aware LangChain splitter options for source-code profiles.
+  Known code languages use LangChain language splitters when available and
+  code-specific separator fallback otherwise.
 - Rebuild/recreate the LangGraph container and live-test the new
   `langchain-text-splitters` dependency in the running stack.
 - Tune large-paste runtime performance for very large real chat runs. A previous
@@ -3066,8 +3081,9 @@ Lower priority / future:
     Needed behavior:
 
     - Generate short stable titles for archive records and archive collections.
-    - Extract candidate user/system insights for review without auto-promoting
-      them into always-memory.
+    - Done: candidate user/system insights can be extracted into a pending
+      review queue, listed, accepted, or rejected. Accept is the only path that
+      writes curated memory.
     - Keep this separate from raw archives and pgvector source-of-truth rules.
 
 ## Aktuelle Zusammenfassung der offenen Aufgaben (Stand: 12. Mai 2026)
@@ -3076,8 +3092,8 @@ Lower priority / future:
 
 ### Prioritäre Baustellen:
 1.  **Responses & Streaming Stabilität:** Finalisierung des Full-Streaming-Modus (derzeit experimentell) und Entfernung lokaler Patches, sobald Upstream-Fixes für LangChain verfügbar sind. Optimierung der Latenz im Agenten-Pfad.
-2.  **Model & Power Management:** Anbindung des realen Action-Endpoints für Hardware-Aktionen und Vervollständigung der administrativen Tools (Ollama/Embedding Management).
-3.  **Crisis Manager:** Aktivierung der automatischen Recovery-Trigger bei Inferenz-Fehlern (Timeouts, 502s).
+2.  **Model & Power Management:** Live-Validierung der realen Ollama/Embedding-Actions, Context-Policy und des Ubuntu-Manager-Action-Endpoints.
+3.  **Crisis Manager:** Live-Validierung der Mid-run-Recovery bei echten Timeout-/502-/Connection-Fehlern.
 4.  **Media & Vision:** Ausbau der Media-Gallery zur zentralen Video-Verwaltung (Meet-Integration), inklusive Vision-Embeddings und Frame-Analyse.
 5.  **OpenWebUI:** Verifizierung der Integration und Konfiguration der Web-Suche (SearXNG).
 
@@ -3088,6 +3104,10 @@ Lower priority / future:
 - **Service Dashboard / Tailscale:** Das Dashboard wird von den
   Tailscale-Helper-Zielen standardmäßig auf Port `8090` eingeplant; Opt-out ist
   weiterhin möglich.
+- **Model/Crisis/Backfill/Streaming:** Reale Ollama/Embedding-Actions,
+  automatische primary/secondary Context-Policy mit Rollback, Mid-run-Crisis-Recovery
+  mit Hard Caps, exakte Embedding-Backfill-Commands, guarded Full Tool Streaming
+  und optionales Two-phase-Final-Streaming sind implementiert.
 
 *Hinweis: Diese Zusammenfassung sollte regelmäßig aktualisiert und verfeinert werden, um den Projektfortschritt präzise abzubilden.*
 

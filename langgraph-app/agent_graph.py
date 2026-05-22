@@ -139,28 +139,38 @@ else:
 
 try:
     from model_management import (
+        apply_model_context_policy as _model_mgmt_apply_context_policy,
+        check_ollama_models as _model_mgmt_check_ollama_models,
         configure_ubuntu_llama_instance as _model_mgmt_configure_ubuntu_llama_instance,
         control_ubuntu_llama_service as _model_mgmt_control_ubuntu_llama_service,
         embedding_maintenance_decision as _model_mgmt_embedding_decision,
         inspect_runtime as _model_mgmt_inspect_runtime,
         inspect_ubuntu_llama_manager as _model_mgmt_inspect_ubuntu_llama_manager,
+        load_embedding_model as _model_mgmt_load_embedding_model,
         prepare_comfy_for_pixelle as _model_mgmt_prepare_comfy,
         request_power_action as _model_mgmt_request_power_action,
         request_ubuntu_server_power_action as _model_mgmt_request_ubuntu_server_power_action,
         recover_ubuntu_llama_no_response as _model_mgmt_recover_ubuntu_llama_no_response,
+        run_embedding_jobs as _model_mgmt_run_embedding_jobs,
         run_embedding_lifecycle as _model_mgmt_run_embedding_lifecycle,
+        unload_ollama_model as _model_mgmt_unload_ollama_model,
     )
 except Exception as exc:  # pragma: no cover - optional local module/deps
+    _model_mgmt_apply_context_policy = None
+    _model_mgmt_check_ollama_models = None
     _model_mgmt_configure_ubuntu_llama_instance = None
     _model_mgmt_control_ubuntu_llama_service = None
     _model_mgmt_embedding_decision = None
     _model_mgmt_inspect_runtime = None
     _model_mgmt_inspect_ubuntu_llama_manager = None
+    _model_mgmt_load_embedding_model = None
     _model_mgmt_prepare_comfy = None
     _model_mgmt_request_power_action = None
     _model_mgmt_request_ubuntu_server_power_action = None
     _model_mgmt_recover_ubuntu_llama_no_response = None
+    _model_mgmt_run_embedding_jobs = None
     _model_mgmt_run_embedding_lifecycle = None
+    _model_mgmt_unload_ollama_model = None
     MODEL_MANAGEMENT_IMPORT_ERROR: Exception | None = exc
 else:
     MODEL_MANAGEMENT_IMPORT_ERROR = None
@@ -277,6 +287,32 @@ except Exception as exc:  # pragma: no cover - state manager must not block grap
     RUN_STATE_MANAGER_IMPORT_ERROR: Exception | None = exc
 else:
     RUN_STATE_MANAGER_IMPORT_ERROR = None
+
+try:
+    from rag_pins_manager import (
+        load_pins as _mongo_load_rag_pins,
+        update_pins as _mongo_update_rag_pins,
+    )
+except Exception as exc:  # pragma: no cover - pins manager must not block graph import
+    _mongo_load_rag_pins = None
+    _mongo_update_rag_pins = None
+    RAG_PINS_MANAGER_IMPORT_ERROR: Exception | None = exc
+else:
+    RAG_PINS_MANAGER_IMPORT_ERROR = None
+
+try:
+    from curated_memory_review import (
+        extract_candidates as _curated_review_extract_candidates,
+        list_candidates as _curated_review_list_candidates,
+        update_candidate as _curated_review_update_candidate,
+    )
+except Exception as exc:  # pragma: no cover - review helpers must not block graph import
+    _curated_review_extract_candidates = None
+    _curated_review_list_candidates = None
+    _curated_review_update_candidate = None
+    CURATED_MEMORY_REVIEW_IMPORT_ERROR: Exception | None = exc
+else:
+    CURATED_MEMORY_REVIEW_IMPORT_ERROR = None
 
 try:
     from runtime_settings import apply_runtime_overrides as _apply_runtime_overrides
@@ -708,6 +744,64 @@ def _crisis_manager_enabled() -> bool:
     return _advanced_model_management_enabled() and _env_bool("ALPHARAVIS_ENABLE_CRISIS_MANAGER", "false")
 
 
+def _crisis_max_attempts() -> int:
+    try:
+        return max(0, int(os.getenv("ALPHARAVIS_CRISIS_MAX_ATTEMPTS", "1")))
+    except ValueError:
+        return 1
+
+
+def _crisis_max_wall_clock_seconds() -> float:
+    try:
+        return max(1.0, float(os.getenv("ALPHARAVIS_CRISIS_MAX_WALL_CLOCK_SECONDS", "180")))
+    except ValueError:
+        return 180.0
+
+
+def _crisis_action_timeout_seconds() -> float:
+    try:
+        return max(1.0, float(os.getenv("ALPHARAVIS_CRISIS_ACTION_TIMEOUT_SECONDS", "90")))
+    except ValueError:
+        return 90.0
+
+
+def _crisis_caps_status(state: AlphaRavisState) -> dict[str, Any]:
+    profile = dict(state.get("run_profile") or {})
+    attempts = int(profile.get("crisis_attempts") or 0)
+    started_at = float(profile.get("crisis_started_at") or time.time())
+    elapsed = max(0.0, time.time() - started_at)
+    max_attempts = _crisis_max_attempts()
+    max_wall_clock = _crisis_max_wall_clock_seconds()
+    recursive_block = bool(state.get("crisis_recovery_attempted") or profile.get("crisis_recovery_active"))
+    allowed = attempts < max_attempts and elapsed <= max_wall_clock and not recursive_block
+    reason = ""
+    if recursive_block:
+        reason = "recursive_crisis_loop_blocked"
+    elif attempts >= max_attempts:
+        reason = "max_attempts_reached"
+    elif elapsed > max_wall_clock:
+        reason = "max_wall_clock_reached"
+    return {
+        "allowed": allowed,
+        "reason": reason,
+        "attempts": attempts,
+        "max_attempts": max_attempts,
+        "started_at": started_at,
+        "elapsed_seconds": round(elapsed, 3),
+        "max_wall_clock_seconds": max_wall_clock,
+    }
+
+
+def _crisis_error_is_recoverable(classified: dict[str, Any]) -> bool:
+    return bool(classified.get("should_use_crisis_manager")) or str(classified.get("reason") or "") in {
+        "timeout",
+        "server_error",
+        "connection_error",
+        "overloaded",
+        "rate_limited",
+    }
+
+
 def _available_agent_names() -> str:
     agents = [
         "general_assistant",
@@ -859,6 +953,36 @@ def _deepagents_responses_extra_body(model_kwargs: dict[str, Any] | None) -> dic
     return extra_body
 
 
+def _deepagents_responses_streaming_policy() -> dict[str, Any]:
+    """Resolve internal Responses streaming mode with a guarded full-tool default."""
+
+    policy = os.getenv("ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING_POLICY", "full_guarded").strip().lower()
+    explicit_disable = os.getenv("ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING")
+    explicit_streaming = os.getenv("ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING")
+    if explicit_disable is not None:
+        disable_streaming = _env_disable_streaming("ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING", "tool_calling")
+        streaming = _env_bool("ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING", "true")
+        mode = "explicit"
+    elif policy in {"hybrid", "tool_calling", "tool-calling"}:
+        streaming = True if explicit_streaming is None else _env_bool("ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING", "true")
+        disable_streaming = "tool_calling"
+        mode = "hybrid"
+    elif policy in {"off", "nonstreaming", "non-streaming"}:
+        streaming = False
+        disable_streaming = True
+        mode = "nonstreaming"
+    else:
+        streaming = True if explicit_streaming is None else _env_bool("ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING", "true")
+        disable_streaming = False
+        mode = "full_guarded"
+    return {
+        "mode": mode,
+        "streaming": streaming,
+        "disable_streaming": disable_streaming,
+        "tool_streaming_buffer": policy not in {"hybrid", "tool_calling", "tool-calling", "off", "nonstreaming", "non-streaming"},
+    }
+
+
 def _deepagents_responses_model(
     *,
     model_name: str | None = None,
@@ -874,6 +998,7 @@ def _deepagents_responses_model(
         print(f"WARNING: {message}")
         return None
 
+    streaming_policy = _deepagents_responses_streaming_policy()
     kwargs: dict[str, Any] = {
         "model": (
             model_name.removeprefix("openai/")
@@ -890,16 +1015,16 @@ def _deepagents_responses_model(
         "api_key": os.getenv("ALPHARAVIS_DEEPAGENTS_RESPONSES_API_KEY", os.getenv("ALPHARAVIS_RESPONSES_API_KEY", os.getenv("OPENAI_API_KEY", "sk-local-dev"))),
         "timeout": timeout_seconds or float(os.getenv("ALPHARAVIS_LLM_TIMEOUT_SECONDS", "120")),
         "max_retries": int(os.getenv("ALPHARAVIS_LLM_MAX_RETRIES", "0")),
-        "streaming": _env_bool("ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING", "false"),
-        "disable_streaming": _env_disable_streaming(
-            "ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING",
-            "true",
-        ),
+        "streaming": bool(streaming_policy["streaming"]),
+        "disable_streaming": streaming_policy["disable_streaming"],
         "use_responses_api": True,
         "store": _env_bool("ALPHARAVIS_RESPONSES_STORE", "false"),
         "output_version": os.getenv("ALPHARAVIS_DEEPAGENTS_RESPONSES_OUTPUT_VERSION", "responses/v1"),
         "extra_body": _deepagents_responses_extra_body(model_kwargs),
     }
+    if streaming_policy["mode"] == "full_guarded":
+        kwargs["extra_body"].setdefault("parse_tool_calls", True)
+        kwargs["extra_body"].setdefault("parallel_tool_calls", False)
     if _env_bool("ALPHARAVIS_DEEPAGENTS_USE_PREVIOUS_RESPONSE_ID", "false"):
         kwargs["use_previous_response_id"] = True
 
@@ -2624,6 +2749,48 @@ async def run_embedding_memory_jobs(reason: str = "", job_limit: int = 10, last_
 
 
 @tool
+async def check_ollama_models():
+    """Inspect real Ollama running models for chat/embedding model-management decisions."""
+
+    if _model_mgmt_check_ollama_models is None:
+        return _model_management_unavailable() or "Model management module not loaded."
+    return _json_tool_result(await _model_mgmt_check_ollama_models(REMOTE_PCS))
+
+
+@tool
+async def load_embedding_model(model: str = "", keep_alive: str = ""):
+    """Load the configured or supplied Ollama embedding model with a real keep_alive request."""
+
+    if _model_mgmt_load_embedding_model is None:
+        return _model_management_unavailable() or "Model management module not loaded."
+    return _json_tool_result(
+        await _model_mgmt_load_embedding_model(
+            model=model,
+            keep_alive=keep_alive or None,
+            remote_pcs=REMOTE_PCS,
+        )
+    )
+
+
+@tool
+async def unload_ollama_model(model: str = ""):
+    """Unload the configured or supplied Ollama model with a real keep_alive=0 request."""
+
+    if _model_mgmt_unload_ollama_model is None:
+        return _model_management_unavailable() or "Model management module not loaded."
+    return _json_tool_result(await _model_mgmt_unload_ollama_model(model=model, remote_pcs=REMOTE_PCS))
+
+
+@tool
+async def run_embedding_jobs(job_limit: int = 10):
+    """Run queued pgvector embedding jobs directly without a lifecycle model switch."""
+
+    if _model_mgmt_run_embedding_jobs is None:
+        return _model_management_unavailable() or "Model management module not loaded."
+    return _json_tool_result(await _model_mgmt_run_embedding_jobs(job_limit=job_limit))
+
+
+@tool
 async def inspect_ubuntu_llama_manager():
     """Inspect the external Ubuntu Llama Manager API, llama instances, and local models."""
 
@@ -2729,6 +2896,28 @@ async def configure_ubuntu_llama_instance(
             context_size=context_size,
             command=command,
             restart=restart,
+            remote_pcs=REMOTE_PCS,
+        )
+    )
+
+
+@tool
+async def apply_model_context_policy(
+    reason: str = "",
+    requested_context_size: int | None = None,
+    current_instance: str = "",
+    rollback: bool = False,
+):
+    """Automatically raise or roll back primary/secondary llama.cpp context using policy rules."""
+
+    if _model_mgmt_apply_context_policy is None:
+        return _model_management_unavailable() or "Model management module not loaded."
+    return _json_tool_result(
+        await _model_mgmt_apply_context_policy(
+            reason=reason,
+            requested_context_size=requested_context_size,
+            current_instance=current_instance,
+            rollback=rollback,
             remote_pcs=REMOTE_PCS,
         )
     )
@@ -3169,6 +3358,106 @@ def extract_review_insights(text: str, max_candidates: int = 8):
             "auto_promoted": False,
             "candidates": _extract_review_insight_candidates(text, max_candidates=max_candidates),
         }
+    )
+
+
+@tool
+def create_curated_memory_review_candidates(
+    text: str,
+    source_key: str = "",
+    source_type: str = "thread",
+    title: str = "",
+    max_candidates: int = 8,
+):
+    """Extract durable-memory candidates into the review queue without saving them as curated memory."""
+
+    if _curated_review_extract_candidates is None:
+        return f"Curated memory review helper unavailable: {CURATED_MEMORY_REVIEW_IMPORT_ERROR}"
+    result = _curated_review_extract_candidates(
+        text,
+        source_key=source_key,
+        source_type=source_type,
+        thread_id=_state_thread_id(),
+        title=title,
+        max_candidates=max_candidates,
+    )
+    
+    # Auto-storage for accepted candidates
+    if isinstance(result, dict) and result.get("ok") and result.get("items"):
+        for item in result["items"]:
+            if item.get("status") == "accepted" and not item.get("memory_key"):
+                # Use the existing tool logic to store
+                try:
+                    # We need a dummy agent_id/scope or from item
+                    asyncio.create_task(
+                        record_curated_memory(
+                            memory=item["memory"],
+                            memory_type=item["memory_type"],
+                            evidence=item.get("source_preview", ""),
+                        )
+                    )
+                except Exception:
+                    pass
+
+    return _json_tool_result(result)
+
+
+@tool
+def list_curated_memory_review_candidates(status: str = "pending", limit: int = 50):
+    """List pending/accepted/rejected curated-memory candidates for human review."""
+
+    if _curated_review_list_candidates is None:
+        return f"Curated memory review helper unavailable: {CURATED_MEMORY_REVIEW_IMPORT_ERROR}"
+    return _json_tool_result(_curated_review_list_candidates(status=status, limit=limit))
+
+
+@tool
+async def accept_curated_memory_candidate(candidate_id: str, reviewer_note: str = "", scope: str = "global", agent_id: str = ""):
+    """Accept a reviewed candidate and only then store it as curated memory."""
+
+    if _curated_review_list_candidates is None or _curated_review_update_candidate is None:
+        return f"Curated memory review helper unavailable: {CURATED_MEMORY_REVIEW_IMPORT_ERROR}"
+    candidates = _curated_review_list_candidates(status="all", limit=200).get("items", [])
+    candidate = next((item for item in candidates if str(item.get("candidate_id")) == str(candidate_id)), None)
+    if not isinstance(candidate, dict):
+        return f"Curated memory candidate `{candidate_id}` was not found."
+    if str(candidate.get("status") or "pending") == "accepted":
+        return _json_tool_result({"ok": True, "already_accepted": True, "candidate": candidate})
+
+    store_result = await record_curated_memory.ainvoke(
+        {
+            "memory": str(candidate.get("memory") or ""),
+            "memory_type": str(candidate.get("memory_type") or "fact"),
+            "evidence": str(candidate.get("source_preview") or reviewer_note or ""),
+            "scope": scope,
+            "agent_id": agent_id,
+        }
+    )
+    memory_key = ""
+    match = re.search(r"`([a-f0-9]{16,32})`", str(store_result))
+    if match:
+        memory_key = match.group(1)
+    update = _curated_review_update_candidate(
+        str(candidate_id),
+        status="accepted",
+        reviewer_note=reviewer_note,
+        memory_key=memory_key,
+    )
+    return _json_tool_result({"ok": bool(update.get("ok")), "candidate": update.get("item"), "store_result": store_result})
+
+
+@tool
+def reject_curated_memory_candidate(candidate_id: str, reviewer_note: str = ""):
+    """Reject a curated-memory candidate without storing it as memory."""
+
+    if _curated_review_update_candidate is None:
+        return f"Curated memory review helper unavailable: {CURATED_MEMORY_REVIEW_IMPORT_ERROR}"
+    return _json_tool_result(
+        _curated_review_update_candidate(
+            str(candidate_id),
+            status="rejected",
+            reviewer_note=reviewer_note,
+        )
     )
 
 
@@ -4119,6 +4408,13 @@ async def _llm_grade_retrieval_hits(
 
 
 async def _load_thread_rag_pins(thread_id: str) -> dict[str, Any]:
+    if _mongo_load_rag_pins is not None:
+        try:
+            pins = _mongo_load_rag_pins(thread_id)
+            if pins:
+                return pins
+        except Exception:
+            pass
     if get_store is None:
         return {}
     try:
@@ -4131,6 +4427,18 @@ async def _load_thread_rag_pins(thread_id: str) -> dict[str, Any]:
 
 
 async def _write_thread_rag_pins(thread_id: str, value: dict[str, Any]) -> None:
+    if _mongo_update_rag_pins is not None:
+        try:
+            _mongo_update_rag_pins(
+                thread_id=thread_id,
+                clear_all=True,
+                add_source_keys=_merge_unique_strings(value.get("active_source_keys")),
+                add_rag_file_ids=_merge_unique_strings(value.get("active_rag_file_ids")),
+                archive_rag_mode=str(value.get("archive_rag_mode") or "tool_only"),
+            )
+            return
+        except Exception:
+            pass
     if get_store is None:
         raise RuntimeError("LangGraph Store is unavailable; cannot persist RAG pins.")
     store = get_store()
@@ -6364,6 +6672,183 @@ async def _queue_vector_backfill_from_store(
     return {"ok": True, "query": query, "queued": queued, "warnings": warnings[:20]}
 
 
+async def _queue_backfill_item(
+    *,
+    normalized_type: str,
+    key: str,
+    value: dict[str, Any],
+    namespace: tuple[str, ...],
+    backfill_reason: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    title, content, metadata = _backfill_content_from_value(normalized_type, value)
+    if not content.strip():
+        return None, f"{normalized_type}:{key} skipped because content is empty"
+    thread_id = str(value.get("thread_id") or "")
+    result = await _maybe_index_vector_memory(
+        source_type=normalized_type,
+        source_key=key,
+        title=title,
+        content=content,
+        thread_id=thread_id,
+        thread_key=str(value.get("thread_key") or ("global" if not thread_id else thread_id)),
+        scope=str(value.get("scope") or ("global" if not thread_id else "thread")),
+        metadata={**metadata, "backfill_reason": backfill_reason, "backfill_source_namespace": "/".join(namespace)},
+    )
+    return {"source_type": normalized_type, "source_key": key, "vector_result": result}, None
+
+
+async def _queue_current_thread_vector_backfill_from_store(
+    store: Any,
+    *,
+    source_types: list[str],
+    limit_per_source: int,
+) -> dict[str, Any]:
+    if not _vector_memory_available():
+        return {"ok": False, "message": "pgvector memory is disabled"}
+
+    queued: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for source_type in source_types:
+        for namespace, normalized_type in _backfill_namespaces(source_type.strip().lower(), include_other_threads=False):
+            try:
+                results = await _maybe_search(store, namespace, query="", limit=limit_per_source)
+            except Exception as exc:
+                warnings.append(f"{normalized_type}:{namespace} search failed: {exc}")
+                continue
+            for item in results or []:
+                value = _store_item_value(item)
+                if not isinstance(value, dict):
+                    continue
+                record, warning = await _queue_backfill_item(
+                    normalized_type=normalized_type,
+                    key=_store_item_key(item),
+                    value=value,
+                    namespace=namespace,
+                    backfill_reason="current_thread",
+                )
+                if record:
+                    queued.append(record)
+                if warning:
+                    warnings.append(warning)
+    return {"ok": True, "scope": "current_thread", "queued": queued, "warnings": warnings[:20]}
+
+
+async def _queue_recent_artifact_vector_backfill_from_store(
+    store: Any,
+    *,
+    limit: int,
+    include_other_threads: bool,
+) -> dict[str, Any]:
+    if not _vector_memory_available():
+        return {"ok": False, "message": "pgvector memory is disabled"}
+
+    namespace = ARTIFACT_INDEX_NS if include_other_threads else _thread_artifact_ns(_state_thread_id())
+    warnings: list[str] = []
+    try:
+        results = await _maybe_search(store, namespace, query="artifact", limit=max(limit * 4, limit))
+    except Exception as exc:
+        return {"ok": False, "message": f"artifact search failed: {exc}", "queued": [], "warnings": []}
+
+    def _artifact_ts(item: Any) -> int:
+        value = _store_item_value(item)
+        if not isinstance(value, dict):
+            return 0
+        for key in ("updated_at", "created_at", "timestamp", "mtime"):
+            try:
+                return int(float(value.get(key) or 0))
+            except Exception:
+                continue
+        return 0
+
+    queued: list[dict[str, Any]] = []
+    for item in sorted(results or [], key=_artifact_ts, reverse=True)[:limit]:
+        value = _store_item_value(item)
+        if not isinstance(value, dict):
+            continue
+        record, warning = await _queue_backfill_item(
+            normalized_type="artifact",
+            key=_store_item_key(item),
+            value=value,
+            namespace=namespace,
+            backfill_reason="recent_artifacts",
+        )
+        if record:
+            queued.append(record)
+        if warning:
+            warnings.append(warning)
+    return {"ok": True, "scope": "recent_artifacts", "queued": queued, "warnings": warnings[:20]}
+
+
+async def _queue_selected_source_vector_backfill_from_store(
+    store: Any,
+    *,
+    source_keys: list[str],
+    source_type: str,
+    include_other_threads: bool,
+) -> dict[str, Any]:
+    if not _vector_memory_available():
+        return {"ok": False, "message": "pgvector memory is disabled"}
+
+    normalized_keys = list(dict.fromkeys(key.strip() for key in source_keys if key and key.strip()))[:50]
+    wanted_type = source_type.strip().lower() or "all"
+    source_types = (
+        ["source_record", "artifact", "archive", "archive_collection", "session_turn"]
+        if wanted_type in {"all", "*"}
+        else [wanted_type]
+    )
+    queued: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    for key in normalized_keys:
+        found = False
+        if "source_record" in source_types:
+            raw = await _load_raw_source_record(
+                key,
+                source_type="all" if wanted_type in {"all", "*", "source_record"} else wanted_type,
+                include_other_threads=include_other_threads,
+            )
+            if isinstance(raw, dict):
+                record, warning = await _queue_backfill_item(
+                    normalized_type=str(raw.get("source_type") or "source_record"),
+                    key=key,
+                    value={**raw, "content": str(raw.get("indexed_content") or raw.get("content") or "")},
+                    namespace=_thread_source_record_ns(str(raw.get("thread_id") or _state_thread_id())),
+                    backfill_reason="selected_source_keys",
+                )
+                if record:
+                    queued.append(record)
+                    found = True
+                if warning:
+                    warnings.append(warning)
+
+        for candidate_type in [item for item in source_types if item != "source_record"]:
+            for namespace, normalized_type in _backfill_namespaces(candidate_type, include_other_threads):
+                try:
+                    item = await _maybe_get(store, namespace, key)
+                except Exception as exc:
+                    warnings.append(f"{normalized_type}:{key} read failed: {exc}")
+                    continue
+                value = _store_item_value(item)
+                if not isinstance(value, dict):
+                    continue
+                record, warning = await _queue_backfill_item(
+                    normalized_type=normalized_type,
+                    key=key,
+                    value=value,
+                    namespace=namespace,
+                    backfill_reason="selected_source_keys",
+                )
+                if record:
+                    queued.append(record)
+                    found = True
+                if warning:
+                    warnings.append(warning)
+        if not found:
+            warnings.append(f"{key} not found in selected source stores")
+
+    return {"ok": True, "scope": "selected_source_keys", "source_keys": normalized_keys, "queued": queued, "warnings": warnings[:20]}
+
+
 @tool
 async def queue_vector_memory_backfill(
     query: str,
@@ -6385,6 +6870,68 @@ async def queue_vector_memory_backfill(
         query=query,
         source_types=_split_csv_env(source_types, []),
         limit_per_source=max(1, min(int(limit_per_source), int(os.getenv("ALPHARAVIS_VECTOR_BACKFILL_MAX_LIMIT", "50")))),
+        include_other_threads=include_other_threads,
+    )
+    return _json_tool_result(result)
+
+
+@tool
+async def queue_current_thread_vector_backfill(
+    source_types: str = "session_turn,artifact,archive,archive_collection",
+    limit_per_source: int = 25,
+):
+    """Queue pgvector backfill for this exact thread without requiring a search query."""
+
+    if get_store is None:
+        return "LangGraph store access is unavailable in this runtime."
+    try:
+        store = get_store()
+    except Exception as exc:
+        return f"No LangGraph store is attached to this run: {exc}"
+    result = await _queue_current_thread_vector_backfill_from_store(
+        store,
+        source_types=_split_csv_env(source_types, []),
+        limit_per_source=max(1, min(int(limit_per_source), int(os.getenv("ALPHARAVIS_VECTOR_BACKFILL_MAX_LIMIT", "50")))),
+    )
+    return _json_tool_result(result)
+
+
+@tool
+async def queue_recent_artifact_vector_backfill(limit: int = 10, include_other_threads: bool = False):
+    """Queue pgvector backfill for the last N stored artifacts."""
+
+    if get_store is None:
+        return "LangGraph store access is unavailable in this runtime."
+    try:
+        store = get_store()
+    except Exception as exc:
+        return f"No LangGraph store is attached to this run: {exc}"
+    result = await _queue_recent_artifact_vector_backfill_from_store(
+        store,
+        limit=max(1, min(int(limit), int(os.getenv("ALPHARAVIS_VECTOR_BACKFILL_MAX_LIMIT", "50")))),
+        include_other_threads=include_other_threads,
+    )
+    return _json_tool_result(result)
+
+
+@tool
+async def queue_selected_source_vector_backfill(
+    source_keys: str,
+    source_type: str = "all",
+    include_other_threads: bool = False,
+):
+    """Queue pgvector backfill for exact source keys such as large-paste, artifact, archive, or raw-source IDs."""
+
+    if get_store is None:
+        return "LangGraph store access is unavailable in this runtime."
+    try:
+        store = get_store()
+    except Exception as exc:
+        return f"No LangGraph store is attached to this run: {exc}"
+    result = await _queue_selected_source_vector_backfill_from_store(
+        store,
+        source_keys=_split_csv_env(source_keys, []),
+        source_type=source_type,
         include_other_threads=include_other_threads,
     )
     return _json_tool_result(result)
@@ -11472,6 +12019,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             control_ubuntu_llama_service,
             request_ubuntu_server_power_action,
             configure_ubuntu_llama_instance,
+            apply_model_context_policy,
         ]
         if server_model_manager_enabled or model_management_enabled
         else []
@@ -11479,9 +12027,16 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     model_management_tools = (
         [
             *server_management_tools,
+            check_ollama_models,
             plan_embedding_maintenance,
+            load_embedding_model,
+            unload_ollama_model,
+            run_embedding_jobs,
             run_embedding_memory_jobs,
             queue_vector_memory_backfill,
+            queue_current_thread_vector_backfill,
+            queue_recent_artifact_vector_backfill,
+            queue_selected_source_vector_backfill,
         ]
         if model_management_enabled
         else server_management_tools
@@ -11621,6 +12176,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             reload_repo_ai_skills,
             suggest_thread_title,
             extract_review_insights,
+            create_curated_memory_review_candidates,
+            list_curated_memory_review_candidates,
+            accept_curated_memory_candidate,
+            reject_curated_memory_candidate,
             export_skill_candidate_to_repo_draft,
             normalize_research_sources,
             build_specialist_report,
@@ -11731,6 +12290,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             reload_repo_ai_skills,
             suggest_thread_title,
             extract_review_insights,
+            create_curated_memory_review_candidates,
+            list_curated_memory_review_candidates,
+            accept_curated_memory_candidate,
+            reject_curated_memory_candidate,
             normalize_research_sources,
             build_specialist_report,
             inspect_context_budget,
@@ -11805,6 +12368,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             reload_repo_ai_skills,
             suggest_thread_title,
             extract_review_insights,
+            create_curated_memory_review_candidates,
+            list_curated_memory_review_candidates,
+            accept_curated_memory_candidate,
+            reject_curated_memory_candidate,
             build_specialist_report,
             inspect_context_budget,
             search_agent_memory,
@@ -11937,6 +12504,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             reload_repo_ai_skills,
             suggest_thread_title,
             extract_review_insights,
+            create_curated_memory_review_candidates,
+            list_curated_memory_review_candidates,
+            accept_curated_memory_candidate,
+            reject_curated_memory_candidate,
             inspect_context_budget,
             build_specialist_report,
             search_skill_library,
@@ -11983,6 +12554,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             reload_repo_ai_skills,
             suggest_thread_title,
             extract_review_insights,
+            create_curated_memory_review_candidates,
+            list_curated_memory_review_candidates,
+            accept_curated_memory_candidate,
+            reject_curated_memory_candidate,
             inspect_context_budget,
         ], [
             transfer_to_generalist,
@@ -12052,6 +12627,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             reload_repo_ai_skills,
             suggest_thread_title,
             extract_review_insights,
+            create_curated_memory_review_candidates,
+            list_curated_memory_review_candidates,
+            accept_curated_memory_candidate,
+            reject_curated_memory_candidate,
             read_alpha_ravis_architecture,
             inspect_context_budget,
             build_specialist_report,
@@ -12128,10 +12707,18 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 control_ubuntu_llama_service,
                 request_ubuntu_server_power_action,
                 configure_ubuntu_llama_instance,
+                apply_model_context_policy,
                 check_external_service,
+                check_ollama_models,
                 plan_embedding_maintenance,
+                load_embedding_model,
+                unload_ollama_model,
+                run_embedding_jobs,
                 run_embedding_memory_jobs,
                 queue_vector_memory_backfill,
+                queue_current_thread_vector_backfill,
+                queue_recent_artifact_vector_backfill,
+                queue_selected_source_vector_backfill,
                 prepare_comfy_for_pixelle,
                 request_power_management_action,
                 *owner_safe_power_tools,
@@ -12232,6 +12819,34 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         default_active_agent="general_assistant",
     ).compile(store=store)
 
+    async def _crisis_readiness_gate(state: AlphaRavisState) -> dict[str, Any]:
+        try:
+            if _owner_check_llama_server is not None:
+                status = await _owner_check_llama_server()
+            elif _model_mgmt_inspect_ubuntu_llama_manager is not None:
+                status = await _model_mgmt_inspect_ubuntu_llama_manager(REMOTE_PCS)
+            else:
+                return {"ready": False, "reason": "readiness_probe_unavailable"}
+        except Exception as exc:
+            return {
+                "ready": False,
+                "reason": "readiness_probe_failed",
+                "error": str(exc)[:500],
+                "classification": _classified_error_profile(
+                    exc,
+                    provider="crisis_readiness_gate",
+                    model=os.getenv("ALPHARAVIS_MODEL", "openai/big-boss"),
+                ),
+            }
+        if not isinstance(status, dict):
+            return {"ready": False, "reason": "readiness_probe_returned_non_dict", "status": str(status)[:500]}
+        return {
+            "ready": bool(status.get("ok")) and not _ubuntu_manager_status_indicates_primary_down(status),
+            "reason": "ready" if bool(status.get("ok")) and not _ubuntu_manager_status_indicates_primary_down(status) else "not_ready",
+            "status": status,
+            "caps": _crisis_caps_status(state),
+        }
+
     async def run_swarm_with_context_retry(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
         try:
             _save_run_state_checkpoint(state, phase="alpha_ravis_swarm", status="running")
@@ -12254,6 +12869,69 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 and classified.get("should_compress")
                 and classified.get("reason") in {"context_overflow", "payload_too_large"}
             ):
+                if _crisis_manager_enabled() and crisis_worker is not None and _crisis_error_is_recoverable(classified):
+                    caps = _crisis_caps_status(state)
+                    if caps.get("allowed"):
+                        profile = dict(state.get("run_profile") or {})
+                        attempt = int(caps.get("attempts") or 0) + 1
+                        crisis_state: AlphaRavisState = dict(state)
+                        crisis_state["run_profile"] = _profile_update(
+                            state,
+                            crisis_recovery_active=True,
+                            crisis_started_at=float(profile.get("crisis_started_at") or time.time()),
+                            crisis_attempts=attempt,
+                            crisis_mid_run_error=str(exc)[:500],
+                            crisis_mid_run_error_classification=classified,
+                        )
+                        _save_run_state_checkpoint(
+                            crisis_state,
+                            phase="alpha_ravis_swarm.crisis_recovery",
+                            status="running",
+                            error=str(exc),
+                            error_classification=classified,
+                        )
+                        try:
+                            crisis_updates = await asyncio.wait_for(
+                                run_crisis_manager(crisis_state),
+                                timeout=_crisis_action_timeout_seconds(),
+                            )
+                            retry_state = _state_with_node_updates(crisis_state, crisis_updates)
+                            retry_state["crisis_recovery_attempted"] = True
+                            gate = await asyncio.wait_for(
+                                _crisis_readiness_gate(retry_state),
+                                timeout=max(1.0, float(os.getenv("ALPHARAVIS_CRISIS_READINESS_TIMEOUT_SECONDS", "20"))),
+                            )
+                            retry_state["run_profile"] = _profile_update(
+                                retry_state,
+                                crisis_recovery_active=False,
+                                crisis_readiness_gate=gate,
+                            )
+                            if gate.get("ready"):
+                                retry_result = await swarm.ainvoke(retry_state)
+                                if isinstance(retry_result, dict):
+                                    retry_result["run_profile"] = _profile_update(
+                                        retry_state,
+                                        **dict(retry_result.get("run_profile") or {}),
+                                        crisis_mid_run_recovery_used=True,
+                                        crisis_attempts=attempt,
+                                        crisis_readiness_gate=gate,
+                                    )
+                                _save_run_state_checkpoint(
+                                    {**retry_state, **(retry_result if isinstance(retry_result, dict) else {})},
+                                    phase="alpha_ravis_swarm.after_crisis_recovery",
+                                    status="running",
+                                )
+                                return retry_result
+                            classified["crisis_readiness_gate"] = gate
+                        except Exception as crisis_exc:
+                            classified["crisis_recovery_error"] = str(crisis_exc)[:500]
+                            classified["crisis_recovery_error_classification"] = _classified_error_profile(
+                                crisis_exc,
+                                provider="crisis_manager_mid_run",
+                                model=os.getenv("ALPHARAVIS_CRISIS_MANAGER_MODEL", "openai/edge-gemma"),
+                            )
+                    else:
+                        classified["crisis_caps"] = caps
                 interrupted_profile = _profile_update(
                     state,
                     run_interrupted=True,
@@ -12319,6 +12997,13 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     async def run_crisis_manager(state: AlphaRavisState) -> dict[str, Any]:
         if crisis_worker is None:
             return {"crisis_route": "normal"}
+        caps = _crisis_caps_status(state)
+        if not caps.get("allowed") and not dict(state.get("run_profile") or {}).get("crisis_recovery_active"):
+            return {
+                "crisis_route": "normal",
+                "crisis_recovery_attempted": True,
+                "run_profile": _profile_update(state, crisis_manager_skipped="caps_exceeded", crisis_caps=caps),
+            }
 
         latest = _latest_user_query(list(state.get("messages", [])))
         prompt = (
@@ -12355,6 +13040,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "run_profile": _profile_update(
                 state,
                 crisis_manager_used=True,
+                crisis_recovery_active=False,
+                crisis_caps=caps,
                 **({"crisis_manager_error_classification": crisis_error_classification} if crisis_error_classification else {}),
             ),
         }

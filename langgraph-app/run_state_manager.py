@@ -143,6 +143,25 @@ def load_run_checkpoint(thread_id: str) -> dict[str, Any] | None:
     return record
 
 
+def list_run_checkpoints(*, status: str = "awaiting_resume", limit: int = 50) -> list[dict[str, Any]]:
+    if not _enabled():
+        return []
+    query: dict[str, Any] = {}
+    if status:
+        query["status"] = status
+    try:
+        rows = _collection().find(query).sort("updated_at", -1).limit(max(1, min(int(limit), 200)))
+    except Exception:
+        return []
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row["_id"] = str(row.get("_id") or "")
+        records.append(row)
+    return records
+
+
 def resume_updates_from_checkpoint(checkpoint: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(checkpoint, dict):
         return {}

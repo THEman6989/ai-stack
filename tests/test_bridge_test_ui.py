@@ -316,8 +316,28 @@ def test_observer_page_is_full_table_view() -> None:
     assert "RAG Load Probe" in test_ui_server.OBSERVER_HTML
     assert "runRagLoadProbe" in test_ui_server.OBSERVER_HTML
     assert "/api/rag-load-probe" in test_ui_server.OBSERVER_HTML
+    assert "Curated Memory Review" in test_ui_server.OBSERVER_HTML
+    assert "/api/curated-memory/review/extract" in test_ui_server.OBSERVER_HTML
     assert "400,1000,4000,10000,20000,40000" in test_ui_server.OBSERVER_HTML
     assert "window.setInterval" in test_ui_server.OBSERVER_HTML
+
+
+def test_curated_memory_review_extract_and_decide(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ALPHARAVIS_CURATED_MEMORY_REVIEW_PATH", str(tmp_path / "review.json"))
+
+    result = test_ui_server.memory_review_extract_candidates(
+        "Remember that I prefer concise feature updates.",
+        source_key="thread-1",
+        source_type="thread",
+        thread_id="thread-1",
+    )
+
+    assert result["count"] >= 1
+    candidate_id = result["items"][0]["candidate_id"]
+    accepted = test_ui_server.memory_review_update_candidate(candidate_id, status="accepted", reviewer_note="ok")
+
+    assert accepted["ok"] is True
+    assert accepted["item"]["status"] == "accepted"
 
 
 def test_chunking_diagnostic_uses_real_compressor_with_tool_and_prompt_load() -> None:
@@ -491,6 +511,34 @@ def test_native_document_rag_smoke_uses_alpharavis_pgvector_only(monkeypatch) ->
     assert result["acceptance_ok"] is True
     assert result["acceptance"]["pgvector_backend_selected"] is True
     assert result["acceptance"]["rag_api_not_used"] is True
+
+
+def test_embedding_queue_status_exposes_source_progress(monkeypatch) -> None:
+    async def fake_queue_stats():
+        return {
+            "table": "alpharavis_embedding_jobs",
+            "counts": {"pending": 1, "running": 1, "done": 2},
+            "recent_active": [],
+            "source_progress": [
+                {
+                    "id": "job-1",
+                    "status": "running",
+                    "source_type": "large_paste",
+                    "source_key": "source-1",
+                    "planned_chunks": 4,
+                    "completed_chunks": 2,
+                    "progress": 0.5,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(test_ui_server, "pgvector_queue_stats", fake_queue_stats)
+
+    result = asyncio.run(test_ui_server._embedding_queue_status())
+
+    assert result["active_count"] == 2
+    assert result["source_progress"][0]["source_key"] == "source-1"
+    assert result["source_progress"][0]["completed_chunks"] == 2
 
 
 def test_rag_classifier_probe_covers_semantic_and_fallback_cases() -> None:

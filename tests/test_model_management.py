@@ -195,3 +195,120 @@ def test_request_ubuntu_server_power_action_requires_confirmation_for_power_off(
     assert result["ok"] is False
     assert result["needs_confirmation"] is True
     assert result["action"] == "power-off"
+
+
+def test_check_ollama_models_reads_real_runtime_models(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+        text = '{"models": []}'
+
+        def json(self):
+            return {"models": [{"name": "qwen3-embedding:0.6b"}, {"model": "edge-gemma"}]}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            return FakeResponse()
+
+    monkeypatch.setenv("ALPHARAVIS_OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b")
+    monkeypatch.setenv("ALPHARAVIS_OLLAMA_CHAT_MODEL", "edge-gemma")
+    monkeypatch.setattr(model_management.httpx, "AsyncClient", FakeClient)
+
+    result = asyncio.run(model_management.check_ollama_models())
+
+    assert result["ok"] is True
+    assert result["embedding_model_loaded"] is True
+    assert result["chat_model_loaded"] is True
+
+
+def test_load_and_unload_ollama_models_use_keep_alive(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"done": true}'
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None):
+            calls.append({"url": url, "json": json})
+            return FakeResponse()
+
+    monkeypatch.setenv("ALPHARAVIS_OLLAMA_EMBED_MODEL", "embedder")
+    monkeypatch.setattr(model_management.httpx, "AsyncClient", FakeClient)
+
+    loaded = asyncio.run(model_management.load_embedding_model(keep_alive="10m"))
+    unloaded = asyncio.run(model_management.unload_ollama_model("embedder"))
+
+    assert loaded["ok"] is True
+    assert unloaded["ok"] is True
+    assert calls[0]["json"]["model"] == "embedder"
+    assert calls[0]["json"]["keep_alive"] == "10m"
+    assert calls[1]["json"]["keep_alive"] == "0"
+
+
+def test_request_power_action_dispatches_embedding_jobs_locally(monkeypatch):
+    async def fake_run_embedding_jobs(limit):
+        return {"ok": True, "limit": limit, "processed": 2}
+
+    monkeypatch.setattr(model_management, "_vector_run_embedding_jobs", fake_run_embedding_jobs)
+
+    result = asyncio.run(model_management.request_power_action("run_embedding_jobs", "7", "operator"))
+
+    assert result == {"ok": True, "limit": 7, "processed": 2}
+
+
+def test_model_context_policy_routes_large_context_to_primary(monkeypatch):
+    monkeypatch.setenv("ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MAX", "262144")
+    monkeypatch.setenv("ALPHARAVIS_PRIMARY_CONTEXT_HIGH", "200000")
+
+    plan = model_management.model_context_policy_plan(reason="context_overflow")
+
+    assert plan["ok"] is True
+    assert plan["action"] == "raise_context"
+    assert plan["instance_id"] == "primary"
+    assert plan["target_context_size"] == 200000
+    assert plan["rollback_action"]["context_size"] == 131072
+
+
+def test_model_context_policy_rolls_secondary_back_to_normal(monkeypatch):
+    monkeypatch.setenv("ALPHARAVIS_SECONDARY_CONTEXT_NORMAL", "8192")
+
+    plan = model_management.model_context_policy_plan(current_instance="secondary", rollback=True)
+
+    assert plan["action"] == "rollback_context"
+    assert plan["instance_id"] == "secondary"
+    assert plan["target_context_size"] == 8192
+
+
+def test_apply_model_context_policy_uses_configure_action(monkeypatch):
+    calls = []
+
+    async def fake_configure(instance_id, **kwargs):
+        calls.append({"instance_id": instance_id, **kwargs})
+        return {"ok": True, "payload": {"context_size": kwargs["context_size"]}}
+
+    monkeypatch.setattr(model_management, "configure_ubuntu_llama_instance", fake_configure)
+
+    result = asyncio.run(model_management.apply_model_context_policy(requested_context_size=16384))
+
+    assert result["ok"] is True
+    assert calls[0]["instance_id"] == "secondary"
+    assert calls[0]["context_size"] == 16384
+    assert result["rollback_action"]["context_size"] == 8192

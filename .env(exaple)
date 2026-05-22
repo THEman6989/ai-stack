@@ -145,8 +145,12 @@ ALPHARAVIS_DEEPAGENTS_RESPONSES_OUTPUT_VERSION=responses/v1
 #   tool_calling = default; bypass streaming when tools are passed
 #   true         = force stream()/astream to defer to invoke()/ainvoke()
 #   false        = full Responses streaming; still experimental with tools
+# Values for ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING_POLICY:
+#   full_guarded = full streaming with local tool-call buffering and repair
+#   legacy       = uses the older toggle-based streaming logic
 ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
 ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING_POLICY=full_guarded
 ALPHARAVIS_FORCE_TEXT_ONLY_AGENT_MODEL_CONTENT=true
 # Optional experimental patch for full Responses tool streaming. Leave false
 # unless you are actively probing ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false.
@@ -449,6 +453,8 @@ ALPHARAVIS_ENABLE_CRISIS_MANAGER=false
 # used only as a moderator/recovery dispatcher, not for normal complex work.
 ALPHARAVIS_CRISIS_MANAGER_MODEL=openai/edge-gemma
 ALPHARAVIS_CRISIS_MAX_ATTEMPTS=1
+ALPHARAVIS_CRISIS_MAX_WALL_CLOCK_SECONDS=180
+ALPHARAVIS_CRISIS_ACTION_TIMEOUT_SECONDS=90
 ALPHARAVIS_CRISIS_TIMEOUT_SECONDS=120
 ALPHARAVIS_CRISIS_AUTO_ACTIONS=check_llama_server|check_ollama_models|check_comfyui|start_llama_server|restart_llama_server|wake_pc
 ALPHARAVIS_CRISIS_HITL_ACTIONS=shutdown_server|reboot_server|kill_process|delete_files
@@ -511,6 +517,15 @@ ALPHARAVIS_UBUNTU_LLAMA_ESP_URL=
 ALPHARAVIS_UBUNTU_LLAMA_ESP_API_KEY=
 ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MIN=512
 ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MAX=262144
+
+# Automatic Model Manager Policy: Context budget rules for Secondary and Primary.
+# Secondary is the small background manager; Primary is the large chat model.
+# Normal values are used for standard runs; High values are used when
+# context pressure (overflow/payload too large) is detected.
+ALPHARAVIS_SECONDARY_CONTEXT_NORMAL=8192
+ALPHARAVIS_SECONDARY_CONTEXT_HIGH=16384
+ALPHARAVIS_PRIMARY_CONTEXT_NORMAL=131072
+ALPHARAVIS_PRIMARY_CONTEXT_HIGH=200000
 
 # Hardware identity from REMOTE_PCS.
 ALPHARAVIS_BIG_LLM_PC=main_pc
@@ -994,6 +1009,15 @@ ALPHARAVIS_ALWAYS_MEMORY_MAX_CHARS=2200
 ALPHARAVIS_CURATED_MEMORY_ENTRY_MAX_CHARS=1200
 ALPHARAVIS_CURATED_MEMORY_SEARCH_LIMIT=5
 
+# JSON storage path for curated memory review candidates.
+ALPHARAVIS_CURATED_MEMORY_REVIEW_PATH=/tmp/alpharavis_curated_memory_review.json
+
+# Minimum confidence score for auto-accepting memory candidates.
+# If a candidate's confidence is >= this value, it is stored immediately
+# as curated memory without human review.
+# Range: 0.0 to 1.0 (e.g., 0.9). Leave empty to disable auto-accept.
+ALPHARAVIS_CURATED_MEMORY_AUTO_ACCEPT_THRESHOLD=
+
 # Indexed session-history search, inspired by Hermes SQLite/FTS5 session search.
 # Current-thread search is default; cross-thread search only happens when a tool
 # call explicitly sets include_other_threads=true.
@@ -1105,6 +1129,8 @@ ALPHARAVIS_PGVECTOR_CATALOG_ENABLED=true
 #   chat/archive/code/log profiles.
 # - langchain: force LangChain splitter for all pgvector text sources.
 # - alpharavis: force the local AlphaRavis splitter.
+# - code: use code-aware splitting logic.
+# - tree_sitter: use tree-sitter based code splitting if available.
 ALPHARAVIS_PGVECTOR_SPLITTER=auto
 ALPHARAVIS_PGVECTOR_CHARS_PER_TOKEN=4.0
 ALPHARAVIS_PGVECTOR_CHUNK_TOKENS=900

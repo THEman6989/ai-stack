@@ -4,6 +4,93 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-22 - Context Policy And Full Tool Streaming Default
+
+- Added automatic Model Manager context policy. `apply_model_context_policy`
+  chooses `secondary` for bounded increases, `primary` for context-overflow or
+  very large requested windows, and returns a rollback action for the normal
+  context size.
+- Policy defaults:
+  `ALPHARAVIS_SECONDARY_CONTEXT_NORMAL=8192`,
+  `ALPHARAVIS_SECONDARY_CONTEXT_HIGH=16384`,
+  `ALPHARAVIS_PRIMARY_CONTEXT_NORMAL=131072`, and
+  `ALPHARAVIS_PRIMARY_CONTEXT_HIGH=200000`.
+- DeepAgents Responses internal streaming now defaults to guarded full tool
+  streaming through `ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING_POLICY=full_guarded`.
+  Explicit `ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling`
+  still forces the older hybrid mode.
+- Guarded full mode sets `streaming=true`, `disable_streaming=false`,
+  `parse_tool_calls=true`, and `parallel_tool_calls=false` so streamed tool
+  calls are parsed serially.
+
+## 2026-05-22 - Curated Memory Review Workflow
+
+- Added a review queue for curated-memory candidates. Extraction writes
+  `pending` candidates only; nothing is promoted into always-memory during
+  extraction.
+- Added LangGraph tools:
+  `create_curated_memory_review_candidates`,
+  `list_curated_memory_review_candidates`,
+  `accept_curated_memory_candidate`, and
+  `reject_curated_memory_candidate`.
+- Accepting through the LangGraph tool stores the reviewed item through
+  `record_curated_memory`; rejecting marks it rejected without writing memory.
+- The Bridge Observer now has a `Curated Memory Review` panel for extracting
+  candidates from pasted thread/archive text and accepting or rejecting them.
+
+## 2026-05-22 - Model Actions, Crisis Recovery, Backfill Commands, Two-phase Final Streaming
+
+- Model Manager now exposes real `check_ollama_models`, `load_embedding_model`,
+  `unload_ollama_model`, and `run_embedding_jobs` actions. The Ollama actions
+  use `/api/ps` and `/api/generate keep_alive`; queue draining calls the
+  pgvector embedding queue directly.
+- The power/model-management agent receives those actions as first-class tools,
+  alongside the lifecycle-oriented `run_embedding_memory_jobs`.
+- Crisis recovery now handles mid-run timeout, connection, 502/server,
+  overload, and rate-limit style failures. It runs a bounded crisis attempt,
+  checks readiness afterward, and retries the swarm only after the readiness
+  gate reports the primary backend ready.
+- Crisis hard caps are enforced with
+  `ALPHARAVIS_CRISIS_MAX_ATTEMPTS`,
+  `ALPHARAVIS_CRISIS_MAX_WALL_CLOCK_SECONDS`, and
+  `ALPHARAVIS_CRISIS_ACTION_TIMEOUT_SECONDS`. A `crisis_recovery_attempted`
+  flag blocks recursive crisis loops.
+- Backfill now has exact commands for the current thread, recent artifacts, and
+  selected source keys:
+  `queue_current_thread_vector_backfill`,
+  `queue_recent_artifact_vector_backfill`, and
+  `queue_selected_source_vector_backfill`.
+- Responses streaming can optionally use a two-phase final answer:
+  tool-capable LangGraph streaming stays hybrid for tool/status/reasoning
+  events, then the Bridge streams a final no-tools `/chat/completions` call.
+
+## 2026-05-22 - Operator Resume, RAG Pins, Queue Progress, Code Splitter
+
+- Added `rag_pins_manager.py`, a Mongo-backed active-RAG pin store shared by
+  LangGraph tools and the Bridge Test UI. `pin_active_rag_sources`,
+  `unpin_active_rag_sources`, and `inspect_active_rag_sources` now use the
+  shared store when available, so operator UI changes affect the same
+  `active_rag_prefetch_node` path as agent tool calls.
+- The Bridge Observer now has an `Awaiting Resume` panel backed by
+  `GET /api/resume-runs`. It lists saved `awaiting_resume` runs with thread id,
+  thread key, phase, task brief, active agent, toolsets, and the resume phrase
+  `ja, weiter`.
+- The Bridge Observer now has a `RAG Pins` panel backed by
+  `GET/POST /api/rag-pins`. Operators can select a thread, pin or unpin source
+  keys, clear all pins, and set the archive RAG mode without asking an agent to
+  call the tool.
+- The durable embedding queue now stores per-job progress JSON. Queue-drained
+  document/large-paste jobs update chunk progress while `run_embedding_jobs`
+  embeds chunks, and `/api/embedding-queue/status` exposes per-source planned
+  chunks, completed chunks, percent, latest event, status, and thread id.
+- Code sources now use a code-aware splitter path. When
+  `langchain-text-splitters` is available, AlphaRavis uses LangChain language
+  splitters for known code languages; otherwise it falls back to code-specific
+  separators before the existing AlphaRavis semantic section splitter.
+- Focused verification:
+  `pytest -q tests/test_run_state_manager.py tests/test_bridge_test_ui.py tests/test_media_analysis.py tests/test_retrieval_router.py`
+  passed.
+
 ## 2026-05-22 - Dashboard Settings Web UI
 
 - The Service Dashboard now exposes a mobile/PWA-friendly `/settings` web UI

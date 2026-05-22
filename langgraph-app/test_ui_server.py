@@ -15,12 +15,19 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from context_compressor import compress_messages, estimate_tokens_rough, prepare_messages_for_summary
+from curated_memory_review import extract_candidates as memory_review_extract_candidates
+from curated_memory_review import list_candidates as memory_review_list_candidates
+from curated_memory_review import update_candidate as memory_review_update_candidate
 from rag_api_client import RagApiClientError
 from rag_api_client import mirror_text as rag_api_mirror_text
 from rag_api_client import query_sources as rag_api_query_sources
 from retrieval_router import agentic_rag_retrieve as router_agentic_rag_retrieve
 from retrieval_router import archive_rag_file_id
 from retrieval_router import ingest_source as router_ingest_source
+from rag_pins_manager import list_pins as rag_list_pins
+from rag_pins_manager import load_pins as rag_load_pins
+from rag_pins_manager import update_pins as rag_update_pins
+from run_state_manager import list_run_checkpoints
 
 try:
     from vector_memory import is_enabled as pgvector_memory_enabled
@@ -129,6 +136,30 @@ class RagClassifierProbeRequest(BaseModel):
     classifier_base_url: str = ""
     classifier_model: str = ""
     timeout_seconds: float = 8.0
+
+
+class RagPinsRequest(BaseModel):
+    thread_id: str
+    add_source_keys: list[str] = []
+    add_rag_file_ids: list[str] = []
+    remove_source_keys: list[str] = []
+    remove_rag_file_ids: list[str] = []
+    clear_all: bool = False
+    archive_rag_mode: str = "tool_only"
+
+
+class CuratedMemoryReviewExtractRequest(BaseModel):
+    text: str
+    source_key: str = ""
+    source_type: str = "thread"
+    thread_id: str = ""
+    title: str = ""
+    max_candidates: int = 8
+
+
+class CuratedMemoryReviewDecisionRequest(BaseModel):
+    candidate_id: str
+    reviewer_note: str = ""
 
 
 def _extract_responses_text(payload: dict[str, Any]) -> str:
@@ -1550,6 +1581,7 @@ async def _embedding_queue_status() -> dict[str, Any]:
         "done_count": done,
         "progress": progress,
         "recent_active": stats.get("recent_active", []) if isinstance(stats, dict) else [],
+        "source_progress": stats.get("source_progress", []) if isinstance(stats, dict) else [],
         "raw": stats,
         "meaning": {
             "pending": "queued but not indexed yet",
@@ -1558,6 +1590,39 @@ async def _embedding_queue_status() -> dict[str, Any]:
             "done": "indexed or processed successfully",
         },
     }
+
+
+def _awaiting_resume_dashboard(limit: int = 50) -> dict[str, Any]:
+    records = list_run_checkpoints(status="awaiting_resume", limit=limit)
+    items = []
+    for record in records:
+        run_profile = record.get("run_profile") if isinstance(record.get("run_profile"), dict) else {}
+        items.append(
+            {
+                "thread_id": record.get("thread_id", ""),
+                "thread_key": record.get("thread_key", ""),
+                "phase": record.get("phase", ""),
+                "status": record.get("status", ""),
+                "updated_at": record.get("updated_at"),
+                "current_task_brief": record.get("current_task_brief", ""),
+                "planner_context": record.get("planner_context", ""),
+                "active_agent": record.get("active_agent", ""),
+                "selected_toolsets": record.get("selected_toolsets", []),
+                "active_source_keys": run_profile.get("active_source_keys", []),
+                "active_rag_file_ids": run_profile.get("active_rag_file_ids", []),
+                "error": record.get("error", ""),
+                "resume_text": "ja, weiter",
+            }
+        )
+    return {"status": "ok", "count": len(items), "items": items}
+
+
+def _rag_pins_dashboard(thread_id: str = "", limit: int = 50) -> dict[str, Any]:
+    thread_id = str(thread_id or "").strip()
+    if thread_id:
+        pins = rag_load_pins(thread_id)
+        return {"status": "ok", "thread_id": thread_id, "pins": pins or {"thread_id": thread_id, "rag_active": False}}
+    return {"status": "ok", "items": rag_list_pins(limit=limit)}
 
 
 def _trim_chunking_runs() -> None:
@@ -1672,6 +1737,74 @@ async def rag_classifier_probe(request: RagClassifierProbeRequest) -> JSONRespon
 @app.get("/api/embedding-queue/status")
 async def embedding_queue_status() -> JSONResponse:
     return JSONResponse(await _embedding_queue_status())
+
+
+@app.get("/api/resume-runs")
+async def resume_runs(limit: int = 50) -> JSONResponse:
+    return JSONResponse(_awaiting_resume_dashboard(limit=limit))
+
+
+@app.get("/api/rag-pins")
+async def rag_pins(thread_id: str = "", limit: int = 50) -> JSONResponse:
+    return JSONResponse(_rag_pins_dashboard(thread_id=thread_id, limit=limit))
+
+
+@app.post("/api/rag-pins")
+async def update_rag_pins(request: RagPinsRequest) -> JSONResponse:
+    try:
+        pins = rag_update_pins(
+            thread_id=request.thread_id,
+            add_source_keys=request.add_source_keys,
+            add_rag_file_ids=request.add_rag_file_ids,
+            remove_source_keys=request.remove_source_keys,
+            remove_rag_file_ids=request.remove_rag_file_ids,
+            clear_all=request.clear_all,
+            archive_rag_mode=request.archive_rag_mode,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse({"status": "ok", "pins": pins})
+
+
+@app.get("/api/curated-memory/review")
+async def list_curated_memory_review(status: str = "pending", limit: int = 50) -> JSONResponse:
+    return JSONResponse(memory_review_list_candidates(status=status, limit=limit))
+
+
+@app.post("/api/curated-memory/review/extract")
+async def extract_curated_memory_review(request: CuratedMemoryReviewExtractRequest) -> JSONResponse:
+    return JSONResponse(
+        memory_review_extract_candidates(
+            request.text,
+            source_key=request.source_key,
+            source_type=request.source_type,
+            thread_id=request.thread_id,
+            title=request.title,
+            max_candidates=request.max_candidates,
+        )
+    )
+
+
+@app.post("/api/curated-memory/review/{candidate_id}/accept")
+async def accept_curated_memory_review(candidate_id: str, request: CuratedMemoryReviewDecisionRequest) -> JSONResponse:
+    return JSONResponse(
+        memory_review_update_candidate(
+            candidate_id or request.candidate_id,
+            status="accepted",
+            reviewer_note=request.reviewer_note,
+        )
+    )
+
+
+@app.post("/api/curated-memory/review/{candidate_id}/reject")
+async def reject_curated_memory_review(candidate_id: str, request: CuratedMemoryReviewDecisionRequest) -> JSONResponse:
+    return JSONResponse(
+        memory_review_update_candidate(
+            candidate_id or request.candidate_id,
+            status="rejected",
+            reviewer_note=request.reviewer_note,
+        )
+    )
 
 
 @app.post("/api/send")
@@ -1958,6 +2091,61 @@ OBSERVER_HTML = """<!doctype html>
       </div>
       <div id="embeddingQueueGrid" class="source-grid"></div>
       <div id="embeddingQueueActions" class="chunk-actions"></div>
+    </section>
+    <section class="budget" aria-label="Awaiting Resume">
+      <div class="budget-title">
+        <span>Awaiting Resume</span>
+        <span id="resumeStatus" class="status">lade...</span>
+      </div>
+      <div id="resumeGrid" class="source-grid"></div>
+    </section>
+    <section class="budget" aria-label="RAG Pins">
+      <div class="budget-title">
+        <span>RAG Pins</span>
+        <span id="ragPinsStatus" class="status">lade...</span>
+      </div>
+      <div class="chunk-form archive-rag-form">
+        <label>Thread ID
+          <input id="ragPinsThread" type="text" placeholder="thread_id">
+        </label>
+        <label>Source Key
+          <input id="ragPinsSource" type="text" placeholder="large_paste:...">
+        </label>
+        <label>Mode
+          <select id="ragPinsMode">
+            <option value="tool_only">tool_only</option>
+            <option value="auto_on_intent">auto_on_intent</option>
+            <option value="manual">manual</option>
+          </select>
+        </label>
+        <button id="ragPinsPin" type="button">Pin</button>
+        <button id="ragPinsUnpin" type="button">Unpin</button>
+        <button id="ragPinsClear" type="button">Clear</button>
+      </div>
+      <div id="ragPinsGrid" class="source-grid"></div>
+    </section>
+    <section class="budget" aria-label="Curated Memory Review">
+      <div class="budget-title">
+        <span>Curated Memory Review</span>
+        <span id="memoryReviewStatus" class="status">lade...</span>
+      </div>
+      <div class="chunk-form archive-rag-form">
+        <label>Source Key
+          <input id="memoryReviewSource" type="text" placeholder="thread/archive/source">
+        </label>
+        <label>Type
+          <input id="memoryReviewType" type="text" value="thread">
+        </label>
+        <label>Thread ID
+          <input id="memoryReviewThread" type="text" placeholder="optional">
+        </label>
+        <label style="grid-column: 1 / -1;">Text
+          <textarea id="memoryReviewText" placeholder="Text aus Thread/Archiv einfuegen"></textarea>
+        </label>
+        <button id="memoryReviewExtract" type="button">Extrahieren</button>
+        <button id="memoryReviewRefresh" type="button">Aktualisieren</button>
+      </div>
+      <div id="memoryReviewGrid" class="source-grid"></div>
     </section>
     <section class="shrink" aria-label="Compression Shrinking">
       <div class="budget-title">
@@ -2297,6 +2485,14 @@ OBSERVER_HTML = """<!doctype html>
     const ragLoadStats = document.getElementById('ragLoadStats');
     const ragLoadActions = document.getElementById('ragLoadActions');
     const ragLoadRaw = document.getElementById('ragLoadRaw');
+    const memoryReviewStatus = document.getElementById('memoryReviewStatus');
+    const memoryReviewSource = document.getElementById('memoryReviewSource');
+    const memoryReviewType = document.getElementById('memoryReviewType');
+    const memoryReviewThread = document.getElementById('memoryReviewThread');
+    const memoryReviewText = document.getElementById('memoryReviewText');
+    const memoryReviewExtract = document.getElementById('memoryReviewExtract');
+    const memoryReviewRefresh = document.getElementById('memoryReviewRefresh');
+    const memoryReviewGrid = document.getElementById('memoryReviewGrid');
     let records = [];
     let selectedId = '';
     let activeTab = 'send';
@@ -2570,6 +2766,35 @@ OBSERVER_HTML = """<!doctype html>
         row.append(status, source, detail);
         embeddingQueueActions.appendChild(row);
       }
+      for (const item of (result.source_progress || [])) {
+        const card = document.createElement('div');
+        card.className = 'source-card';
+        const head = document.createElement('div');
+        head.className = 'source-card-head';
+        const title = document.createElement('h3');
+        title.textContent = item.title || item.source_key || item.id || 'Queue Source';
+        const badge = document.createElement('span');
+        badge.className = item.status === 'failed' ? 'pill hard' : (item.status === 'running' ? 'pill warn' : 'pill');
+        badge.textContent = item.status || '';
+        head.append(title, badge);
+        const source = document.createElement('p');
+        source.textContent = `${item.source_type || ''}:${item.source_key || ''}`;
+        const planned = Number(item.planned_chunks || 0);
+        const completed = Number(item.completed_chunks || 0);
+        const percent = item.progress === null || item.progress === undefined ? '' : `${Math.round(Number(item.progress) * 100)}%`;
+        const grid = document.createElement('div');
+        grid.className = 'source-metrics';
+        [
+          ['Chunks', planned ? `${completed}/${planned}` : ''],
+          ['Progress', percent],
+          ['Thread', short(item.thread_id || '', 18)],
+          ['Event', item.last_event || ''],
+        ].forEach(([name, value]) => {
+          if (value !== '') grid.appendChild(metric(name, value));
+        });
+        card.append(head, source, grid);
+        embeddingQueueGrid.appendChild(card);
+      }
     }
     async function refreshEmbeddingQueue() {
       try {
@@ -2580,6 +2805,202 @@ OBSERVER_HTML = """<!doctype html>
         embeddingQueueStatus.textContent = error.message;
         embeddingQueueStatus.className = 'status hard';
       }
+    }
+    function renderResumeRuns(result) {
+      resumeGrid.innerHTML = '';
+      const items = result?.items || [];
+      resumeStatus.textContent = items.length ? `${items.length} wartende Runs` : 'keine wartenden Runs';
+      resumeStatus.className = `status ${items.length ? 'warn' : 'ok'}`;
+      for (const item of items) {
+        const card = document.createElement('div');
+        card.className = 'source-card';
+        const head = document.createElement('div');
+        head.className = 'source-card-head';
+        const title = document.createElement('h3');
+        title.textContent = item.thread_key || item.thread_id || 'Thread';
+        const badge = document.createElement('span');
+        badge.className = 'pill warn';
+        badge.textContent = item.phase || item.status || 'awaiting_resume';
+        head.append(title, badge);
+        const source = document.createElement('p');
+        source.textContent = item.current_task_brief || item.error || item.planner_context || '';
+        const grid = document.createElement('div');
+        grid.className = 'source-metrics';
+        [
+          ['Thread ID', short(item.thread_id || '', 24)],
+          ['Agent', item.active_agent || ''],
+          ['Toolsets', Array.isArray(item.selected_toolsets) ? item.selected_toolsets.join(', ') : ''],
+          ['Resume Text', item.resume_text || 'ja, weiter'],
+        ].forEach(([name, value]) => {
+          if (value !== '') grid.appendChild(metric(name, value));
+        });
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = 'Thread übernehmen';
+        button.addEventListener('click', () => {
+          ragPinsThread.value = item.thread_id || '';
+          navigator.clipboard?.writeText(item.resume_text || 'ja, weiter').catch(() => {});
+        });
+        card.append(head, source, grid, button);
+        resumeGrid.appendChild(card);
+      }
+    }
+    async function refreshResumeRuns() {
+      try {
+        const response = await fetch('/api/resume-runs', { cache: 'no-store' });
+        if (!response.ok) throw new Error(await response.text());
+        renderResumeRuns(await response.json());
+      } catch (error) {
+        resumeStatus.textContent = error.message;
+        resumeStatus.className = 'status hard';
+      }
+    }
+    function renderRagPins(result) {
+      ragPinsGrid.innerHTML = '';
+      const items = result?.pins ? [result.pins] : (result?.items || []);
+      ragPinsStatus.textContent = items.length ? `${items.length} Pin-Satz` : 'keine Pins';
+      ragPinsStatus.className = `status ${items.some((item) => item.rag_active) ? 'ok' : ''}`;
+      for (const item of items) {
+        const card = document.createElement('div');
+        card.className = 'source-card';
+        const head = document.createElement('div');
+        head.className = 'source-card-head';
+        const title = document.createElement('h3');
+        title.textContent = item.thread_id || 'Thread';
+        const badge = document.createElement('span');
+        badge.className = item.rag_active ? 'pill ok' : 'pill';
+        badge.textContent = item.rag_active ? 'aktiv' : 'inaktiv';
+        head.append(title, badge);
+        const source = document.createElement('p');
+        source.textContent = (item.active_source_keys || []).join(', ');
+        const grid = document.createElement('div');
+        grid.className = 'source-metrics';
+        [
+          ['Source Keys', (item.active_source_keys || []).length],
+          ['RAG File IDs', (item.active_rag_file_ids || []).length],
+          ['Archive Mode', item.archive_rag_mode || 'tool_only'],
+          ['Updated', item.updated_at ? fmtTime(item.updated_at) : ''],
+        ].forEach(([name, value]) => {
+          if (value !== '') grid.appendChild(metric(name, value));
+        });
+        card.append(head, source, grid);
+        ragPinsGrid.appendChild(card);
+      }
+    }
+    async function refreshRagPins() {
+      try {
+        const params = ragPinsThread.value.trim() ? `?thread_id=${encodeURIComponent(ragPinsThread.value.trim())}` : '';
+        const response = await fetch(`/api/rag-pins${params}`, { cache: 'no-store' });
+        if (!response.ok) throw new Error(await response.text());
+        renderRagPins(await response.json());
+      } catch (error) {
+        ragPinsStatus.textContent = error.message;
+        ragPinsStatus.className = 'status hard';
+      }
+    }
+    async function writeRagPins(action) {
+      const source = ragPinsSource.value.trim();
+      const body = {
+        thread_id: ragPinsThread.value.trim(),
+        archive_rag_mode: ragPinsMode.value,
+        add_source_keys: action === 'pin' && source ? [source] : [],
+        remove_source_keys: action === 'unpin' && source ? [source] : [],
+        clear_all: action === 'clear',
+      };
+      if (!body.thread_id) {
+        ragPinsStatus.textContent = 'thread_id fehlt';
+        ragPinsStatus.className = 'status hard';
+        return;
+      }
+      const response = await fetch('/api/rag-pins', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      renderRagPins(await response.json());
+    }
+    function renderMemoryReview(result) {
+      memoryReviewGrid.innerHTML = '';
+      const items = result?.items || [];
+      memoryReviewStatus.textContent = items.length ? `${items.length} Kandidat(en)` : 'keine offenen Kandidaten';
+      memoryReviewStatus.className = `status ${items.length ? 'warn' : 'ok'}`;
+      for (const item of items) {
+        const card = document.createElement('div');
+        card.className = 'source-card';
+        const head = document.createElement('div');
+        head.className = 'source-card-head';
+        const title = document.createElement('h3');
+        title.textContent = item.memory_type || 'fact';
+        const badge = document.createElement('span');
+        badge.className = item.status === 'accepted' ? 'pill ok' : (item.status === 'rejected' ? 'pill hard' : 'pill warn');
+        badge.textContent = item.status || 'pending';
+        head.append(title, badge);
+        const source = document.createElement('p');
+        source.textContent = item.memory || '';
+        const grid = document.createElement('div');
+        grid.className = 'source-metrics';
+        [
+          ['Confidence', item.confidence === undefined ? '' : Math.round(Number(item.confidence) * 100) + '%'],
+          ['Source', item.source_key || item.source_type || ''],
+          ['Thread', short(item.thread_id || '', 24)],
+          ['Updated', item.updated_at ? fmtTime(item.updated_at) : ''],
+        ].forEach(([name, value]) => {
+          if (value !== '') grid.appendChild(metric(name, value));
+        });
+        const preview = document.createElement('pre');
+        preview.className = 'chunk-raw';
+        preview.textContent = item.source_preview || '';
+        const actions = document.createElement('div');
+        actions.className = 'chunk-actions';
+        const accept = document.createElement('button');
+        accept.type = 'button';
+        accept.textContent = 'Accept';
+        accept.disabled = item.status === 'accepted';
+        accept.addEventListener('click', () => decideMemoryReview(item.candidate_id, 'accept'));
+        const reject = document.createElement('button');
+        reject.type = 'button';
+        reject.textContent = 'Reject';
+        reject.disabled = item.status === 'rejected';
+        reject.addEventListener('click', () => decideMemoryReview(item.candidate_id, 'reject'));
+        actions.append(accept, reject);
+        card.append(head, source, grid, preview, actions);
+        memoryReviewGrid.appendChild(card);
+      }
+    }
+    async function refreshMemoryReview() {
+      const response = await fetch('/api/curated-memory/review?status=pending&limit=50', { cache: 'no-store' });
+      if (!response.ok) throw new Error(await response.text());
+      renderMemoryReview(await response.json());
+    }
+    async function extractMemoryReview() {
+      const text = memoryReviewText.value.trim();
+      if (!text) {
+        memoryReviewStatus.textContent = 'Text fehlt';
+        memoryReviewStatus.className = 'status hard';
+        return;
+      }
+      const response = await fetch('/api/curated-memory/review/extract', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text,
+          source_key: memoryReviewSource.value.trim(),
+          source_type: memoryReviewType.value.trim() || 'thread',
+          thread_id: memoryReviewThread.value.trim(),
+        }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      renderMemoryReview(await response.json());
+    }
+    async function decideMemoryReview(candidateId, action) {
+      const response = await fetch(`/api/curated-memory/review/${encodeURIComponent(candidateId)}/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ candidate_id: candidateId }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      await refreshMemoryReview();
     }
     function chunkMetric(label, value, className = '') {
       return metric(label, value, className);
@@ -3075,11 +3496,13 @@ OBSERVER_HTML = """<!doctype html>
         });
         tr.addEventListener('click', () => {
           selectedId = record.id;
+          if (record.thread_id) ragPinsThread.value = record.thread_id;
           renderRows();
           renderDetail();
           renderBudget();
           renderSourceIngests();
           renderShrinking();
+          refreshRagPins().catch(() => {});
         });
         rowsEl.appendChild(tr);
       }
@@ -3214,10 +3637,20 @@ OBSERVER_HTML = """<!doctype html>
     runRagClassifierProbe.addEventListener('click', () => startRagClassifierProbe());
     runMemoryEmbedProbe.addEventListener('click', () => startMemoryEmbedProbe());
     runRagLoadProbe.addEventListener('click', () => startRagLoadProbe());
+    ragPinsPin.addEventListener('click', () => writeRagPins('pin').catch((error) => { ragPinsStatus.textContent = error.message; ragPinsStatus.className = 'status hard'; }));
+    ragPinsUnpin.addEventListener('click', () => writeRagPins('unpin').catch((error) => { ragPinsStatus.textContent = error.message; ragPinsStatus.className = 'status hard'; }));
+    ragPinsClear.addEventListener('click', () => writeRagPins('clear').catch((error) => { ragPinsStatus.textContent = error.message; ragPinsStatus.className = 'status hard'; }));
+    ragPinsThread.addEventListener('change', () => refreshRagPins().catch(() => {}));
+    memoryReviewExtract.addEventListener('click', () => extractMemoryReview().catch((error) => { memoryReviewStatus.textContent = error.message; memoryReviewStatus.className = 'status hard'; }));
+    memoryReviewRefresh.addEventListener('click', () => refreshMemoryReview().catch((error) => { memoryReviewStatus.textContent = error.message; memoryReviewStatus.className = 'status hard'; }));
     loadRecords().catch((error) => { statusEl.textContent = error.message; });
     refreshEmbeddingQueue();
+    refreshResumeRuns();
+    refreshRagPins();
+    refreshMemoryReview();
     window.setInterval(() => loadRecords().catch(() => {}), 2500);
     window.setInterval(() => refreshEmbeddingQueue().catch(() => {}), 5000);
+    window.setInterval(() => refreshResumeRuns().catch(() => {}), 10000);
   </script>
 </body>
 </html>

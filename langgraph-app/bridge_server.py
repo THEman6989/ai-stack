@@ -70,6 +70,11 @@ BRIDGE_RESPONSES_ALLOW_CLIENT_TOOLS = _env_bool("BRIDGE_RESPONSES_ALLOW_CLIENT_T
 BRIDGE_RESPONSES_STREAM_TOOL_EVENTS = _env_bool("BRIDGE_RESPONSES_STREAM_TOOL_EVENTS", "true")
 BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS = _env_bool("BRIDGE_RESPONSES_STREAM_ACTIVITY_EVENTS", "true")
 BRIDGE_RESPONSES_STREAM_REASONING_EVENTS = _env_bool("BRIDGE_RESPONSES_STREAM_REASONING_EVENTS", "true")
+BRIDGE_RESPONSES_TWO_PHASE_FINAL_STREAMING = _env_bool("BRIDGE_RESPONSES_TWO_PHASE_FINAL_STREAMING", "false")
+BRIDGE_RESPONSES_TWO_PHASE_FINAL_URL = os.getenv("BRIDGE_RESPONSES_TWO_PHASE_FINAL_URL", os.getenv("OPENAI_API_BASE", "http://litellm:4000/v1")).rstrip("/")
+BRIDGE_RESPONSES_TWO_PHASE_FINAL_API_KEY = os.getenv("BRIDGE_RESPONSES_TWO_PHASE_FINAL_API_KEY", os.getenv("OPENAI_API_KEY", "sk-local-dev"))
+BRIDGE_RESPONSES_TWO_PHASE_FINAL_MODEL = os.getenv("BRIDGE_RESPONSES_TWO_PHASE_FINAL_MODEL", "").strip()
+BRIDGE_RESPONSES_TWO_PHASE_FINAL_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_RESPONSES_TWO_PHASE_FINAL_TIMEOUT_SECONDS", "120"))
 BRIDGE_RESPONSES_TOOL_OUTPUT_MAX_CHARS = int(os.getenv("BRIDGE_RESPONSES_TOOL_OUTPUT_MAX_CHARS", "8000"))
 BRIDGE_RESPONSES_OUTPUT_DELTA_MAX_CHARS = int(os.getenv("BRIDGE_RESPONSES_OUTPUT_DELTA_MAX_CHARS", "1"))
 BRIDGE_RESPONSES_REASONING_DELTA_MAX_CHARS = int(os.getenv("BRIDGE_RESPONSES_REASONING_DELTA_MAX_CHARS", "1"))
@@ -3438,6 +3443,95 @@ async def _response_output_delta_events(
             await asyncio.sleep(0)
 
 
+def _two_phase_final_enabled(body: dict[str, Any]) -> bool:
+    if body.get("tools"):
+        return False
+    return BRIDGE_RESPONSES_TWO_PHASE_FINAL_STREAMING
+
+
+def _two_phase_messages(messages: list[dict[str, Any]], draft: str) -> list[dict[str, str]]:
+    latest_user = ""
+    for message in reversed(messages):
+        if str(message.get("role") or "").lower() == "user":
+            latest_user = str(message.get("content") or "")
+            break
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are the final no-tools answer pass for AlphaRavis. "
+                "Use only the supplied draft and user request. Do not call tools. "
+                "Return the final answer directly, preserving concrete facts and source references."
+            ),
+        },
+        {"role": "user", "content": f"User request:\n{latest_user}\n\nDraft answer from tool-capable run:\n{draft}"},
+    ]
+
+
+async def _stream_two_phase_final_events(
+    builder: _ResponsesStreamBuilder,
+    *,
+    body: dict[str, Any],
+    messages: list[dict[str, Any]],
+    draft: str,
+    model: str,
+) -> AsyncIterator[str]:
+    draft = _visible_content(str(draft or "")).strip()
+    if not draft:
+        return
+    selected_model = BRIDGE_RESPONSES_TWO_PHASE_FINAL_MODEL or model
+    payload = {
+        "model": selected_model,
+        "messages": _two_phase_messages(messages, draft),
+        "stream": True,
+        "tools": [],
+    }
+    headers = {"Accept": "text/event-stream", "Content-Type": "application/json"}
+    if BRIDGE_RESPONSES_TWO_PHASE_FINAL_API_KEY:
+        headers["Authorization"] = f"Bearer {BRIDGE_RESPONSES_TWO_PHASE_FINAL_API_KEY}"
+    emitted = False
+    try:
+        async with httpx.AsyncClient(timeout=BRIDGE_RESPONSES_TWO_PHASE_FINAL_TIMEOUT_SECONDS) as client:
+            async with client.stream(
+                "POST",
+                f"{BRIDGE_RESPONSES_TWO_PHASE_FINAL_URL}/chat/completions",
+                headers=headers,
+                json=payload,
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line.startswith("data: "):
+                        continue
+                    raw = line.removeprefix("data: ").strip()
+                    if raw == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(raw)
+                    except Exception:
+                        continue
+                    delta = (
+                        ((data.get("choices") or [{}])[0].get("delta") or {}).get("content")
+                        or ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
+                        or ""
+                    )
+                    if delta:
+                        emitted = True
+                        async for event in _response_output_delta_events(builder, str(delta)):
+                            yield event
+    except Exception as exc:
+        _log_exception(
+            "bridge.responses.two_phase_final.failed",
+            exc,
+            level=logging.WARNING,
+            dependency="litellm",
+            model=selected_model,
+        )
+    if not emitted:
+        async for event in _response_output_delta_events(builder, draft):
+            yield event
+
+
 async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIterator[str]:
     started = time.perf_counter()
     model = str(body.get("model") or OPENAI_MODEL_NAME)
@@ -3528,6 +3622,8 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
     message_nodes: dict[str, str] = {}
     thinking_splitter = _VisibleThinkingSplitter()
     used_state_fallback = False
+    two_phase_final = _two_phase_final_enabled(body)
+    two_phase_draft = ""
     content_scrubber = StreamingInternalContextScrubber() if BRIDGE_SCRUB_INTERNAL_CONTEXT else None
     reasoning_scrubber = StreamingInternalContextScrubber() if BRIDGE_SCRUB_INTERNAL_CONTEXT else None
 
@@ -3651,8 +3747,11 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
                     visible_delta = content_scrubber.feed(answer_delta) if content_scrubber else answer_delta
                     if visible_delta:
                         saw_token = True
-                        async for event in _response_output_delta_events(builder, visible_delta):
-                            yield event
+                        if two_phase_final:
+                            two_phase_draft += visible_delta
+                        else:
+                            async for event in _response_output_delta_events(builder, visible_delta):
+                                yield event
     except TimeoutError as exc:
         error_message = _clean_error_message(exc)
         _log_exception(
@@ -3707,8 +3806,12 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
                     yield event
             visible = content_scrubber.feed(visible) if content_scrubber else visible
             if visible:
-                async for event in _response_output_delta_events(builder, visible):
-                    yield event
+                if two_phase_final:
+                    saw_token = True
+                    two_phase_draft += visible
+                else:
+                    async for event in _response_output_delta_events(builder, visible):
+                        yield event
 
     answer_tail, thinking_tail = (
         ("", "")
@@ -3725,8 +3828,11 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
     if answer_tail:
         visible_answer_tail = content_scrubber.feed(answer_tail) if content_scrubber else answer_tail
         if visible_answer_tail:
-            async for event in _response_output_delta_events(builder, visible_answer_tail):
-                yield event
+            if two_phase_final:
+                two_phase_draft += visible_answer_tail
+            else:
+                async for event in _response_output_delta_events(builder, visible_answer_tail):
+                    yield event
 
     if reasoning_scrubber:
         reasoning_tail = reasoning_scrubber.flush()
@@ -3736,8 +3842,21 @@ async def _stream_responses(body: dict[str, Any], request: Request) -> AsyncIter
     if content_scrubber:
         content_tail = content_scrubber.flush()
         if content_tail:
-            async for event in _response_output_delta_events(builder, content_tail):
-                yield event
+            if two_phase_final:
+                two_phase_draft += content_tail
+            else:
+                async for event in _response_output_delta_events(builder, content_tail):
+                    yield event
+
+    if two_phase_final and two_phase_draft.strip():
+        async for event in _stream_two_phase_final_events(
+            builder,
+            body=body,
+            messages=messages,
+            draft=two_phase_draft,
+            model=model,
+        ):
+            yield event
 
     for event in builder.finish_reasoning():
         yield event

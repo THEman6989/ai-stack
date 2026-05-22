@@ -182,8 +182,9 @@ There are three separate modes for DeepAgents Responses model calls:
 | Mode | Env | What happens |
 | --- | --- | --- |
 | Fully non-streaming | `STREAMING=false`, `DISABLE_STREAMING=true`, `EXPERIMENTAL_BUFFER_TOOL_STREAMING=false` | Every internal model call waits for a complete response before LangChain continues. Stable, but no internal token stream. |
-| Hybrid default | `STREAMING=true`, `DISABLE_STREAMING=tool_calling`, `EXPERIMENTAL_BUFFER_TOOL_STREAMING=false` | LangChain may stream calls without tools. Calls with tools are sent non-streaming so tool-call JSON is complete before execution. |
-| Full streaming | `STREAMING=true`, `DISABLE_STREAMING=false`, `EXPERIMENTAL_BUFFER_TOOL_STREAMING=true` | Tool-bound model calls are also streamed. This passed the focused AlphaRavis LangChain/React-agent probe, but remains experimental as the default stack mode. |
+| Guarded full default | `STREAMING=true`, `STREAMING_POLICY=full_guarded` | Tool-bound model calls are streamed with tool-call parsing enabled and parallel tool calls disabled for serial safety. |
+| Forced hybrid | `STREAMING=true`, `DISABLE_STREAMING=tool_calling` | LangChain may stream calls without tools. Calls with tools are sent non-streaming so tool-call JSON is complete before execution. |
+| Full streaming legacy env | `STREAMING=true`, `DISABLE_STREAMING=false`, `EXPERIMENTAL_BUFFER_TOOL_STREAMING=true` | Kept for compatibility with older Makefile profiles; guarded policy is preferred. |
 
 Use the Makefile to set the matching `.env` values:
 

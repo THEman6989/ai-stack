@@ -273,8 +273,7 @@ ALPHARAVIS_DEEPAGENTS_RESPONSES_API_BASE=http://litellm:4000/v1
 ALPHARAVIS_DEEPAGENTS_RESPONSES_MODEL=big-boss
 ALPHARAVIS_DEEPAGENTS_RESPONSES_OUTPUT_VERSION=responses/v1
 ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
-ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
-ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=false
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING_POLICY=full_guarded
 ```
 
 Set `ALPHARAVIS_DEEPAGENTS_API_MODE=chat_completions` to return only DeepAgents
@@ -292,11 +291,11 @@ only when you want direct no-tool calls to fail instead of falling back to Chat
 Completions.
 
 The DeepAgents Responses streaming flags are separate from the external bridge
-stream. The stable local default is:
+stream. The stable local default is guarded full tool streaming:
 
 ```text
 ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
-ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING_POLICY=full_guarded
 ```
 
 AlphaRavis applies a local startup patch equivalent to the important part of
@@ -309,9 +308,9 @@ Live testing after the patch showed:
 - direct `ChatOpenAI(use_responses_api=True, streaming=True,
   disable_streaming="tool_calling")` with a bound tool passes
 - Bridge `/v1/responses` Agent Path streaming returns SSE output text chunks
-- full streaming with `ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false`
-  now has an env-gated AlphaRavis patch and passed the focused
-  LangChain/React-agent probe, but remains experimental as a runtime default
+- full streaming with `ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING_POLICY=full_guarded`
+  uses the AlphaRavis tool-call parsing guard and the focused
+  LangChain/React-agent probe path
 
 Those modes remain available as opt-ins for provider/library upgrades:
 
@@ -320,15 +319,13 @@ Those modes remain available as opt-ins for provider/library upgrades:
 ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=false
 ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=true
 
-# experimental full streaming
+# guarded full tool streaming
 ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
-ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=false
-ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=true
+ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING_POLICY=full_guarded
 
-# default patched LangChain hybrid
+# force patched LangChain hybrid
 ALPHARAVIS_DEEPAGENTS_RESPONSES_STREAMING=true
 ALPHARAVIS_DEEPAGENTS_RESPONSES_DISABLE_STREAMING=tool_calling
-ALPHARAVIS_EXPERIMENTAL_BUFFER_TOOL_STREAMING=false
 ```
 
 The Makefile can write those combinations for you:
@@ -420,6 +417,18 @@ Hermes-inspired maintenance helpers are available as review tools:
   archive, or collection.
 - `extract_review_insights` returns candidate user/system insights with
   `review_required=true`; it never promotes them into always-memory.
+- `create_curated_memory_review_candidates` stores extracted candidates in the
+  review queue as `pending`.
+- `list_curated_memory_review_candidates` lists pending/accepted/rejected
+  candidates.
+- `accept_curated_memory_candidate` writes the reviewed item into curated
+  memory through `record_curated_memory`.
+- `reject_curated_memory_candidate` marks a candidate rejected without storing
+  it.
+
+The Bridge Observer has a `Curated Memory Review` panel for the same workflow:
+paste thread/archive text, extract candidates, then accept or reject. Extraction
+alone never creates always-memory.
 
 ## Model And Power Management
 
@@ -468,6 +477,32 @@ ALPHARAVIS_ENABLE_ADVANCED_MODEL_MANAGEMENT=true
 older SSH/Wake-on-LAN owner tools. The Crisis Manager can run with advanced
 model management plus the Ubuntu Llama Manager API, without owner SSH tools.
 
+The Model Manager has direct Ollama and queue actions:
+
+```text
+check_ollama_models
+load_embedding_model
+unload_ollama_model
+run_embedding_jobs
+run_embedding_memory_jobs
+```
+
+Use `run_embedding_jobs` when the embedding model is already ready and the
+queue should drain immediately. Use `run_embedding_memory_jobs` when AlphaRavis
+should apply the safe embedding lifecycle around the queue.
+
+Embedding backfill commands are exact and do not require inventing a search
+query:
+
+```text
+queue_current_thread_vector_backfill
+queue_recent_artifact_vector_backfill
+queue_selected_source_vector_backfill
+```
+
+Use them for "index this thread", "index the last N artifacts", and "index
+these source keys" respectively.
+
 Even then, real shutdowns, service changes, Ollama model switching, and
 embedding-job runs stay disabled until you provide:
 
@@ -509,6 +544,19 @@ diagnose, restart services, power-cycle through ESP when needed, and run gated
 recovery; context/model changes are for the Power Management Agent or an
 explicit operator request.
 
+Mid-run crisis recovery uses these caps:
+
+```text
+ALPHARAVIS_CRISIS_MAX_ATTEMPTS=1
+ALPHARAVIS_CRISIS_MAX_WALL_CLOCK_SECONDS=180
+ALPHARAVIS_CRISIS_ACTION_TIMEOUT_SECONDS=90
+ALPHARAVIS_CRISIS_READINESS_TIMEOUT_SECONDS=20
+```
+
+Timeouts, 502/server errors, overloads, rate limits, and connection errors can
+trigger one bounded recovery attempt. AlphaRavis then checks readiness and only
+retries the main swarm if the primary backend is ready.
+
 LibreChat has a dedicated `Server Model Manager` preset. It routes through the
 normal AlphaRavis Bridge but marks the graph input for
 `power_management_agent`, so the same capability is also available to native
@@ -520,6 +568,21 @@ to prefer BigBoss and fall back to Edge Gemma. Because the fallback is
 intentionally small, shutdown, power-off, reset, reboot, force-kill, service
 stop, and power-cycle tools return `needs_confirmation=true` unless the agent
 passes `confirmed=true` after showing the exact target/tool to the operator.
+
+For context-size changes, use `apply_model_context_policy` instead of patching
+`primary`/`secondary` manually. It chooses `secondary` for bounded increases,
+`primary` for context-overflow or very large requests, and returns a rollback
+action.
+
+```text
+ALPHARAVIS_SECONDARY_CONTEXT_NORMAL=8192
+ALPHARAVIS_SECONDARY_CONTEXT_HIGH=16384
+ALPHARAVIS_PRIMARY_CONTEXT_NORMAL=131072
+ALPHARAVIS_PRIMARY_CONTEXT_HIGH=200000
+```
+
+Set `rollback=true` with `current_instance=primary` or `secondary` to restore
+the normal policy size.
 
 `make model-management` can write these ENV switches interactively. The result
 is still plain `.env`, so you can copy that `.env` to another machine and skip
@@ -712,6 +775,20 @@ response.content_part.done
 response.output_item.done
 response.completed
 ```
+
+Set `BRIDGE_RESPONSES_TWO_PHASE_FINAL_STREAMING=true` to keep the LangGraph
+tool run in the stable hybrid stream while the user-visible final answer is
+streamed by a second no-tools `/chat/completions` call. Optional overrides:
+
+```text
+BRIDGE_RESPONSES_TWO_PHASE_FINAL_URL=http://litellm:4000/v1
+BRIDGE_RESPONSES_TWO_PHASE_FINAL_API_KEY=sk-local-dev
+BRIDGE_RESPONSES_TWO_PHASE_FINAL_MODEL=
+BRIDGE_RESPONSES_TWO_PHASE_FINAL_TIMEOUT_SECONDS=120
+```
+
+Tool/status/reasoning events still come from the first LangGraph run. Only the
+final visible answer is replaced by the no-tools final pass.
 
 The bridge also supports the bridge-local management endpoints that clients
 expect from the Responses surface:
@@ -1362,17 +1439,18 @@ ALPHARAVIS_DOCUMENT_INGEST_ROOT=
 ```
 
 AlphaRavis chooses the chunk profile from `source_type`, filename/path metadata,
-Markdown code fences, and common code/log syntax. Code detection is intentionally
-heuristic for now; a later Tree-sitter/AST splitter can cut by function/class
-boundaries more precisely. Archives and archive collections are not forced to a
-chat profile anymore: AlphaRavis first scans their content for code fences,
-common code syntax, and log/traceback lines, then uses `code`, `log`, or `chat`
-accordingly. With `ALPHARAVIS_PGVECTOR_SPLITTER=auto`, explicit
-document and large-paste sources use LangChain's
-`RecursiveCharacterTextSplitter` when the runtime package is available, while
-chat/archive/code/log profiles keep the AlphaRavis splitter. Use
-`ALPHARAVIS_PGVECTOR_SPLITTER=langchain` to force LangChain splitting, or
-`alpharavis` to force the local fallback.
+Markdown code fences, and common code/log syntax. Archives and archive
+collections are not forced to a chat profile anymore: AlphaRavis first scans
+their content for code fences, common code syntax, and log/traceback lines,
+then uses `code`, `log`, or `chat` accordingly. With
+`ALPHARAVIS_PGVECTOR_SPLITTER=auto`, explicit document and large-paste sources
+use LangChain's `RecursiveCharacterTextSplitter` when the runtime package is
+available. Code sources use a code-aware path: known languages use LangChain
+language splitters when available and fall back to language-specific separators
+before the local AlphaRavis section splitter. Use
+`ALPHARAVIS_PGVECTOR_SPLITTER=langchain` to force LangChain text splitting,
+`code` / `tree_sitter` to force the code-aware path, or `alpharavis` to force
+the local fallback.
 Optional router reranking is default-off. When
 `ALPHARAVIS_ENABLE_RAG_RERANKING=true`, AlphaRavis reorders source-scoped hits.
 With `ALPHARAVIS_RAG_RERANKER_MODE=model`, it calls the configured llama.cpp
@@ -1470,6 +1548,13 @@ source key, content type, indexed/queued backend, character counts, RAG-active
 state, and whether the original paste was replaced by a marker. The Bridge only
 surfaces this metadata; LangGraph owns the decision.
 
+The Bridge Observer also has a `RAG Pins` panel. It reads and writes the same
+shared Mongo-backed pin store as the agent tools, so pinning a source key in the
+UI affects later `active_rag_prefetch_node` runs for that thread. Select or
+paste a thread id, enter a source key, and use Pin, Unpin, or Clear. The archive
+mode selector controls whether archive recall stays `tool_only`, `manual`, or
+can be checked with `auto_on_intent`.
+
 ```text
 /rag
 large source text
@@ -1543,6 +1628,11 @@ ALPHARAVIS_EMBEDDING_JOB_STALE_AFTER_SECONDS=900
 The Power Management Agent can drain that queue with `run_embedding_memory_jobs`.
 If a dev reload or container restart interrupts a claimed job, the next queue
 drain can reclaim stale `running` rows after the configured stale timeout.
+While queue-drained document and large-paste jobs run, AlphaRavis stores
+per-job chunk progress in the queue row. The Bridge Observer `Embedding Queue`
+panel shows source-level planned chunks, completed chunks, percent complete,
+latest progress event, status, and thread id in addition to the aggregate
+pending/running/failed/done counts.
 
 Archive mirroring into `rag_api` is prepared but off by default:
 
@@ -2027,7 +2117,7 @@ been processed by the vision embedding path. Use
 work is still pending, running, failed, or done in `alpharavis_embedding_jobs`.
 The Bridge Observer also has an `Embedding Queue` panel that polls the same
 queue status every few seconds and shows pending/running/failed/done counts plus
-recent active jobs.
+recent active jobs and per-source chunk progress.
 
 When `prepare_media_for_model` is called with `mode=index`, it queues a durable
 `media_analysis` job in the same embedding queue used for text, archive,

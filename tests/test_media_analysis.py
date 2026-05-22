@@ -143,6 +143,34 @@ def test_vector_chunk_text_uses_langchain_splitter_for_large_paste(monkeypatch) 
     assert calls[0]["chunk_overlap"] == 100
 
 
+def test_vector_chunk_text_uses_code_aware_splitter_for_code(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeRecursiveCharacterTextSplitter:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def split_text(self, text):
+            return ["code chunk one", "code chunk two"]
+
+    monkeypatch.delenv("ALPHARAVIS_PGVECTOR_CHUNK_MAX_CHARS", raising=False)
+    monkeypatch.delenv("ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_CHARS", raising=False)
+    monkeypatch.setenv("ALPHARAVIS_PGVECTOR_CODE_CHUNK_TOKENS", "150")
+    monkeypatch.setenv("ALPHARAVIS_PGVECTOR_CODE_CHUNK_OVERLAP_TOKENS", "25")
+    monkeypatch.setattr(vector_memory, "RecursiveCharacterTextSplitter", FakeRecursiveCharacterTextSplitter)
+    monkeypatch.setattr(vector_memory, "Language", None)
+
+    chunks = vector_memory.chunk_text(
+        "def first():\n    return 1\n\nclass Second:\n    pass\n",
+        source_type="repo_file",
+        title="module.py",
+    )
+
+    assert chunks == ["code chunk one", "code chunk two"]
+    assert calls[0]["chunk_size"] == 600
+    assert "\ndef " in calls[0]["separators"]
+
+
 def test_archive_chunk_text_splits_mixed_sections_by_profile(monkeypatch) -> None:
     monkeypatch.delenv("ALPHARAVIS_PGVECTOR_CHUNK_MAX_CHARS", raising=False)
     monkeypatch.delenv("ALPHARAVIS_PGVECTOR_CHUNK_OVERLAP_CHARS", raising=False)

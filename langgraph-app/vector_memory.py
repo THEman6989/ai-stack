@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -11,8 +12,13 @@ import httpx
 
 try:
     from langchain_text_splitters import RecursiveCharacterTextSplitter
+    try:
+        from langchain_text_splitters import Language
+    except Exception:
+        Language = None  # type: ignore[assignment]
 except Exception as exc:  # pragma: no cover - optional dependency during local tests.
     RecursiveCharacterTextSplitter = None  # type: ignore[assignment]
+    Language = None  # type: ignore[assignment]
     LANGCHAIN_TEXT_SPLITTERS_IMPORT_ERROR: Exception | None = exc
 else:
     LANGCHAIN_TEXT_SPLITTERS_IMPORT_ERROR = None
@@ -273,7 +279,7 @@ def _splitter_mode(metadata: dict[str, Any] | None = None) -> str:
         "recursive_character": "langchain",
         "recursive_character_text_splitter": "langchain",
     }
-    return aliases.get(raw, raw if raw in {"auto", "langchain", "alpharavis"} else "auto")
+    return aliases.get(raw, raw if raw in {"auto", "langchain", "alpharavis", "code", "tree_sitter"} else "auto")
 
 
 def _langchain_splitter_source_default(source_type: str, profile: str) -> bool:
@@ -305,6 +311,143 @@ def _should_use_langchain_splitter(
         return True
     profile = _chunk_profile(source_type, title, metadata, text)
     return _langchain_splitter_source_default(source_type, profile)
+
+
+def _source_code_language(source_type: str = "", title: str = "", metadata: dict[str, Any] | None = None) -> str:
+    metadata = metadata or {}
+    explicit = str(metadata.get("language") or metadata.get("code_language") or "").strip().lower()
+    if explicit:
+        return explicit
+    pathish = " ".join(
+        str(value or "")
+        for value in [
+            title,
+            metadata.get("path"),
+            metadata.get("file_path"),
+            metadata.get("filename"),
+            metadata.get("source_path"),
+            metadata.get("source_key"),
+            source_type,
+        ]
+    ).lower()
+    mapping = {
+        ".py": "python",
+        ".pyi": "python",
+        ".js": "js",
+        ".jsx": "js",
+        ".ts": "ts",
+        ".tsx": "ts",
+        ".go": "go",
+        ".rs": "rust",
+        ".java": "java",
+        ".kt": "kotlin",
+        ".c": "c",
+        ".h": "cpp",
+        ".cpp": "cpp",
+        ".hpp": "cpp",
+        ".cs": "csharp",
+        ".php": "php",
+        ".rb": "ruby",
+        ".swift": "swift",
+        ".scala": "scala",
+        ".sh": "bash",
+        ".bash": "bash",
+        ".zsh": "bash",
+        ".ps1": "powershell",
+        ".sql": "sql",
+        ".html": "html",
+        ".css": "css",
+        ".scss": "css",
+        ".json": "json",
+        ".yaml": "yaml",
+        ".yml": "yaml",
+        ".toml": "toml",
+        ".xml": "xml",
+    }
+    for suffix, language in mapping.items():
+        if pathish.endswith(suffix) or suffix in pathish:
+            return language
+    return ""
+
+
+def _langchain_language_enum(language: str) -> Any | None:
+    if Language is None:
+        return None
+    aliases = {
+        "javascript": "JS",
+        "js": "JS",
+        "typescript": "TS",
+        "ts": "TS",
+        "python": "PYTHON",
+        "py": "PYTHON",
+        "go": "GO",
+        "golang": "GO",
+        "java": "JAVA",
+        "kotlin": "KOTLIN",
+        "rust": "RUST",
+        "rs": "RUST",
+        "cpp": "CPP",
+        "c++": "CPP",
+        "c": "C",
+        "csharp": "CSHARP",
+        "c#": "CSHARP",
+        "php": "PHP",
+        "ruby": "RUBY",
+        "rb": "RUBY",
+        "swift": "SWIFT",
+        "scala": "SCALA",
+        "markdown": "MARKDOWN",
+        "md": "MARKDOWN",
+        "html": "HTML",
+        "latex": "LATEX",
+        "solidity": "SOL",
+    }
+    enum_name = aliases.get(str(language or "").strip().lower())
+    return getattr(Language, enum_name, None) if enum_name else None
+
+
+def _code_separators(language: str = "") -> list[str]:
+    language = str(language or "").lower()
+    common = ["\nclass ", "\ndef ", "\nasync def ", "\nfunction ", "\nexport ", "\nimport ", "\n\n", "\n", " ", ""]
+    if language in {"python", "py"}:
+        return ["\nclass ", "\ndef ", "\nasync def ", "\n@", "\n\n", "\n", " ", ""]
+    if language in {"js", "javascript", "ts", "typescript"}:
+        return ["\nexport class ", "\nclass ", "\nexport function ", "\nfunction ", "\nconst ", "\nlet ", "\n\n", "\n", " ", ""]
+    if language in {"go", "golang"}:
+        return ["\nfunc ", "\ntype ", "\npackage ", "\nimport ", "\n\n", "\n", " ", ""]
+    if language in {"rust", "rs"}:
+        return ["\nfn ", "\nimpl ", "\nstruct ", "\nenum ", "\nmod ", "\nuse ", "\n\n", "\n", " ", ""]
+    if language in {"java", "kotlin", "cpp", "c", "csharp", "c#"}:
+        return ["\nclass ", "\ninterface ", "\nstruct ", "\npublic ", "\nprivate ", "\nprotected ", "\n\n", "\n", " ", ""]
+    if language in {"sql"}:
+        return ["\nCREATE ", "\nALTER ", "\nSELECT ", "\nINSERT ", "\nUPDATE ", "\nDELETE ", "\n\n", "\n", " ", ""]
+    return common
+
+
+def _code_aware_chunk_text(text: str, *, max_chars: int, overlap: int, language: str = "") -> list[str]:
+    if RecursiveCharacterTextSplitter is not None:
+        language_enum = _langchain_language_enum(language)
+        try:
+            if language_enum is not None:
+                splitter = RecursiveCharacterTextSplitter.from_language(
+                    language=language_enum,
+                    chunk_size=max_chars,
+                    chunk_overlap=overlap,
+                    keep_separator=True,
+                )
+            else:
+                splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=max_chars,
+                    chunk_overlap=overlap,
+                    keep_separator=True,
+                    separators=_code_separators(language),
+                )
+            chunks = [chunk.strip() for chunk in splitter.split_text(text) if chunk.strip()]
+            if chunks:
+                return chunks
+        except Exception as exc:
+            print(f"WARNING: code-aware LangChain splitter failed; falling back to AlphaRavis splitter: {exc}")
+    return []
 
 
 def _langchain_chunk_text(text: str, *, max_chars: int, overlap: int) -> list[str]:
@@ -638,6 +781,17 @@ def chunk_text(
 
     max_chars = _chunk_max_chars(source_type=source_type, title=title, metadata=metadata, text=text)
     overlap = _chunk_overlap_chars(max_chars, source_type=source_type, title=title, metadata=metadata, text=text)
+    profile = _chunk_profile(source_type, title, metadata, text)
+    mode = _splitter_mode(metadata)
+    if profile == "code" or mode in {"code", "tree_sitter"}:
+        chunks = _code_aware_chunk_text(
+            text,
+            max_chars=max_chars,
+            overlap=overlap,
+            language=_source_code_language(source_type, title, metadata),
+        )
+        if chunks:
+            return chunks
     if _should_use_langchain_splitter(source_type=source_type, title=title, metadata=metadata, text=text):
         try:
             chunks = _langchain_chunk_text(text, max_chars=max_chars, overlap=overlap)
@@ -1059,6 +1213,7 @@ def _ensure_queue_schema_sync() -> None:
                         status TEXT NOT NULL DEFAULT 'pending',
                         attempts INTEGER NOT NULL DEFAULT 0,
                         last_error TEXT NOT NULL DEFAULT '',
+                        progress JSONB NOT NULL DEFAULT '{{}}'::jsonb,
                         available_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -1070,6 +1225,9 @@ def _ensure_queue_schema_sync() -> None:
                 sql.SQL(
                     "CREATE INDEX IF NOT EXISTS {index} ON {table} (status, available_at, created_at)"
                 ).format(index=sql.Identifier(f"{table_name}_status_idx"), table=table)
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS progress JSONB NOT NULL DEFAULT '{{}}'::jsonb").format(table=table)
             )
 
 
@@ -1803,10 +1961,35 @@ def _claim_embedding_jobs_sync(limit: int, max_attempts: int) -> list[dict[str, 
     return [{"id": row[0], "payload": row[1], "attempts": row[2]} for row in rows]
 
 
-def _finish_embedding_job_sync(job_id: str, *, ok: bool, error: str = "") -> None:
+def _update_embedding_job_progress_sync(job_id: str, progress: dict[str, Any]) -> None:
+    _require_psycopg()
+    _ensure_queue_schema_sync()
+    table = _queue_table_identifier()
+    with psycopg.connect(_database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    UPDATE {table}
+                    SET progress = progress || %s::jsonb,
+                        updated_at = now()
+                    WHERE id = %s
+                    """
+                ).format(table=table),
+                (Jsonb(progress or {}), job_id),
+            )
+        conn.commit()
+
+
+def _finish_embedding_job_sync(job_id: str, *, ok: bool, error: str = "", result: Any = None) -> None:
     _require_psycopg()
     table = _queue_table_identifier()
     status = "done" if ok else "failed"
+    final_progress = {
+        "ok": bool(ok),
+        "finished_at": int(time.time()),
+        **({"result": str(result)[:1000]} if result is not None else {}),
+    }
     with psycopg.connect(_database_url()) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -1815,14 +1998,59 @@ def _finish_embedding_job_sync(job_id: str, *, ok: bool, error: str = "") -> Non
                     UPDATE {table}
                     SET status = %s,
                         last_error = %s,
+                        progress = progress || %s::jsonb,
                         available_at = CASE WHEN %s THEN now() ELSE now() + interval '5 minutes' END,
                         updated_at = now()
                     WHERE id = %s
                     """
                 ).format(table=table),
-                (status, error[:2000], ok, job_id),
+                (status, error[:2000], Jsonb(final_progress), ok, job_id),
             )
         conn.commit()
+
+
+def _queue_job_planned_chunks(payload: dict[str, Any]) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    if payload.get("job_kind") == "media_analysis":
+        return 0
+    try:
+        chunks = chunk_text(
+            str(payload.get("content") or ""),
+            source_type=str(payload.get("source_type") or ""),
+            title=str(payload.get("title") or ""),
+            metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+        )
+        return len(chunks)
+    except Exception:
+        return 0
+
+
+def _source_indexed_chunk_count_sync(*, namespace: str, scope: str, thread_id: str, source_type: str, source_key: str) -> int:
+    try:
+        _require_psycopg()
+        table = _table_identifier()
+        with psycopg.connect(_database_url()) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL(
+                        """
+                        SELECT COALESCE(MAX(chunk_count), COUNT(*))
+                        FROM {table}
+                        WHERE namespace = %s
+                          AND scope = %s
+                          AND COALESCE(thread_id, '') = %s
+                          AND source_type = %s
+                          AND source_key = %s
+                          AND is_catalog = false
+                        """
+                    ).format(table=table),
+                    (namespace, scope, thread_id or "", source_type, source_key),
+                )
+                row = cur.fetchone()
+                return int(row[0] or 0) if row else 0
+    except Exception:
+        return 0
 
 
 def _queue_stats_sync() -> dict[str, Any]:
@@ -1838,11 +2066,12 @@ def _queue_stats_sync() -> dict[str, Any]:
             cur.execute(
                 sql.SQL(
                     """
-                    SELECT id, source_type, source_key, title, status, attempts, last_error, updated_at
+                    SELECT id, namespace, scope, thread_id, source_type, source_key, title,
+                           status, attempts, last_error, payload, progress, updated_at
                     FROM {table}
                     WHERE status IN ('pending', 'failed', 'running')
                     ORDER BY updated_at DESC
-                    LIMIT 5
+                    LIMIT 12
                     """
                 ).format(table=table)
             )
@@ -1851,7 +2080,33 @@ def _queue_stats_sync() -> dict[str, Any]:
     for row in rows:
         if hasattr(row.get("updated_at"), "isoformat"):
             row["updated_at"] = row["updated_at"].isoformat()
-    return {"table": _queue_table_name(), "counts": counts, "recent_active": rows}
+    source_progress: list[dict[str, Any]] = []
+    for row in rows:
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        progress = row.get("progress") if isinstance(row.get("progress"), dict) else {}
+        planned = int(progress.get("chunk_count") or _queue_job_planned_chunks(payload))
+        completed = int(progress.get("chunk_number") or 0)
+        if str(row.get("status") or "") == "done" and planned:
+            completed = planned
+        if str(row.get("status") or "") == "running":
+            completed = max(0, min(completed, planned or completed))
+        source_progress.append(
+            {
+                "id": row.get("id"),
+                "status": row.get("status"),
+                "source_type": row.get("source_type"),
+                "source_key": row.get("source_key"),
+                "title": row.get("title"),
+                "thread_id": row.get("thread_id"),
+                "planned_chunks": planned,
+                "completed_chunks": completed,
+                "progress": round(completed / planned, 4) if planned else None,
+                "last_event": progress.get("event", ""),
+                "last_error": row.get("last_error", ""),
+                "updated_at": row.get("updated_at"),
+            }
+        )
+    return {"table": _queue_table_name(), "counts": counts, "recent_active": rows, "source_progress": source_progress}
 
 
 async def queue_stats() -> dict[str, Any]:
@@ -1875,8 +2130,11 @@ async def run_embedding_jobs(limit: int = 10) -> dict[str, Any]:
             if payload.get("job_kind") == "media_analysis":
                 result = await _run_media_analysis_job(payload)
             else:
-                result = await upsert_memory_record(**payload)
-            await asyncio.to_thread(_finish_embedding_job_sync, job_id, ok=True)
+                async def progress_callback(event: dict[str, Any], *, _job_id: str = job_id):
+                    await asyncio.to_thread(_update_embedding_job_progress_sync, _job_id, dict(event))
+
+                result = await upsert_memory_record(**payload, progress_callback=progress_callback)
+            await asyncio.to_thread(_finish_embedding_job_sync, job_id, ok=True, result=result)
             results.append({"id": job_id, "ok": True, "result": result})
         except Exception as exc:
             await asyncio.to_thread(_finish_embedding_job_sync, job_id, ok=False, error=str(exc))

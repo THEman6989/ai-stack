@@ -630,6 +630,7 @@ def setting_importance(key: str, section: str, description: str) -> int:
         "run_state",
         "runtime_settings",
         "crisis",
+        "curated_memory_auto_accept",
     )
     medium = ("url", "mode", "limit", "seconds", "memory", "rag", "media", "bridge", "context")
     if any(item in text for item in high):

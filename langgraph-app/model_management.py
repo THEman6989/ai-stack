@@ -226,6 +226,67 @@ async def _ollama_running_models(config: ModelManagementConfig) -> dict[str, Any
     return probe
 
 
+async def check_ollama_models(remote_pcs: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return the real Ollama runtime model state used by model-management tools."""
+
+    config = load_config(remote_pcs or {})
+    result = await _ollama_running_models(config)
+    running_models = result.get("running_models", []) or []
+    return {
+        "ok": bool(result.get("ok")),
+        "ollama_base_url": config.ollama_base_url,
+        "running_models": running_models,
+        "chat_model": config.ollama_chat_model,
+        "embedding_model": config.ollama_embedding_model,
+        "fallback_embedding_model": config.ollama_embedding_fallback_model,
+        "chat_model_loaded": any(_model_name_matches(name, config.ollama_chat_model) for name in running_models),
+        "embedding_model_loaded": any(_model_name_matches(name, config.ollama_embedding_model) for name in running_models),
+        "probe": result,
+    }
+
+
+async def load_embedding_model(
+    model: str = "",
+    *,
+    keep_alive: str | None = None,
+    remote_pcs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Load the configured Ollama embedding model by issuing a real keep_alive request."""
+
+    config = load_config(remote_pcs or {})
+    selected_model = (model or config.ollama_embedding_model).strip()
+    if not selected_model:
+        return {"ok": False, "error": "embedding model is not configured"}
+    return await _ollama_generate_control(
+        config,
+        model=selected_model,
+        keep_alive=keep_alive or os.getenv("ALPHARAVIS_EMBEDDING_KEEP_ALIVE", "30m"),
+    )
+
+
+async def unload_ollama_model(
+    model: str = "",
+    *,
+    remote_pcs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Unload a real Ollama model with keep_alive=0."""
+
+    config = load_config(remote_pcs or {})
+    selected_model = (model or config.ollama_embedding_model).strip()
+    if not selected_model:
+        return {"ok": False, "error": "ollama model is required"}
+    return await _ollama_generate_control(config, model=selected_model, keep_alive="0")
+
+
+async def run_embedding_jobs(job_limit: int | None = None) -> dict[str, Any]:
+    """Drain queued pgvector embedding jobs through the real vector-memory queue."""
+
+    if _vector_run_embedding_jobs is None:
+        return {"ok": False, "message": f"vector queue unavailable: {VECTOR_QUEUE_IMPORT_ERROR}"}
+    limit = job_limit or int(os.getenv("ALPHARAVIS_EMBEDDING_JOB_BATCH_SIZE", "10"))
+    return await _vector_run_embedding_jobs(limit=max(1, int(limit)))
+
+
 async def _embedding_queue_status() -> dict[str, Any]:
     if _vector_queue_stats is None:
         return {"ok": False, "message": f"vector queue unavailable: {VECTOR_QUEUE_IMPORT_ERROR}"}
@@ -546,6 +607,120 @@ def _validate_context_size(config: ModelManagementConfig, context_size: int | st
             f"context_size must be between {config.ubuntu_llama_context_min} and {config.ubuntu_llama_context_max}"
         )
     return value
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def model_context_policy_plan(
+    *,
+    reason: str = "",
+    requested_context_size: int | str | None = None,
+    current_instance: str = "",
+    rollback: bool = False,
+    remote_pcs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Plan automatic primary/secondary context sizing without executing it."""
+
+    config = load_config(remote_pcs or {})
+    secondary_normal = _env_int("ALPHARAVIS_SECONDARY_CONTEXT_NORMAL", 8192)
+    secondary_high = _env_int("ALPHARAVIS_SECONDARY_CONTEXT_HIGH", 16384)
+    primary_normal = _env_int("ALPHARAVIS_PRIMARY_CONTEXT_NORMAL", 131072)
+    primary_high = _env_int("ALPHARAVIS_PRIMARY_CONTEXT_HIGH", 200000)
+    reason_text = str(reason or "").lower()
+    requested = _validate_context_size(config, requested_context_size) if requested_context_size not in (None, "") else None
+
+    if rollback:
+        instance = _validate_llama_instance(current_instance or "secondary")
+        target = primary_normal if instance == "primary" else secondary_normal
+        return {
+            "ok": True,
+            "action": "rollback_context",
+            "instance_id": instance,
+            "target_context_size": _validate_context_size(config, target),
+            "restart": True,
+            "reason": reason,
+            "rollback_to": "primary_normal" if instance == "primary" else "secondary_normal",
+            "policy": {
+                "secondary_normal": secondary_normal,
+                "secondary_high": secondary_high,
+                "primary_normal": primary_normal,
+                "primary_high": primary_high,
+            },
+        }
+
+    large_context_reason = any(
+        marker in reason_text
+        for marker in ("context_overflow", "payload_too_large", "large", "big-context", "200k", "primary")
+    )
+    if requested is not None:
+        target = requested
+        instance = "primary" if requested > secondary_high else "secondary"
+    elif large_context_reason:
+        instance = "primary"
+        target = primary_high
+    else:
+        instance = "secondary"
+        target = secondary_high
+
+    target = _validate_context_size(config, min(target, config.ubuntu_llama_context_max))
+    return {
+        "ok": True,
+        "action": "raise_context",
+        "instance_id": instance,
+        "target_context_size": target,
+        "restart": True,
+        "reason": reason,
+        "rollback_context_size": primary_normal if instance == "primary" else secondary_normal,
+        "rollback_action": {
+            "instance_id": instance,
+            "context_size": primary_normal if instance == "primary" else secondary_normal,
+            "restart": True,
+        },
+        "policy": {
+            "secondary_normal": secondary_normal,
+            "secondary_high": secondary_high,
+            "primary_normal": primary_normal,
+            "primary_high": primary_high,
+        },
+    }
+
+
+async def apply_model_context_policy(
+    *,
+    reason: str = "",
+    requested_context_size: int | str | None = None,
+    current_instance: str = "",
+    rollback: bool = False,
+    remote_pcs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Apply automatic primary/secondary context policy through Ubuntu Llama Manager."""
+
+    plan = model_context_policy_plan(
+        reason=reason,
+        requested_context_size=requested_context_size,
+        current_instance=current_instance,
+        rollback=rollback,
+        remote_pcs=remote_pcs,
+    )
+    if not plan.get("ok"):
+        return plan
+    result = await configure_ubuntu_llama_instance(
+        str(plan["instance_id"]),
+        context_size=int(plan["target_context_size"]),
+        restart=bool(plan.get("restart", True)),
+        remote_pcs=remote_pcs,
+    )
+    return {
+        "ok": bool(result.get("ok")),
+        "plan": plan,
+        "result": result,
+        "rollback_action": plan.get("rollback_action"),
+    }
 
 
 async def configure_ubuntu_llama_instance(
@@ -891,6 +1066,16 @@ async def request_power_action(
             "reason": "unsupported_action",
             "supported_actions": sorted(allowed),
         }
+    if normalized == "load_embedding_model":
+        return await load_embedding_model(target, remote_pcs=remote_pcs)
+    if normalized == "unload_ollama_model":
+        return await unload_ollama_model(target, remote_pcs=remote_pcs)
+    if normalized == "run_embedding_jobs":
+        try:
+            job_limit = int(target) if str(target or "").strip().isdigit() else None
+        except Exception:
+            job_limit = None
+        return await run_embedding_jobs(job_limit=job_limit)
     return await call_management_action(
         normalized,
         {"target": target, "reason": reason},
