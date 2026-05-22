@@ -710,18 +710,34 @@ def fallback_description(key: str, description: str) -> str:
             return f"{text} Fallback: {fallback['fallbackFor']}"
         return text
     lower = key.lower()
+    if "run_state_manager_enabled" in lower:
+        return "Aktiviert den durablen Run-State Manager, der Snapshots von Agent-Runs speichert."
     if "run_state_auto_resume" in lower:
         return "Wenn true, setzt AlphaRavis gespeicherte unterbrochene Agent-Jobs automatisch fort, statt im Thread nachzufragen."
+    if "run_state_resume_prompt_timeout" in lower:
+        return "Zeitlimit in Sekunden fuer die Bestaetigung der Fortsetzung eines unterbrochenen Runs."
     if "run_state_db" in lower:
         return "Mongo-Datenbank fuer durable Run-State-Checkpoints und Resume-Metadaten."
     if "run_state_collection" in lower:
         return "Mongo-Collection fuer den jeweils neuesten wiederaufnehmbaren Job-Checkpoint pro Thread."
     if "runtime_settings_file" in lower:
         return "JSON-Datei fuer temporaere Settings aus der Dashboard-WebUI; LangGraph laedt sie vor neuen Runs."
+    if "ubuntu_llama_manager_ip" in lower:
+        return "IP-Adresse des Hosts, auf dem der Ubuntu Llama Manager laeuft."
+    if "ubuntu_llama_manager_port" in lower:
+        return "Port der Ubuntu Llama Manager API (Standard 8099)."
+    if "ubuntu_llama_manager_url" in lower:
+        return "Base-URL der externen Ubuntu Llama Manager API fuer die Steuerung von llama.cpp Instanzen."
+    if "ubuntu_llama_manager_api_key" in lower:
+        return "API-Key fuer den Zugriff auf die Ubuntu Llama Manager API (Bearer Auth)."
+    if "ubuntu_llama_esp_url" in lower:
+        return "Direkte URL zum ESP-Modul fuer Power-Aktionen, falls der Ubuntu-Host offline ist."
     if "ubuntu_llama_context_min" in lower:
         return "Untergrenze fuer Kontextfenster-Aenderungen am Ubuntu Llama Manager."
     if "ubuntu_llama_context_max" in lower:
         return "Obergrenze fuer Kontextfenster-Aenderungen am Ubuntu Llama Manager."
+    if "server_model_manager_model_name" in lower:
+        return "Modellname, unter dem der Server Model Manager fuer LibreChat sichtbar ist."
     if "server_model_manager_fallback_timeout" in lower:
         return "Timeout in Sekunden fuer den Fallback-Modellaufruf des Server Model Managers."
     if "server_model_manager_timeout" in lower:
