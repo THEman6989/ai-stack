@@ -330,7 +330,7 @@ class PercentageBudgetPolicy:
     route_to_small_when_free_below_pct: float = 0.15  # try small model below 15%
 
     # ---- Small model context ----
-    small_model_context: int = 16384           # small model context (detected or configured)
+    small_model_context: int = 60000          # small model context (detected or configured)
     small_model_max_output_pct: float = 0.30   # small model output cap
 
     # ---- Output clamping ----
@@ -372,7 +372,7 @@ class PercentageBudgetPolicy:
             min_free_pct_background=pct("ALPHARAVIS_BUDGET_MIN_FREE_BACKGROUND_PCT", 0.05),
             queue_when_free_below_pct=pct("ALPHARAVIS_BUDGET_QUEUE_FREE_BELOW_PCT", 0.10),
             route_to_small_when_free_below_pct=pct("ALPHARAVIS_BUDGET_ROUTE_SMALL_FREE_BELOW_PCT", 0.15),
-            small_model_context=int(os.getenv("ALPHARAVIS_SMALL_MODEL_CONTEXT", "16384")),
+            small_model_context=int(os.getenv("ALPHARAVIS_SMALL_MODEL_CONTEXT", "60000")),
             small_model_max_output_pct=pct("ALPHARAVIS_BUDGET_SMALL_MODEL_OUTPUT_PCT", 0.30),
             min_output_tokens=int(os.getenv("ALPHARAVIS_BUDGET_MIN_OUTPUT_TOKENS", "64")),
             max_output_tokens=int(os.getenv("ALPHARAVIS_BUDGET_MAX_OUTPUT_TOKENS", "131072")),

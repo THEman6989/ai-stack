@@ -544,6 +544,20 @@ ALPHARAVIS_CONTEXT_SAFETY_FACTOR=0.92
 ALPHARAVIS_CONTEXT_DEFAULT_MAX_OUTPUT_TOKENS=2048
 ALPHARAVIS_CONTEXT_LEASE_SAFETY_MARGIN_TOKENS=1024
 ALPHARAVIS_LLAMA_RUNTIME_TIMEOUT_SECONDS=30
+# Small model context size (2B classifier / judge / summarizer). Detected
+# dynamically from the running llama-server /slots or /props when available;
+# this is the fallback when live probes are unavailable.
+ALPHARAVIS_SMALL_MODEL_CONTEXT=60000
+# Latency-hiding background lane. Read-only tasks may run in parallel. Small
+# background LLM calls still need a ContextLease and use direct llama-server
+# /apply-template + /tokenize before admission. Background work is capped below
+# the main scheduler safety factor so the main agent keeps priority.
+ALPHARAVIS_BACKGROUND_TASKS_ENABLED=true
+ALPHARAVIS_BACKGROUND_READ_ONLY_MAX_CONCURRENCY=4
+ALPHARAVIS_BACKGROUND_SMALL_LLM_MAX_CONCURRENCY=2
+ALPHARAVIS_BACKGROUND_CONTEXT_MAX_UTILIZATION=0.70
+ALPHARAVIS_BACKGROUND_TASK_TIMEOUT_SECONDS=30
+ALPHARAVIS_BACKGROUND_CANCEL_ON_CONTEXT_PRESSURE=true
 # Optional override when the Manager reports llama-server host=127.0.0.1 but
 # AlphaRavis must reach it over the Manager machine's network IP/name.
 ALPHARAVIS_LLAMA_RUNTIME_HOST_OVERRIDE=
