@@ -294,16 +294,14 @@ class PercentageBudgetPolicy:
     """
 
     # ---- Which priorities are primary / uncapped ----
-    # Primary agents (main, coding, analysis, normal chat) get the full
-    # usable free context as their output budget — no percentage cap.
-    # Secondary agents (summarization, background, low-priority) use
-    # their configured percentage caps.
+    # Primary agents (main, coding) get the full usable free context
+    # as their output budget — no artificial percentage cap.
+    # Secondary agents (summarization, background, low-priority, judge,
+    # long analysis) use their configured percentage caps.
     # Comma-separated list in env: ALPHARAVIS_BUDGET_UNCAPPED_PRIORITIES
     uncapped_priorities: tuple[TaskPriority, ...] = (
         TaskPriority.CRITICAL_MAIN_AGENT,
         TaskPriority.CODING_AGENT,
-        TaskPriority.LONG_ANALYSIS,
-        TaskPriority.NORMAL_CHAT,
     )
 
     # ---- Safety reserves (percent of context pool) ----
@@ -397,10 +395,11 @@ class PercentageBudgetPolicy:
     ) -> int:
         """Compute max_tokens from free context and task priority.
 
-        Primary agents (critical, coding, analysis, normal chat) get the
-        full usable free context — no artificial percentage cap.
-        Secondary agents (summarization, background, low-priority) use
-        their configured percentage caps.
+        Primary agents (critical main agent, coding) get the full usable
+        free context — no artificial percentage cap.
+        Secondary agents (summarization, background, low-priority,
+        normal chat / judge, long analysis) use their configured
+        percentage caps.
         """
         if free_context is None:
             free_context = state.free_context

@@ -152,13 +152,14 @@ class TestPercentageBudgetPolicy:
         policy = PercentageBudgetPolicy()
         assert TaskPriority.CRITICAL_MAIN_AGENT in policy.uncapped_priorities
         assert TaskPriority.CODING_AGENT in policy.uncapped_priorities
-        assert TaskPriority.NORMAL_CHAT in policy.uncapped_priorities
 
     def test_secondary_agents_are_capped_default(self):
         policy = PercentageBudgetPolicy()
         assert TaskPriority.SUMMARIZATION not in policy.uncapped_priorities
         assert TaskPriority.BACKGROUND_TASK not in policy.uncapped_priorities
         assert TaskPriority.LOW_PRIORITY not in policy.uncapped_priorities
+        assert TaskPriority.NORMAL_CHAT not in policy.uncapped_priorities
+        assert TaskPriority.LONG_ANALYSIS not in policy.uncapped_priorities
 
     def test_uncapped_priorities_from_env(self, monkeypatch):
         monkeypatch.setenv("ALPHARAVIS_BUDGET_UNCAPPED_PRIORITIES", "critical_main_agent, summarization")
