@@ -1,2 +1,1 @@
-"""Context budgeting and llama.cpp lease scheduling."""
-
+"""Context budgeting, background lanes, and llama.cpp lease scheduling."""

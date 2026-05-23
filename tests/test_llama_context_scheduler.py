@@ -152,3 +152,40 @@ def test_scheduler_without_kv_unified_uses_conservative_slot_capacity(monkeypatc
     assert lease is None
     assert admission["reason"] == "insufficient_context"
     assert admission["capacity_tokens"] == 500
+
+
+def test_scheduler_background_leases_use_smaller_context_lane(monkeypatch):
+    scheduler = ContextScheduler(lease_store=LeaseStore(), safety_factor=0.9, background_safety_factor=0.5)
+    scheduler.instances = {
+        "primary": UbuntuLlamaInstance.from_api(
+            {
+                "id": "primary",
+                "host": "llama-box",
+                "port": 8033,
+                "command": "./llama-server -c 1000 --parallel 1 --kv-unified",
+            }
+        )
+    }
+
+    async def fake_count(self, messages):
+        return 400
+
+    monkeypatch.setattr(LlamaCppRuntimeClient, "count_tokens_chat", fake_count)
+
+    lease, admission = asyncio.run(
+        scheduler.estimate_and_reserve(
+            messages=[{"role": "user", "content": "background"}],
+            max_output_tokens=80,
+            safety_margin=30,
+            preferred_instance_id="primary",
+            background=True,
+            speculative=True,
+            priority="low",
+        )
+    )
+
+    assert lease is None
+    assert admission["reason"] == "insufficient_context"
+    assert admission["capacity_tokens"] == 500
+    assert admission["background"] is True
+    assert admission["speculative"] is True

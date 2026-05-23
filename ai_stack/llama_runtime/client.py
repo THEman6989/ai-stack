@@ -38,6 +38,12 @@ class LlamaCppRuntimeClient:
     async def get_slots(self) -> Any:
         return await self._request("GET", "/slots")
 
+    async def get_props(self) -> Any:
+        return await self._request("GET", "/props")
+
+    async def get_metrics(self) -> Any:
+        return await self._request("GET", "/metrics")
+
     async def apply_template(self, messages: list[dict[str, Any]] | list[Any]) -> RenderedPrompt:
         payload = {"messages": [_message_to_dict(message) for message in messages]}
         data = await self._request("POST", "/apply-template", json_payload=payload)
