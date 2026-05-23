@@ -49,6 +49,28 @@ The current Docker architecture is split into these main roles:
   hard token counts and process-local context leases before async LLM calls.
   `--kv-unified` enables dynamic shared-pool planning; without it, planning is
   conservative per slot.
+- Background lane: small independent read-only jobs can overlap with the main
+  graph work. Small LLM side jobs, such as Router, Judge, Summarizer, RAG
+  compression, and chunk ranking, still go through direct llama-server token
+  counting and ContextLease admission, with a lower background utilization cap.
+  Dangerous write, restart, recovery, and power actions remain outside this
+  lane.
+- Percentage-based context budget router (`ai_stack/context_budget/router.py`):
+  `DynamicServerState` probes live llama-server `/slots`, `/props`, `/metrics`.
+  `PercentageBudgetPolicy` computes safety reserves and output budgets as
+  percentages of the detected context pool (no fixed token constants).
+  `PriorityAwareRouter` classifies requests into 7 priority levels and routes
+  based on dynamic free context, task priority, and configurable thresholds.
+  Primary agents (critical_main_agent, coding_agent) get full usable context;
+  secondary agents use percentage caps. Budget notice injection tells the model
+  about output limits in natural language.
+- Parallel task executor (`ai_stack/parallel_executor/`): Parses planner output
+  into a structured `TaskDAG` with classification, file conflict detection,
+  chokepoint detection, and parallelization analysis. Git worktree isolation
+  (`worktree_manager.py`) adapted from Hermes CLI patterns. Abstract worker
+  spawner interface (`worker_spawner.py`) with `DryRunWorker` mock for testing.
+  Feature-flagged via `ALPHARAVIS_PARALLEL_TASK_EXECUTION=false` (default OFF).
+  When disabled, existing sequential swarm path is unchanged.
 - `Server Model Manager`: a dedicated LangGraph/Bridge access mode for
   `power_management_agent`. LibreChat sees it as the `server-model-manager`
   model/preset on the existing AlphaRavis Bridge, while native LangGraph

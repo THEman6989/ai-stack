@@ -583,6 +583,12 @@ ALPHARAVIS_CONTEXT_SAFETY_FACTOR=0.92
 ALPHARAVIS_CONTEXT_DEFAULT_MAX_OUTPUT_TOKENS=2048
 ALPHARAVIS_CONTEXT_LEASE_SAFETY_MARGIN_TOKENS=1024
 ALPHARAVIS_LLAMA_RUNTIME_TIMEOUT_SECONDS=30
+ALPHARAVIS_BACKGROUND_TASKS_ENABLED=true
+ALPHARAVIS_BACKGROUND_READ_ONLY_MAX_CONCURRENCY=4
+ALPHARAVIS_BACKGROUND_SMALL_LLM_MAX_CONCURRENCY=2
+ALPHARAVIS_BACKGROUND_CONTEXT_MAX_UTILIZATION=0.70
+ALPHARAVIS_BACKGROUND_TASK_TIMEOUT_SECONDS=30
+ALPHARAVIS_BACKGROUND_CANCEL_ON_CONTEXT_PRESSURE=true
 ALPHARAVIS_LLAMA_RUNTIME_HOST_OVERRIDE=
 ```
 
@@ -602,6 +608,63 @@ dynamically; otherwise AlphaRavis uses the conservative
 `ctx_total // parallel` per-slot limit. If the Manager reports
 `host=127.0.0.1`, AlphaRavis derives the runtime URL from the Manager host plus
 the instance port, unless `ALPHARAVIS_LLAMA_RUNTIME_HOST_OVERRIDE` is set.
+
+## Percentage-Based Dynamic Context Budget
+
+The context budget router (`ai_stack/context_budget/router.py`) replaces
+hardcoded token budgets with percentage-based configurable policies.
+All budget values are percentages of the dynamically detected context pool.
+
+Relevant env flags:
+
+```text
+ALPHARAVIS_BUDGET_SAFETY_RESERVE_PCT=0.08
+ALPHARAVIS_BUDGET_SAFETY_MULTI_SLOT_PCT=0.15
+ALPHARAVIS_BUDGET_SAFETY_CRITICAL_PCT=0.12
+ALPHARAVIS_BUDGET_CRITICAL_OUTPUT_PCT=0.50
+ALPHARAVIS_BUDGET_CODING_OUTPUT_PCT=0.40
+ALPHARAVIS_BUDGET_ANALYSIS_OUTPUT_PCT=0.45
+ALPHARAVIS_BUDGET_NORMAL_CHAT_OUTPUT_PCT=0.20
+ALPHARAVIS_BUDGET_SUMMARIZATION_OUTPUT_PCT=0.15
+ALPHARAVIS_BUDGET_BACKGROUND_OUTPUT_PCT=0.10
+ALPHARAVIS_BUDGET_LOW_PRIORITY_OUTPUT_PCT=0.05
+ALPHARAVIS_BUDGET_UNCAPPED_PRIORITIES=critical_main_agent,coding_agent
+ALPHARAVIS_SMALL_MODEL_CONTEXT=60000
+```
+
+The `UNCAPPED_PRIORITIES` list controls which agent types get the full usable
+free context without any percentage cap. Everything else uses its configured
+percentage. The router probes the live llama-server (`/slots`, `/props`) for
+context pool size and active slot usage; it falls back to Manager config when
+probes are unavailable. All routing decisions are logged for observability.
+
+The small 2B model (Qwen3.5-2B) is used only for classification tasks:
+long prompt intent, archive recall detection, and large paste classification.
+Compression and summarization always use the main BigBoss model.
+
+## Parallel Task Execution (opt-in)
+
+When `ALPHARAVIS_PARALLEL_TASK_EXECUTION=true`, the planner output is parsed
+into a structured task DAG. Independent tasks can be identified for parallel
+execution (Stage 1: analysis only; Stage 2: actual parallel execution).
+
+```text
+ALPHARAVIS_PARALLEL_TASK_EXECUTION=false
+```
+
+When disabled (default), the existing sequential swarm path is completely
+unchanged. When enabled, tasks are analyzed for parallelization potential
+based on file conflicts, chokepoint files, dependencies, and resource
+constraints. Write tasks use git worktrees for isolation.
+
+Background work is allowed only for latency hiding. Read-only non-LLM work may
+run in parallel. Small LLM jobs, such as Router, Judge, Summarizer, RAG
+compression, and chunk ranking, are admitted only after the same direct
+llama-server token count and ContextLease check, and they use the lower
+`ALPHARAVIS_BACKGROUND_CONTEXT_MAX_UTILIZATION` cap. If context is tight,
+speculative jobs should wait, shrink, route to the secondary/2B instance, skip,
+or cancel. Restart, recovery, shutdown, and other write/power actions stay on
+the controlled model-management path and are not launched speculatively.
 
 Recovery, service control, ESP/server power actions, and instance config
 changes, such as raising `secondary` from 8K to 16K context or temporarily

@@ -3,6 +3,57 @@
 This is the running backlog for features that are intentionally prepared but
 not fully wired yet.
 
+## Parallel Task Execution (Stage 2)
+
+Status: Stage 1 implemented (structured DAG, analysis, logging). Stage 2
+(actual parallel execution) still needed.
+
+Implemented in Stage 1:
+
+- `ai_stack/parallel_executor/task_graph.py`: Parses planner text into
+  structured `PlannedTask` DAG with classification, file conflict detection,
+  chokepoint detection, and parallelization analysis.
+- `ai_stack/parallel_executor/worktree_manager.py`: Git worktree isolation
+  adapted from Hermes CLI.
+- `ai_stack/parallel_executor/worker_spawner.py`: Abstract `WorkerSpawner`
+  interface with `DryRunWorker` mock.
+- Minimal hook in `agent_graph.py` (planner_node produces `parallel_dag`).
+- Feature flag `ALPHARAVIS_PARALLEL_TASK_EXECUTION=false` (default OFF).
+- 36 tests covering DAG analysis and all parallelization rules.
+
+Still needed (Stage 2):
+
+- Actual worker spawning: connect Codex/Hermes/Direct-LLM adapters to the
+  `WorkerSpawner` interface and `WorkerAdapterRegistry`.
+- Parallel execution in the swarm: when the DAG identifies parallel groups,
+  spawn workers in isolated worktrees concurrently instead of sequential
+  handoff.
+- Merge/review agent: after parallel workers complete, collect `build_specialist_report`
+  outputs, detect merge conflicts, and produce a unified result.
+- Integration with `ContextScheduler` for admission checks before spawning
+  big-model workers in parallel.
+- File/glob locking: prevent race conditions on shared resources beyond
+  static conflict detection.
+- Live test with a real multi-task user request.
+
+## Percentage-Based Context Budget Router
+
+Status: Implemented. Live integration verification still needed.
+
+- Module: `ai_stack/context_budget/router.py` with `DynamicServerState`,
+  `PercentageBudgetPolicy`, `PriorityAwareRouter`.
+- Scheduler integration: `ContextScheduler` now uses the router for dynamic
+  max_tokens calculation.
+- `LlamaCppRuntimeClient` now supports `/props` and `/metrics`.
+- Secondary model context updated to 60k (`ALPHARAVIS_SMALL_MODEL_CONTEXT=60000`).
+
+Still needed:
+
+- Live-test the router with real `/slots` data from the primary llama-server.
+- Verify that dynamic context detection works correctly after a server restart
+  with different `--ctx-size`.
+- Profile routing overhead in the hot path.
+
 ## Ubuntu Llama Manager Integration
 
 Status: LangGraph tool surface implemented; live manager validation still
@@ -59,6 +110,12 @@ Implemented:
   `/v1/chat/completions`, and `ContextScheduler` reserves process-local
   context leases before async LLM calls when
   `ALPHARAVIS_CONTEXT_SCHEDULER_ENABLED` is active.
+- A background task lane is available for small independent work. Read-only
+  tools can run concurrently; small LLM side jobs still need direct
+  llama-server token counting plus a ContextLease and are capped by
+  `ALPHARAVIS_BACKGROUND_CONTEXT_MAX_UTILIZATION` so they do not starve the
+  main agent. The memory-kernel curated-memory and semantic-memory prefetches
+  now run through this read-only parallel path.
 - Runtime config is discovered per instance from Manager response data and the
   saved command: `host`, `port`, `base_url`, `ctx_total`, `parallel`, and
   `kv_unified`. When Manager-reported localhost would be unreachable from
@@ -78,6 +135,9 @@ Still needed:
 - Improve automatic parallel-slot policy: temporarily use `parallel_slots=2`
   for safe short-context windows, but restore `parallel_slots=1` before
   concurrent high-context BigBoss work can exhaust VRAM.
+- Wire more optional side jobs, such as Planner, Router/Judge, RAG compression,
+  summarization, and chunk ranking, into the background lane where their inputs
+  are independent and cancellation is safe.
 - Extend managed-run lifecycle tracking for the big llama host. The prompt and
   ENV policy now distinguish "already running" from "powered on for this
   request"; ComfyUI/Pixelle has concrete delayed shutdown scheduling, while

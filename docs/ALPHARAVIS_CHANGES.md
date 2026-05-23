@@ -4,6 +4,74 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-23 - Percentage-Based Dynamic Context Budget Router
+
+- Replaced hardcoded token budgets with a dynamic percentage-based system.
+  New module: `ai_stack/context_budget/router.py`.
+- `DynamicServerState` probes `/slots`, `/props`, `/metrics` from the live
+  llama-server. Discovers context pool size, slot usage, and KV state
+  dynamically. Falls back to Manager config when probes unavailable.
+- `PercentageBudgetPolicy`: all budget numbers are percentages of detected
+  context pool. Safety reserves, output budgets, admission thresholds, and
+  queue/defer thresholds are configurable via `ALPHARAVIS_BUDGET_*_PCT` env
+  vars. No fixed token constants remain as policy.
+- `PriorityAwareRouter`: classifies requests into 7 priority levels and routes
+  based on dynamic free context, priority, and configurable thresholds.
+- Primary agents (critical_main_agent, coding_agent) get full usable context
+  without percentage caps. Secondary agents (summarization, background_task,
+  low_priority) use configured percentage caps. Uncapped set is configurable
+  via `ALPHARAVIS_BUDGET_UNCAPPED_PRIORITIES`.
+- Budget notice injection provides natural-language hints (tight/moderate/ample)
+  based on output budget vs free context ratio.
+- Added `/props` and `/metrics` endpoints to `LlamaCppRuntimeClient`.
+- `ContextScheduler` now integrates the router for dynamic max_tokens
+  calculation. `max_output_tokens=0` means "use dynamic budget from router".
+- Router decisions are logged for observability (route_action, free_context,
+  priority, max_output_tokens, reason, etc.).
+- Secondary (2B) model context updated from 16k to 60k.
+- Primary model updated to Qwen3.6-35B-A3B-MTP MXFP4_MOE, 256k context.
+- `ALPHARAVIS_SMALL_MODEL_CONTEXT=60000` added to `.env` and `.env(exaple)`.
+- Tests: 35 new tests covering 128k/200k/300k context pools, all priority
+  levels, /slots fallback, server restart recalculation.
+- Clarified: 2B model is only used for 3 classification tasks (long prompt
+  intent, archive recall, large paste intent). Compression/summarization
+  always uses BigBoss via the existing `_ainvoke_direct_model` path.
+
+## 2026-05-23 - Parallel Task Execution (Stage 1: Structured DAG)
+
+- New module: `ai_stack/parallel_executor/`.
+- `task_graph.py`: Parses planner text output into structured `PlannedTask`
+  list with classification, file glob extraction, chokepoint detection, and
+  DAG-based parallelization analysis. Each task receives: task_id, task_type
+  (read_only_analysis/write_implementation/test/integration_review/merge_review/
+  summarization/classification), read_only, write_enabled, affected_file_globs,
+  shared_chokepoint_files, dependencies, can_parallelize, parallel_group_id,
+  required_model_class (small_model/big_model), risk_level, and detailed
+  reasoning.
+- `worktree_manager.py`: Git worktree isolation for parallel write tasks.
+  Adapted from Hermes CLI patterns. Creates/removes per-task worktrees in
+  `.worktrees/`, ensures `.gitignore` entries, copies `.worktreeinclude` files.
+- `worker_spawner.py`: Abstract `WorkerSpawner` interface plus `DryRunWorker`
+  mock for testing. Adapter registry for future Codex/Hermes real workers.
+- Minimal hook in `agent_graph.py`: one state field (`parallel_dag`), one
+  guarded import block, one function (`_parallel_execution_hook`), one line
+  in `planner_node` updates dict. No refactor, no rewrite.
+- Feature flag: `ALPHARAVIS_PARALLEL_TASK_EXECUTION=false` (default OFF).
+  When disabled, existing sequential swarm path is completely unchanged.
+  When enabled, planner output is parsed into structured DAG and logged.
+- Parallelization rules: read-only tasks parallelize freely, write tasks
+  serialize on file conflicts, chokepoint files (package.json, lockfiles,
+  docker-compose.yml, Dockerfile, .env, README.md, shared schemas/types,
+  API client files, migrations) force serialization, tests wait for
+  implementation, merge/review always serialized.
+- Actual parallel execution (worker spawn, merge/review) is Stage 2.
+- Tests: 36 new tests covering feature flag, planner parsing, task
+  classification, file conflict detection, parallelization analysis (12
+  scenarios), DAG counts, observability logging, dry-run worker, and
+  worktree manager.
+- Agent graph now defaults to ephemeral threads and preserves dirty user work
+  across all parallel execution scenarios.
+
 ## 2026-05-22 - Llama Runtime Context Leases
 
 - Added separate AI-stack clients for the Ubuntu Llama Manager control plane
@@ -27,6 +95,15 @@ can tell which patches are intentional and which ones can be removed.
   `ALPHARAVIS_CONTEXT_SCHEDULER_ENABLED` is enabled or `auto` with a Manager
   URL/IP configured. Leases are released after completion and `truncated=true`
   is logged as a scheduler warning.
+- Added a background task lane for latency hiding. Read-only side work can run
+  concurrently, while small background LLM calls are admitted only after the
+  same direct llama-server token counting and `ContextLease` check. Background
+  and speculative leases use `ALPHARAVIS_BACKGROUND_CONTEXT_MAX_UTILIZATION`
+  so Planner/Router/Judge/Summarizer-style work cannot consume the main
+  agent's full context budget.
+- Memory-kernel prefetch now uses that read-only background lane for curated
+  memory and semantic vector memory lookups, allowing both searches to overlap
+  instead of running serially.
 - If the Manager reports `host=127.0.0.1`, the runtime base URL is derived from
   the Manager host plus the instance port, or from
   `ALPHARAVIS_LLAMA_RUNTIME_HOST_OVERRIDE`.
