@@ -629,6 +629,11 @@ ALPHARAVIS_HARD_CONTEXT_TOKEN_LIMIT=128000
 # model with ALPHARAVIS_CONTEXT_LENGTH_<SANITIZED_MODEL_NAME>, for example:
 #   ALPHARAVIS_CONTEXT_LENGTH_BIG_BOSS=128000
 ALPHARAVIS_AUTO_DISCOVER_CONTEXT_LENGTH=true
+# Parallel task execution: when true, the planner output is parsed into a
+# structured task DAG. Independent tasks may run in parallel via git
+# worktrees. Write tasks run in isolated branches. Default false.
+# Allowed values: true, false
+ALPHARAVIS_PARALLEL_TASK_EXECUTION=false
 ALPHARAVIS_CONTEXT_DISCOVERY_API_BASE=
 ALPHARAVIS_CONTEXT_DISCOVERY_API_KEY=
 ALPHARAVIS_CONTEXT_DISCOVERY_MODEL=
