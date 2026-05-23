@@ -293,6 +293,19 @@ class PercentageBudgetPolicy:
     Every value is configurable via env. No fixed token budgets.
     """
 
+    # ---- Which priorities are primary / uncapped ----
+    # Primary agents (main, coding, analysis, normal chat) get the full
+    # usable free context as their output budget — no percentage cap.
+    # Secondary agents (summarization, background, low-priority) use
+    # their configured percentage caps.
+    # Comma-separated list in env: ALPHARAVIS_BUDGET_UNCAPPED_PRIORITIES
+    uncapped_priorities: tuple[TaskPriority, ...] = (
+        TaskPriority.CRITICAL_MAIN_AGENT,
+        TaskPriority.CODING_AGENT,
+        TaskPriority.LONG_ANALYSIS,
+        TaskPriority.NORMAL_CHAT,
+    )
+
     # ---- Safety reserves (percent of context pool) ----
     safety_reserve_pct: float = 0.08          # e.g. 8% reserve for stability
     safety_reserve_multi_slot_pct: float = 0.15  # higher when multiple slots active
@@ -331,7 +344,19 @@ class PercentageBudgetPolicy:
         def pct(key: str, default: float) -> float:
             return float(os.getenv(key, str(default)))
 
+        # Parse uncapped priorities from env: comma-separated list of priority names
+        uncapped_raw = os.getenv("ALPHARAVIS_BUDGET_UNCAPPED_PRIORITIES", "")
+        if uncapped_raw.strip():
+            uncapped = tuple(
+                TaskPriority(p.strip())
+                for p in uncapped_raw.split(",")
+                if p.strip()
+            )
+        else:
+            uncapped = cls.uncapped_priorities  # use class default
+
         return cls(
+            uncapped_priorities=uncapped,
             safety_reserve_pct=pct("ALPHARAVIS_BUDGET_SAFETY_RESERVE_PCT", 0.08),
             safety_reserve_multi_slot_pct=pct("ALPHARAVIS_BUDGET_SAFETY_MULTI_SLOT_PCT", 0.15),
             safety_reserve_critical_pct=pct("ALPHARAVIS_BUDGET_SAFETY_CRITICAL_PCT", 0.12),
@@ -370,18 +395,26 @@ class PercentageBudgetPolicy:
         *,
         free_context: int | None = None,
     ) -> int:
-        """Compute max_tokens from free context and task priority."""
+        """Compute max_tokens from free context and task priority.
+
+        Primary agents (critical, coding, analysis, normal chat) get the
+        full usable free context — no artificial percentage cap.
+        Secondary agents (summarization, background, low-priority) use
+        their configured percentage caps.
+        """
         if free_context is None:
             free_context = state.free_context
 
         reserve = self.compute_safety_reserve(state)
         usable = max(0, free_context - reserve)
 
+        # Primary agents: no cap, use full usable context
+        if priority in self.uncapped_priorities:
+            budget = max(self.min_output_tokens, usable)
+            return min(budget, self.max_output_tokens)
+
+        # Secondary agents: apply percentage cap
         pct_map = {
-            TaskPriority.CRITICAL_MAIN_AGENT: self.critical_output_pct,
-            TaskPriority.CODING_AGENT: self.coding_output_pct,
-            TaskPriority.LONG_ANALYSIS: self.analysis_output_pct,
-            TaskPriority.NORMAL_CHAT: self.normal_chat_output_pct,
             TaskPriority.SUMMARIZATION: self.summarization_output_pct,
             TaskPriority.BACKGROUND_TASK: self.background_output_pct,
             TaskPriority.LOW_PRIORITY: self.low_priority_output_pct,

@@ -98,27 +98,32 @@ class TestPercentageBudgetPolicy:
         assert policy.compute_safety_reserve(busy) == 30000
 
     def test_output_budget_scales_with_free_context_and_priority(self):
-        policy = PercentageBudgetPolicy(critical_output_pct=0.50, normal_chat_output_pct=0.20)
+        policy = PercentageBudgetPolicy(summarization_output_pct=0.15)
         state = DynamicServerState(
             instance_id="t", context_pool_size=200000, kv_unified=True
         )
-        # free = 100k, critical gets 50% of (100k - reserve)
+        # Critical: uncapped — gets full usable context (free - reserve)
         budget_critical = policy.compute_output_budget(
             state, TaskPriority.CRITICAL_MAIN_AGENT, free_context=100000
         )
-        budget_normal = policy.compute_output_budget(
-            state, TaskPriority.NORMAL_CHAT, free_context=100000
+        # Summarization: capped at 15% of usable
+        budget_summary = policy.compute_output_budget(
+            state, TaskPriority.SUMMARIZATION, free_context=100000
         )
-        assert budget_critical > budget_normal
-        assert budget_critical < 100000  # less than total free
+        assert budget_critical > budget_summary
+        # Critical should get close to full usable (free - reserve)
+        reserve = policy.compute_safety_reserve(state)
+        usable = 100000 - reserve
+        assert budget_critical == usable  # full usable context, no cap
 
     def test_output_budget_respects_absolute_ceiling(self):
         policy = PercentageBudgetPolicy(
-            critical_output_pct=1.0, max_output_tokens=50000
+            max_output_tokens=50000
         )
         state = DynamicServerState(
             instance_id="t", context_pool_size=200000, kv_unified=True
         )
+        # Critical is uncapped but respects absolute ceiling
         budget = policy.compute_output_budget(
             state, TaskPriority.CRITICAL_MAIN_AGENT, free_context=200000
         )
@@ -138,10 +143,29 @@ class TestPercentageBudgetPolicy:
 
     def test_from_env_reads_percentage_values(self, monkeypatch):
         monkeypatch.setenv("ALPHARAVIS_BUDGET_SAFETY_RESERVE_PCT", "0.12")
-        monkeypatch.setenv("ALPHARAVIS_BUDGET_CODING_OUTPUT_PCT", "0.35")
+        monkeypatch.setenv("ALPHARAVIS_BUDGET_SUMMARIZATION_OUTPUT_PCT", "0.35")
         policy = PercentageBudgetPolicy.from_env()
         assert policy.safety_reserve_pct == 0.12
-        assert policy.coding_output_pct == 0.35
+        assert policy.summarization_output_pct == 0.35
+
+    def test_primary_agents_are_uncapped_default(self):
+        policy = PercentageBudgetPolicy()
+        assert TaskPriority.CRITICAL_MAIN_AGENT in policy.uncapped_priorities
+        assert TaskPriority.CODING_AGENT in policy.uncapped_priorities
+        assert TaskPriority.NORMAL_CHAT in policy.uncapped_priorities
+
+    def test_secondary_agents_are_capped_default(self):
+        policy = PercentageBudgetPolicy()
+        assert TaskPriority.SUMMARIZATION not in policy.uncapped_priorities
+        assert TaskPriority.BACKGROUND_TASK not in policy.uncapped_priorities
+        assert TaskPriority.LOW_PRIORITY not in policy.uncapped_priorities
+
+    def test_uncapped_priorities_from_env(self, monkeypatch):
+        monkeypatch.setenv("ALPHARAVIS_BUDGET_UNCAPPED_PRIORITIES", "critical_main_agent, summarization")
+        policy = PercentageBudgetPolicy.from_env()
+        assert TaskPriority.CRITICAL_MAIN_AGENT in policy.uncapped_priorities
+        assert TaskPriority.SUMMARIZATION in policy.uncapped_priorities
+        assert TaskPriority.CODING_AGENT not in policy.uncapped_priorities
 
 
 # ---------------------------------------------------------------------------
