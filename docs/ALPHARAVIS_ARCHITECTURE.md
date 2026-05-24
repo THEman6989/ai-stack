@@ -68,9 +68,13 @@ The current Docker architecture is split into these main roles:
   into a structured `TaskDAG` with classification, file conflict detection,
   chokepoint detection, and parallelization analysis. Git worktree isolation
   (`worktree_manager.py`) adapted from Hermes CLI patterns. Abstract worker
-  spawner interface (`worker_spawner.py`) with `DryRunWorker` mock for testing.
+  spawner interface (`worker_spawner.py`) with `DryRunWorker` mock and
+  `DirectLLMWorker` for real LLM calls. `executor.py` runs parallel groups
+  concurrently via `asyncio.gather()`, then serial chain, then merge/review.
   Feature-flagged via `ALPHARAVIS_PARALLEL_TASK_EXECUTION=false` (default OFF).
-  When disabled, existing sequential swarm path is unchanged.
+  When disabled, the `parallel_executor` graph node returns `{}` (no-op) and
+  existing sequential swarm path is unchanged. When enabled, workers run
+  concurrently before the swarm, results are collected and merged.
 - `Server Model Manager`: a dedicated LangGraph/Bridge access mode for
   `power_management_agent`. LibreChat sees it as the `server-model-manager`
   model/preset on the existing AlphaRavis Bridge, while native LangGraph

@@ -656,17 +656,22 @@ Compression and summarization always use the main BigBoss model.
 ## Parallel Task Execution (opt-in)
 
 When `ALPHARAVIS_PARALLEL_TASK_EXECUTION=true`, the planner output is parsed
-into a structured task DAG. Independent tasks can be identified for parallel
-execution (Stage 1: analysis only; Stage 2: actual parallel execution).
+into a structured task DAG and executed concurrently before the sequential
+swarm. Independent tasks run in parallel via `asyncio.gather()` with isolated
+git worktrees for write tasks. Results are collected and a merge/review step
+runs after all workers complete.
 
 ```text
 ALPHARAVIS_PARALLEL_TASK_EXECUTION=false
 ```
 
-When disabled (default), the existing sequential swarm path is completely
-unchanged. When enabled, tasks are analyzed for parallelization potential
-based on file conflicts, chokepoint files, dependencies, and resource
-constraints. Write tasks use git worktrees for isolation.
+When disabled (default), the `parallel_executor` graph node returns `{}`
+(complete no-op) and the existing sequential swarm path is fully unchanged.
+When enabled, tasks are analyzed for parallelization potential based on file
+conflicts, chokepoint files, dependencies, and resource constraints. Write
+tasks use git worktrees for isolation. Workers are spawned via
+`DirectLLMWorker` (wired to the main BigBoss model) or `DryRunWorker` for
+testing.
 
 Background work is allowed only for latency hiding. Read-only non-LLM work may
 run in parallel. Small LLM jobs, such as Router, Judge, Summarizer, RAG
