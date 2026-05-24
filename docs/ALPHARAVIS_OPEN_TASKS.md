@@ -36,6 +36,11 @@ Still needed:
   rename/delete including active-thread deletion recovery.
 - Decide later whether to tackle AionUi Tier 3 items: i18n, inline tool-result
   streaming, and conversation tabs.
+- New: Office/Docs integration research completed. `docs/AIONUI_OFFICE_INTEGRATION.md`
+  documents AionUi's architecture, Office document pipeline (mammoth,
+  officeparser, docx, xlsx-republish, pptx2json), feature-channel system,
+  and a 3-phase AlphaRavis porting plan. Phase 1 (Office upload → Agent
+  context) is low-effort/high-impact.
 
 ## Parallel Task Execution (Stage 2)
 

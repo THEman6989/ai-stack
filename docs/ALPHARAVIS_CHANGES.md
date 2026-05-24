@@ -64,6 +64,24 @@ can tell which patches are intentional and which ones can be removed.
   Tool-Approval, Subagent-Indicators as foundation; ported features add the
   missing chat UX (file upload, thread management, chat openers).
 
+## 2026-05-24 — AionUi Office/Docs Integration Research
+
+- Analyzed `iOfficeAI/AionUi` (26.4k ⭐) architecture for Office document
+  integration opportunities.
+- Key findings documented in `docs/AIONUI_OFFICE_INTEGRATION.md`:
+  - Dependencies: `@office-ai/aioncli-core` (CLI core), `@office-ai/platform`
+    (IPC bridge), `officeparser`, `mammoth`, `docx`, `xlsx-republish`,
+    `pptx2json` for Office document handling.
+  - Architecture: Electron 37 + React 19, ChannelManager plugin system
+    (Telegram, Lark, DingTalk), Preview Panel with Monaco/Codemirror.
+  - AlphaRavis porting plan: 3 phases — Phase 1 (Office upload to Agent
+    context via mammoth/officeparser), Phase 2 (document generation via docx),
+    Phase 3 (Channel/IM plugins).
+  - All recommended dependencies are MIT/BSD licensed, `@office-ai/*` scope
+    packages are AionUi-proprietary and would NOT be used.
+- Feature-gap comparison: AionUi has Office docs + IM channels, Deep Agents UI
+  has Tasks/Todos + Tool Approval. Office upload is low-effort/high-impact.
+
 ## 2026-05-24 — Storage Manager: pgvector / Archive Coverage
 
 - Extended `ai_stack/storage_manager/` with pgvector/archive support
