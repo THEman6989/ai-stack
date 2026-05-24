@@ -30,8 +30,6 @@ Still needed:
 - Codex CLI adapter and Hermes agent adapter for `WorkerSpawner` interface.
 - Live test with real BigBoss calls through the DirectLLM worker.
 - Profile parallel execution overhead and resource usage.
-- File/glob locking for concurrent write tasks (currently only static
-  conflict detection).
 - DeepAgents Responses compatibility testing with parallel executor messages.
 
 ## Percentage-Based Context Budget Router
@@ -145,8 +143,12 @@ Still needed:
   `POST /llama/instances/{id}/restart` and
   `POST /llama/instances/{id}/stop`. The current AI-stack client intentionally
   uses the documented primary/secondary endpoints from helper `docs/api.md`.
-- Promote context leases from process-local memory to Redis/Postgres if
+- Promote context leases from process-local memory to Redis if
   multiple `langgraph-api` workers need a shared global budget.
+  Implemented 2026-05-24: `RedisLeaseStore` with atomic Lua-script admission,
+  lazy `redis.asyncio` import, TTL-based stale-lease expiry, and graceful
+  fallback to `LocalLeaseStore`. Controlled by `ALPHARAVIS_CONTEXT_LEASE_BACKEND`
+  (default `local`). See `ai_stack/context_budget/leases.py`.
 - Wire the scheduler's "not enough context" decisions into automatic
   compression/RAG-chunk reduction/max-output lowering/retry routing. The
   scheduler currently returns a structured decision and blocks admission rather

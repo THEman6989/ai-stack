@@ -46,7 +46,8 @@ The current Docker architecture is split into these main roles:
   AlphaRavis can call the selected llama-server directly for `/apply-template`,
   `/tokenize`, `/slots`, `/v1/models`, `/completion`, and
   `/v1/chat/completions`. The context scheduler uses that runtime plane for
-  hard token counts and process-local context leases before async LLM calls.
+  hard token counts and context leases (process-local by default, optional
+  Redis-backed for multi-worker setups) before async LLM calls.
   `--kv-unified` enables dynamic shared-pool planning; without it, planning is
   conservative per slot.
 - Background lane: small independent read-only jobs can overlap with the main
@@ -71,6 +72,8 @@ The current Docker architecture is split into these main roles:
   spawner interface (`worker_spawner.py`) with `DryRunWorker` mock and
   `DirectLLMWorker` for real LLM calls. `executor.py` runs parallel groups
   concurrently via `asyncio.gather()`, then serial chain, then merge/review.
+  `file_lock.py` provides process-local file/glob locking for concurrent
+  write safety.
   Feature-flagged via `ALPHARAVIS_PARALLEL_TASK_EXECUTION=false` (default OFF).
   When disabled, the `parallel_executor` graph node returns `{}` (no-op) and
   existing sequential swarm path is unchanged. When enabled, workers run
@@ -85,7 +88,11 @@ The current Docker architecture is split into these main roles:
 - `mongodb`: LangGraph checkpointing and long-term store backing.
 - `vectordb`: Postgres with pgvector. It can act as an optional semantic
   search sidecar for AlphaRavis memory; it does not replace MongoDB.
-- `redis`: optional LLM cache, not the primary checkpointer in this phase.
+- `redis`: optional LLM cache and shared context-lease store for multi-worker
+  deployments. When `ALPHARAVIS_CONTEXT_LEASE_BACKEND=redis`, the
+  `ContextScheduler` uses Redis for atomic cross-worker context admission
+  (Lua-script-backed `HSET` + capacity check). Default `local` uses a
+  process-local dict — sufficient for single-worker setups.
 - `deep-agents-ui`: visual UI for DeepAgents/LangGraph-style inspection.
 - `service-dashboard`: lightweight local redirector UI on port `8090` that
   lists host and Docker URLs for the stack services, separating Web Interfaces,

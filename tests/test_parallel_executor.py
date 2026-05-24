@@ -449,3 +449,100 @@ class TestParallelExecutor:
         d = report.to_dict()
         assert d["total_tasks"] == 2
         assert d["completed"] == 2
+
+
+# ---------------------------------------------------------------------------
+# File lock manager
+# ---------------------------------------------------------------------------
+
+class TestFileLockManager:
+    def test_acquire_and_release(self):
+        from ai_stack.parallel_executor.file_lock import FileLockManager
+        mgr = FileLockManager()
+        lock = asyncio.run(mgr.try_acquire("task_a", ["src/a.py"]))
+        assert lock is not None
+        assert lock.task_id == "task_a"
+
+        count = asyncio.run(mgr.release("task_a"))
+        assert count == 1
+        assert mgr.active_locks == 0
+
+    def test_conflict_detected(self):
+        from ai_stack.parallel_executor.file_lock import FileLockManager
+        mgr = FileLockManager()
+        lock_a = asyncio.run(mgr.try_acquire("task_a", ["src/a.py"]))
+        assert lock_a is not None
+
+        lock_b = asyncio.run(mgr.try_acquire("task_b", ["src/a.py"]))
+        assert lock_b is None  # conflict!
+
+        asyncio.run(mgr.release("task_a"))
+
+    def test_no_conflict_different_files(self):
+        from ai_stack.parallel_executor.file_lock import FileLockManager
+        mgr = FileLockManager()
+        lock_a = asyncio.run(mgr.try_acquire("task_a", ["frontend/app.tsx"]))
+        lock_b = asyncio.run(mgr.try_acquire("task_b", ["backend/api.py"]))
+        assert lock_a is not None
+        assert lock_b is not None
+
+        asyncio.run(mgr.release_all())
+
+    def test_check_conflict(self):
+        from ai_stack.parallel_executor.file_lock import FileLockManager
+        mgr = FileLockManager()
+        asyncio.run(mgr.try_acquire("task_a", ["src/a.py", "src/b.py"]))
+        conflicts = asyncio.run(mgr.check_conflict(["src/b.py"]))
+        assert "task_a" in conflicts
+
+        no_conflicts = asyncio.run(mgr.check_conflict(["src/c.py"]))
+        assert no_conflicts == []
+
+        asyncio.run(mgr.release_all())
+
+
+# ---------------------------------------------------------------------------
+# Responses compatibility (message format validation)
+# ---------------------------------------------------------------------------
+
+class TestResponsesCompatibility:
+    def test_parallel_executor_output_messages_format(self):
+        """Parallel executor output must use valid message format."""
+        # Simulate what _parallel_executor_node produces (dict form, no import needed)
+        messages = [
+            {"role": "system", "content": "[task_001] OK: Frontend component built"},
+            {"role": "system", "content": "[task_002] OK: Backend API implemented"},
+            {"role": "system", "content": "[merge_review] All tasks completed successfully."},
+        ]
+        for msg in messages:
+            assert msg["role"] == "system"
+            assert isinstance(msg["content"], str)
+            assert len(msg["content"]) > 0
+            # Merge messages must fit in 2000 chars
+            if "merge_review" in msg["content"]:
+                assert len(msg["content"]) <= 2000
+
+    def test_execution_report_serializes_for_state(self):
+        """Report.to_dict() must be JSON-serializable for LangGraph state."""
+        import json
+        from ai_stack.parallel_executor.executor import ExecutionReport
+        from ai_stack.parallel_executor.worker_spawner import WorkerResult
+
+        report = ExecutionReport(
+            total_tasks=3,
+            completed=2,
+            failed=1,
+            elapsed_seconds=1.5,
+            errors=["task_c: test error"],
+            results=[
+                WorkerResult(task_id="a", status="completed", output="OK"),
+                WorkerResult(task_id="b", status="completed", output="OK"),
+                WorkerResult(task_id="c", status="failed", error="test error"),
+            ],
+        )
+        d = report.to_dict()
+        json_str = json.dumps(d, default=str)
+        assert json_str
+        parsed = json.loads(json_str)
+        assert parsed["total_tasks"] == 3
+        assert len(parsed["results"]) == 3

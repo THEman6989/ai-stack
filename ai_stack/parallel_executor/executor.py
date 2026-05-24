@@ -31,6 +31,7 @@ from ai_stack.parallel_executor.worker_spawner import (
     WorkerResult,
     WorkerSpawner,
 )
+from ai_stack.parallel_executor.file_lock import FileLock, FileLockManager, GLOBAL_FILE_LOCK_MANAGER
 
 LOGGER = logging.getLogger(__name__)
 
@@ -148,10 +149,12 @@ class ParallelExecutor:
         spawner: WorkerSpawner | None = None,
         worktree_manager: WorktreeManager | None = None,
         merge_spawner: WorkerSpawner | None = None,
+        file_lock_manager: FileLockManager | None = None,
     ) -> None:
         self.spawner = spawner or DryRunWorker()
         self.worktrees = worktree_manager or WorktreeManager()
         self.merge_spawner = merge_spawner or self.spawner
+        self.file_locks = file_lock_manager or GLOBAL_FILE_LOCK_MANAGER
 
     async def execute(
         self,
@@ -228,8 +231,26 @@ class ParallelExecutor:
         *,
         task_brief: str = "",
     ) -> WorkerResult:
-        """Run a single task, with worktree if write-enabled."""
+        """Run a single task, with worktree if write-enabled and file-lock safety."""
         worktree: WorktreeInfo | None = None
+        file_lock: FileLock | None = None
+
+        # Acquire file lock for write tasks with file globs
+        if task.write_enabled and task.affected_file_globs:
+            file_lock = await self.file_locks.try_acquire(
+                task.task_id,
+                task.affected_file_globs,
+            )
+            if file_lock is None:
+                conflicting = await self.file_locks.check_conflict(
+                    task.affected_file_globs,
+                    exclude_task_id=task.task_id,
+                )
+                return WorkerResult(
+                    task_id=task.task_id,
+                    status="skipped",
+                    error=f"file lock conflict with: {', '.join(conflicting)}",
+                )
 
         # Create worktree for write tasks
         if task.write_enabled and self.worktrees.is_git_repo:
@@ -252,6 +273,10 @@ class ParallelExecutor:
         # Cleanup worktree if task completed successfully
         if worktree and result.ok and not self.worktrees.check_uncommitted(task.task_id):
             self.worktrees.remove(task.task_id, force=True)
+
+        # Release file lock
+        if file_lock:
+            await self.file_locks.release(task.task_id)
 
         return result
 

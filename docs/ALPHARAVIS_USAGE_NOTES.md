@@ -594,6 +594,13 @@ ALPHARAVIS_CONTEXT_SAFETY_FACTOR=0.92
 ALPHARAVIS_CONTEXT_DEFAULT_MAX_OUTPUT_TOKENS=2048
 ALPHARAVIS_CONTEXT_LEASE_SAFETY_MARGIN_TOKENS=1024
 ALPHARAVIS_LLAMA_RUNTIME_TIMEOUT_SECONDS=30
+# Lease store backend for multi-worker setups. local (default) uses a
+# process-local dict — fine for a single langgraph-api worker. redis uses
+# the shared Redis container for atomic cross-worker context admission.
+# Falls back to local if Redis is unreachable or the redis package is missing.
+ALPHARAVIS_CONTEXT_LEASE_BACKEND=local
+ALPHARAVIS_REDIS_URL=redis://redis:6379
+ALPHARAVIS_CONTEXT_LEASE_TTL=600
 ALPHARAVIS_BACKGROUND_TASKS_ENABLED=true
 ALPHARAVIS_BACKGROUND_READ_ONLY_MAX_CONCURRENCY=4
 ALPHARAVIS_BACKGROUND_SMALL_LLM_MAX_CONCURRENCY=2

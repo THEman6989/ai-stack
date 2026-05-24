@@ -4,6 +4,31 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-24 — Redis Context Lease Store For Multi-Worker Coordination
+
+- Added `RedisLeaseStore` as optional shared lease backend alongside the
+  existing process-local `LocalLeaseStore`.
+- `LeaseStore` is now an abstract base; `LocalLeaseStore` is the default
+  concrete implementation (zero behaviour change for existing deployments).
+- `RedisLeaseStore` uses `redis.asyncio` with atomic Lua-script admission
+  (`HSET` + capacity check in one round-trip) and TTL-based expiry (default
+  600s) so stale leases from crashed workers don't leak forever.
+- Controlled by `ALPHARAVIS_CONTEXT_LEASE_BACKEND=local|redis` (default
+  `local`). When `redis` is selected but the package is missing or the
+  connection fails, it logs a warning and falls back to `LocalLeaseStore`.
+- Redis container already exists in `docker-compose.yml` on port 6379;
+  `langgraph-api` already has `REDIS_URL` and `redis` dependency wired.
+- New env vars in `.env(exaple)`:
+  `ALPHARAVIS_CONTEXT_LEASE_BACKEND`,
+  `ALPHARAVIS_REDIS_URL`,
+  `ALPHARAVIS_CONTEXT_LEASE_TTL`.
+- Tests: 10 new tests (local store roundtrip, env switching, fake-Redis
+  atomic admission, release, capacity rejection). Full suite: 452 passed.
+
+Rationale: single-worker setups (the default) pay zero cost. Multi-worker
+setups (`docker compose --scale langgraph-api=3`) can switch to Redis for
+shared context admission and avoid overbooking the llama.cpp server.
+
 ## 2026-05-24 - agent_graph.py Phase 2 Module Extraction
 
 - Extracted pure helper functions from `agent_graph.py` into focused modules.
@@ -103,6 +128,12 @@ can tell which patches are intentional and which ones can be removed.
 - `executor.py`: `ParallelExecutor` runs parallel groups concurrently via
   `asyncio.gather()`, then serial chain sequentially, then merge/review.
   `build_execution_plan()` converts TaskDAG to ordered ExecutionPlan.
+  Integrated with `FileLockManager` for concurrent write safety — tasks
+  touching the same files are serialized via process-local locks.
+- `file_lock.py`: `FileLockManager` provides process-local file/glob
+  locking. Acquire per-task locks before spawning workers, release on
+  completion. Prevents race conditions on shared files across parallel
+  write tasks.
 - Minimal hook in `agent_graph.py`: one state field (`parallel_dag`), one
   guarded import block, two functions (`_parallel_execution_hook`,
   `_parallel_executor_node`), one line in `planner_node`, one graph node

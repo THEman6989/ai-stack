@@ -36,6 +36,12 @@ from ai_stack.parallel_executor.worker_spawner import (
     GLOBAL_WORKER_REGISTRY,
 )
 
+from ai_stack.parallel_executor.file_lock import (
+    FileLock,
+    FileLockManager,
+    GLOBAL_FILE_LOCK_MANAGER,
+)
+
 from ai_stack.parallel_executor.executor import (
     ExecutionPlan,
     ExecutionReport,
@@ -68,6 +74,10 @@ __all__ = [
     "DirectLLMFn",
     "WorkerAdapterRegistry",
     "GLOBAL_WORKER_REGISTRY",
+    # File lock
+    "FileLock",
+    "FileLockManager",
+    "GLOBAL_FILE_LOCK_MANAGER",
     # Executor
     "ExecutionPlan",
     "ExecutionReport",
