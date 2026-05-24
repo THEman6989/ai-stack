@@ -1089,6 +1089,26 @@ ALPHARAVIS_CURATED_MEMORY_REVIEW_PATH=/tmp/alpharavis_curated_memory_review.json
 # Range: 0.0 to 1.0 (e.g., 0.9). Leave empty to disable auto-accept.
 ALPHARAVIS_CURATED_MEMORY_AUTO_ACCEPT_THRESHOLD=
 
+# ── Storage Manager ──
+# Enable per-service disk quotas with auto-cleanup of oldest entries.
+# Set to true to enable. Default: false.
+#ALPHARAVIS_STORAGE_MANAGER_ENABLED=false
+# Total cap in GB across all data services. Default: 50.
+#ALPHARAVIS_STORAGE_MAX_TOTAL_GB=50
+# Warn when a service exceeds this percentage of its budget. Default: 90.
+#ALPHARAVIS_STORAGE_WARN_THRESHOLD_PCT=90
+# Dry-run mode: only report, never delete. Default: false.
+#ALPHARAVIS_STORAGE_DRY_RUN=false
+# Per-service percentage allocations (uncomment to override defaults):
+#ALPHARAVIS_STORAGE_LIBRECHAT_PCT=10      # MongoDB chat history
+#ALPHARAVIS_STORAGE_MEDIA_GALLERY_PCT=40  # User media files
+#ALPHARAVIS_STORAGE_HERMES_PCT=5          # Hermes agent data
+#ALPHARAVIS_STORAGE_VECTORDB_PCT=30       # Archives / pgvector
+#ALPHARAVIS_STORAGE_PIXELLE_PCT=5         # Generated images
+#ALPHARAVIS_STORAGE_OPENWEBUI_PCT=5       # OpenWebUI chat history
+#ALPHARAVIS_STORAGE_LOGS_PCT=3            # Service logs
+#ALPHARAVIS_STORAGE_OTHER_PCT=2           # Everything else
+
 # Indexed session-history search, inspired by Hermes SQLite/FTS5 session search.
 # Current-thread search is default; cross-thread search only happens when a tool
 # call explicitly sets include_other_threads=true.

@@ -809,6 +809,10 @@ def _crisis_manager_enabled() -> bool:
     return _advanced_model_management_enabled() and _env_bool("ALPHARAVIS_ENABLE_CRISIS_MANAGER", "false")
 
 
+def _storage_manager_enabled() -> bool:
+    return _env_bool("ALPHARAVIS_STORAGE_MANAGER_ENABLED", "false")
+
+
 def _crisis_max_attempts() -> int:
     try:
         return max(0, int(os.getenv("ALPHARAVIS_CRISIS_MAX_ATTEMPTS", "1")))
@@ -3625,6 +3629,73 @@ def execute_local_command(command: str):
         return "Error: local command timed out."
     except Exception as exc:
         return f"Local command failed: {exc}"
+
+
+@tool
+def storage_manager_status() -> str:
+    """Show disk usage across all data services with budget limits and warnings.
+
+    Returns a table showing each service's actual disk usage, its percentage
+    of the total storage cap, and whether it's OK, WARN, or CRITICAL.
+    Read-only — no files are deleted.
+    """
+    if not _storage_manager_enabled():
+        return "Storage Manager is DISABLED. Set ALPHARAVIS_STORAGE_MANAGER_ENABLED=true to enable."
+
+    try:
+        from ai_stack.storage_manager.manager import get_storage_status
+        status = get_storage_status()
+        return status.format_table()
+    except ImportError as e:
+        return f"Storage Manager module not available: {e}"
+    except Exception as e:
+        return f"Storage Manager error: {e}"
+
+
+@tool
+def storage_manager_budget() -> str:
+    """Show the configured storage budget allocations per service.
+
+    Returns the total cap and per-service percentage allocations in GB.
+    Read-only — no files are deleted.
+    """
+    if not _storage_manager_enabled():
+        return "Storage Manager is DISABLED. Set ALPHARAVIS_STORAGE_MANAGER_ENABLED=true to enable."
+
+    try:
+        from ai_stack.storage_manager.manager import get_storage_manager
+        mgr = get_storage_manager()
+        return mgr.budget_summary()
+    except ImportError as e:
+        return f"Storage Manager module not available: {e}"
+    except Exception as e:
+        return f"Storage Manager error: {e}"
+
+
+@tool
+def storage_manager_cleanup(force: bool = False, service: str = "") -> str:
+    """Run storage cleanup: delete oldest entries from services that exceed their budget.
+
+    By default, only cleans services that are CRITICAL (over budget).
+    Set force=True to clean ALL services regardless of budget.
+
+    Args:
+        force: If True, clean all services. Default: only critical ones.
+        service: If non-empty, only clean this specific service (e.g. 'media_gallery', 'librechat').
+
+    Returns a cleanup report showing what was deleted and how much space was freed.
+    """
+    if not _storage_manager_enabled():
+        return "Storage Manager is DISABLED. Set ALPHARAVIS_STORAGE_MANAGER_ENABLED=true to enable."
+
+    try:
+        from ai_stack.storage_manager.manager import run_storage_cleanup
+        report = run_storage_cleanup(force=force, service_filter=service)
+        return report.format_report()
+    except ImportError as e:
+        return f"Storage Manager module not available: {e}"
+    except Exception as e:
+        return f"Storage Manager error: {e}"
 
 
 def _first_shell_word(command: str) -> str:
@@ -12903,6 +12974,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             *owner_protected_power_tools,
             execute_ssh_command,
             execute_local_command,
+            *([storage_manager_status, storage_manager_budget, storage_manager_cleanup] if _storage_manager_enabled() else []),
             fast_web_search,
             deep_web_research,
             ask_documents,
