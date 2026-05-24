@@ -1253,6 +1253,28 @@ def _deep_agent_model(
     return _model(model_name=model_name, timeout_seconds=timeout_seconds, model_kwargs=kwargs)
 
 
+def _big_boss_llama_reachable() -> bool:
+    """Quick TCP probe to check if BigBoss llama-server is accepting connections.
+
+    Used at graph-build time to decide whether the power_management_agent
+    gets the full toolset (BigBoss available) or a stripped recovery-only
+    toolset (Edge Gemma fallback).
+    """
+    import socket
+    from urllib.parse import urlparse
+
+    try:
+        base = os.getenv("BIG_BOSS_API_BASE", "http://litellm:4000/v1")
+        parsed = urlparse(base)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 8033
+        sock = socket.create_connection((host, port), timeout=2.0)
+        sock.close()
+        return True
+    except Exception:
+        return False
+
+
 def _server_model_manager_model() -> Any:
     primary_model = os.getenv("ALPHARAVIS_SERVER_MODEL_MANAGER_MODEL", "openai/server-model-manager")
     model_kwargs = {
@@ -13426,94 +13448,138 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     ]
     if advanced_model_management_enabled or server_model_manager_enabled:
         power_llm = _server_model_manager_model()
+        big_boss_up = _big_boss_llama_reachable()
+
+        # Full toolset when BigBoss is reachable. Recovery-only when Edge Gemma
+        # is the only option — the small model can't handle Ollama management,
+        # embedding jobs, or context configuration.
+        _power_full_tools = [
+            inspect_model_management_status,
+            inspect_ubuntu_llama_manager,
+            diagnose_ubuntu_llama_no_response,
+            recover_ubuntu_llama_no_response,
+            control_ubuntu_llama_service,
+            request_ubuntu_server_power_action,
+            configure_ubuntu_llama_instance,
+            apply_model_context_policy,
+            check_external_service,
+            check_ollama_models,
+            plan_embedding_maintenance,
+            load_embedding_model,
+            unload_ollama_model,
+            run_embedding_jobs,
+            run_embedding_memory_jobs,
+            queue_vector_memory_backfill,
+            queue_current_thread_vector_backfill,
+            queue_recent_artifact_vector_backfill,
+            queue_selected_source_vector_backfill,
+            prepare_comfy_for_pixelle,
+            request_power_management_action,
+            *owner_safe_power_tools,
+            *owner_protected_power_tools,
+            wake_on_lan,
+            build_specialist_report,
+            search_agent_memory,
+            record_agent_memory,
+            search_curated_memory,
+            record_curated_memory,
+            semantic_memory_search,
+            query_source,
+            query_sources,
+            ingest_document_file,
+        ]
+        _power_recovery_tools = [
+            inspect_model_management_status,
+            inspect_ubuntu_llama_manager,
+            diagnose_ubuntu_llama_no_response,
+            recover_ubuntu_llama_no_response,
+            control_ubuntu_llama_service,
+            request_ubuntu_server_power_action,
+            *owner_safe_power_tools,
+            *owner_protected_power_tools,
+            wake_on_lan,
+            build_specialist_report,
+            search_agent_memory,
+            record_agent_memory,
+        ]
+        _power_tools = _power_full_tools if big_boss_up else _power_recovery_tools
+        _power_handoff = [
+            transfer_to_generalist,
+            transfer_to_debugger,
+            transfer_to_hermes,
+            transfer_to_research,
+            transfer_to_context,
+            *crisis_handoff_tools,
+        ]
+
+        _power_system_prompt = (
+            "You are the Power and Model Management Agent. Your job is to keep "
+            "AlphaRavis aware of local hardware state without taking unsafe "
+            "actions. Inspect big llama.cpp availability, Ollama running models, "
+            "ComfyUI readiness, and the embedding-maintenance window. "
+            "Use Ubuntu Llama Manager tools for the external llama.cpp manager "
+            "API: inspect instances/models, diagnose no-response failures, "
+            "recover the primary server when actions are enabled, start/stop/"
+            "restart managed llama services, run ESP/server power actions, "
+            "or patch primary/secondary model and context size. "
+            "When the user asks to turn BigBoss or the llama PC on, first "
+            "treat that as a power-on request for the Ubuntu host. If the "
+            "Ubuntu Manager API is reachable, use request_ubuntu_server_power_action "
+            "with action=`power-on`; if it is unreachable because the PC is "
+            "off, use the same tool with direct_esp=true so the ESP receives "
+            "the power button action directly. Do not call llama-server "
+            "runtime endpoints to power on a machine that is off. "
+            "Keep prompts and tool arguments small. For start requests, you may "
+            "start the named server or all requested servers. For shutdown, "
+            "power-off, reboot, reset, force-kill, or ambiguous destructive "
+            "requests, first state the exact target and tool you intend to use "
+            "and ask for confirmation unless the tool itself returns a human "
+            "approval interrupt. Never substitute a different server target. "
+            "You may use wake_on_lan for configured PCs when the user asks or "
+            "a Pixelle/Comfy job needs it. Shutdowns, service starts/stops, "
+            "Ollama model switching, and embedding-job runs must go through "
+            "request_power_management_action; by default it returns a dry-run "
+            "until the curated external management endpoint is configured. "
+            "Track whether a machine was already on or was started only for "
+            "the current user request. If ComfyUI was woken only for Pixelle, "
+            "wait for the Pixelle job to complete before shutdown; if the "
+            "big llama host was powered on only for this request, prefer the "
+            "Ubuntu Llama Manager shutdown path after the request is finished "
+            "and the configured idle delay has passed. Do not shut down a "
+            "machine that was already in use before this request. "
+            "Never invent SSH commands for shutdown or model switching. If raw "
+            "logs or shell diagnostics are needed, transfer to debugger_agent. "
+            "Use agent_id=`power_management_agent` for durable hardware/model "
+            "lessons, and record only stable facts such as known health URLs or "
+            "safe wake procedures."
+        )
+        if not big_boss_up:
+            _power_system_prompt = (
+                "You are the Power Management Recovery Agent. "
+                "BigBoss (the primary llama.cpp server) is currently DOWN. "
+                "Your ONLY job is to recover it: check status, power on the "
+                "host, start the llama-server, or restart it. "
+                "You have ONLY recovery tools — no Ollama management, no "
+                "embedding jobs, no context configuration. "
+                "If the user asks anything beyond server recovery (embedding "
+                "maintenance, context changes, Ollama models, queue backfill), "
+                "tell them BigBoss must be recovered first and offer to start "
+                "the server. "
+                "Use request_ubuntu_server_power_action with action=`power-on` "
+                "or direct_esp=true for the llama host. Use "
+                "control_ubuntu_llama_service to start/restart the llama-server "
+                "once the host is on. "
+                "Keep responses short and focused on recovery. "
+                + _power_system_prompt.split(
+                    "Use Ubuntu Llama Manager tools"
+                )[0]
+            )
+
         power_worker = _create_budgeted_deep_agent(
             model=power_llm,
-            tools=_agent_tools("power_management_agent", [
-                inspect_model_management_status,
-                inspect_ubuntu_llama_manager,
-                diagnose_ubuntu_llama_no_response,
-                recover_ubuntu_llama_no_response,
-                control_ubuntu_llama_service,
-                request_ubuntu_server_power_action,
-                configure_ubuntu_llama_instance,
-                apply_model_context_policy,
-                check_external_service,
-                check_ollama_models,
-                plan_embedding_maintenance,
-                load_embedding_model,
-                unload_ollama_model,
-                run_embedding_jobs,
-                run_embedding_memory_jobs,
-                queue_vector_memory_backfill,
-                queue_current_thread_vector_backfill,
-                queue_recent_artifact_vector_backfill,
-                queue_selected_source_vector_backfill,
-                prepare_comfy_for_pixelle,
-                request_power_management_action,
-                *owner_safe_power_tools,
-                *owner_protected_power_tools,
-                wake_on_lan,
-                build_specialist_report,
-                search_agent_memory,
-                record_agent_memory,
-                search_curated_memory,
-                record_curated_memory,
-                semantic_memory_search,
-                query_source,
-                query_sources,
-                ingest_document_file,
-            ], [
-                transfer_to_generalist,
-                transfer_to_debugger,
-                transfer_to_hermes,
-                transfer_to_research,
-                transfer_to_context,
-                *crisis_handoff_tools,
-            ]),
+            tools=_agent_tools("power_management_agent", _power_tools, _power_handoff),
             name="power_management_agent",
-            system_prompt=(
-                "You are the Power and Model Management Agent. Your job is to keep "
-                "AlphaRavis aware of local hardware state without taking unsafe "
-                "actions. Inspect big llama.cpp availability, Ollama running models, "
-                "ComfyUI readiness, and the embedding-maintenance window. "
-                "Use Ubuntu Llama Manager tools for the external llama.cpp manager "
-                "API: inspect instances/models, diagnose no-response failures, "
-                "recover the primary server when actions are enabled, start/stop/"
-                "restart managed llama services, run ESP/server power actions, "
-                "or patch primary/secondary model and context size. "
-                "When the user asks to turn BigBoss or the llama PC on, first "
-                "treat that as a power-on request for the Ubuntu host. If the "
-                "Ubuntu Manager API is reachable, use request_ubuntu_server_power_action "
-                "with action=`power-on`; if it is unreachable because the PC is "
-                "off, use the same tool with direct_esp=true so the ESP receives "
-                "the power button action directly. Do not call llama-server "
-                "runtime endpoints to power on a machine that is off. "
-                "Keep prompts and tool arguments small. For start requests, you may "
-                "start the named server or all requested servers. For shutdown, "
-                "power-off, reboot, reset, force-kill, or ambiguous destructive "
-                "requests, first state the exact target and tool you intend to use "
-                "and ask for confirmation unless the tool itself returns a human "
-                "approval interrupt. Never substitute a different server target. "
-                "You may use wake_on_lan for configured PCs when the user asks or "
-                "a Pixelle/Comfy job needs it. Shutdowns, service starts/stops, "
-                "Ollama model switching, and embedding-job runs must go through "
-                "request_power_management_action; by default it returns a dry-run "
-                "until the curated external management endpoint is configured. "
-                "Track whether a machine was already on or was started only for "
-                "the current user request. If ComfyUI was woken only for Pixelle, "
-                "wait for the Pixelle job to complete before shutdown; if the "
-                "big llama host was powered on only for this request, prefer the "
-                "Ubuntu Llama Manager shutdown path after the request is finished "
-                "and the configured idle delay has passed. Do not shut down a "
-                "machine that was already in use before this request. "
-                "Never invent SSH commands for shutdown or model switching. If raw "
-                "logs or shell diagnostics are needed, transfer to debugger_agent. "
-                "Use agent_id=`power_management_agent` for durable hardware/model "
-                "lessons, and record only stable facts such as known health URLs or "
-                "safe wake procedures."
-            )
-            + " "
-            + AGENT_POLICY_PROMPT,
+            system_prompt=_power_system_prompt + " " + AGENT_POLICY_PROMPT,
         )
         swarm_workers.append(power_worker)
     if crisis_manager_enabled:
