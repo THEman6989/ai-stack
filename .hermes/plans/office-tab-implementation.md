@@ -349,54 +349,74 @@ die 2-5 Tools die der Agent tatsächlich braucht.**
 Kann in den System-Prompt injected werden (∼3K chars, ∼750 Tokens).
 Deckt alle Befehle, Path-Syntax, Units/Colors, Error-Recovery.
 
-**Dual-Mode: CLI + MCP mit UI-Toggle**
+**Integration via bestehendes Toolset-System — KEIN separater CLI/ MCP-Mode nötig**
 
-Der User will BEIDES:
-- **Normaler Chat**: CLI-Modus (Agent nutzt `terminal("officecli ...")`)
-- **Office Tab**: MCP-Modus (Agent nutzt strukturierte MCP-Tools)
-- Zwei kleine Buttons im Office Tab zum Umschalten
+AlphaRavis hat bereits ein Lazy-Toolset-System in `alpharavis_toolsets.py`:
 
-Begründung:
-- CLI im Chat = kein Prompt-Overhead, spontane Office-Operationen
-- MCP im Office-Tab = tiefe Office-Arbeit, alle Tools verfügbar
-- Der Agent kann im CLI-Modus OfficeCLI trotzdem nutzen (via Help-System)
-- Im MCP-Modus kriegt er typisierte Tools mit Validierung
+```
+Agent sieht NUR Toolset-Registry (Kategorien):
+  coding/read: Read repository, artifacts, reviewed skills...
+  media/image: Generate images through Pixelle...
+  system/power: Owner-gated power lifecycle...
 
-**UI-Toggle im OfficePanel:**
-
-```tsx
-// Im OfficePanel.tsx — unter der Toolbar
-const [officeMode, setOfficeMode] = useState<"cli" | "mcp">("mcp");
-
-<div className="flex gap-1 items-center">
-  <span className="text-xs text-muted-foreground">Mode:</span>
-  <Button
-    size="sm"
-    variant={officeMode === "cli" ? "default" : "outline"}
-    className="h-6 px-2 text-xs"
-    onClick={() => setOfficeMode("cli")}
-  >
-    CLI
-  </Button>
-  <Button
-    size="sm"
-    variant={officeMode === "mcp" ? "default" : "outline"}
-    className="h-6 px-2 text-xs"
-    onClick={() => setOfficeMode("mcp")}
-  >
-    MCP
-  </Button>
-</div>
+Erst wenn Agent ein Toolset anfordert → materialize_toolsets() → echte Tools injected
 ```
 
-Der Mode wird als State-Metadatum an den Agent gesendet:
+OfficeCLI wird einfach als weiteres Toolset registriert:
+
 ```python
-# In agent state
-office_mode: "cli" | "mcp"  # default: "cli"
+# In alpharavis_toolsets.py — TOOLSETS dict
+"office/documents": Toolset(
+    "office/documents",
+    "Create, read, edit, and validate Office documents (.docx, .xlsx, .pptx). "
+    "Generate presentations, spreadsheets, and Word documents via OfficeCLI. "
+    "Includes live preview, template merge, and batch operations.",
+    mcp_categories=("officecli", "office"),
+),
 ```
 
-Im CLI-Mode ignoriert der Agent MCP-Tools und nutzt `terminal()`.
-Im MCP-Mode lädt er `mcp_discover("officecli")` und nutzt typisierte Tools.
+In `mcp.json` wird der OfficeCLI-MCP-Server registriert:
+
+```json
+{
+  "officecli": {
+    "command": "officecli",
+    "args": ["mcp", "start"],
+    "transport": "stdio"
+  }
+}
+```
+
+**Was der Agent sieht (im Prompt):**
+```
+office/documents: Create, read, edit, and validate Office documents (.docx, .xlsx, .pptx)...
+```
+→ ~25 Tokens. Eine Zeile. Keine 20 Einzel-Tools.
+
+**Was passiert wenn der Agent Office braucht:**
+1. `infer_toolsets_from_text("Erstelle eine PPTX")` → matcht "office/documents"
+2. `materialize_toolsets(["office/documents"])` → injected ALLE OfficeCLI-MCP-Tools
+3. Agent nutzt `officecli_add`, `officecli_create`, `officecli_view` etc.
+
+**Token-Bilanz:**
+- Request ohne Office: 0 Office-Tokens
+- Request mit Office: ~2000 Tokens (20 Tools), ABER nur wenn Office angefordert
+- Server-Verbindung: EAGER beim Start (1x), kostet ~2 Sekunden, keine Tokens
+
+**Kein CLI-Mode nötig.** Das Toolset-System ist bereits das "Ordner"-Konzept
+das du beschrieben hast. OfficeCLI funktioniert exakt wie Pixelle, RAG, etc.
+
+**Warum das besser ist als ein separater CLI/ MCP-Toggle:**
+- Kein UI-Toggle nötig — Agent entscheidet selbst wann er Office-Tools braucht
+- Kein `office_mode` State — weniger Komplexität
+- CLI-Referenz (`OFFICECLI_AGENT_REFERENCE.md`) bleibt als Fallback für Prompt-Injection
+- MCP-Tools sind typisiert, validiert, structured — kein Shell-Parsing
+- Funktioniert im normalen Chat UND im Office-Tab — kein Unterschied
+
+**Spätere Optimierung (Phase 5+): Server-Level Lazy MCP**
+Falls der OfficeCLI-MCP-Server-Start zu lange dauert (>5s), kann die
+Server-Verbindung von eager auf lazy umgestellt werden. Das ist aber
+ein separater Umbau in `mcp_client.py` und nicht Office-spezifisch.
 
 ### Phase 3: UI — Office Tab (Day 5-8)
 
@@ -814,7 +834,7 @@ officecli close report.docx      # Save and release
 | File | Purpose |
 |------|---------|
 | `submodules/OfficeCLI/` | Git submodule (already cloned) |
-| `src/app/components/OfficePanel.tsx` | Office tab UI component with CLI/MCP toggle |
+| `src/app/components/OfficePanel.tsx` | Office tab UI component |
 | `src/lib/office-parser.ts` | OfficeCLI wrapper for upload parsing |
 | `docs/AIONUI_OFFICE_INTEGRATION.md` | Architecture doc (already exists) |
 | `docs/OFFICECLI_AGENT_REFERENCE.md` | Compact CLI reference for agent system prompt |
@@ -827,7 +847,7 @@ officecli close report.docx      # Save and release
 | `docker/langgraph-api/Dockerfile` | Install OfficeCLI binary + chromium |
 | `docker-compose.yml` | Add office_output volume, expose port 26315 |
 | `src/app/page.tsx` | Add "Office" tab to navigation |
-| `langgraph-app/agent_graph.py` | Add `office_documents` + `office_mode` to state; add `mcp_discover` @tool; lazy MCP integration |
+| `langgraph-app/agent_graph.py` | Add `office/documents` toolset to `TOOLSETS`; register OfficeCLI MCP tools |
 | `langgraph-app/mcp_client.py` | Add `load_mcp_tools_lazy()` with TTL cache and selective tool injection |
 | `langgraph-app/prompt_assembly.py` | Add OfficeCLI CLI reference to system prompt (from OFFICECLI_AGENT_REFERENCE.md) |
 | `langgraph-app/mcp.json` | Register OfficeCLI MCP server (stdio transport) |
