@@ -603,7 +603,7 @@ ALPHARAVIS_PIXELLE_OWNER_WAKE_WAIT_SECONDS=30
 # job finishes and this idle delay passes. Uses owner SSH shutdown when enabled,
 # otherwise the curated power-management action endpoint.
 # Allowed values: true, false
-ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_COMFY_AFTER_JOB=false
+ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_COMFY_AFTER_JOB=true
 ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_DELAY_SECONDS=600
 # Policy marker for the Power/Model Manager: if it powered on the big llama
 # host only for one request, it should shut it down through Ubuntu Llama Manager
@@ -1159,9 +1159,16 @@ ALPHARAVIS_EMBEDDING_JOB_MAX_BATCH=25
 ALPHARAVIS_EMBEDDING_JOB_MAX_ATTEMPTS=3
 ALPHARAVIS_EMBEDDING_JOB_STALE_AFTER_SECONDS=900
 ALPHARAVIS_EMBEDDING_KEEP_ALIVE=30m
-ALPHARAVIS_EMBEDDING_UNLOAD_CHAT_MODEL=false
+ALPHARAVIS_EMBEDDING_UNLOAD_CHAT_MODEL=true
+# When true (default), skip the embedding lifecycle while the chat/crisis model is
+# loaded so chat responsiveness is not interrupted by Ollama model switching.
+# Combined with ALPHARAVIS_EMBEDDING_UNLOAD_CHAT_MODEL=true, embedding work still
+# runs during idle windows: the lifecycle unloads chat first, loads embedding,
+# drains the queue, and leaves embedding loaded (RESTORE_CHAT=false).
 ALPHARAVIS_EMBEDDING_SKIP_IF_CHAT_MODEL_LOADED=true
-ALPHARAVIS_EMBEDDING_RESTORE_CHAT_MODEL=true
+# When true, re-load the chat model after embedding jobs finish. Set to false to
+# leave the embedding model loaded for low-latency RAG on the next turn.
+ALPHARAVIS_EMBEDDING_RESTORE_CHAT_MODEL=false
 ALPHARAVIS_OLLAMA_CHAT_KEEP_ALIVE=30m
 ALPHARAVIS_ENABLE_EMBEDDING_SCHEDULER=false
 ALPHARAVIS_EMBEDDING_SCHEDULER_INTERVAL_SECONDS=120
