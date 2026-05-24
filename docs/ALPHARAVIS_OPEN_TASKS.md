@@ -37,10 +37,11 @@ Still needed:
 - Decide later whether to tackle AionUi Tier 3 items: i18n, inline tool-result
   streaming, and conversation tabs.
 - New: Office/Docs integration research completed. `docs/AIONUI_OFFICE_INTEGRATION.md`
-  documents AionUi's architecture, Office document pipeline (mammoth,
-  officeparser, docx, xlsx-republish, pptx2json), feature-channel system,
-  and a 3-phase AlphaRavis porting plan. Phase 1 (Office upload → Agent
-  context) is low-effort/high-impact.
+  documents AionUi and OfficeCLI architecture. OfficeCLI submodule cloned
+  (`submodules/OfficeCLI`). Full implementation plan in
+  `.hermes/plans/office-tab-implementation.md` — standalone, self-contained,
+  5-phase plan covering Docker integration, Agent tooling, Office UI tab,
+  Live Preview (watch mode), and advanced features (templates, batch, MCP).
 
 ## Parallel Task Execution (Stage 2)
 
