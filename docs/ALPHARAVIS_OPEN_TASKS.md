@@ -5,36 +5,34 @@ not fully wired yet.
 
 ## Parallel Task Execution (Stage 2)
 
-Status: Stage 1 implemented (structured DAG, analysis, logging). Stage 2
-(actual parallel execution) still needed.
+Status: Stage 2 implemented (executor, worker spawn, merge/review). Live
+testing and Codex/Hermes adapters still needed.
 
-Implemented in Stage 1:
+Implemented:
 
-- `ai_stack/parallel_executor/task_graph.py`: Parses planner text into
-  structured `PlannedTask` DAG with classification, file conflict detection,
-  chokepoint detection, and parallelization analysis.
-- `ai_stack/parallel_executor/worktree_manager.py`: Git worktree isolation
-  adapted from Hermes CLI.
-- `ai_stack/parallel_executor/worker_spawner.py`: Abstract `WorkerSpawner`
-  interface with `DryRunWorker` mock.
-- Minimal hook in `agent_graph.py` (planner_node produces `parallel_dag`).
-- Feature flag `ALPHARAVIS_PARALLEL_TASK_EXECUTION=false` (default OFF).
-- 36 tests covering DAG analysis and all parallelization rules.
+- `ai_stack/parallel_executor/executor.py`: `ParallelExecutor` runs parallel
+  groups concurrently via `asyncio.gather()`, then serial chain sequentially,
+  then merge/review. `build_execution_plan()` converts `TaskDAG` to ordered
+  `ExecutionPlan`.
+- `ai_stack/parallel_executor/worker_spawner.py`: Added `DirectLLMWorker`
+  that integrates with `_ainvoke_direct_text` via callable injection (avoids
+  circular imports with agent_graph).
+- `agent_graph.py`: Added `parallel_executor` graph node wired between
+  `final_budget_rescue` and `swarm_trace_start`. When disabled, returns `{}`
+  (complete no-op).
+- `_parallel_executor_node` builds executor with DirectLLM worker, runs DAG,
+  logs results, and appends result messages to state.
+- 41 tests covering Stage 1 + Stage 2 (execution plan, dry-run executor,
+  failing worker, merge/review, report serialization). All 91 tests pass.
 
-Still needed (Stage 2):
+Still needed:
 
-- Actual worker spawning: connect Codex/Hermes/Direct-LLM adapters to the
-  `WorkerSpawner` interface and `WorkerAdapterRegistry`.
-- Parallel execution in the swarm: when the DAG identifies parallel groups,
-  spawn workers in isolated worktrees concurrently instead of sequential
-  handoff.
-- Merge/review agent: after parallel workers complete, collect `build_specialist_report`
-  outputs, detect merge conflicts, and produce a unified result.
-- Integration with `ContextScheduler` for admission checks before spawning
-  big-model workers in parallel.
-- File/glob locking: prevent race conditions on shared resources beyond
-  static conflict detection.
-- Live test with a real multi-task user request.
+- Codex CLI adapter and Hermes agent adapter for `WorkerSpawner` interface.
+- Live test with real BigBoss calls through the DirectLLM worker.
+- Profile parallel execution overhead and resource usage.
+- File/glob locking for concurrent write tasks (currently only static
+  conflict detection).
+- DeepAgents Responses compatibility testing with parallel executor messages.
 
 ## Percentage-Based Context Budget Router
 

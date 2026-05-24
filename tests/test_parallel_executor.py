@@ -367,3 +367,85 @@ class TestWorktreeManager:
         removed = wm.remove("test_task_worktree", force=True)
         assert removed is True
         assert not Path(info.path).exists()
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: ExecutionPlan and ParallelExecutor
+# ---------------------------------------------------------------------------
+
+class TestExecutionPlan:
+    def test_build_plan_from_simple_dag(self):
+        from ai_stack.parallel_executor.executor import build_execution_plan
+        tasks = [
+            PlannedTask(task_id="a", title="Read A", task_type=TaskType.READ_ONLY_ANALYSIS,
+                       read_only=True, write_enabled=False, can_parallelize=True,
+                       parallel_group_id="group_01"),
+            PlannedTask(task_id="b", title="Read B", task_type=TaskType.READ_ONLY_ANALYSIS,
+                       read_only=True, write_enabled=False, can_parallelize=True,
+                       parallel_group_id="group_01"),
+            PlannedTask(task_id="c", title="Serial C", task_type=TaskType.WRITE_IMPLEMENTATION,
+                       read_only=False, write_enabled=True, can_parallelize=False),
+        ]
+        dag = TaskDAG(tasks=tasks, serial_chain=["c"])
+        plan = build_execution_plan(dag)
+        assert len(plan.parallel_groups) >= 1
+        assert len(plan.serial_chain) >= 1
+        # Merge task created for multi-task DAG
+        assert plan.merge_task is not None
+
+    def test_single_task_no_merge(self):
+        from ai_stack.parallel_executor.executor import build_execution_plan
+        tasks = [
+            PlannedTask(task_id="a", title="Only task", task_type=TaskType.READ_ONLY_ANALYSIS,
+                       read_only=True, write_enabled=False),
+        ]
+        dag = TaskDAG(tasks=tasks)
+        plan = build_execution_plan(dag)
+        assert plan.merge_task is None
+
+
+class TestParallelExecutor:
+    def test_execute_with_dry_run(self):
+        from ai_stack.parallel_executor.executor import ParallelExecutor
+        tasks = [
+            PlannedTask(task_id="a", title="Task A", task_type=TaskType.READ_ONLY_ANALYSIS,
+                       read_only=True, write_enabled=False, can_parallelize=True,
+                       parallel_group_id="group_01"),
+            PlannedTask(task_id="b", title="Task B", task_type=TaskType.SUMMARIZATION,
+                       read_only=True, write_enabled=False, can_parallelize=True,
+                       parallel_group_id="group_01"),
+        ]
+        dag = TaskDAG(tasks=tasks)
+        executor = ParallelExecutor()
+        report = asyncio.run(executor.execute(dag, task_brief="Test"))
+        assert report.total_tasks == 2
+        assert report.completed == 2
+        assert report.failed == 0
+        assert report.ok is True
+        assert report.merge_result is not None
+
+    def test_execute_with_failed_task(self):
+        from ai_stack.parallel_executor.executor import ParallelExecutor
+        from ai_stack.parallel_executor.worker_spawner import WorkerSpawner, WorkerResult
+
+        class FailingWorker(WorkerSpawner):
+            async def spawn(self, task, **kwargs):
+                return WorkerResult(task_id=task.task_id, status="failed", error="test error")
+
+        tasks = [
+            PlannedTask(task_id="a", title="Will fail", task_type=TaskType.WRITE_IMPLEMENTATION,
+                       read_only=False, write_enabled=True),
+        ]
+        dag = TaskDAG(tasks=tasks)
+        executor = ParallelExecutor(spawner=FailingWorker())
+        report = asyncio.run(executor.execute(dag))
+        assert report.completed == 0
+        assert report.failed == 1
+        assert report.ok is False
+
+    def test_execution_report_to_dict(self):
+        from ai_stack.parallel_executor.executor import ExecutionReport
+        report = ExecutionReport(total_tasks=2, completed=2)
+        d = report.to_dict()
+        assert d["total_tasks"] == 2
+        assert d["completed"] == 2

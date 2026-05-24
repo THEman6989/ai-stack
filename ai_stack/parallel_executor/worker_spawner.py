@@ -122,6 +122,64 @@ class DryRunWorker(WorkerSpawner):
 
 
 # ---------------------------------------------------------------------------
+# Direct LLM worker (calls into agent_graph's _ainvoke_direct_text)
+# ---------------------------------------------------------------------------
+
+
+DirectLLMFn = Any  # async callable: (prompt: str, max_tokens: int) -> str
+
+
+class DirectLLMWorker(WorkerSpawner):
+    """Spawns a direct LLM call for a task.
+
+    Uses a callable (typically _ainvoke_direct_text from agent_graph)
+    to avoid circular imports.
+    """
+
+    def __init__(self, llm_fn: DirectLLMFn | None = None) -> None:
+        self._llm_fn = llm_fn
+
+    def set_llm_fn(self, fn: DirectLLMFn) -> None:
+        self._llm_fn = fn
+
+    async def spawn(
+        self,
+        task: PlannedTask,
+        *,
+        worktree: WorktreeInfo | None = None,
+        task_brief: str = "",
+        **kwargs: Any,
+    ) -> WorkerResult:
+        if self._llm_fn is None:
+            # Fall back to dry-run behavior
+            dry = DryRunWorker()
+            return await dry.spawn(task, worktree=worktree, task_brief=task_brief)
+
+        prompt = (
+            f"Task: {task.title}\n"
+            f"Type: {task.task_type.value}\n"
+            f"Context: {task_brief}\n"
+        )
+        max_tokens = 4096 if task.required_model_class == ModelClass.BIG_MODEL else 1024
+
+        try:
+            output = await self._llm_fn(prompt, max_tokens)
+            return WorkerResult(
+                task_id=task.task_id,
+                status="completed",
+                output=str(output),
+                worktree=worktree,
+            )
+        except Exception as exc:
+            return WorkerResult(
+                task_id=task.task_id,
+                status="failed",
+                error=f"{type(exc).__name__}: {exc}",
+                worktree=worktree,
+            )
+
+
+# ---------------------------------------------------------------------------
 # Adapter registry (for future real adapters)
 # ---------------------------------------------------------------------------
 

@@ -477,7 +477,11 @@ if _setup_operational_logging is not None:
 _PARALLEL_EXECUTOR_AVAILABLE = False
 try:
     from ai_stack.parallel_executor import (
+        DirectLLMWorker,
+        ParallelExecutor,
+        TaskDAG,
         analyze_parallelization,
+        build_execution_plan,
         log_parallelization_decision,
         parallel_execution_enabled,
         parse_planner_text_into_tasks,
@@ -861,6 +865,86 @@ def _crisis_action_timeout_seconds() -> float:
         return max(1.0, float(os.getenv("ALPHARAVIS_CRISIS_ACTION_TIMEOUT_SECONDS", "90")))
     except ValueError:
         return 90.0
+
+
+async def _parallel_executor_node(state: AlphaRavisState) -> dict[str, Any]:
+    """If parallel execution is enabled and the DAG has parallel groups,
+    run tasks in parallel via the executor instead of the sequential swarm.
+
+    Returns state updates with the execution result. When disabled or no
+    parallel groups exist, returns empty dict (no-op, swarm runs normally).
+    """
+    if not _PARALLEL_EXECUTOR_AVAILABLE:
+        return {}
+    if not parallel_execution_enabled():
+        return {}
+
+    dag_dict = state.get("parallel_dag") or {}
+    tasks_data = dag_dict.get("tasks") or []
+    if not tasks_data:
+        return {}
+
+    from ai_stack.parallel_executor.task_graph import PlannedTask
+    tasks = [PlannedTask.from_dict(t) for t in tasks_data if isinstance(t, dict)]
+    if not tasks:
+        return {}
+
+    dag = TaskDAG(tasks=tasks)
+    plan = build_execution_plan(dag)
+
+    # Only intercept if there are actually parallel groups to run
+    if not plan.parallel_groups and not plan.serial_chain:
+        return {}
+
+    _log_event(
+        logging.INFO,
+        "parallel_executor.running",
+        parallel_groups=len(plan.parallel_groups),
+        serial_tasks=len(plan.serial_chain),
+        total_tasks=len(tasks),
+    )
+
+    # Build executor with DirectLLM worker wired to _ainvoke_direct_text
+    worker = DirectLLMWorker()
+    worker.set_llm_fn(_ainvoke_direct_text)
+    executor = ParallelExecutor(spawner=worker, merge_spawner=worker)
+
+    task_brief = str(state.get("current_task_brief") or state.get("planner_context") or "")
+    report = await executor.execute(dag, task_brief=task_brief)
+
+    _log_event(
+        logging.INFO,
+        "parallel_executor.completed",
+        completed=report.completed,
+        failed=report.failed,
+        elapsed_seconds=round(report.elapsed_seconds, 3),
+    )
+
+    # Build response messages from results
+    messages: list[Any] = []
+    for r in report.results:
+        status = "OK" if r.ok else "FAILED"
+        messages.append(
+            SystemMessage(content=f"[{r.task_id}] {status}: {r.output[:500]}")
+        )
+
+    if report.merge_result and report.merge_result.ok:
+        messages.append(
+            SystemMessage(
+                content=f"[merge_review] {report.merge_result.output[:2000]}"
+            )
+        )
+
+    return {
+        "messages": messages,
+        "run_profile": _profile_update(
+            state,
+            parallel_executed=True,
+            parallel_completed=report.completed,
+            parallel_failed=report.failed,
+            parallel_elapsed_seconds=round(report.elapsed_seconds, 3),
+        ),
+    }
 
 
 def _crisis_caps_status(state: AlphaRavisState) -> dict[str, Any]:
@@ -13723,6 +13807,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     builder.add_node("handoff_context_guard", handoff_context_guard_node)
     builder.add_node("handoff_context_guard_trace_finish", _trace_marker_node("langgraph.handoff_context_guard.completed"))
     builder.add_node("final_budget_rescue", final_budget_rescue_node)
+    # Parallel executor: runs before swarm if enabled. Returns {} (no-op) when disabled.
+    builder.add_node("parallel_executor", _parallel_executor_node)
     builder.add_node("swarm_trace_start", swarm_trace_start_node)
     builder.add_node("alpha_ravis_swarm", run_swarm_with_context_retry)
     builder.add_node("swarm_trace_finish", swarm_trace_finish_node)
@@ -13759,7 +13845,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     builder.add_edge("skill_library_trace_finish", "handoff_context_guard")
     builder.add_edge("handoff_context_guard", "handoff_context_guard_trace_finish")
     builder.add_edge("handoff_context_guard_trace_finish", "final_budget_rescue")
-    builder.add_edge("final_budget_rescue", "swarm_trace_start")
+    builder.add_edge("final_budget_rescue", "parallel_executor")
+    builder.add_edge("parallel_executor", "swarm_trace_start")
     builder.add_edge("swarm_trace_start", "alpha_ravis_swarm")
     builder.add_edge("alpha_ravis_swarm", "swarm_trace_finish")
     builder.add_edge("swarm_trace_finish", "memory_kernel_after")

@@ -30,8 +30,18 @@ from ai_stack.parallel_executor.worker_spawner import (
     WorkerResult,
     WorkerSpawner,
     DryRunWorker,
+    DirectLLMWorker,
+    DirectLLMFn,
     WorkerAdapterRegistry,
     GLOBAL_WORKER_REGISTRY,
+)
+
+from ai_stack.parallel_executor.executor import (
+    ExecutionPlan,
+    ExecutionReport,
+    ParallelExecutor,
+    build_execution_plan,
+    get_executor,
 )
 
 __all__ = [
@@ -54,6 +64,14 @@ __all__ = [
     "WorkerResult",
     "WorkerSpawner",
     "DryRunWorker",
+    "DirectLLMWorker",
+    "DirectLLMFn",
     "WorkerAdapterRegistry",
     "GLOBAL_WORKER_REGISTRY",
+    # Executor
+    "ExecutionPlan",
+    "ExecutionReport",
+    "ParallelExecutor",
+    "build_execution_plan",
+    "get_executor",
 ]

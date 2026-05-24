@@ -98,25 +98,18 @@ can tell which patches are intentional and which ones can be removed.
   Adapted from Hermes CLI patterns. Creates/removes per-task worktrees in
   `.worktrees/`, ensures `.gitignore` entries, copies `.worktreeinclude` files.
 - `worker_spawner.py`: Abstract `WorkerSpawner` interface plus `DryRunWorker`
-  mock for testing. Adapter registry for future Codex/Hermes real workers.
+  mock for testing. `DirectLLMWorker` integrates with `_ainvoke_direct_text`
+  via callable injection (avoids circular imports).
+- `executor.py`: `ParallelExecutor` runs parallel groups concurrently via
+  `asyncio.gather()`, then serial chain sequentially, then merge/review.
+  `build_execution_plan()` converts TaskDAG to ordered ExecutionPlan.
 - Minimal hook in `agent_graph.py`: one state field (`parallel_dag`), one
-  guarded import block, one function (`_parallel_execution_hook`), one line
-  in `planner_node` updates dict. No refactor, no rewrite.
+  guarded import block, two functions (`_parallel_execution_hook`,
+  `_parallel_executor_node`), one line in `planner_node`, one graph node
+  (`parallel_executor`) wired between `final_budget_rescue` and
+  `swarm_trace_start`. When disabled, returns `{}` (complete no-op).
 - Feature flag: `ALPHARAVIS_PARALLEL_TASK_EXECUTION=false` (default OFF).
   When disabled, existing sequential swarm path is completely unchanged.
-  When enabled, planner output is parsed into structured DAG and logged.
-- Parallelization rules: read-only tasks parallelize freely, write tasks
-  serialize on file conflicts, chokepoint files (package.json, lockfiles,
-  docker-compose.yml, Dockerfile, .env, README.md, shared schemas/types,
-  API client files, migrations) force serialization, tests wait for
-  implementation, merge/review always serialized.
-- Actual parallel execution (worker spawn, merge/review) is Stage 2.
-- Tests: 36 new tests covering feature flag, planner parsing, task
-  classification, file conflict detection, parallelization analysis (12
-  scenarios), DAG counts, observability logging, dry-run worker, and
-  worktree manager.
-- Agent graph now defaults to ephemeral threads and preserves dirty user work
-  across all parallel execution scenarios.
 
 ## 2026-05-22 - Llama Runtime Context Leases
 
