@@ -316,7 +316,87 @@ ALPHARAVIS_MCP_LAZY_CACHE_TTL=300  # Cache TTL in seconds
 - Mit Office-Request: ~2000 Tokens ONCE (dann gecached)
 - Bei 100 Requests/Tag, 10% Office: 180K Tokens gespart
 
----
+**Lazy-Granularität: Server-Level vs. Tool-Level**
+
+MCP-Protokoll kann nur den GANZEN Server laden — `list_tools()` gibt immer
+alle Tools zurück. Man kann nicht einzelne Tools anfragen.
+
+ABER: Nach dem Laden können wir **selektiv injecten**:
+
+```
+Server-Verbindung (1x):
+  mcp_discover("officecli")
+  → Verbindet zu officecli MCP
+  → list_tools() → 20 Tools (add, set, view, merge, watch, ...)
+  → Cache: alle 20 für 5min
+
+Tool-Injection (pro Request):
+  Agent sagt "add a slide"
+  → System erkennt: nur "add" wird gebraucht
+  → Injiziert NUR officecli_add in den Prompt
+  → 18 andere Office-Tools bleiben draussen
+  
+  Agent sagt "create full presentation with pivot table"
+  → System injiziert: create, add, set, merge, view → 5 Tools
+```
+
+Das heisst: Server-Lazy (keine Verbindung bis gebraucht) + Tool-Lazy
+(nur relevante Tools in den Prompt). **Token-Kosten pro Request = nur
+die 2-5 Tools die der Agent tatsächlich braucht.**
+
+**Agent-Referenz-Dokumentation:**
+`docs/OFFICECLI_AGENT_REFERENCE.md` — kompakte CLI-Referenz für den Agent.
+Kann in den System-Prompt injected werden (∼3K chars, ∼750 Tokens).
+Deckt alle Befehle, Path-Syntax, Units/Colors, Error-Recovery.
+
+**Dual-Mode: CLI + MCP mit UI-Toggle**
+
+Der User will BEIDES:
+- **Normaler Chat**: CLI-Modus (Agent nutzt `terminal("officecli ...")`)
+- **Office Tab**: MCP-Modus (Agent nutzt strukturierte MCP-Tools)
+- Zwei kleine Buttons im Office Tab zum Umschalten
+
+Begründung:
+- CLI im Chat = kein Prompt-Overhead, spontane Office-Operationen
+- MCP im Office-Tab = tiefe Office-Arbeit, alle Tools verfügbar
+- Der Agent kann im CLI-Modus OfficeCLI trotzdem nutzen (via Help-System)
+- Im MCP-Modus kriegt er typisierte Tools mit Validierung
+
+**UI-Toggle im OfficePanel:**
+
+```tsx
+// Im OfficePanel.tsx — unter der Toolbar
+const [officeMode, setOfficeMode] = useState<"cli" | "mcp">("mcp");
+
+<div className="flex gap-1 items-center">
+  <span className="text-xs text-muted-foreground">Mode:</span>
+  <Button
+    size="sm"
+    variant={officeMode === "cli" ? "default" : "outline"}
+    className="h-6 px-2 text-xs"
+    onClick={() => setOfficeMode("cli")}
+  >
+    CLI
+  </Button>
+  <Button
+    size="sm"
+    variant={officeMode === "mcp" ? "default" : "outline"}
+    className="h-6 px-2 text-xs"
+    onClick={() => setOfficeMode("mcp")}
+  >
+    MCP
+  </Button>
+</div>
+```
+
+Der Mode wird als State-Metadatum an den Agent gesendet:
+```python
+# In agent state
+office_mode: "cli" | "mcp"  # default: "cli"
+```
+
+Im CLI-Mode ignoriert der Agent MCP-Tools und nutzt `terminal()`.
+Im MCP-Mode lädt er `mcp_discover("officecli")` und nutzt typisierte Tools.
 
 ### Phase 3: UI — Office Tab (Day 5-8)
 
@@ -734,9 +814,10 @@ officecli close report.docx      # Save and release
 | File | Purpose |
 |------|---------|
 | `submodules/OfficeCLI/` | Git submodule (already cloned) |
-| `src/app/components/OfficePanel.tsx` | Office tab UI component |
+| `src/app/components/OfficePanel.tsx` | Office tab UI component with CLI/MCP toggle |
 | `src/lib/office-parser.ts` | OfficeCLI wrapper for upload parsing |
 | `docs/AIONUI_OFFICE_INTEGRATION.md` | Architecture doc (already exists) |
+| `docs/OFFICECLI_AGENT_REFERENCE.md` | Compact CLI reference for agent system prompt |
 | `.hermes/plans/office-tab-implementation.md` | This plan |
 
 ### Modified Files
@@ -746,9 +827,10 @@ officecli close report.docx      # Save and release
 | `docker/langgraph-api/Dockerfile` | Install OfficeCLI binary + chromium |
 | `docker-compose.yml` | Add office_output volume, expose port 26315 |
 | `src/app/page.tsx` | Add "Office" tab to navigation |
-| `langgraph-app/agent_graph.py` | Add `office_documents` to state |
-| `langgraph-app/prompt_assembly.py` | Add OfficeCLI instructions to system prompt |
-| `langgraph-app/mcp.json` | Optional: register OfficeCLI MCP server |
+| `langgraph-app/agent_graph.py` | Add `office_documents` + `office_mode` to state; add `mcp_discover` @tool; lazy MCP integration |
+| `langgraph-app/mcp_client.py` | Add `load_mcp_tools_lazy()` with TTL cache and selective tool injection |
+| `langgraph-app/prompt_assembly.py` | Add OfficeCLI CLI reference to system prompt (from OFFICECLI_AGENT_REFERENCE.md) |
+| `langgraph-app/mcp.json` | Register OfficeCLI MCP server (stdio transport) |
 
 ---
 
