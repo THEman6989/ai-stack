@@ -77,8 +77,8 @@ can tell which patches are intentional and which ones can be removed.
   - AlphaRavis porting plan: 3 phases — Phase 1 (Office upload to Agent
     context via mammoth/officeparser), Phase 2 (document generation via docx),
     Phase 3 (Channel/IM plugins).
-  - All recommended dependencies are MIT/BSD licensed, `@office-ai/*` scope
-    packages are AionUi-proprietary and would NOT be used.
+  - All dependencies are open source (Apache 2.0 / MIT / BSD).
+    `@office-ai/aioncli-core` = Apache 2.0, `@office-ai/platform` = MIT.
 - Feature-gap comparison: AionUi has Office docs + IM channels, Deep Agents UI
   has Tasks/Todos + Tool Approval. Office upload is low-effort/high-impact.
 

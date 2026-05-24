@@ -276,13 +276,15 @@ Telegram/Discord-Integration. Channel-Plugins würden den Scope sprengen.
 ## 9. Lizenz-Kompatibilität
 
 - AionUi: Apache 2.0 ✅ (kompatibel mit AlphaRavis)
-- `@office-ai/aioncli-core`: Proprietär? (npm @office-ai scope)
-- `@office-ai/platform`: Proprietär? (npm @office-ai scope)
+- `@office-ai/aioncli-core`: Apache 2.0 ✅ — Repo: `github.com/office-sec/aioncli`
+- `@office-ai/platform`: MIT ✅ — (kein öffentliches Repo, aber MIT via npm)
 - `mammoth`: BSD 2-Clause ✅
 - `officeparser`: MIT ✅
 - `docx`: MIT ✅
 
-**Wichtig**: Die `@office-ai/*` Pakete sind im npm Registry unter dem
-`@office-ai` Scope verfügbar, aber ihre Lizenzen sind unklar. Für AlphaRavis
-würden wir die **offenen Alternativen** (`mammoth`, `officeparser`, `docx`,
-`xlsx-republish`) verwenden, nicht die proprietären AionUi-Core-Pakete.
+**Korrektur (2026-05-24)**: Die `@office-ai/*` Pakete sind entgegen erster
+Annahme Open Source (Apache 2.0 / MIT). Sie können für AlphaRavis verwendet
+werden, sofern der Scope `@office-ai` keine Nutzungsbeschränkungen auferlegt.
+Empfehlung: `@office-ai/aioncli-core` nur dann einbinden, wenn AlphaRavis das
+AionUi-CLI-Framework direkt nutzen will (aktuell nicht der Fall). Für reines
+Office-Parsing/Dokument-Handling reichen `mammoth`, `officeparser`, `docx`.
