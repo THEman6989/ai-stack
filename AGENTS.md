@@ -100,6 +100,54 @@ Bridge smoke tests, and relevant docs all support that change.
 - Preserve dirty user work. Do not revert files you did not intentionally
   change.
 
+### Module Boundary Rules (agent_graph.py)
+
+agent_graph.py is the main LangGraph orchestration file. It should remain the
+place where graph nodes, state transitions, and high-level orchestration live.
+Implementation logic that does not need to live directly inside agent_graph.py
+should be extracted to separate modules.
+
+**Keep in agent_graph.py:**
+- LangGraph node definitions (graph wiring)
+- Graph state transitions and routing
+- High-level orchestration (calls to planner/router/executor/reviewer)
+- Graph-global state and configuration
+- @tool-decorated functions registered in _build_graph()
+- Model construction helpers coupled to graph context
+
+**Extract to separate modules when safe:**
+- Pure helper functions with no LLM calls or graph state dependency
+- Prompt construction and policy text constants
+- Content analysis and text parsing utilities
+- Command safety classification
+- Token estimation and ratio calculation utilities
+- Context discovery helpers
+- Source metadata and content type detection
+
+**Decision rules:**
+- Create a separate file only when code clearly belongs together
+- Prefer extending existing modules over creating new ones
+- Keep old behavior working — do not remove from agent_graph.py until verified
+- Use guarded imports (try/except ImportError) so graph import never breaks
+- Move only when coupling is low and circular imports are avoided
+
+**Existing extracted modules (extend these, don't create duplicates):**
+- `source_content.py` — text analysis, content type detection, line range parsing
+- `command_safety.py` — SSH command classification (read-only vs dangerous)
+- `prompt_assembly.py` — policy prompts, FAST_PATH patterns, environment hints
+- `context_compressor.py` — message compression, token estimation, ratio utils
+- `model_metadata.py` — context length discovery, model metadata
+- `retrieval_router.py` — RAG backend selection, hit scoring (see open tasks)
+- `alpharavis_toolsets.py` — toolset resolution and materialization
+- `error_classifier.py` — error reason classification
+- `file_safety.py` — file read/write safety decisions
+- `internal_context.py` — internal context block scrubbing
+- `compression_redact.py` — secret redaction
+- `media_analysis.py` — media preparation for model
+- `operational_logging.py` — structured operational logging
+- `owner_power_tools.py` — owner-gated server power commands
+- `repo_skills.py` — AI skill card scanning
+
 ## Verification
 
 Run the narrowest useful test first, then broaden when touching shared paths.

@@ -531,6 +531,8 @@ def setting_category(key: str, section: str, description: str) -> str:
     text = f"{key} {section} {description}".lower()
     if "reviewer" in key_lower or "async_review" in key_lower:
         return "features"
+    if "background_task" in key_lower or "background_context" in key_lower:
+        return "features"
     if "run_state" in key_lower or "runtime_settings" in key_lower:
         return "runtime"
     if "service_dashboard" in key_lower or "tailscale" in key_lower:
@@ -561,6 +563,7 @@ def setting_tags(key: str, section: str, description: str, category: str) -> lis
     tag_rules = [
         ("run-state", ("run_state", "resume", "checkpoint")),
         ("reviewer", ("reviewer", "async_review", "review after run")),
+        ("background-tasks", ("background_task", "background_context", "latency-hiding")),
         ("runtime", ("runtime", "temporary", "resume", "timeout")),
         ("dashboard", ("service_dashboard", "dashboard")),
         ("tailscale", ("tailscale", "tailnet")),
@@ -636,6 +639,8 @@ def setting_importance(key: str, section: str, description: str) -> int:
         "run_state",
         "reviewer",
         "async_review",
+        "background_task",
+        "background_context",
         "runtime_settings",
         "crisis",
         "curated_memory_auto_accept",
@@ -741,6 +746,18 @@ def fallback_description(key: str, description: str) -> str:
         return "Mindestlaenge der finalen Antwort, ab der der optionale Hintergrund-Reviewer startet."
     if "async_review_store_path" in lower:
         return "JSON-Speicher fuer ausstehende Hintergrund-Review-Hinweise pro Thread."
+    if "background_tasks_enabled" in lower:
+        return "Aktiviert die parallele Background-Lane fuer kleine read-only Nebenaufgaben; LLM-Nebenjobs brauchen weiterhin Context-Leases."
+    if "background_read_only_max_concurrency" in lower:
+        return "Maximale Parallelitaet fuer ungefaehrliche read-only Background-Tools."
+    if "background_small_llm_max_concurrency" in lower:
+        return "Maximale Parallelitaet fuer kleine Background-LLM-Jobs nach Context-Lease-Pruefung."
+    if "background_context_max_utilization" in lower:
+        return "Maximaler Kontextanteil fuer Background-LLM-Leases, damit der Main-Agent priorisiert bleibt."
+    if "background_task_timeout_seconds" in lower:
+        return "Timeout in Sekunden fuer einzelne Background-Tasks."
+    if "background_cancel_on_context_pressure" in lower:
+        return "Wenn true, duerfen niedrige oder spekulative Background-Tasks bei Kontextdruck abgebrochen werden."
     if "code_window" in lower or "code_windows" in lower:
         return "Steuert Markdown-Codefenster-Unterstuetzung fuer Bridge- und LangGraph-Ausgaben."
     if "ubuntu_llama_manager_ip" in lower:

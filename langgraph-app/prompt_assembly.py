@@ -135,3 +135,97 @@ def stable_prompt_sections(*, cwd: str | Path | None = None) -> list[str]:
 def build_stable_prompt_context(*, cwd: str | Path | None = None, extra_sections: Iterable[str] = ()) -> str:
     sections = [*stable_prompt_sections(cwd=cwd), *[str(item).strip() for item in extra_sections if str(item).strip()]]
     return "<stable-runtime-context>\n" + "\n\n".join(sections) + "\n</stable-runtime-context>"
+
+
+# ---------- agent policy prompts ----------
+
+HANDOFF_POLICY_PROMPT = (
+    "Handoff policy: before you transfer to another AlphaRavis agent, create a "
+    "handoff packet with build_specialist_report. The packet must state what is "
+    "done, what remains open, evidence/source keys, files/commands/tools used, "
+    "verification status, risks, and the exact next-agent instruction. Do not "
+    "put long logs in the packet; store them as artifacts and cite the artifact key."
+)
+
+ARCHIVE_RETRIEVAL_POLICY_PROMPT = (
+    "Archived context policy: archived context is not automatically loaded into "
+    "the active prompt. If the user asks about earlier work, old debugging, "
+    "previous decisions, 'damals', 'vorhin', 'letztes Mal', or if a summary says "
+    "details are archived, use semantic_memory_search first. Archive collections "
+    "are tables of contents; inspect child_archive_keys and load only relevant "
+    "raw archives before relying on exact old details. Cross-thread retrieval "
+    "requires an explicit user request."
+)
+
+CODE_WINDOW_POLICY_PROMPT = (
+    "Code-window policy: when showing code, patches, shell snippets, logs, JSON, "
+    "YAML, or config, use normal Markdown fenced code blocks with a language tag "
+    "when known. Do not wrap code in HTML or proprietary canvas markers unless "
+    "the user explicitly asks for an artifact file."
+)
+
+SPECIALIST_LOCAL_PLAN_PROMPT = (
+    "Specialist planning policy: when you receive an execution plan or current "
+    "task brief, first adapt it into your own short specialist plan before "
+    "doing substantive work. Keep this internal plan concise: objective, needed "
+    "tools/retrieval, safety gates, success criteria, and handoff target if one "
+    "is likely. Do not replace the planner's task contract; refine only the "
+    "part your specialist role owns."
+)
+
+# ---------- fast path routing patterns ----------
+
+FAST_PATH_DENY_PATTERNS: list[str] = [
+    "agent",
+    "alpha ravis",
+    "alpharavis",
+    "archiv",
+    "architecture",
+    "code",
+    "comfy",
+    "context",
+    "debug",
+    "deepagents",
+    "docker",
+    "dokument",
+    "datei",
+    "embedding",
+    "fehl",
+    "git",
+    "hermes",
+    "image",
+    "install",
+    "kompression",
+    "log",
+    "memory",
+    "mcp",
+    "model management",
+    "ollama",
+    "pc",
+    "power",
+    "pdf",
+    "pixelle",
+    "python",
+    "recherche",
+    "research",
+    "server",
+    "shell",
+    "ssh",
+    "starte",
+    "starten",
+    "shutdown",
+    "suche",
+    "terminal",
+    "tool",
+    "wake",
+    "was kannst du",
+    "wer bist",
+    "wol",
+]
+
+FAST_PATH_FORCE_PATTERNS: list[str] = [
+    "fast path",
+    "ohne tools",
+    "nur chat",
+    "simple chat",
+]

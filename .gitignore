@@ -26,3 +26,5 @@ service-dashboard-data/
 
 # Lokaler LangGraph-Dev-Cache
 langgraph-app/.langgraph_api/
+.worktrees/
+openwebui-data/

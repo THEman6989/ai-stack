@@ -163,6 +163,8 @@ def test_settings_model_tags_new_runtime_and_model_manager_keys(monkeypatch, tmp
                 "ALPHARAVIS_RUNTIME_SETTINGS_FILE=/workspace/service-dashboard-data/runtime_settings.json",
                 "ALPHARAVIS_ASYNC_REVIEWER_ENABLED=false",
                     "ALPHARAVIS_ASYNC_REVIEW_STORE_PATH=/tmp/alpharavis_run_reviews.json",
+                    "ALPHARAVIS_BACKGROUND_TASKS_ENABLED=true",
+                    "ALPHARAVIS_BACKGROUND_CONTEXT_MAX_UTILIZATION=0.70",
                     "ALPHARAVIS_SERVER_MODEL_MANAGER_TEMPERATURE=0",
                     "ALPHARAVIS_UBUNTU_LLAMA_MANAGER_API_KEY=",
                     "ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MAX=262144",
@@ -193,6 +195,12 @@ def test_settings_model_tags_new_runtime_and_model_manager_keys(monkeypatch, tmp
     assert "reviewer" in entries["ALPHARAVIS_ASYNC_REVIEWER_ENABLED"]["tags"]
     assert "korrigiert nichts automatisch" in entries["ALPHARAVIS_ASYNC_REVIEWER_ENABLED"]["description"]
     assert entries["ALPHARAVIS_ASYNC_REVIEW_STORE_PATH"]["envOrder"] > entries["ALPHARAVIS_ASYNC_REVIEWER_ENABLED"]["envOrder"]
+    assert entries["ALPHARAVIS_BACKGROUND_TASKS_ENABLED"]["category"] == "features"
+    assert "background-tasks" in entries["ALPHARAVIS_BACKGROUND_TASKS_ENABLED"]["tags"]
+    assert entries["ALPHARAVIS_BACKGROUND_TASKS_ENABLED"]["importance"] == 90
+    assert "Context-Leases" in entries["ALPHARAVIS_BACKGROUND_TASKS_ENABLED"]["description"]
+    assert entries["ALPHARAVIS_BACKGROUND_CONTEXT_MAX_UTILIZATION"]["category"] == "features"
+    assert "Main-Agent" in entries["ALPHARAVIS_BACKGROUND_CONTEXT_MAX_UTILIZATION"]["description"]
     assert entries["ALPHARAVIS_UBUNTU_LLAMA_MANAGER_API_KEY"]["category"] == "model"
     assert entries["ALPHARAVIS_UBUNTU_LLAMA_MANAGER_API_KEY"]["secret"] is True
     assert entries["ALPHARAVIS_PIXELLE_AUTO_SHUTDOWN_COMFY_AFTER_JOB"]["importance"] == 90

@@ -1820,3 +1820,65 @@ async def compress_messages(
         workflow_tool_result_count=prep.workflow_tool_result_count,
         workflow_event_chars=prep.workflow_event_chars,
     )
+
+
+# ---------- ratio token limit utilities (used by agent_graph) ----------
+
+
+def ratio_token_limit(
+    context_length: int,
+    *,
+    ratio_env: str,
+    fixed_env: str,
+    default_fixed: str = "30000",
+    default_ratio: float = 0.50,
+) -> int:
+    """Return a token limit as min(fixed_value, ratio * context_length)."""
+    fixed_value = int(os.getenv(fixed_env, default_fixed))
+    if fixed_value:
+        ratio_value = int(context_length * _env_float(ratio_env, default_ratio))
+        return min(fixed_value, ratio_value)
+    return int(context_length * _env_float(ratio_env, default_ratio))
+
+
+def ratio_token_limit_for_context(
+    context_length: int,
+    *,
+    ratio_env: str,
+    fixed_env: str,
+    fixed_default: str = "30000",
+    default_ratio: float = 0.50,
+) -> int:
+    """Return a context-scoped token limit. Uses fixed value only if explicitly set."""
+    if os.getenv(fixed_env):
+        return ratio_token_limit(
+            context_length,
+            ratio_env=ratio_env,
+            fixed_env=fixed_env,
+            default_fixed=fixed_default,
+            default_ratio=default_ratio,
+        )
+    return ratio_token_limit(
+        context_length,
+        ratio_env=ratio_env,
+        fixed_env="",
+        default_ratio=default_ratio,
+    )
+
+
+def effective_context_limit(limit: int, reserve_tokens: int) -> int:
+    return max(4096, limit - reserve_tokens)
+
+
+def message_for_context_estimate(message: Any) -> dict[str, Any]:
+    """Strip usage/reasoning metadata from a message for token estimation."""
+    data = _message_mapping(message)
+    for key in ("usage", "token_usage", "usage_metadata", "response_metadata"):
+        data.pop(key, None)
+    additional = data.get("additional_kwargs")
+    if isinstance(additional, dict):
+        additional = dict(additional)
+        for key in ("reasoning", "reasoning_content", "usage", "token_usage", "usage_metadata", "response_metadata"):
+            additional.pop(key, None)
+        data["additional_kwargs"] = additional
+    return data

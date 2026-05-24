@@ -460,3 +460,48 @@ def get_model_context_length(
             return max(MINIMUM_CONTEXT_LENGTH, length)
 
     return max(MINIMUM_CONTEXT_LENGTH, int(default or DEFAULT_CONTEXT_LENGTH))
+
+
+# ---------- context discovery helpers (used by agent_graph) ----------
+
+
+def context_discovery_model() -> str:
+    return (
+        os.getenv("ALPHARAVIS_CONTEXT_DISCOVERY_MODEL")
+        or os.getenv("ALPHARAVIS_RESPONSES_MODEL")
+        or os.getenv("ALPHARAVIS_MODEL")
+        or "big-boss"
+    )
+
+
+def context_discovery_base_url() -> str:
+    return (
+        os.getenv("ALPHARAVIS_CONTEXT_DISCOVERY_API_BASE")
+        or os.getenv("BIG_BOSS_API_BASE")
+        or os.getenv("ALPHARAVIS_RESPONSES_API_BASE")
+        or os.getenv("OPENAI_API_BASE")
+        or ""
+    ).rstrip("/")
+
+
+def context_discovery_api_key() -> str:
+    return (
+        os.getenv("ALPHARAVIS_CONTEXT_DISCOVERY_API_KEY")
+        or os.getenv("LOCAL_LLM_API_KEY")
+        or os.getenv("ALPHARAVIS_RESPONSES_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or ""
+    )
+
+
+def provider_context_length_override(state: dict[str, Any] | None, detected_context_length: int) -> int | None:
+    if not _env_bool("ALPHARAVIS_ENABLE_PROVIDER_CONTEXT_LIMIT_RETRY", "true"):
+        return None
+    raw = (state or {}).get("provider_reported_context_limit")
+    try:
+        value = int(raw) if raw is not None else 0
+    except (TypeError, ValueError):
+        return None
+    if value < 4096:
+        return None
+    return max(4096, min(value, detected_context_length))

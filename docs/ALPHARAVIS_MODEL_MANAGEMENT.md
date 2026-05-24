@@ -98,6 +98,14 @@ calls. With `--kv-unified`, capacity is the shared context pool times
 process-local, so a multi-worker deployment still needs a Redis/Postgres lease
 store before it can enforce one global budget across workers.
 
+Small independent side tasks use a separate background lane. Non-LLM read-only
+work can overlap with the main agent. Small LLM side tasks, such as Router,
+Judge, Summarizer, RAG compression, and chunk ranking, still reserve a normal
+ContextLease after direct llama-server token counting, but their admission is
+capped by `ALPHARAVIS_BACKGROUND_CONTEXT_MAX_UTILIZATION`. Low-priority or
+speculative tasks can be skipped or cancelled under pressure. Write, restart,
+recovery, and power actions are not admitted through this lane.
+
 ```text
 ALPHARAVIS_UBUNTU_LLAMA_MANAGER_IP=<llama-host-ip>
 ALPHARAVIS_UBUNTU_LLAMA_MANAGER_PORT=8099
@@ -109,6 +117,8 @@ ALPHARAVIS_UBUNTU_LLAMA_ESP_URL=http://<esp-ip>
 ALPHARAVIS_UBUNTU_LLAMA_ESP_API_KEY=<ESP_AUTH_TOKEN>
 ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MIN=512
 ALPHARAVIS_UBUNTU_LLAMA_CONTEXT_MAX=262144
+ALPHARAVIS_BACKGROUND_TASKS_ENABLED=true
+ALPHARAVIS_BACKGROUND_CONTEXT_MAX_UTILIZATION=0.70
 ```
 
 For normal setup, enter the IP fields. `ALPHARAVIS_UBUNTU_LLAMA_MANAGER_URL`
