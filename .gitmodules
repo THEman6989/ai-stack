@@ -23,3 +23,6 @@
 [submodule "submodules/deep-agents-ui"]
 	path = submodules/deep-agents-ui
 	url = https://github.com/THEman6989/deep-agents-ui.git
+[submodule "submodules/OfficeCLI"]
+	path = submodules/OfficeCLI
+	url = https://github.com/iOfficeAI/OfficeCLI.git
