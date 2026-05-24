@@ -192,13 +192,23 @@ else:
     MODEL_MANAGEMENT_IMPORT_ERROR = None
 
 try:
-    from model_metadata import context_limit_from_ratio as _context_limit_from_ratio
-    from model_metadata import get_model_context_length as _get_model_context_length
-    from model_metadata import parse_context_limit_from_error as _parse_context_limit_from_error
+    from model_metadata import (
+        context_discovery_api_key as _context_discovery_api_key,
+        context_discovery_base_url as _context_discovery_base_url,
+        context_discovery_model as _context_discovery_model,
+        context_limit_from_ratio as _context_limit_from_ratio,
+        get_model_context_length as _get_model_context_length,
+        parse_context_limit_from_error as _parse_context_limit_from_error,
+        provider_context_length_override as _provider_context_length_override,
+    )
 except Exception as exc:  # pragma: no cover - optional local helper
+    _context_discovery_api_key = None
+    _context_discovery_base_url = None
+    _context_discovery_model = None
     _context_limit_from_ratio = None
     _get_model_context_length = None
     _parse_context_limit_from_error = None
+    _provider_context_length_override = None
     MODEL_METADATA_IMPORT_ERROR: Exception | None = exc
 else:
     MODEL_METADATA_IMPORT_ERROR = None
@@ -226,8 +236,22 @@ else:
     TOOLSETS_IMPORT_ERROR = None
 
 try:
-    from prompt_assembly import build_stable_prompt_context as _build_stable_prompt_context
+    from prompt_assembly import (
+        ARCHIVE_RETRIEVAL_POLICY_PROMPT as _ARCHIVE_RETRIEVAL_POLICY_PROMPT,
+        CODE_WINDOW_POLICY_PROMPT as _CODE_WINDOW_POLICY_PROMPT,
+        FAST_PATH_DENY_PATTERNS as _FAST_PATH_DENY_PATTERNS,
+        FAST_PATH_FORCE_PATTERNS as _FAST_PATH_FORCE_PATTERNS,
+        HANDOFF_POLICY_PROMPT as _HANDOFF_POLICY_PROMPT,
+        SPECIALIST_LOCAL_PLAN_PROMPT as _SPECIALIST_LOCAL_PLAN_PROMPT,
+        build_stable_prompt_context as _build_stable_prompt_context,
+    )
 except Exception as exc:  # pragma: no cover - helper must not block graph import
+    _ARCHIVE_RETRIEVAL_POLICY_PROMPT = ""
+    _CODE_WINDOW_POLICY_PROMPT = ""
+    _FAST_PATH_DENY_PATTERNS = []
+    _FAST_PATH_FORCE_PATTERNS = []
+    _HANDOFF_POLICY_PROMPT = ""
+    _SPECIALIST_LOCAL_PLAN_PROMPT = ""
     _build_stable_prompt_context = None
     PROMPT_ASSEMBLY_IMPORT_ERROR: Exception | None = exc
 else:
@@ -434,7 +458,11 @@ from context_compressor import (
     build_archive_policy_message,
     build_summary_message_content,
     compress_messages,
+    effective_context_limit as _effective_context_limit,
     estimate_tokens_rough as _compressor_estimate_tokens,
+    message_for_context_estimate as _message_for_context_estimate,
+    ratio_token_limit as _ratio_token_limit,
+    ratio_token_limit_for_context as _ratio_token_limit_for_context,
     redacted_message_to_json,
     summary_budget_snapshot as _summary_budget_snapshot,
 )
@@ -457,6 +485,58 @@ try:
     _PARALLEL_EXECUTOR_AVAILABLE = True
 except ImportError:
     pass
+
+# Source content analysis — pure text helpers extracted from agent_graph
+try:
+    from source_content import (
+        _SOURCE_STOPWORDS,
+        bounded_text_window as _bounded_text_window,
+        classifier_window_text as _classifier_window_text,
+        detect_source_content_type as _detect_source_content_type,
+        extract_source_entities as _extract_source_entities,
+        extract_source_keywords as _extract_source_keywords,
+        extract_source_symbols as _extract_source_symbols,
+        line_range_indexes as _line_range_indexes,
+        line_ranges_from_text as _line_ranges_from_text,
+        local_retrieval_query as _local_retrieval_query,
+        normalize_line_ranges as _normalize_line_ranges,
+        parse_classifier_json as _parse_classifier_json,
+        source_metadata_summary as _source_metadata_summary,
+        source_title_from_text as _source_title_from_text,
+        strip_line_ranges_from_text as _strip_line_ranges_from_text,
+        tail_question_line_ranges as _tail_question_line_ranges,
+        text_from_line_ranges as _text_from_line_ranges,
+    )
+except ImportError:
+    _SOURCE_STOPWORDS = set()
+    _bounded_text_window = None
+    _classifier_window_text = None
+    _detect_source_content_type = None
+    _extract_source_entities = None
+    _extract_source_keywords = None
+    _extract_source_symbols = None
+    _line_range_indexes = None
+    _line_ranges_from_text = None
+    _local_retrieval_query = None
+    _normalize_line_ranges = None
+    _parse_classifier_json = None
+    _source_metadata_summary = None
+    _source_title_from_text = None
+    _strip_line_ranges_from_text = None
+    _tail_question_line_ranges = None
+    _text_from_line_ranges = None
+
+# Command safety — SSH command classification extracted from agent_graph
+try:
+    from command_safety import (
+        command_segments as _command_segments,
+        first_shell_word as _first_shell_word,
+        is_read_only_command as _is_read_only_command,
+    )
+except ImportError:
+    _command_segments = None
+    _first_shell_word = None
+    _is_read_only_command = None
 
 
 class AlphaRavisState(MessagesState):
@@ -573,36 +653,10 @@ COMPRESSION_PAUSE_PATTERNS = [
     "skip compression",
     "no compression",
 ]
-HANDOFF_POLICY_PROMPT = (
-    "Handoff policy: before you transfer to another AlphaRavis agent, create a "
-    "handoff packet with build_specialist_report. The packet must state what is "
-    "done, what remains open, evidence/source keys, files/commands/tools used, "
-    "verification status, risks, and the exact next-agent instruction. Do not "
-    "put long logs in the packet; store them as artifacts and cite the artifact key."
-)
-ARCHIVE_RETRIEVAL_POLICY_PROMPT = (
-    "Archived context policy: archived context is not automatically loaded into "
-    "the active prompt. If the user asks about earlier work, old debugging, "
-    "previous decisions, 'damals', 'vorhin', 'letztes Mal', or if a summary says "
-    "details are archived, use semantic_memory_search first. Archive collections "
-    "are tables of contents; inspect child_archive_keys and load only relevant "
-    "raw archives before relying on exact old details. Cross-thread retrieval "
-    "requires an explicit user request."
-)
-CODE_WINDOW_POLICY_PROMPT = (
-    "Code-window policy: when showing code, patches, shell snippets, logs, JSON, "
-    "YAML, or config, use normal Markdown fenced code blocks with a language tag "
-    "when known. Do not wrap code in HTML or proprietary canvas markers unless "
-    "the user explicitly asks for an artifact file."
-)
-SPECIALIST_LOCAL_PLAN_PROMPT = (
-    "Specialist planning policy: when you receive an execution plan or current "
-    "task brief, first adapt it into your own short specialist plan before "
-    "doing substantive work. Keep this internal plan concise: objective, needed "
-    "tools/retrieval, safety gates, success criteria, and handoff target if one "
-    "is likely. Do not replace the planner's task contract; refine only the "
-    "part your specialist role owns."
-)
+HANDOFF_POLICY_PROMPT = _HANDOFF_POLICY_PROMPT or ""
+ARCHIVE_RETRIEVAL_POLICY_PROMPT = _ARCHIVE_RETRIEVAL_POLICY_PROMPT or ""
+CODE_WINDOW_POLICY_PROMPT = _CODE_WINDOW_POLICY_PROMPT or ""
+SPECIALIST_LOCAL_PLAN_PROMPT = _SPECIALIST_LOCAL_PLAN_PROMPT or ""
 AGENT_POLICY_PROMPT = (
     SPECIALIST_LOCAL_PLAN_PROMPT
     + " "
@@ -612,59 +666,8 @@ AGENT_POLICY_PROMPT = (
     + " "
     + CODE_WINDOW_POLICY_PROMPT
 )
-FAST_PATH_DENY_PATTERNS = [
-    "agent",
-    "alpha ravis",
-    "alpharavis",
-    "archiv",
-    "architecture",
-    "code",
-    "comfy",
-    "context",
-    "debug",
-    "deepagents",
-    "docker",
-    "dokument",
-    "datei",
-    "embedding",
-    "fehl",
-    "git",
-    "hermes",
-    "image",
-    "install",
-    "kompression",
-    "log",
-    "memory",
-    "mcp",
-    "model management",
-    "ollama",
-    "pc",
-    "power",
-    "pdf",
-    "pixelle",
-    "python",
-    "recherche",
-    "research",
-    "server",
-    "shell",
-    "ssh",
-    "starte",
-    "starten",
-    "shutdown",
-    "suche",
-    "terminal",
-    "tool",
-    "wake",
-    "was kannst du",
-    "wer bist",
-    "wol",
-]
-FAST_PATH_FORCE_PATTERNS = [
-    "fast path",
-    "ohne tools",
-    "nur chat",
-    "simple chat",
-]
+FAST_PATH_DENY_PATTERNS = _FAST_PATH_DENY_PATTERNS or []
+FAST_PATH_FORCE_PATTERNS = _FAST_PATH_FORCE_PATTERNS or []
 OPTIONAL_TOOL_MANIFEST = [
     {
         "name": "Pixelle MCP",
@@ -3519,6 +3522,12 @@ def execute_local_command(command: str):
 
 
 def _first_shell_word(command: str) -> str:
+    if _first_shell_word is not None:
+        try:
+            from command_safety import first_shell_word as _fs
+            return _fs(command)
+        except ImportError:
+            pass
     try:
         parts = shlex.split(command, posix=True)
     except ValueError:
@@ -6414,81 +6423,30 @@ async def deactivate_skill(skill_id: str, reason: str = ""):
 
 
 async def _load_configured_mcp_tools(stack: contextlib.AsyncExitStack) -> list[Any]:
-    """Load configured MCP tools with DeepAgents-style config semantics."""
+    """Load configured MCP tools with Hermes-style robustness.
 
+    Delegates to ``mcp_client.load_robust_mcp_tools()`` which adds:
+    - Reconnect with exponential backoff on connection loss.
+    - Circuit breaker (3 failures → 60s cooldown) to prevent retry-loop burn.
+    - Per-server ``timeout`` and ``connect_timeout`` in mcp.json.
+    - Error classification: auth, transient, permanent.
+
+    Updates module-level ``MCP_LOAD_WARNINGS`` and ``MCP_SERVER_INFOS``.
+    """
+    from mcp_client import (
+        load_robust_mcp_tools,
+        MCP_LOAD_WARNINGS as _WARNINGS,
+        MCP_SERVER_INFOS as _INFOS,
+    )
+
+    tools = await load_robust_mcp_tools(stack)
+
+    # Sync module-level globals for backward compatibility
     global MCP_LOAD_WARNINGS, MCP_SERVER_INFOS
+    MCP_LOAD_WARNINGS = list(_WARNINGS)
+    MCP_SERVER_INFOS = list(_INFOS)
 
-    MCP_LOAD_WARNINGS = []
-    MCP_SERVER_INFOS = []
-    strict = _env_bool("ALPHARAVIS_MCP_STRICT", "false")
-    tool_prefix = _env_bool("ALPHARAVIS_MCP_TOOL_PREFIX", "true")
-
-    config, _, warnings = _load_mcp_config_from_paths()
-    MCP_LOAD_WARNINGS.extend(warnings)
-    if strict and warnings:
-        raise RuntimeError("Invalid MCP config:\n" + "\n".join(warnings))
-
-    servers = config.get("mcpServers", {})
-    if not servers:
-        return []
-
-    connections = {
-        name: _mcp_connection_from_config(server_config)
-        for name, server_config in servers.items()
-    }
-
-    try:
-        from langchain_mcp_adapters.client import MultiServerMCPClient
-        from langchain_mcp_adapters.tools import load_mcp_tools
-
-        client = MultiServerMCPClient(connections)
-        all_tools = []
-        for server_name in sorted(connections):
-            server_config = servers[server_name]
-            try:
-                session = await stack.enter_async_context(client.session(server_name))
-                try:
-                    tools = await load_mcp_tools(
-                        session,
-                        server_name=server_name,
-                        tool_name_prefix=tool_prefix,
-                    )
-                except TypeError:
-                    tools = await load_mcp_tools(session)
-                tool_list = list(tools)
-                all_tools.extend(tool_list)
-                MCP_SERVER_INFOS.append(
-                    {
-                        "name": server_name,
-                        "transport": _mcp_transport(server_config),
-                        "tools": [
-                            {
-                                "name": getattr(mcp_tool, "name", "unknown"),
-                                "description": getattr(mcp_tool, "description", "") or "",
-                            }
-                            for mcp_tool in tool_list
-                        ],
-                    }
-                )
-            except Exception as exc:
-                message = f"MCP server `{server_name}` could not be loaded: {exc}"
-                MCP_LOAD_WARNINGS.append(message)
-                if strict:
-                    raise RuntimeError(message) from exc
-
-        all_tools.sort(key=lambda mcp_tool: getattr(mcp_tool, "name", ""))
-        if all_tools:
-            print(
-                f"Loaded {len(all_tools)} MCP tools from {len(MCP_SERVER_INFOS)} server(s)."
-            )
-        return all_tools
-    except Exception as exc:
-        message = f"Configured MCP tools unavailable: {exc}"
-        MCP_LOAD_WARNINGS.append(message)
-        print(f"WARNING: {message}")
-        if strict:
-            raise
-        return []
+    return tools
 
 
 def _message_text(message: Any) -> str:

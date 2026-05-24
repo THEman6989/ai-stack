@@ -4,6 +4,52 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-24 - agent_graph.py Phase 2 Module Extraction
+
+- Extracted pure helper functions from `agent_graph.py` into focused modules.
+  No behavior change. No graph node or @tool function was touched.
+- New modules:
+  - `langgraph-app/source_content.py` (383 lines): Content-type detection,
+    keyword/entity/symbol extraction, line-range parsing, classifier JSON
+    parsing, classifier window text, retrieval query condensation, bounded
+    text window, source metadata summary. All pure functions, no LLM calls,
+    no graph state dependencies. Only stdlib deps (re, json, os).
+  - `langgraph-app/command_safety.py` (109 lines): SSH command classification.
+    `first_shell_word`, `command_segments`, `is_read_only_command` with
+    safe command root set and dangerous pattern detection. Only stdlib deps
+    (re, shlex).
+- Extended existing modules:
+  - `prompt_assembly.py` (+94 lines): Agent policy prompts (HANDOFF,
+    ARCHIVE_RETRIEVAL, CODE_WINDOW, SPECIALIST_LOCAL_PLAN) and FAST_PATH
+    routing patterns (DENY_PATTERNS, FORCE_PATTERNS). These were previously
+    embedded as module-level constants in agent_graph.py.
+  - `context_compressor.py` (+66 lines): `ratio_token_limit`,
+    `ratio_token_limit_for_context`, `effective_context_limit`,
+    `message_for_context_estimate`. Token budget calculation utilities
+    previously duplicated or embedded in agent_graph.py.
+  - `model_metadata.py` (+47 lines): `context_discovery_model`,
+    `context_discovery_base_url`, `context_discovery_api_key`,
+    `provider_context_length_override`. Context window detection helpers.
+- `agent_graph.py` changes:
+  - Added guarded imports (try/except ImportError) for all new and extended
+    modules so graph import never breaks on missing modules.
+  - Policy prompts and FAST_PATH patterns now resolve from
+    `prompt_assembly.py` imports with empty-string/empty-list fallbacks.
+  - Old inline implementations remain as canonical fallback code.
+  - No graph node, @tool function, routing decision, or orchestration logic
+    was changed.
+- Design rules documented in `AGENTS.md` under "Module Boundary Rules":
+  keep graph orchestration in agent_graph.py; extract pure helpers to
+  separate modules; prefer extending existing modules; use guarded imports.
+- Full refactor analysis with per-function keep/extract/target/risk decisions
+  in `docs/ALPHARAVIS_AGENT_GRAPH_REFACTOR_ANALYSIS.md`.
+- Tests: 437 passed, bridge-smoke OK (fast path, ~5s). AST parse clean for
+  all 6 touched files.
+- This extraction aligns with the existing doc plan in
+  `docs/ALPHARAVIS_OPEN_TASKS.md` (lines 1907-1918, 2172-2181) which
+  already flagged RAG backend selection and retrieval routing as candidates
+  for extraction from agent_graph.py — those remain for Phase 3-4.
+
 ## 2026-05-23 - Percentage-Based Dynamic Context Budget Router
 
 - Replaced hardcoded token budgets with a dynamic percentage-based system.
@@ -2953,3 +2999,54 @@ scripts/apply_hermes_agent_patches.sh
 ```
 
 The normal Docker path does not require this manual step.
+
+## 2026-05-24 — Robust MCP Client for LangGraph
+
+### Summary
+
+New `langgraph-app/mcp_client.py` replaces the plain `langchain_mcp_adapters`
+wrapper with a Hermes-style robust MCP loader. `agent_graph.py` now delegates
+to `mcp_client.load_robust_mcp_tools()`.
+
+### Changes
+
+- **`langgraph-app/mcp_client.py`** (new, ~650 lines): Robust MCP tool loader.
+- **`langgraph-app/agent_graph.py`**: `_load_configured_mcp_tools()` → delegate
+  to `mcp_client.load_robust_mcp_tools()`. Keeps `MCP_LOAD_WARNINGS` /
+  `MCP_SERVER_INFOS` module globals for backward compatibility.
+- **`langgraph-app/mcp.json`**: Added `_comment_examples`, Pixelle now uses
+  `${PIXELLE_URL}` env-var expansion with auto-fallback, Pixelle gets explicit
+  `timeout: 300` / `connect_timeout: 30`.
+- **`hermes-agent/tools/mcp_tool.py`**: Recovery functions now use
+  `threading.Event.wait()` + interrupt checks instead of `time.sleep()` polling.
+  `_handle_session_expired_and_retry` uses `_reset_server_error()` instead of
+  direct dict access.
+
+### Features (Hermes-parity for LangGraph MCP)
+
+- **Reconnect** with exponential backoff (1s→2s→4s→…, max 5 retries).
+- **Circuit breaker** (3-state): after 3 consecutive failures, tools
+  short-circuit for 60s with a clear error message, preventing the
+  iteration-burn retry loop (#10447).
+- **Per-server timeouts**: `timeout` and `connect_timeout` in mcp.json
+  server config.
+- **Error classification**: auth errors, transient transport errors,
+  permanent application errors — each with distinct response messages.
+- **Pixelle SSE** continues working via `${PIXELLE_URL}` env var with
+  automatic fallback to `http://localhost:9004`.
+
+### Rationale
+
+The previous integration used `langchain_mcp_adapters` directly with no
+reconnect, no circuit breaker, no timeout config, and no error classification.
+After a Pixelle restart or network blip, MCP tools were gone for the rest of
+the process lifetime. The model could burn dozens of iterations retrying a
+dead tool. These are the same problems Hermes' `tools/mcp_tool.py` solved.
+
+### Verification
+
+```bash
+# In the langgraph-app Docker container:
+python -c "from mcp_client import load_robust_mcp_tools; print('ok')"
+python -m pytest tests/ -k mcp
+```

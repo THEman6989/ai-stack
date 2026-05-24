@@ -199,6 +199,17 @@ servers, while the agent can inspect the server manifest before tools are
 loaded. The native Pixelle HTTP tool can still start Pixelle jobs without
 loading the extra MCP registry.
 
+When enabled, the new ``langgraph-app/mcp_client.py`` wraps
+``langchain_mcp_adapters`` with Hermes-style robustness:
+
+- **Reconnect** — Pixelle dropped? Auto-reconnect with 1s→2s→4s backoff.
+- **Circuit breaker** — 3 failures → 60s cooldown, prevents retry-loop burn.
+- **Per-server timeouts** — Add ``timeout`` and ``connect_timeout`` to each
+  server entry in ``mcp.json``. Recommended for Pixelle SSE: ``timeout: 300``.
+- **Error classification** — Auth errors, transient transport errors, and
+  permanent application errors get distinct messages so the model responds
+  appropriately instead of retrying blindly.
+
 Agents can still see a short manifest of optional registries through the
 `describe_optional_tool_registry` tool, so they know Pixelle MCP exists and how
 it can be enabled without paying the startup cost by default.

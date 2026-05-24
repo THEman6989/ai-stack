@@ -303,10 +303,21 @@ MCP tools remain lazy by default:
 ALPHARAVIS_LOAD_MCP_TOOLS=false
 ```
 
-When enabled, AlphaRavis loads configured MCP servers through
-`MultiServerMCPClient`, prefixes tool names by server when supported, records
-server/tool metadata for `describe_optional_tool_registry`, and keeps stdio MCP
-servers disabled unless explicitly trusted:
+When enabled, AlphaRavis loads configured MCP servers through the robust
+``mcp_client`` module (``langgraph-app/mcp_client.py``), which wraps
+``langchain_mcp_adapters`` with Hermes-style resilience:
+
+- **Reconnect** with exponential backoff on connection loss.
+- **Circuit breaker** (3-state) that short-circuits after 3 consecutive
+  failures for 60s to prevent iteration-burn retry loops.
+- **Per-server timeouts** configurable via ``timeout`` and ``connect_timeout``
+  in ``mcp.json``.
+- **Error classification** into auth, transient, and permanent errors with
+  appropriate response messages.
+
+The loader prefixes tool names by server when supported, records server/tool
+metadata for ``describe_optional_tool_registry``, and keeps stdio MCP servers
+disabled unless explicitly trusted:
 
 ```text
 ALPHARAVIS_MCP_ALLOW_STDIO=false
@@ -479,6 +490,41 @@ START
   -> run_profile_finish
   -> END
 ```
+
+### Supporting Modules
+
+agent_graph.py delegates pure logic to focused helper modules to keep
+orchestration and implementation separate:
+
+| Module | Responsibility |
+|---|---|
+| `source_content.py` | Content-type detection, keyword/entity/symbol extraction, line-range parsing, classifier JSON, text windows |
+| `command_safety.py` | SSH command classification (read-only vs dangerous), command word/segment helpers |
+| `prompt_assembly.py` | Stable prompt context, environment hints, policy prompts, FAST_PATH routing patterns |
+| `context_compressor.py` | Message compression, token estimation, ratio token limits, summary preparation |
+| `model_metadata.py` | Context length discovery, model metadata, provider context length overrides |
+| `retrieval_router.py` | RAG backend selection, hit scoring, reranking, source ingest routing |
+| `alpharavis_toolsets.py` | Toolset dataclasses, resolution, materialization, MCP schema cache |
+| `error_classifier.py` | Error reason classification (auth, rate_limit, context_overflow, etc.) |
+| `file_safety.py` | File read/write safety decisions, sensitive path detection |
+| `internal_context.py` | Internal context block scrubbing (streaming + batch) |
+| `compression_redact.py` | Secret redaction from tool output and messages |
+| `media_analysis.py` | Media (image/video) preparation for model input |
+| `operational_logging.py` | Structured operational logging |
+| `owner_power_tools.py` | Owner-gated server power commands (llama, ComfyUI) |
+| `repo_skills.py` | AI skill card scanning, manifest, draft export |
+| `responses_client.py` | Direct `/v1/responses` API client |
+| `provider_hardening.py` | Provider hardening (timeouts, retries, compatibility) |
+| `document_ingest.py` | Document file loading for RAG ingest |
+| `run_state_manager.py` | Run checkpoint save/load/resume |
+| `rag_api_client.py` | External RAG API client |
+| `rag_pins_manager.py` | Active RAG source pin management |
+| `runtime_settings.py` | Runtime overrides from config files |
+| `context_references.py` | @file:/@git:/@diff: reference parsing and expansion |
+| `curated_memory_review.py` | Curated memory candidate review workflow |
+| `maintenance_helpers.py` | Maintenance scheduling decisions |
+
+See `AGENTS.md` Module Boundary Rules for when to extract vs keep in agent_graph.py.
 
 ## Agents
 

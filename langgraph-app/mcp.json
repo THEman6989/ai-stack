@@ -1,8 +1,40 @@
 {
+  "_comment": "MCP servers for AlphaRavis LangGraph brain.",
+  "_comment_examples": {
+    "pixelle_via_env": {
+      "type": "sse",
+      "url": "${PIXELLE_URL}/pixelle/mcp/sse"
+    },
+    "pixelle_direct": {
+      "type": "sse",
+      "url": "http://localhost:9004/pixelle/mcp/sse"
+    },
+    "filesystem_stdio": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+      "timeout": 30
+    },
+    "remote_http": {
+      "type": "streamable_http",
+      "url": "https://my-server.example.com/mcp",
+      "headers": { "Authorization": "Bearer sk-..." },
+      "timeout": 180,
+      "connect_timeout": 30
+    },
+    "github_oauth": {
+      "type": "streamable_http",
+      "url": "https://api.github.com/mcp",
+      "auth": "oauth",
+      "timeout": 60
+    }
+  },
   "mcpServers": {
     "pixelle": {
       "type": "sse",
-      "url": "${PIXELLE_URL}/pixelle/mcp/sse"
+      "url": "${PIXELLE_URL}/pixelle/mcp/sse",
+      "timeout": 300,
+      "connect_timeout": 30
     }
   }
 }
