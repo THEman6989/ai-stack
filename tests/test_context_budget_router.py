@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ai_stack.context_budget.leases import LeaseStore
+from ai_stack.context_budget.leases import LocalLeaseStore
 from ai_stack.context_budget.policies import parse_runtime_config_from_command
 from ai_stack.context_budget.router import (
     DynamicServerState,
@@ -600,7 +600,7 @@ class TestSchedulerWithRouter:
         router = PriorityAwareRouter()
         policy = PercentageBudgetPolicy.from_env()
         scheduler = ContextScheduler(
-            lease_store=LeaseStore(), router=router, budget_policy=policy
+            lease_store=LocalLeaseStore(), router=router, budget_policy=policy
         )
         instance = _make_instance(ctx_total=200000)
         scheduler.instances = {"primary": instance}
@@ -637,7 +637,7 @@ class TestSchedulerWithRouter:
         router = PriorityAwareRouter()
         policy = PercentageBudgetPolicy.from_env()
         scheduler = ContextScheduler(
-            lease_store=LeaseStore(), router=router, budget_policy=policy
+            lease_store=LocalLeaseStore(), router=router, budget_policy=policy
         )
         instance = _make_instance(ctx_total=200000)
         scheduler.instances = {"primary": instance}

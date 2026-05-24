@@ -6,7 +6,7 @@ import os
 import uuid
 from typing import Any
 
-from ai_stack.context_budget.leases import GLOBAL_LEASE_STORE, ContextLease, LeaseStore
+from ai_stack.context_budget.leases import GLOBAL_LEASE_STORE, ContextLease, LeaseStore, _make_lease_store_from_env
 from ai_stack.context_budget.policies import RuntimeConfig, capacity_limit, parse_runtime_config_from_command
 from ai_stack.context_budget.router import (
     DynamicServerState,
@@ -56,6 +56,7 @@ class ContextScheduler:
             return None
         return cls(
             manager_client=manager,
+            lease_store=_make_lease_store_from_env(),
             safety_factor=float(os.getenv("ALPHARAVIS_CONTEXT_SAFETY_FACTOR", "0.92")),
             background_safety_factor=float(os.getenv("ALPHARAVIS_BACKGROUND_CONTEXT_MAX_UTILIZATION", "0.70")),
         )

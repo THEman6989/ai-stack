@@ -544,6 +544,15 @@ ALPHARAVIS_CONTEXT_SAFETY_FACTOR=0.92
 ALPHARAVIS_CONTEXT_DEFAULT_MAX_OUTPUT_TOKENS=2048
 ALPHARAVIS_CONTEXT_LEASE_SAFETY_MARGIN_TOKENS=1024
 ALPHARAVIS_LLAMA_RUNTIME_TIMEOUT_SECONDS=30
+# Lease store backend. local = process-local dict (default, single-worker safe).
+# redis = shared Redis store for multi-worker coordination (docker compose --scale).
+# Falls back to local on import/connection errors. Requires redis package.
+ALPHARAVIS_CONTEXT_LEASE_BACKEND=local
+# Redis URL used when ALPHARAVIS_CONTEXT_LEASE_BACKEND=redis.
+ALPHARAVIS_REDIS_URL=redis://redis:6379
+# TTL in seconds for Redis-backed leases. Stale leases from crashed workers
+# auto-expire after this duration.
+ALPHARAVIS_CONTEXT_LEASE_TTL=600
 # Small model context size (2B classifier / judge / summarizer). Detected
 # dynamically from the running llama-server /slots or /props when available;
 # this is the fallback when live probes are unavailable.

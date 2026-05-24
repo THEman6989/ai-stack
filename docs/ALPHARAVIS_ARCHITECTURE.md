@@ -84,7 +84,27 @@ The current Docker architecture is split into these main roles:
   callers can pass `active_agent="power_management_agent"` and
   `selected_toolsets=["agent/power"]`. Its default LangGraph model is
   `openai/server-model-manager`, a LiteLLM route intended to prefer BigBoss and
-  fall back to Edge Gemma.
+  fall back to Edge Gemma. The agent carries a comprehensive set of power and
+  model management tools controlling two separate hardware paths:
+
+  **Llama Server (ESP + Ubuntu Llama Manager API):**
+  `request_ubuntu_server_power_action` (power-on/off/cycle, reset, shutdown,
+  reboot via Manager or direct ESP, gated by `confirmed=true`),
+  `control_ubuntu_llama_service`, `configure_ubuntu_llama_instance`.
+
+  **ComfyUI Server (SSH + Wake-on-LAN):**
+  `owner_check_comfyui_server`, `owner_start_comfyui_server` (WoL),
+  `owner_shutdown_comfyui_server` (SSH, HITL-gated),
+  `wake_on_lan`, `prepare_comfy_for_pixelle`.
+
+  **Monitoring, Recovery, Embedding:**
+  `inspect_ubuntu_llama_manager`, `diagnose_ubuntu_llama_no_response`,
+  `recover_ubuntu_llama_no_response`, `check_ollama_models`,
+  `load_embedding_model`, `run_embedding_jobs`, `queue_*_vector_backfill`.
+
+  **Owner SSH Tools** (gated by `ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=true`):
+  `owner_start_llama_server`, `owner_restart_llama_server`,
+  `owner_shutdown_llama_server` (prefer Ubuntu Manager API for llama).
 - `mongodb`: LangGraph checkpointing and long-term store backing.
 - `vectordb`: Postgres with pgvector. It can act as an optional semantic
   search sidecar for AlphaRavis memory; it does not replace MongoDB.

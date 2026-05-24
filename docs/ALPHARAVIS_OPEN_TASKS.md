@@ -772,18 +772,18 @@ ALPHARAVIS_MODEL_MGMT_API_KEY=
 ALPHARAVIS_MODEL_MGMT_ALLOW_ACTIONS=true
 ```
 
-- Populate remaining safe real actions:
-  - `check_ollama_models`
-  - `load_embedding_model`
-  - `unload_ollama_model`
-  - `run_embedding_jobs`
-- Populate remaining HITL/destructive actions if you really want them:
-  - `reboot_server`
-  - `kill_process`
-  - `delete_files`
-- Restrict `delete_files` to explicitly allowed temp/work folders.
 - Decide whether `wake_pc` should stay as direct Wake-on-LAN or also route
   through the curated action endpoint.
+
+Note: All previously listed "still needed" actions are now implemented:
+- `check_ollama_models`, `load_embedding_model`, `unload_ollama_model`,
+  `run_embedding_jobs` — implemented 2026-05-22 (see CHANGES).
+- `reboot_server` — exists as `request_ubuntu_server_power_action(action="reboot-now")`
+  via Ubuntu Llama Manager, and `owner_shutdown_llama_server()` + WoL restart
+  via SSH for the owner power tools path.
+- `kill_process` — exists as `owner_restart_llama_server()` (`pkill -f llama-server`)
+  plus Ubuntu Manager service-control and ESP power-cycle.
+- `delete_files` — intentionally not implemented (too dangerous for an agent).
 
 ## Crisis Manager
 
@@ -814,18 +814,15 @@ ALPHARAVIS_POWER_MANAGER_MODEL=openai/edge-gemma
   original user request can continue.
 - Destructive shutdown tools are not given to the crisis agent.
 
-Still needed:
-
-- Trigger crisis recovery on mid-run main-model failures such as timeout, 502,
-  connection errors, or LiteLLM backend generation health failure.
-- Add a post-recovery readiness gate before continuing to the planner.
-- Add full hard caps from the ENV placeholders:
-  - max recovery attempts
-  - max wall-clock time
-  - no recursive crisis loops
-- Add read-only Ollama/LiteLLM checks:
-  - `check_ollama_models`
-  - LiteLLM generation smoke status
+Note: The previously listed "still needed" Crisis Manager items were all
+implemented 2026-05-22 (see CHANGES):
+- Mid-run crisis recovery for timeout, 502, connection errors, overload,
+  rate-limit → handled by `error_classifier` + bounded crisis attempt.
+- Post-recovery readiness gate → checks primary backend reachable before retry.
+- Hard caps: `ALPHARAVIS_CRISIS_MAX_ATTEMPTS`, `ALPHARAVIS_CRISIS_MAX_WALL_CLOCK_SECONDS`,
+  `ALPHARAVIS_CRISIS_ACTION_TIMEOUT_SECONDS`. Recursive-loop guard via
+  `crisis_recovery_attempted` flag.
+- Read-only Ollama/LiteLLM checks: `check_ollama_models`, `inspect_model_management_status`.
 
 ENV placeholders already exist:
 
@@ -863,9 +860,10 @@ Implemented:
 Still needed:
 
 - More precise convenience backfill commands:
-  - index this exact thread without a search query
-  - index last N artifacts by timestamp
-  - index selected document/source keys from the external RAG backend
+  Implemented 2026-05-22 (see CHANGES):
+  - `queue_current_thread_vector_backfill` — index this exact thread
+  - `queue_recent_artifact_vector_backfill` — index last N artifacts
+  - `queue_selected_source_vector_backfill` — index selected source keys
 - Active-job awareness for Pixelle/MCP jobs beyond the current big-LLM/Ollama
   model probes.
 

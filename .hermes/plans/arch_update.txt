@@ -1,0 +1,40 @@
+- `Server Model Manager`: a dedicated LangGraph/Bridge access mode for
+  `power_management_agent`. LibreChat sees it as the `server-model-manager`
+  model/preset on the existing AlphaRavis Bridge, while native LangGraph
+  callers can pass `active_agent="power_management_agent"` and
+  `selected_toolsets=["agent/power"]`. Its default LangGraph model is
+  `openai/server-model-manager`, a LiteLLM route intended to prefer BigBoss and
+  fall back to Edge Gemma. The agent carries a comprehensive set of power and
+  model management tools:
+
+  **Llama Server Control (via ESP + Ubuntu Llama Manager API):**
+  - `request_ubuntu_server_power_action` — power-on/off/cycle, reset, shutdown,
+    reboot-now, reboot-enable/disable, gpu-fault, esp-cancel. Supports both
+    Manager-proxied ESP and direct ESP paths when the Ubuntu host is offline.
+    Destructive actions require `confirmed=true`.
+  - `control_ubuntu_llama_service` — start/stop/restart managed llama-server.
+  - `configure_ubuntu_llama_instance` — patch model, context, parallel slots.
+
+  **ComfyUI Control (via SSH + Wake-on-LAN):**
+  - `owner_check_comfyui_server`, `owner_start_comfyui_server` (WoL),
+    `owner_shutdown_comfyui_server` (SSH shutdown, HITL-gated).
+  - `wake_on_lan` — direct WoL for configured MAC addresses.
+  - `prepare_comfy_for_pixelle` — preflight check + optional wake before jobs.
+
+  **Monitoring, Recovery, Embedding:**
+  - `inspect_ubuntu_llama_manager`, `diagnose_ubuntu_llama_no_response`,
+    `recover_ubuntu_llama_no_response` — inspect, diagnose, bounded recovery.
+  - `check_ollama_models`, `load_embedding_model`, `unload_ollama_model` —
+    Ollama lifecycle on the management node.
+  - `run_embedding_jobs`, `run_embedding_memory_jobs` — drain queues.
+  - `queue_*_vector_backfill` — targeted backfill for threads/artifacts/sources.
+  - `request_power_management_action` — curated external endpoint (optional).
+
+  **Owner SSH Tools (gated by `ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=true`):**
+  - `owner_check_llama_server`, `owner_start_llama_server`,
+    `owner_restart_llama_server`, `owner_get_llama_server_logs` —
+    legacy SSH path for llama-server (prefer Ubuntu Manager API).
+  - `owner_shutdown_llama_server` — SSH `sudo shutdown -h now` (HITL-gated).
+
+  The crisis manager gets a subset (inspect, diagnose, gated recovery, safe
+  power-on) without context/model changes or destructive shutdown tools.
