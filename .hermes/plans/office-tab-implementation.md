@@ -213,7 +213,112 @@ Output directory: /workspace/office-output/
 
 ---
 
-### Phase 3: UI — Office Tab (Day 3-7)
+### Phase 2b: Lazy MCP — Token-effiziente Tool-Registrierung (Day 3-4)
+
+**Problem**: Aktuell lädt `mcp_client.py` → `load_robust_mcp_tools()` ALLE
+MCP-Tools **eager** beim Graph-Start (`make_graph()` in Zeile 14125). Jeder
+Request — auch "hi" — bekommt sämtliche Tool-Definitionen in den System-Prompt.
+Bei OfficeCLI mit 20+ Commands sind das ~2000 Tokens Overhead PRO Request.
+
+**CLI vs MCP — Runtime-Vergleich:**
+
+| | Direct CLI (`terminal`) | MCP eager (aktuell) | MCP lazy (Ziel) |
+|---|---|---|---|
+| **Prompt-Tokens** | ~50 (nur terminal) | ~2000+ (alle Tools immer) | 0 (Tools on-demand) |
+| **Tool-Call-Qualität** | String-Parsing | Typisiert, validiert | Typisiert, validiert |
+| **Agent-Denkarbeit** | Hoch (Syntax lernen) | Niedrig (Schema da) | Niedrig (Schema da) |
+| **Live Preview** | ✅ Gleich | ✅ Gleich | ✅ Gleich |
+| **Fehler-Recovery** | stderr lesen | Structured JSON | Structured JSON |
+
+**Fazit**: Direct CLI funktioniert, aber Lazy MCP ist das Optimum —
+token-effizient wie CLI, präzise wie MCP. Eager MCP ist raus.
+
+**Ziel-Architektur Lazy MCP:**
+
+```
+Graph-Start (make_graph):
+  KEINE MCP-Tools laden
+  
+Request "Erstelle eine PPTX":
+  Agent ruft: mcp_discover("officecli")
+  → mcp_client lädt OfficeCLI-Tools ON-DEMAND
+  → Tools werden dem aktuellen Request hinzugefügt
+  → Nächster Request (ohne Office): KEINE OfficeCLI-Tools im Prompt
+  
+Cache: Geladene Tools bleiben für Session (TTL 5 min)
+       Neue Requests ohne Office-Bezug: kein Overhead
+```
+
+**Implementierung in `mcp_client.py`:**
+
+Neue Funktion `load_mcp_tools_lazy()`:
+
+```python
+# Module-level cache: server_name → (tools, expiry_timestamp)
+_lazy_tool_cache: dict[str, tuple[list, float]] = {}
+_LAZY_CACHE_TTL = 300  # 5 minutes
+
+async def load_mcp_tools_lazy(
+    server_name: str,
+    stack: contextlib.AsyncExitStack,
+) -> list[Any]:
+    """Load MCP tools on-demand with TTL cache."""
+    now = time.monotonic()
+    if server_name in _lazy_tool_cache:
+        tools, expiry = _lazy_tool_cache[server_name]
+        if now < expiry:
+            return tools
+    
+    # Load tools from server
+    config = load_mcp_config()[0]
+    server_config = config["mcpServers"][server_name]
+    manager = RobustMCPServerManager(...)
+    tools = await manager.connect(stack)
+    
+    _lazy_tool_cache[server_name] = (tools, now + _LAZY_CACHE_TTL)
+    return tools
+```
+
+In `agent_graph.py` — `@tool` decorator für Discovery:
+
+```python
+@tool
+async def mcp_discover(server_hint: str) -> str:
+    """Load MCP tools from a server. Use when you need document/office capabilities.
+    
+    Known servers: officecli (Word/Excel/PowerPoint), pixelle (image gen)
+    """
+    tools = await load_mcp_tools_lazy(server_hint, _global_stack)
+    # Dynamically register tools for current invocation
+    for tool in tools:
+        _register_tool_for_current_run(tool)
+    return f"Loaded {len(tools)} tools from {server_hint}"
+```
+
+**Env-Var für graduelle Migration:**
+
+```bash
+# .env
+ALPHARAVIS_MCP_LAZY=true           # Enable lazy loading
+ALPHARAVIS_MCP_LAZY_EAGER_LIST=    # Servers to still load eagerly (empty = all lazy)
+ALPHARAVIS_MCP_LAZY_CACHE_TTL=300  # Cache TTL in seconds
+```
+
+**Migration:**
+1. `mcp_client.py`: `load_mcp_tools_lazy()` neue Funktion
+2. `agent_graph.py`: `make_graph()` lädt KEINE Tools mehr eager
+3. `agent_graph.py`: `mcp_discover` @tool für On-Demand-Loading
+4. Alte `load_robust_mcp_tools()` bleibt für `ALPHARAVIS_MCP_LAZY=false`
+5. Bestehende Server (Pixelle SSE) funktionieren unverändert
+
+**Token-Ersparnis (geschätzt):**
+- Ohne Office-Request: 0 Office-Tokens (statt ~2000)
+- Mit Office-Request: ~2000 Tokens ONCE (dann gecached)
+- Bei 100 Requests/Tag, 10% Office: 180K Tokens gespart
+
+---
+
+### Phase 3: UI — Office Tab (Day 5-8)
 
 **Goal**: New "Office" tab in Deep Agents UI with document list, live preview, agent chat.
 
