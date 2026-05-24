@@ -1,19 +1,19 @@
 # Deep Agents UI — AlphaRavis Migration Plan
 
-> **Status: COMPLETE** (2026-05-24) — All planned features ported, plus bonus features from AionUi analysis.
+> **Status: IMPLEMENTED + HARDENED** (2026-05-24) — Planned features are ported and the review shortcomings have been fixed. Remaining check: live browser smoke test including Monaco-on-button behavior, upload flows, and thread rename/delete recovery.
 > **Branch:** dev2
 
 **Goal:** Port missing features from agent-custom-ui (agent-chat-ui fork) into submodules/deep-agents-ui (THEman6989 fork), making it the primary AlphaRavis chat UI.
 
 **Architecture:** deep-agents-ui is a Next.js 16 + React 19 app. Features are added as new components/hooks in `src/app/components/` and `src/app/hooks/`. The ChatProvider context is extended to carry new state (files, openers, skills). All additions follow existing patterns (shadcn/ui, Tailwind, framer-motion).
 
-**Tech Stack:** Next.js 16, React 19, TypeScript, Tailwind CSS, @langchain/langgraph-sdk, @langchain/core, shadcn/ui (Radix), framer-motion, SWR, Monaco Editor, diff
+**Tech Stack:** Next.js 16, React 19, TypeScript, Tailwind CSS, @langchain/langgraph-sdk, @langchain/core, shadcn/ui (Radix), framer-motion, SWR, Monaco Editor
 
 **Source of truth for ported code:** `agent-custom-ui/src/` (fork of langchain-ai/agent-chat-ui)
 
 ---
 
-## Final Status: 16/16 Tasks Done + 3 Bonus Features
+## Final Status: 16/16 Tasks Done + 3 Bonus Features + Hardening Fixes
 
 ### Phase 1: File Upload ✅ COMPLETE
 
@@ -24,13 +24,13 @@
 | 1.3 Port useFileUpload hook | ✅ | `src/app/hooks/useFileUpload.ts` — Drag&Drop, Paste, Input |
 | 1.4 ContentBlocksPreview | ✅ | `src/app/components/ContentBlocksPreview.tsx` |
 | 1.5 MultimodalPreview | ✅ | `src/app/components/MultimodalPreview.tsx` — Bilder/PDFs |
-| 1.6 Wire into ChatInterface | ✅ | Paperclip-Button, hidden input, preview, content blocks in sendMessage |
+| 1.6 Wire into ChatInterface | ✅ | Paperclip-Button, hidden input, preview, content blocks in sendMessage, `dropRef`, paste handler, drag-over overlay, processing state, remove-all |
 
 ### Phase 2: Thread Rename/Delete ✅ COMPLETE (rewritten)
 
 | Task | Status | File |
 |---|---|---|
-| 2.1 Thread operations | ✅ | Direkt in ThreadList.tsx — `useClient()` statt separatem Hook |
+| 2.1 Thread operations | ✅ | Direkt in ThreadList.tsx — `useClient()` statt separatem Hook; empty-title guard, pending states, metadata title display, active-thread delete recovery |
 | 2.2 Thread helpers | ✅ | Inline — `client.threads.update()`, `client.threads.delete()` |
 | 2.3 Edit/delete UI | ✅ | Hover-icons (Pencil/Trash2), inline rename input, window.confirm delete |
 
@@ -53,8 +53,11 @@
 | Task | Status |
 |---|---|
 | 5.1 Dark mode | ✅ Already supported via Radix colors |
-| 5.2 Docker build | ✅ `docker compose build deep-agents-ui` passes |
-| 5.3 Docs updated | ✅ CHANGES.md, ARCHITECTURE.md, AGENTS.md |
+| 5.2 Docker build | ✅ `docker compose build --no-cache deep-agents-ui` passes |
+| 5.3 Docs updated | ✅ CHANGES.md, ARCHITECTURE.md, USAGE_NOTES.md, OPEN_TASKS.md, AGENTS.md |
+| 5.4 Lockfile hygiene | ✅ `yarn.lock` regenerated; Monaco peer dependency explicit; unused `diff` package removed |
+| 5.5 Docker context hygiene | ✅ `.dockerignore` added to avoid sending `node_modules`/`.next` in build context |
+| 5.6 Next build config hygiene | ✅ `tsconfig.json` aligned with Next.js 16 build-time requirements |
 
 ---
 
@@ -64,7 +67,7 @@
 |---|---|---|
 | **Diff Viewer** | ✅ | `src/app/components/DiffViewer.tsx` — Color-coded, auto-detect |
 | **Skills Indicator** | ✅ | `src/app/components/SkillsIndicator.tsx` — CloudLightning icon, tooltip |
-| **File Preview Panel** | ✅ | `src/app/components/FilePreviewPanel.tsx` — Monaco, Markdown, Diff |
+| **File Preview Panel** | ✅ | `src/app/components/FilePreviewPanel.tsx` — lightweight code preview by default, Monaco only after button, Markdown, Diff |
 
 ---
 
@@ -72,12 +75,14 @@
 
 ### Modified
 ```
-package.json                          (+framer-motion, diff, @monaco-editor/react)
+package.json                          (+framer-motion, @monaco-editor/react, monaco-editor)
 src/app/components/ChatInterface.tsx  (+FileUpload, +ChatOpeners, +Skills, +Preview)
 src/app/components/ThreadList.tsx     (+Rename/Delete inline)
 src/app/hooks/useChat.ts             (+contentBlocks, +skills in StateType)
 src/app/layout.tsx                    (+ArtifactProvider)
 src/app/components/ToolCallBox.tsx    (+DiffViewer detection)
+yarn.lock                             (regenerated dependency lockfile)
+.dockerignore                         (small reproducible Docker build context)
 ```
 
 ### New
@@ -92,7 +97,22 @@ src/app/components/artifact.tsx
 src/app/components/DiffViewer.tsx
 src/app/components/SkillsIndicator.tsx
 src/app/components/FilePreviewPanel.tsx
+src/lib/diff-utils.ts
 ```
+
+## Verification (2026-05-24 hardening pass)
+
+- `docker run --rm -v "$PWD/submodules/deep-agents-ui:/app" -w /app node:20-alpine yarn install --frozen-lockfile` passes.
+- `docker run --rm -v "$PWD/submodules/deep-agents-ui:/app" -w /app node:20-alpine yarn lint` passes with 0 errors / 7 existing Fast Refresh warnings.
+- `git diff --check` and `git -C submodules/deep-agents-ui diff --check` pass.
+- Static added-line scan found no secrets/dangerous eval/shell patterns.
+- Independent review passed after fixing the ThreadList blur/Escape rename edge case.
+- `docker compose build --no-cache deep-agents-ui` passes with `yarn install --frozen-lockfile`.
+- `yarn.lock` now contains `framer-motion`, `@monaco-editor/react`, and `monaco-editor`; unused `diff` / `@types/diff` entries were removed.
+
+## Remaining live check
+
+- Browser smoke test on `deep-agents-ui`: file picker, drag & drop, paste upload, attachment remove/remove-all, preview panel, lightweight diff rendering, code preview before/after `Open Monaco editor`, thread rename/delete including active-thread deletion recovery.
 
 ---
 

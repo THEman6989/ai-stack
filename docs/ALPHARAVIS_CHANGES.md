@@ -11,7 +11,9 @@ can tell which patches are intentional and which ones can be removed.
 - Old LangChain upstream submodule removed; new fork is the canonical UI.
 - Migrated features from `agent-custom-ui` (agent-chat-ui fork):
   - **File Upload**: drag & drop, paste, file input; ContentBlocksPreview,
-    MultimodalPreview; multimodal-utils + file-validation libraries.
+    MultimodalPreview; multimodal-utils + file-validation libraries. The
+    hardening pass wires `dropRef`, `handlePaste`, and `dragOver` directly into
+    `ChatInterface` so the hook functionality is actually active in the composer.
   - **Chat Openers**: carousel with default AlphaRavis prompts on empty chat.
   - **Thread Rename/Delete**: inline edit + delete via `client.threads.update`
     and `client.threads.delete`, wired directly into ThreadList.
@@ -19,11 +21,43 @@ can tell which patches are intentional and which ones can be removed.
     ArtifactContent, ArtifactTitle for agent-generated HTML/React output.
 - Extended `useChat.sendMessage` to support multimodal content blocks.
 - Added `framer-motion` dependency for ChatOpeners animations.
-- Dockerfile: switched from `yarn install --frozen-lockfile` to `yarn install`
-  to allow custom dependency additions.
+- Added explicit `monaco-editor` peer dependency for `@monaco-editor/react`,
+  regenerated `yarn.lock`, and removed unused `diff` / `@types/diff` because
+  the custom DiffViewer parses unified diffs directly. Monaco is now loaded only
+  after the user presses `Open Monaco editor`; normal code previews stay as a
+  lightweight `<pre>` view, while DiffViewer remains the default for patch and
+  agent-change review.
+- Moved `isDiffContent()` into `src/lib/diff-utils.ts` so `DiffViewer.tsx`
+  only exports a component.
+- Added upload UX hardening: processing state, success/error toasts, remove-all
+  control, disabled upload during processing, and timestamped filenames for
+  generic pasted images before duplicate checks.
+- Hardened thread rename/delete UX: empty titles are rejected, unchanged titles
+  skip the API call, rename/delete show pending state, Escape-cancel suppresses
+  blur-save, duplicate pending rename saves are guarded, renamed metadata titles
+  are displayed by the thread list, and deleting the active thread selects a
+  fallback thread or clears `threadId`.
+- Added canonical UI integration contract in
+  `docs/ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md` with a `.hermes/templates/`
+  pointer for future UI ports.
+- Added `submodules/deep-agents-ui/.dockerignore`; no-cache Docker builds no
+  longer send local `node_modules` / `.next` into the build context.
+- Aligned `tsconfig.json` with the values Next.js 16 was applying during
+  production builds (`jsx=react-jsx`, `.next/dev/types/**/*.ts` include), so
+  build output no longer depends on in-container config mutation.
+- Dockerfile: uses `yarn install --frozen-lockfile` now that the custom
+  dependency set is committed in `yarn.lock`, so stale lockfiles fail the build
+  instead of being silently regenerated inside Docker. Docker `ENV` lines use
+  current `key=value` syntax to avoid BuildKit warnings.
 - Updated docker-compose.yml context path: `./submodules/deep-agents-ui`.
 - Updated AGENTS.md and .gitmodules.
-- Build verified: `docker compose build deep-agents-ui` passes.
+- Build verified: `docker compose build deep-agents-ui` passes. Hardening pass
+  verification: `docker run --rm -v "$PWD/submodules/deep-agents-ui:/app" -w /app node:20-alpine yarn install --frozen-lockfile`
+  passes, `docker run --rm -v "$PWD/submodules/deep-agents-ui:/app" -w /app node:20-alpine yarn lint`
+  passes with 0 errors / 7 existing Fast Refresh warnings, `git diff --check`
+  passes, static added-line scan found no secrets/dangerous patterns, independent
+  review passed after fixing the ThreadList blur/Escape rename edge case, and
+  `docker compose build --no-cache deep-agents-ui` passes.
 - Rationale: AlphaRavis needs a LangGraph-native UI with direct graph access
   (no Bridge/LibreChat overhead). deep-agents-ui provides Threads, Tasks,
   Tool-Approval, Subagent-Indicators as foundation; ported features add the

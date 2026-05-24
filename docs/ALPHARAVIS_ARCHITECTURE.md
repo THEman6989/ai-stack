@@ -115,8 +115,11 @@ The current Docker architecture is split into these main roles:
   process-local dict — sufficient for single-worker setups.
 - `deep-agents-ui`: AlphaRavis custom agent UI (forked from langchain-ai/deep-agents-ui,
   in `submodules/`). Features: chat, threads, tasks, tool approval, subagent
-  indicators, file upload, chat openers, thread rename/delete, artifact system.
-  Connects directly to LangGraph API on port 2024.
+  indicators, multimodal file upload (picker, drag/drop, paste), chat openers,
+  hardened thread rename/delete, artifact system, file preview panel, lightweight
+  diff viewer, on-demand Monaco editor for explicit code preview, and skills
+  indicator. Connects directly to LangGraph API on port 2024. Future UI ports
+  should follow `docs/ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md`.
 - `service-dashboard`: lightweight local redirector UI on port `8090` that
   lists host and Docker URLs for the stack services, separating Web Interfaces,
   APIs, and Infrastructure. API cards expose copyable Tailscale HTTPS, local

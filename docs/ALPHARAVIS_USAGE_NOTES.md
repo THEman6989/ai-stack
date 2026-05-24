@@ -22,6 +22,25 @@ For the complete Makefile target and argument reference, including install,
 update, streaming profiles, Tailscale/LAN network modes, media/vision settings,
 and smoke checks, see [`MAKEFILE_README.md`](MAKEFILE_README.md).
 
+## Deep Agents UI
+
+`deep-agents-ui` is the primary LangGraph-native AlphaRavis UI at port `3000`
+when the service is running. It connects directly to the LangGraph API instead
+of going through LibreChat/Bridge. The fork lives in
+`submodules/deep-agents-ui/` and supports chat threads, tasks/tool approvals,
+multimodal upload through file picker, drag/drop, and paste, chat openers,
+thread rename/delete, artifact rendering, file preview, diff rendering, and a
+skills indicator. Code files use a lightweight preview by default; Monaco loads
+only after pressing `Open Monaco editor`, while DiffViewer stays lightweight for
+patch previews and agent-change review. The UI integration contract for future
+ports is documented in [`ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md`](ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md).
+
+For UI smoke testing after changes, verify file picker upload, drag & drop,
+paste upload, attachment remove/remove-all, preview panel, lightweight diff
+rendering, code preview before and after pressing `Open Monaco editor`, and
+thread rename/delete in the browser. Build-level verification is `docker compose
+build --no-cache deep-agents-ui`; local Node/Yarn on the host is not required.
+
 A Tailscale HTTPS helper can make the local HTTP services reachable through
 Tailscale Serve inside your Tailnet and make the dashboard show those HTTPS
 URLs:

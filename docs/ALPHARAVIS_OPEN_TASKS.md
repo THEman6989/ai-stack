@@ -3,6 +3,40 @@
 This is the running backlog for features that are intentionally prepared but
 not fully wired yet.
 
+## Deep Agents UI
+
+Status: Implemented and second hardening pass applied. Build/lint verification
+passes; live browser smoke test still needed.
+
+Implemented:
+
+- `submodules/deep-agents-ui` is the canonical forked UI submodule.
+- Multimodal upload is wired in `ChatInterface`: file picker, drag/drop via
+  `dropRef`, paste via `handlePaste`, content preview, processing state,
+  success/error toasts, remove-all control, timestamped pasted-image filenames,
+  and content blocks in `sendMessage`.
+- Chat openers, hardened thread rename/delete (pending state, Escape cancel,
+  duplicate rename guard, metadata title display, active-thread delete recovery),
+  artifact rendering, file preview panel, lightweight diff rendering, on-demand
+  Monaco editor, and skills indicator are present.
+- Dependency hygiene: `monaco-editor` peer dependency explicit, `yarn.lock`
+  regenerated, unused `diff` / `@types/diff` removed.
+- Docker hygiene: `.dockerignore` keeps local `node_modules`/`.next` out of the
+  build context, and the Dockerfile now uses `yarn install --frozen-lockfile`.
+- Next.js build config hygiene: `tsconfig.json` is aligned with Next 16 so the
+  production build does not need to mutate it in-container.
+- UI integration template: `docs/ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md` plus
+  `.hermes/templates/alpha-ravis-ui-integration-template.md` pointer.
+
+Still needed:
+
+- Live browser smoke test on port 3000: file picker upload, drag/drop upload,
+  paste upload, attachment remove/remove-all, preview panel, lightweight diff
+  rendering, code preview before/after `Open Monaco editor`, and thread
+  rename/delete including active-thread deletion recovery.
+- Decide later whether to tackle AionUi Tier 3 items: i18n, inline tool-result
+  streaming, and conversation tabs.
+
 ## Parallel Task Execution (Stage 2)
 
 Status: Stage 2 implemented (executor, worker spawn, merge/review). Live

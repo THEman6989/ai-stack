@@ -1,6 +1,6 @@
 # AionUi Features — Porting Candidates for deep-agents-ui
 
-> **Status Update: 2026-05-24** — Tier 1 & 2 complete. Tier 3 pending.
+> **Status Update: 2026-05-24** — Tier 1 & 2 implemented and second hardening fixes applied. Tier 3 pending. Remaining check: live browser smoke test.
 > deep-agents-ui fork: `THEman6989/deep-agents-ui` (submodule `submodules/deep-agents-ui/`)
 
 ---
@@ -10,8 +10,8 @@
 ### Diff Viewer ✅
 **Datei:** `src/app/components/DiffViewer.tsx`
 **Integration:** `ToolCallBox.tsx` — Auto-detect `isDiffContent()`, render DiffViewer statt `<pre>`.
-**Dependency:** `diff` (npm)
-**Build:** ✅
+**Dependency:** none; unified diff detection lives in `src/lib/diff-utils.ts`.
+**Build:** ✅ lint/build verified
 
 ### Skills Indicator ✅
 **Datei:** `src/app/components/SkillsIndicator.tsx`
@@ -27,17 +27,19 @@
 **Datei:** `src/app/components/FilePreviewPanel.tsx`
 **Features:**
 - Tab-basiertes Multi-File-Preview
-- Code → Monaco Editor (lazy-loaded)
+- Code → lightweight `<pre>` preview first, Monaco only after explicit `Open Monaco editor` click
 - Markdown → MarkdownContent rendering
 - Diff → DiffViewer component
 - Auto-detection von File-Extension → Language
 **Integration:** `ChatInterface.tsx` — "Preview"-Button (Eye icon) im Files-Row, Overlay-Panel.
-**Dependencies:** `@monaco-editor/react`, `diff`
-**Build:** ✅
+**Dependencies:** `@monaco-editor/react`, `monaco-editor`
+**Build:** ✅ lint/build verified
 
 ### Monaco Code Editor ✅
 Im FilePreviewPanel integriert. Read-only, Dark-Theme, Minimap disabled, Word-Wrap.
-Wird lazy geladen (dynamic import), SSR disabled.
+Wird per dynamic import geladen, SSR disabled, aber erst nachdem der Nutzer für
+eine konkrete Code-Datei `Open Monaco editor` drückt. Der normale Code-Preview-
+Pfad bleibt ein schneller `<pre>` ohne Monaco-Bundle.
 
 ---
 
@@ -69,8 +71,15 @@ Wird lazy geladen (dynamic import), SSR disabled.
 
 | Feature | Datei | Build |
 |---|---|---|
-| Diff Viewer | `src/app/components/DiffViewer.tsx` | ✅ |
+| Diff Viewer | `src/app/components/DiffViewer.tsx` + `src/lib/diff-utils.ts` | ✅ |
 | Skills Indicator | `src/app/components/SkillsIndicator.tsx` | ✅ |
 | File Preview Panel | `src/app/components/FilePreviewPanel.tsx` | ✅ |
-| Monaco Editor | In FilePreviewPanel (lazy) | ✅ |
+| Monaco Editor | In FilePreviewPanel, dynamic import behind explicit button, peer dep | ✅ |
 | Markdown Preview | In FilePreviewPanel | ✅ |
+
+## Hardening Notes
+
+- Removed unused `diff` / `@types/diff`; the custom viewer already parses unified diffs directly.
+- Added explicit `monaco-editor` peer dependency and regenerated `yarn.lock`.
+- Moved `isDiffContent()` out of `DiffViewer.tsx` into `src/lib/diff-utils.ts` to reduce component/export coupling.
+- Added `.dockerignore` to keep Docker build context reproducible and small.
