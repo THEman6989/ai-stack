@@ -400,11 +400,11 @@ services:
       start_period: 5s
     restart: unless-stopped
 
-  # Das offizielle LangChain Deep Agents UI
+  # AlphaRavis Custom Deep Agents UI (forked from langchain-ai/deep-agents-ui)
   deep-agents-ui:
     build:
-      context: ./deep-agents-ui
-      dockerfile: ../docker/deep-agents-ui/Dockerfile
+      context: ./submodules/deep-agents-ui
+      dockerfile: ../../docker/deep-agents-ui/Dockerfile
     container_name: deep-agents-ui
     ports:
       - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:3000:3000"

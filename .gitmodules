@@ -12,9 +12,6 @@
 [submodule "rag-api-repo"]
 	path = rag-api-repo
 	url = https://github.com/danny-avila/rag_api
-[submodule "deep-agents-ui"]
-	path = deep-agents-ui
-	url = https://github.com/langchain-ai/deep-agents-ui
 [submodule "pixelle-mcp-custom"]
 	path = pixelle-mcp-custom
 	url = https://github.com/theman6989/pixelle-mcp-costom
@@ -23,3 +20,6 @@
 	path = hermes-agent
 	url = https://github.com/NousResearch/hermes-agent
 	branch = main
+[submodule "submodules/deep-agents-ui"]
+	path = submodules/deep-agents-ui
+	url = https://github.com/THEman6989/deep-agents-ui.git

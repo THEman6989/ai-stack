@@ -72,7 +72,7 @@ Primary services:
 - `librechat`: normal user chat UI on port `3080`.
 - `litellm`: model gateway on port `4000`.
 - `hermes-agent`: optional coding/system specialist on port `8642`.
-- `deep-agents-ui`: inspection UI.
+- `deep-agents-ui`: AlphaRavis custom agent UI (forked, in `submodules/`).
 
 The stable default for DeepAgents Responses mode is hybrid streaming:
 

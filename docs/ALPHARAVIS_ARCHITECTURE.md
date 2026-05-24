@@ -113,7 +113,10 @@ The current Docker architecture is split into these main roles:
   `ContextScheduler` uses Redis for atomic cross-worker context admission
   (Lua-script-backed `HSET` + capacity check). Default `local` uses a
   process-local dict — sufficient for single-worker setups.
-- `deep-agents-ui`: visual UI for DeepAgents/LangGraph-style inspection.
+- `deep-agents-ui`: AlphaRavis custom agent UI (forked from langchain-ai/deep-agents-ui,
+  in `submodules/`). Features: chat, threads, tasks, tool approval, subagent
+  indicators, file upload, chat openers, thread rename/delete, artifact system.
+  Connects directly to LangGraph API on port 2024.
 - `service-dashboard`: lightweight local redirector UI on port `8090` that
   lists host and Docker URLs for the stack services, separating Web Interfaces,
   APIs, and Infrastructure. API cards expose copyable Tailscale HTTPS, local

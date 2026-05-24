@@ -4,6 +4,63 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-24 — Deep Agents UI: Fork + Feature Migration
+
+- Forked `langchain-ai/deep-agents-ui` to `THEman6989/deep-agents-ui`,
+  moved from root `deep-agents-ui/` to `submodules/deep-agents-ui/`.
+- Old LangChain upstream submodule removed; new fork is the canonical UI.
+- Migrated features from `agent-custom-ui` (agent-chat-ui fork):
+  - **File Upload**: drag & drop, paste, file input; ContentBlocksPreview,
+    MultimodalPreview; multimodal-utils + file-validation libraries.
+  - **Chat Openers**: carousel with default AlphaRavis prompts on empty chat.
+  - **Thread Rename/Delete**: inline edit + delete via `client.threads.update`
+    and `client.threads.delete`, wired directly into ThreadList.
+  - **Artifact System**: portal-based ArtifactProvider, ArtifactSlot,
+    ArtifactContent, ArtifactTitle for agent-generated HTML/React output.
+- Extended `useChat.sendMessage` to support multimodal content blocks.
+- Added `framer-motion` dependency for ChatOpeners animations.
+- Dockerfile: switched from `yarn install --frozen-lockfile` to `yarn install`
+  to allow custom dependency additions.
+- Updated docker-compose.yml context path: `./submodules/deep-agents-ui`.
+- Updated AGENTS.md and .gitmodules.
+- Build verified: `docker compose build deep-agents-ui` passes.
+- Rationale: AlphaRavis needs a LangGraph-native UI with direct graph access
+  (no Bridge/LibreChat overhead). deep-agents-ui provides Threads, Tasks,
+  Tool-Approval, Subagent-Indicators as foundation; ported features add the
+  missing chat UX (file upload, thread management, chat openers).
+
+## 2026-05-24 — Storage Manager: pgvector / Archive Coverage
+
+- Extended `ai_stack/storage_manager/` with pgvector/archive support
+  (vectordb service). Previously only tracked filesystem directories +
+  MongoDB; now also tracks PostgreSQL database sizes and can clean oldest
+  archive chunks.
+- `scanner.py`: Added `scan_vectordb_service()` — queries PostgreSQL via
+  `pg_database_size()` for `rag_api` and `litellm` databases. Added
+  `DB_SERVICES` set to distinguish DB-backed services from pure filesystem.
+  `scan_all_services()` now accepts optional `pg_uri` parameter.
+- `cleaner.py`: Added `_clean_vectordb()` — deletes oldest rows from
+  `langchain_pg_embedding` (archive chunks) ordered by `created_at`. Also
+  cleans `alpharavis_embedding_jobs` older than 30 days. Added
+  `pg_docs_deleted` field to `CleanupResult`. `clean_service()` dispatches
+  `vectordb` to `_clean_vectordb`.
+- `config.py`: Added `pg_uri` field to `StorageConfig`. Updated default
+  percentages: `vectordb=30%`, `librechat=10%`, recalibrated others.
+  `pg_uri` resolved from `ALPHARAVIS_PGVECTOR_DATABASE_URL` with
+  `${POSTGRES_PASSWORD}` expansion.
+- `manager.py`: `scan_all_services()` calls include `pg_uri` to enable
+  vectordb scanning and cleanup.
+- `.env(exaple)`: Updated percentage defaults and added `VECTORDB_PCT`.
+- Tests: 24 tests in `tests/test_storage_manager.py` — 18 original plus
+  6 new vectordb tests (scanner mock, no-psycopg2 fallback, cleaner
+  dry-run, dispatch integration, scan_all_services include). All passing.
+- Feature remains default OFF (`ALPHARAVIS_STORAGE_MANAGER_ENABLED=false`).
+
+Rationale: User requested per-component storage quotas with archive
+coverage. The pgvector-backed archive was a missing piece — vectordb now
+gets 30% of the total budget by default. Cleanup deletes oldest chunks by
+`created_at` without dropping tables.
+
 ## 2026-05-24 — Redis Context Lease Store For Multi-Worker Coordination
 
 - Added `RedisLeaseStore` as optional shared lease backend alongside the

@@ -8,7 +8,7 @@ WORKDIR /app
 
 # Kopiere Paketmanager-Dateien aus dem Build-Kontext (Submodul)
 COPY package.json yarn.lock* ./
-RUN yarn install --frozen-lockfile
+RUN yarn install
 
 # 3. Build-Stufe
 FROM base AS builder
