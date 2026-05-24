@@ -54,7 +54,8 @@ can tell which patches are intentional and which ones can be removed.
 - Build verified: `docker compose build deep-agents-ui` passes. Hardening pass
   verification: `docker run --rm -v "$PWD/submodules/deep-agents-ui:/app" -w /app node:20-alpine yarn install --frozen-lockfile`
   passes, `docker run --rm -v "$PWD/submodules/deep-agents-ui:/app" -w /app node:20-alpine yarn lint`
-  passes with 0 errors / 7 existing Fast Refresh warnings, `git diff --check`
+  passes with 0 errors / 0 warnings (all 7 Fast Refresh warnings fixed by
+  extracting non-component exports to separate files), `git diff --check`
   passes, static added-line scan found no secrets/dangerous patterns, independent
   review passed after fixing the ThreadList blur/Escape rename edge case, and
   `docker compose build --no-cache deep-agents-ui` passes.

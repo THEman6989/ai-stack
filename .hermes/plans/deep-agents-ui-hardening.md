@@ -55,7 +55,7 @@
 
 11. Verify build/lint.
     - ✅ `docker run --rm -v "$PWD/submodules/deep-agents-ui:/app" -w /app node:20-alpine yarn install --frozen-lockfile` passes.
-    - ✅ `docker run --rm -v "$PWD/submodules/deep-agents-ui:/app" -w /app node:20-alpine yarn lint` passes with 0 errors / 7 existing Fast Refresh warnings.
+    - ✅ `docker run --rm -v "$PWD/submodules/deep-agents-ui:/app" -w /app node:20-alpine yarn lint` passes with 0 errors / 0 warnings (all 7 Fast Refresh warnings fixed via extraction of non-component exports).
     - ✅ `git diff --check` and `git -C submodules/deep-agents-ui diff --check` pass.
     - ✅ Static added-line scan found no secrets/dangerous eval/shell patterns.
     - ✅ Independent review passed after fixing the ThreadList blur/Escape rename edge case.
@@ -64,3 +64,19 @@
 12. Manual browser smoke.
     - Still requires running stack/browser on port `3000`.
     - Checklist lives in `docs/ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md`.
+
+13. Fix Fast Refresh warnings (0 warnings).
+    - Extracted `buttonVariants` → `src/components/ui/button-variants.ts`.
+    - Extracted `ClientContext` + `useClient` → `src/providers/ClientContext.ts` + `src/providers/useClient.ts`.
+    - Extracted `ChatContext` + `useChatContext` → `src/providers/ChatContext.ts` + `src/providers/useChatContext.ts`.
+    - Extracted `ArtifactSlotContext` + hooks → `src/app/components/artifact-context.ts` + `src/app/components/useArtifact.tsx`.
+    - Updated all imports (page.tsx, ThreadList.tsx, useChat.ts, TasksFilesSidebar.tsx, ChatInterface.tsx).
+    - ✅ `yarn lint`: 0 errors, 0 warnings.
+
+14. Playwright smoke tests (scaffold).
+    - Added: `e2e/smoke.spec.ts` — covers thread rename/delete, file upload, preview panel, Monaco button, paste, remove-all, processing state.
+    - Added: `playwright.config.ts` — Chromium project, CI-ready.
+    - Added: `yarn test:e2e`, `test:e2e:headed`, `test:e2e:ui` scripts.
+    - Added: `.github/workflows/ci.yml` — lint + build job, e2e job (disabled by default).
+    - ⚠️ `@playwright/test` not yet in devDependencies (`yarn.lock` regeneration needed before first run).
+    - ⚠️ `e2e/` and `playwright.config.ts` excluded from `tsconfig.json` until dep is installed.
