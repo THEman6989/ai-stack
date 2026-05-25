@@ -56,6 +56,15 @@ def test_office_panel_exists_and_sends_agent_officecli_prompt():
     assert "Screenshot" in content
     assert "officecli view" in content
     assert "screenshot -o" in content
+    assert "handleWatch" in content
+    assert "handleStopWatch" in content
+    assert "MonitorPlay" in content
+    assert "MonitorStop" in content
+    assert "watchFile" in content
+    assert "Live Preview:" in content
+    assert "officecli watch" in content
+    assert "iframe" in content
+    assert "sandbox" in content
 
 
 def test_home_page_wires_chat_and_office_tabs():
