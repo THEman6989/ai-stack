@@ -53,8 +53,12 @@ the host and `/workspace/office-output` in `langgraph-api`. The media-gallery
 service mounts the same directory read-only and serves files at
 `http://localhost:8130/office-output/<relative-path>` plus a JSON listing at
 `http://localhost:8130/office/files`; the Office tab's `Output files` button
-opens that listing. Live preview uses OfficeCLI watch on port `26315`,
-configurable with `ALPHARAVIS_OFFICECLI_WATCH_PORT`. Direct CLI use works
+opens that listing. Browser fetches from the UI are allowed by the configurable
+`ALPHARAVIS_MEDIA_CORS_ALLOW_ORIGINS` list. Live preview uses OfficeCLI watch on port `26315`,
+configurable with `ALPHARAVIS_OFFICECLI_WATCH_PORT`; the Office tab sends a
+shell-compatible `nohup officecli watch ... --port <port>` instruction to the
+agent and uses `officecli unwatch` for Stop until managed per-session watch
+lifecycles are implemented. Direct CLI use works
 without the MCP flags; MCP only adds typed OfficeCLI tools when enabled.
 
 For UI smoke testing after changes, verify file picker upload, drag & drop,

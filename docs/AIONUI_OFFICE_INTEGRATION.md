@@ -179,10 +179,14 @@ OfficeCLI + Chromium, Docker Compose mountet `./office-output` nach
 `/workspace/office-output` und veröffentlicht den Watch-Port `26315`. AlphaRavis
 hat das default-off Toolset `office/documents`, default-off OfficeCLI-Prompting,
 per `enabled_env` gegatetes OfficeCLI-MCP, media-gallery Download-URLs unter
-`/office-output/*` plus `/office/files`, und die DeepAgentsUI-Fork akzeptiert
-DOCX/PPTX/XLSX Uploads plus Office-Tab-Launcher. Noch offen sind automatische
-Preview-Generierung, verwaltete Watch-Prozesse pro Datei/Session, und Live
-Browser-Smoke im UI.
+`/office-output/*` plus `/office/files` inklusive konfigurierbarer Browser-CORS,
+und die DeepAgentsUI-Fork akzeptiert
+DOCX/PPTX/XLSX Uploads plus Office-Tab-Launcher. Der Office-Tab zeigt erzeugte
+Dateien als Cards, kann Screenshot-Aufträge senden und startet Watch-Aufträge
+über einen Shell-kompatiblen `nohup officecli watch ... --port <port>` Prompt;
+Stop läuft über `officecli unwatch`. Noch offen sind automatische Preview-
+Generierung, verwaltete Watch-Prozesse pro Datei/Session ohne Agent-Prompt, und
+vollständige Live-Browser-Smokes für Upload-/Preview-Flows.
 
 ### Phase 1 — OfficeCLI im Docker-Container (implemented base path)
 
@@ -215,7 +219,7 @@ RUN curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/instal
 | **Framework** | Electron 37 (Desktop) | Next.js 16 (Web) |
 | **UI Library** | Arco Design | shadcn/ui (Radix + Tailwind) |
 | **Agent-Protokoll** | ACP + CLI stdio | LangGraph SDK (REST/SSE) |
-| **Office Tool** | OfficeCLI (built-in) | ❌ → OfficeCLI-Integration geplant |
+| **Office Tool** | OfficeCLI (built-in) | ✅ OfficeCLI base path implemented (default-off prompt/toolset/MCP, Office tab, output listing) |
 | **Code-Editor** | Monaco + Codemirror | Monaco (lazy) + DiffViewer |
 | **IM Channels** | ✅ Telegram, Lark, DingTalk | ❌ (Hermes Agent separat) |
 | **Multi-Agent** | ✅ Parallel CLI Sessions | ✅ Subagent-Indikatoren |

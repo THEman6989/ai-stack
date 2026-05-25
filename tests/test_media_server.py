@@ -17,11 +17,17 @@ if "fastapi" not in sys.modules and importlib.util.find_spec("fastapi") is None:
     fastapi_stub = types.ModuleType("fastapi")
 
     class HTTPException(Exception):
-        pass
+        def __init__(self, status_code: int = 500, detail: str = "") -> None:
+            super().__init__(detail)
+            self.status_code = status_code
+            self.detail = detail
 
     class FastAPI:
         def __init__(self, *args, **kwargs) -> None:
-            pass
+            self.user_middleware = []
+
+        def add_middleware(self, cls, **options) -> None:
+            self.user_middleware.append(types.SimpleNamespace(cls=cls, options=options))
 
         def get(self, *args, **kwargs):
             return lambda fn: fn
@@ -36,6 +42,16 @@ if "fastapi" not in sys.modules and importlib.util.find_spec("fastapi") is None:
     fastapi_stub.HTTPException = HTTPException
     fastapi_stub.Request = object
     sys.modules["fastapi"] = fastapi_stub
+
+    middleware_stub = types.ModuleType("fastapi.middleware")
+    cors_stub = types.ModuleType("fastapi.middleware.cors")
+
+    class CORSMiddleware:
+        pass
+
+    cors_stub.CORSMiddleware = CORSMiddleware
+    sys.modules["fastapi.middleware"] = middleware_stub
+    sys.modules["fastapi.middleware.cors"] = cors_stub
 
     responses_stub = types.ModuleType("fastapi.responses")
     responses_stub.HTMLResponse = str
@@ -100,6 +116,71 @@ def test_office_files_endpoint_uses_office_output_root(monkeypatch, tmp_path: Pa
 
     assert result["root"] == str(root.resolve())
     assert result["files"][0]["filename"] == "sheet.xlsx"
+
+
+async def _call_list_office_templates() -> dict:
+    return await media_server.list_office_templates(limit=10)
+
+
+def test_office_templates_endpoint_lists_templates_subdir(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "office-output"
+    templates = root / "templates"
+    templates.mkdir(parents=True)
+    (templates / "report.docx").write_bytes(b"DOCX")
+    (root / "normal.docx").write_bytes(b"DOCX")
+    monkeypatch.setattr(media_server, "OFFICE_OUTPUT_ROOT", root.resolve())
+    monkeypatch.setattr(media_server, "OFFICE_OUTPUT_PUBLIC_BASE_URL", "http://localhost:8130/office-output")
+
+    result = asyncio.run(_call_list_office_templates())
+
+    assert result["root"] == str(templates.resolve())
+    assert [item["relative_path"] for item in result["files"]] == ["templates/report.docx"]
+
+
+def test_store_office_uploaded_file_writes_supported_file(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "office-output"
+    root.mkdir()
+    monkeypatch.setattr(media_server, "OFFICE_OUTPUT_ROOT", root.resolve())
+    monkeypatch.setattr(media_server, "OFFICE_OUTPUT_PUBLIC_BASE_URL", "http://localhost:8130/office-output")
+
+    record = media_server._store_office_uploaded_file(
+        filename="Quarterly Report.pptx",
+        content=b"PPTXDATA",
+    )
+
+    stored = root / record["relative_path"]
+    assert stored.read_bytes() == b"PPTXDATA"
+    assert record["filename"] == "quarterly-report.pptx"
+    assert record["download_url"] == "http://localhost:8130/office-output/quarterly-report.pptx"
+
+
+def test_store_office_uploaded_file_rejects_unsupported_extension(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "office-output"
+    root.mkdir()
+    monkeypatch.setattr(media_server, "OFFICE_OUTPUT_ROOT", root.resolve())
+
+    try:
+        media_server._store_office_uploaded_file(filename="notes.txt", content=b"TEXT")
+    except media_server.HTTPException as exc:
+        assert getattr(exc, "status_code", None) == 400
+        assert "unsupported office file type" in str(getattr(exc, "detail", ""))
+    else:  # pragma: no cover - defensive assertion for stubbed environments
+        raise AssertionError("unsupported office upload was accepted")
+
+
+def test_media_gallery_cors_allows_browser_ui_origins() -> None:
+    middleware = [item for item in media_server.app.user_middleware if item.cls.__name__ == "CORSMiddleware"]
+
+    assert middleware
+    allow_origins = middleware[0].options["allow_origins"]
+    assert "http://localhost:3000" in allow_origins
+    assert "http://127.0.0.1:3000" in allow_origins
+
+
+def test_media_gallery_cors_origins_are_env_configurable(monkeypatch) -> None:
+    monkeypatch.setenv("ALPHARAVIS_MEDIA_CORS_ALLOW_ORIGINS", "https://ui.example, http://localhost:9999/")
+
+    assert media_server._cors_allow_origins() == ["https://ui.example", "http://localhost:9999"]
 
 
 def test_download_asset_accepts_inline_video_data(monkeypatch, tmp_path: Path) -> None:

@@ -1360,6 +1360,8 @@ ALPHARAVIS_ENABLE_RAG_ARCHIVE_MIRROR=false
 ALPHARAVIS_ENABLE_MEDIA_GALLERY=true
 ALPHARAVIS_MEDIA_GALLERY_URL=http://media-gallery:8130
 ALPHARAVIS_MEDIA_PUBLIC_BASE_URL=http://localhost:8130
+# Comma-separated browser origins allowed to fetch media-gallery JSON/static files.
+ALPHARAVIS_MEDIA_CORS_ALLOW_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://localhost:3080,http://127.0.0.1:3080
 ALPHARAVIS_MEDIA_PORT=8130
 ALPHARAVIS_MEDIA_ROOT=/media-data
 ALPHARAVIS_MEDIA_MONGO_DB=alpharavis_media
@@ -1673,6 +1675,8 @@ ALPHARAVIS_OFFICECLI_WATCH_PORT=26315
 # OfficePanel UI env vars (NEXT_PUBLIC_* are exposed to the browser)
 NEXT_PUBLIC_OFFICE_PREVIEW_URL=http://localhost:26315
 NEXT_PUBLIC_OFFICE_OUTPUT_FILES_URL=http://localhost:8130/office/files
+NEXT_PUBLIC_OFFICE_OUTPUT_UPLOAD_URL=http://localhost:8130/office/upload
+NEXT_PUBLIC_OFFICE_TEMPLATES_URL=http://localhost:8130/office/templates
 
 # Enables OfficeCLI's stdio MCP server from langgraph-app/mcp.json. Keep false
 # until you explicitly want typed OfficeCLI MCP tools; direct CLI works without it.

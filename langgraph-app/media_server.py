@@ -13,6 +13,7 @@ from urllib.parse import urlencode, unquote_to_bytes, urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -36,6 +37,13 @@ OFFICE_OUTPUT_PUBLIC_BASE_URL = os.getenv(
     f"{PUBLIC_BASE_URL}/office-output",
 ).rstrip("/")
 OFFICE_OUTPUT_EXTENSIONS = {".docx", ".pptx", ".xlsx", ".pdf", ".html", ".png", ".jpg", ".jpeg"}
+OFFICE_UPLOAD_EXTENSIONS = {".docx", ".pptx", ".xlsx"}
+DEFAULT_CORS_ALLOW_ORIGINS = (
+    "http://localhost:3000,"
+    "http://127.0.0.1:3000,"
+    "http://localhost:3080,"
+    "http://127.0.0.1:3080"
+)
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://mongodb:27017")
 MONGO_DB = os.getenv("ALPHARAVIS_MEDIA_MONGO_DB", "alpharavis_media")
 MONGO_COLLECTION = os.getenv("ALPHARAVIS_MEDIA_MONGO_COLLECTION", "assets")
@@ -65,6 +73,22 @@ UPLOAD_MIME_TYPES = {
 }
 
 app = FastAPI(title="AlphaRavis Media Gallery", openapi_version="3.1.0")
+
+
+def _cors_allow_origins() -> list[str]:
+    raw = os.getenv("ALPHARAVIS_MEDIA_CORS_ALLOW_ORIGINS", DEFAULT_CORS_ALLOW_ORIGINS).strip()
+    if raw == "*":
+        return ["*"]
+    origins = [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]
+    return origins or ["http://localhost:3000", "http://127.0.0.1:3000"]
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_allow_origins(),
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 @app.get("/", include_in_schema=False)
 async def root_redirect():
@@ -371,22 +395,73 @@ def _office_output_record(path: Path) -> dict[str, Any]:
     }
 
 
-def _list_office_output_files(limit: int = 200) -> list[dict[str, Any]]:
-    if not OFFICE_OUTPUT_ROOT.exists():
+def _store_office_uploaded_file(*, filename: str, content: bytes) -> dict[str, Any]:
+    if not content:
+        raise HTTPException(status_code=400, detail="uploaded office file is empty")
+    if len(content) > MAX_DOWNLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"upload exceeds limit {MAX_DOWNLOAD_BYTES} bytes")
+    suffix = Path(filename or "").suffix.lower()
+    if suffix not in OFFICE_UPLOAD_EXTENSIONS:
+        supported = ", ".join(sorted(OFFICE_UPLOAD_EXTENSIONS))
+        raise HTTPException(status_code=400, detail=f"unsupported office file type: expected {supported}")
+    digest = hashlib.sha256(content).hexdigest()[:8]
+    stem = _safe_segment(Path(filename).stem or "office-upload", "office-upload")
+    OFFICE_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    target = OFFICE_OUTPUT_ROOT / f"{stem}{suffix}"
+    if target.exists():
+        target = OFFICE_OUTPUT_ROOT / f"{stem}-{digest}{suffix}"
+    ensure_write_allowed(target, allowed_root=OFFICE_OUTPUT_ROOT)
+    tmp = target.with_name(f".{target.name}.tmp")
+    with tmp.open("wb") as fh:
+        fh.write(content)
+    os.replace(tmp, target)
+    return _office_output_record(target)
+
+
+def _list_office_files_under(root: Path, limit: int = 200, extensions: set[str] | None = None) -> list[dict[str, Any]]:
+    if not root.exists():
         return []
     safe_limit = max(1, min(int(limit or 200), 1000))
+    allowed_extensions = extensions or OFFICE_OUTPUT_EXTENSIONS
     files = [
         path.resolve()
-        for path in OFFICE_OUTPUT_ROOT.rglob("*")
-        if path.is_file() and path.suffix.lower() in OFFICE_OUTPUT_EXTENSIONS
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() in allowed_extensions
     ]
     files.sort(key=lambda path: path.stat().st_mtime, reverse=True)
     return [_office_output_record(path) for path in files[:safe_limit]]
 
 
+def _list_office_output_files(limit: int = 200) -> list[dict[str, Any]]:
+    return _list_office_files_under(OFFICE_OUTPUT_ROOT, limit, OFFICE_OUTPUT_EXTENSIONS)
+
+
+def _list_office_template_files(limit: int = 200) -> list[dict[str, Any]]:
+    return _list_office_files_under(OFFICE_OUTPUT_ROOT / "templates", limit, OFFICE_UPLOAD_EXTENSIONS)
+
+
 @app.get("/office/files")
 async def list_office_output_files(limit: int = 200):
     return {"root": str(OFFICE_OUTPUT_ROOT), "files": _list_office_output_files(limit)}
+
+
+@app.get("/office/templates")
+async def list_office_templates(limit: int = 200):
+    template_root = (OFFICE_OUTPUT_ROOT / "templates").resolve()
+    return {"root": str(template_root), "files": _list_office_template_files(limit)}
+
+
+@app.post("/office/upload")
+async def upload_office_file(request: Request):
+    fields, uploaded = _parse_gallery_upload_multipart(
+        request.headers.get("content-type", ""),
+        await request.body(),
+    )
+    record = _store_office_uploaded_file(
+        filename=str(uploaded.get("filename") or fields.get("filename") or "office-upload"),
+        content=uploaded.get("content") or b"",
+    )
+    return {"file": record}
 
 
 def _sort_spec(sort: str, order: str) -> tuple[str, int]:

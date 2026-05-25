@@ -41,8 +41,16 @@ def test_office_panel_exists_and_sends_agent_officecli_prompt():
     assert "OfficeCLI" in content
     assert "/workspace/office-output" in content
     assert "NEXT_PUBLIC_OFFICE_OUTPUT_FILES_URL" in content
+    assert "NEXT_PUBLIC_OFFICE_OUTPUT_UPLOAD_URL" in content
+    assert "NEXT_PUBLIC_OFFICE_TEMPLATES_URL" in content
     assert "http://localhost:8130/office/files" in content
     assert "fetchOutputFiles" in content
+    assert "fetchTemplates" in content
+    assert "handleUpload" in content
+    assert "type=\"file\"" in content
+    assert "accept=\".docx,.pptx,.xlsx" in content
+    assert "officeOutputPath" in content
+    assert "relative_path" in content
     assert "useEffect" in content
     assert "outputFiles" in content
     assert "formatSize" in content
@@ -57,6 +65,21 @@ def test_office_panel_exists_and_sends_agent_officecli_prompt():
     assert "officecli view" in content
     assert "screenshot -o" in content
     assert "handleWatch" in content
+    assert "handleTemplateMerge" in content
+    assert "handleBatch" in content
+    assert "handleValidate" in content
+    assert "handleRoundTrip" in content
+    assert "Template Gallery" in content
+    assert "officecli merge" in content
+    assert "officecli validate" in content
+    assert "officecli dump" in content
+    assert "officecli batch" in content
+    assert "PREVIEW_PORT" in content
+    assert "previewPort" in content
+    assert "nohup officecli watch" in content
+    assert "officecli unwatch" in content
+    assert "background=true" not in content
+    assert "process(action=" not in content
     assert "handleStopWatch" in content
     assert "MonitorPlay" in content
     assert "MonitorStop" in content

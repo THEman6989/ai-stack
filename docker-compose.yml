@@ -282,13 +282,14 @@ services:
     volumes:
       - ./langgraph-app:/app
       - ./media-data:/media-data
-      - ./office-output:/workspace/office-output:ro
+      - ./office-output:/workspace/office-output
     env_file:
       - .env
     environment:
       - MONGODB_URI=mongodb://mongodb:27017
       - ALPHARAVIS_MEDIA_ROOT=${ALPHARAVIS_MEDIA_ROOT:-/media-data}
       - ALPHARAVIS_MEDIA_PUBLIC_BASE_URL=${ALPHARAVIS_MEDIA_PUBLIC_BASE_URL:-http://localhost:8130}
+      - ALPHARAVIS_MEDIA_CORS_ALLOW_ORIGINS=${ALPHARAVIS_MEDIA_CORS_ALLOW_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:3080,http://127.0.0.1:3080}
       - ALPHARAVIS_OFFICE_OUTPUT_ROOT=${ALPHARAVIS_OFFICE_OUTPUT_ROOT:-/workspace/office-output}
       - ALPHARAVIS_OFFICE_OUTPUT_PUBLIC_BASE_URL=${ALPHARAVIS_OFFICE_OUTPUT_PUBLIC_BASE_URL:-http://localhost:8130/office-output}
     depends_on:
@@ -423,6 +424,8 @@ services:
       - LANGGRAPH_API_URL=http://langgraph-api:2024
       - NEXT_PUBLIC_OFFICE_PREVIEW_URL=${NEXT_PUBLIC_OFFICE_PREVIEW_URL:-http://localhost:26315}
       - NEXT_PUBLIC_OFFICE_OUTPUT_FILES_URL=${NEXT_PUBLIC_OFFICE_OUTPUT_FILES_URL:-http://localhost:8130/office/files}
+      - NEXT_PUBLIC_OFFICE_OUTPUT_UPLOAD_URL=${NEXT_PUBLIC_OFFICE_OUTPUT_UPLOAD_URL:-http://localhost:8130/office/upload}
+      - NEXT_PUBLIC_OFFICE_TEMPLATES_URL=${NEXT_PUBLIC_OFFICE_TEMPLATES_URL:-http://localhost:8130/office/templates}
     depends_on:
       - langgraph-api
 

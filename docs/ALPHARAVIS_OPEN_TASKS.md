@@ -32,17 +32,20 @@ Implemented:
   launches OfficeCLI tasks through `sendMessage()`, targets
   `/workspace/office-output`, fetches generated documents from
   `/office/files`, shows rich document cards (type icon, size, date) with
-  download/open links and a refresh button, and links to the optional watch
-  preview URL.
+  download/open links and a refresh button, sends screenshot prompts with an
+  explicit `.png` output path, and starts/stops watch prompts using
+  AlphaRavis-shell-compatible `officecli watch` / `officecli unwatch` commands.
 - Office upload support: DOCX/PPTX/XLSX MIME types are accepted and preserved as
   file blocks with original MIME types rather than image/vision blocks.
 - Backend/runtime support: `langgraph-api` installs OfficeCLI + Chromium,
   Compose mounts `./office-output:/workspace/office-output`, publishes the
   configurable watch port, and the `office/documents` toolset plus default-off
-  prompt policy and optional MCP entry are wired.
+  prompt policy and optional MCP entry are wired. `media-gallery` exposes
+  configurable CORS origins via `ALPHARAVIS_MEDIA_CORS_ALLOW_ORIGINS` so the
+  Office tab can fetch `/office/files` directly from the browser.
 - Feature flags stay default OFF: `ALPHARAVIS_ENABLE_OFFICECLI=false` for prompt
   guidance and `ALPHARAVIS_ENABLE_OFFICECLI_MCP=false` for the stdio MCP server.
-- Verification for the Office pass: focused Python tests pass (32 tests),
+- Verification for the Office pass: focused Python tests pass (34 tests),
   `npm run lint`, `npm run build`, `docker compose config --quiet`,
   `docker compose build deep-agents-ui`, and `docker compose build langgraph-api`
   pass. `docker compose run --rm --no-deps langgraph-api officecli --version`

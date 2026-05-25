@@ -34,9 +34,14 @@ can tell which patches are intentional and which ones can be removed.
   agent, targets `/workspace/office-output`, fetches and displays generated
   Office files from the media-gallery `/office/files` endpoint with document
   cards (type icon, filename, size, date), download/open links, and a refresh
-  button, and links to the optional watch preview URL.
+  button, and links to the optional watch preview URL. The Watch button now
+  sends an AlphaRavis-shell-compatible `nohup officecli watch ... --port <port>`
+  command and Stop uses `officecli unwatch`, instead of referring to Hermes-only
+  background/process tool parameters. The media-gallery endpoint now sets
+  configurable browser CORS origins via `ALPHARAVIS_MEDIA_CORS_ALLOW_ORIGINS`,
+  so the Deep Agents UI can fetch `/office/files` directly from port `8130`.
 - Verification:
-  - `pytest -q tests/test_media_server.py tests/test_deep_agents_office_ui.py tests/test_alpharavis_toolsets.py tests/test_prompt_assembly.py tests/test_mcp_client_config.py` → 32 passed.
+  - `pytest -q tests/test_media_server.py tests/test_deep_agents_office_ui.py tests/test_alpharavis_toolsets.py tests/test_prompt_assembly.py tests/test_mcp_client_config.py` → 34 passed.
   - `npm run lint` in `submodules/deep-agents-ui` → passed.
   - `npm run build` in `submodules/deep-agents-ui` → passed.
   - `docker compose config --quiet`, `docker compose build deep-agents-ui`, and
