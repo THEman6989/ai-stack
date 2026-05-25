@@ -65,6 +65,9 @@ def test_office_panel_exists_and_sends_agent_officecli_prompt():
     assert "officecli watch" in content
     assert "iframe" in content
     assert "sandbox" in content
+    assert "useRef" in content
+    assert "prevLoading" in content
+    assert "Auto-refresh" in content
 
 
 def test_home_page_wires_chat_and_office_tabs():
