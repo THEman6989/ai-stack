@@ -40,9 +40,10 @@ can tell which patches are intentional and which ones can be removed.
   - `npm run lint` in `submodules/deep-agents-ui` → passed.
   - `npm run build` in `submodules/deep-agents-ui` → passed.
   - `docker compose config --quiet`, `docker compose build deep-agents-ui`, and
-    `docker compose build langgraph-api` → passed; runtime check
-    `docker compose run --rm --no-deps langgraph-api officecli --version` printed
-    `1.0.97`.
+    `docker compose build langgraph-api` pass. `docker compose run --rm
+    --no-deps langgraph-api officecli --version` reports `1.0.97`.
+  - Live browser smoke on port 3000: Office tab renders correctly, Chat/Office
+    toggle works, form functional, no JS console errors.
 
 Rationale: Office document support should be usable through the existing lazy
 AlphaRavis toolset/terminal path first, while keeping MCP and extra prompt text

@@ -421,6 +421,8 @@ services:
       - NEXT_PUBLIC_LANGGRAPH_API_URL=http://localhost:2024
       - NEXT_PUBLIC_ASSISTANT_ID=alpha_ravis
       - LANGGRAPH_API_URL=http://langgraph-api:2024
+      - NEXT_PUBLIC_OFFICE_PREVIEW_URL=${NEXT_PUBLIC_OFFICE_PREVIEW_URL:-http://localhost:26315}
+      - NEXT_PUBLIC_OFFICE_OUTPUT_FILES_URL=${NEXT_PUBLIC_OFFICE_OUTPUT_FILES_URL:-http://localhost:8130/office/files}
     depends_on:
       - langgraph-api
 

@@ -1670,6 +1670,10 @@ ALPHARAVIS_OFFICE_OUTPUT_PUBLIC_BASE_URL=http://localhost:8130/office-output
 OFFICECLI_CHROMIUM_PATH=/usr/bin/chromium
 ALPHARAVIS_OFFICECLI_WATCH_PORT=26315
 
+# OfficePanel UI env vars (NEXT_PUBLIC_* are exposed to the browser)
+NEXT_PUBLIC_OFFICE_PREVIEW_URL=http://localhost:26315
+NEXT_PUBLIC_OFFICE_OUTPUT_FILES_URL=http://localhost:8130/office/files
+
 # Enables OfficeCLI's stdio MCP server from langgraph-app/mcp.json. Keep false
 # until you explicitly want typed OfficeCLI MCP tools; direct CLI works without it.
 # Requires ALPHARAVIS_LOAD_MCP_TOOLS=true and ALPHARAVIS_MCP_ALLOW_STDIO=true.
