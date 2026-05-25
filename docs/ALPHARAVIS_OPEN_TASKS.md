@@ -30,8 +30,9 @@ Implemented:
 - Office base path: `OfficePanel.tsx` adds a Chat/Office switch in the
   `submodules/deep-agents-ui` fork. The Office panel stays inside `ChatProvider`,
   launches OfficeCLI tasks through `sendMessage()`, targets
-  `/workspace/office-output`, links to the optional watch preview URL, and lists
-  Office files reported by thread state.
+  `/workspace/office-output`, links to the media-gallery `/office/files` output
+  listing and the optional watch preview URL, and lists Office files reported by
+  thread state.
 - Office upload support: DOCX/PPTX/XLSX MIME types are accepted and preserved as
   file blocks with original MIME types rather than image/vision blocks.
 - Backend/runtime support: `langgraph-api` installs OfficeCLI + Chromium,
@@ -40,7 +41,7 @@ Implemented:
   prompt policy and optional MCP entry are wired.
 - Feature flags stay default OFF: `ALPHARAVIS_ENABLE_OFFICECLI=false` for prompt
   guidance and `ALPHARAVIS_ENABLE_OFFICECLI_MCP=false` for the stdio MCP server.
-- Verification for the Office pass: focused Python tests pass (22 tests),
+- Verification for the Office pass: focused Python tests pass (32 tests),
   `npm run lint`, `npm run build`, `docker compose config --quiet`,
   `docker compose build deep-agents-ui`, and `docker compose build langgraph-api`
   pass. `docker compose run --rm --no-deps langgraph-api officecli --version`
@@ -54,8 +55,8 @@ Still needed:
   preview panel, lightweight diff rendering, code preview before/after
   `Open Monaco editor`, and thread rename/delete including active-thread
   deletion recovery.
-- Office follow-ups: automatic backend-side save/download URLs for generated
-  Office files, automatic `officecli view html|screenshot` preview generation,
+- Office follow-ups: automatic `officecli view html|screenshot` preview
+  generation, richer generated-file cards instead of raw `/office/files` JSON,
   and managed `officecli watch` lifecycle per file/session.
 - Decide later whether to tackle AionUi Tier 3 items: i18n, inline tool-result
   streaming, and conversation tabs.

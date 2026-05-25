@@ -14,7 +14,9 @@ can tell which patches are intentional and which ones can be removed.
 - `langgraph-api` now installs the OfficeCLI single binary in
   `/usr/local/bin/officecli`, adds Chromium for render/watch/screenshot support,
   and exposes `/workspace/office-output` plus the OfficeCLI watch port `26315`
-  through Docker Compose.
+  through Docker Compose. The media-gallery service mounts the same output
+  directory read-only and serves Office artifacts through `/office-output/*` and
+  `/office/files` for lightweight listing/download URLs.
 - Added `office/documents` to `langgraph-app/alpharavis_toolsets.py`. The toolset
   includes bounded local command execution for direct CLI use and can select
   OfficeCLI MCP tools by category when the MCP path is explicitly enabled.
@@ -30,9 +32,10 @@ can tell which patches are intentional and which ones can be removed.
 - Added `OfficePanel.tsx` and a Chat/Office header switch. The Office panel lives
   inside the existing `ChatProvider`, can send an OfficeCLI task prompt to the
   agent, targets `/workspace/office-output`, lists Office files reported by the
-  thread state, and links to the optional watch preview URL.
+  thread state, links to the media-gallery Office output listing, and links to
+  the optional watch preview URL.
 - Verification:
-  - `pytest -q tests/test_alpharavis_toolsets.py tests/test_prompt_assembly.py tests/test_mcp_client_config.py tests/test_deep_agents_office_ui.py` → 22 passed.
+  - `pytest -q tests/test_media_server.py tests/test_deep_agents_office_ui.py tests/test_alpharavis_toolsets.py tests/test_prompt_assembly.py tests/test_mcp_client_config.py` → 32 passed.
   - `npm run lint` in `submodules/deep-agents-ui` → passed.
   - `npm run build` in `submodules/deep-agents-ui` → passed.
   - `docker compose config --quiet`, `docker compose build deep-agents-ui`, and

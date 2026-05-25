@@ -178,9 +178,10 @@ Status 2026-05-25: Der Basis-Pfad ist implementiert. `langgraph-api` installiert
 OfficeCLI + Chromium, Docker Compose mountet `./office-output` nach
 `/workspace/office-output` und veröffentlicht den Watch-Port `26315`. AlphaRavis
 hat das default-off Toolset `office/documents`, default-off OfficeCLI-Prompting,
-per `enabled_env` gegatetes OfficeCLI-MCP, und die DeepAgentsUI-Fork akzeptiert
+per `enabled_env` gegatetes OfficeCLI-MCP, media-gallery Download-URLs unter
+`/office-output/*` plus `/office/files`, und die DeepAgentsUI-Fork akzeptiert
 DOCX/PPTX/XLSX Uploads plus Office-Tab-Launcher. Noch offen sind automatische
-Download-/Preview-APIs, verwaltete Watch-Prozesse pro Datei/Session, und Live
+Preview-Generierung, verwaltete Watch-Prozesse pro Datei/Session, und Live
 Browser-Smoke im UI.
 
 ### Phase 1 — OfficeCLI im Docker-Container (implemented base path)

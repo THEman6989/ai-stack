@@ -282,12 +282,15 @@ services:
     volumes:
       - ./langgraph-app:/app
       - ./media-data:/media-data
+      - ./office-output:/workspace/office-output:ro
     env_file:
       - .env
     environment:
       - MONGODB_URI=mongodb://mongodb:27017
       - ALPHARAVIS_MEDIA_ROOT=${ALPHARAVIS_MEDIA_ROOT:-/media-data}
       - ALPHARAVIS_MEDIA_PUBLIC_BASE_URL=${ALPHARAVIS_MEDIA_PUBLIC_BASE_URL:-http://localhost:8130}
+      - ALPHARAVIS_OFFICE_OUTPUT_ROOT=${ALPHARAVIS_OFFICE_OUTPUT_ROOT:-/workspace/office-output}
+      - ALPHARAVIS_OFFICE_OUTPUT_PUBLIC_BASE_URL=${ALPHARAVIS_OFFICE_OUTPUT_PUBLIC_BASE_URL:-http://localhost:8130/office-output}
     depends_on:
       mongodb:
         condition: service_healthy

@@ -2118,7 +2118,10 @@ Media is safe-by-default:
   attachment record and original upload storage stay unchanged.
 - Pixelle output URLs are registered with `media-gallery`.
 - The gallery downloads/stores returned assets under `media-data` and records
-  metadata in MongoDB.
+  metadata in MongoDB. For OfficeCLI output it also mounts
+  `/workspace/office-output` read-only and exposes static download URLs under
+  `/office-output/<relative-path>` plus a lightweight JSON listing at
+  `/office/files`; Office outputs are not copied into MongoDB by this path.
 - `media-gallery` accepts normal HTTP(S) image/video URLs and inline `data:`
   image/video blocks. Inline payloads are written to disk but not copied back
   into MongoDB asset metadata.

@@ -49,10 +49,13 @@ ALPHARAVIS_ENABLE_OFFICECLI_MCP=true
 ```
 
 With Docker Compose, generated Office files are mounted at `./office-output` on
-the host and `/workspace/office-output` in `langgraph-api`. Live preview uses
-OfficeCLI watch on port `26315`, configurable with
-`ALPHARAVIS_OFFICECLI_WATCH_PORT`. Direct CLI use works without the MCP flags;
-MCP only adds typed OfficeCLI tools when enabled.
+the host and `/workspace/office-output` in `langgraph-api`. The media-gallery
+service mounts the same directory read-only and serves files at
+`http://localhost:8130/office-output/<relative-path>` plus a JSON listing at
+`http://localhost:8130/office/files`; the Office tab's `Output files` button
+opens that listing. Live preview uses OfficeCLI watch on port `26315`,
+configurable with `ALPHARAVIS_OFFICECLI_WATCH_PORT`. Direct CLI use works
+without the MCP flags; MCP only adds typed OfficeCLI tools when enabled.
 
 For UI smoke testing after changes, verify file picker upload, drag & drop,
 paste upload, attachment remove/remove-all, preview panel, lightweight diff

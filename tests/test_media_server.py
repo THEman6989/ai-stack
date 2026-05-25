@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "langgraph-app"))
 os.environ.setdefault("ALPHARAVIS_MEDIA_ROOT", "/tmp/alpharavis-media-server-test")
+os.environ.setdefault("ALPHARAVIS_OFFICE_OUTPUT_ROOT", "/tmp/alpharavis-office-output-test")
 
 if "fastapi" not in sys.modules and importlib.util.find_spec("fastapi") is None:
     fastapi_stub = types.ModuleType("fastapi")
@@ -65,6 +66,40 @@ if "pydantic" not in sys.modules and importlib.util.find_spec("pydantic") is Non
     sys.modules["pydantic"] = pydantic_stub
 
 import media_server  # noqa: E402
+
+
+def test_office_output_listing_returns_supported_files(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "office-output"
+    root.mkdir()
+    (root / "deck.pptx").write_bytes(b"PPTX")
+    (root / "notes.txt").write_text("ignore")
+    nested = root / "nested"
+    nested.mkdir()
+    (nested / "report.docx").write_bytes(b"DOCX")
+
+    monkeypatch.setattr(media_server, "OFFICE_OUTPUT_ROOT", root.resolve())
+    monkeypatch.setattr(media_server, "OFFICE_OUTPUT_PUBLIC_BASE_URL", "http://localhost:8130/office-output")
+
+    files = media_server._list_office_output_files(limit=10)
+
+    assert {item["relative_path"] for item in files} == {"deck.pptx", "nested/report.docx"}
+    assert all(item["download_url"].startswith("http://localhost:8130/office-output/") for item in files)
+
+
+async def _call_list_office_output_files() -> dict:
+    return await media_server.list_office_output_files(limit=10)
+
+
+def test_office_files_endpoint_uses_office_output_root(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "office-output"
+    root.mkdir()
+    (root / "sheet.xlsx").write_bytes(b"XLSX")
+    monkeypatch.setattr(media_server, "OFFICE_OUTPUT_ROOT", root.resolve())
+
+    result = asyncio.run(_call_list_office_output_files())
+
+    assert result["root"] == str(root.resolve())
+    assert result["files"][0]["filename"] == "sheet.xlsx"
 
 
 def test_download_asset_accepts_inline_video_data(monkeypatch, tmp_path: Path) -> None:

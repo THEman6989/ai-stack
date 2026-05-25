@@ -40,6 +40,8 @@ def test_office_panel_exists_and_sends_agent_officecli_prompt():
     assert "sendMessage" in content
     assert "OfficeCLI" in content
     assert "/workspace/office-output" in content
+    assert "NEXT_PUBLIC_OFFICE_OUTPUT_FILES_URL" in content
+    assert "http://localhost:8130/office/files" in content
 
 
 def test_home_page_wires_chat_and_office_tabs():

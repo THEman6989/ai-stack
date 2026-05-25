@@ -30,6 +30,12 @@ else:
 
 MEDIA_ROOT = Path(os.getenv("ALPHARAVIS_MEDIA_ROOT", "/media-data")).expanduser().resolve()
 PUBLIC_BASE_URL = os.getenv("ALPHARAVIS_MEDIA_PUBLIC_BASE_URL", "http://localhost:8130").rstrip("/")
+OFFICE_OUTPUT_ROOT = Path(os.getenv("ALPHARAVIS_OFFICE_OUTPUT_ROOT", "/workspace/office-output")).expanduser().resolve()
+OFFICE_OUTPUT_PUBLIC_BASE_URL = os.getenv(
+    "ALPHARAVIS_OFFICE_OUTPUT_PUBLIC_BASE_URL",
+    f"{PUBLIC_BASE_URL}/office-output",
+).rstrip("/")
+OFFICE_OUTPUT_EXTENSIONS = {".docx", ".pptx", ".xlsx", ".pdf", ".html", ".png", ".jpg", ".jpeg"}
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://mongodb:27017")
 MONGO_DB = os.getenv("ALPHARAVIS_MEDIA_MONGO_DB", "alpharavis_media")
 MONGO_COLLECTION = os.getenv("ALPHARAVIS_MEDIA_MONGO_COLLECTION", "assets")
@@ -73,6 +79,8 @@ async def favicon():
 ensure_write_allowed(MEDIA_ROOT, allowed_root=MEDIA_ROOT)
 MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
 app.mount("/media", StaticFiles(directory=str(MEDIA_ROOT)), name="media")
+OFFICE_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+app.mount("/office-output", StaticFiles(directory=str(OFFICE_OUTPUT_ROOT)), name="office-output")
 
 
 class MediaRegisterRequest(BaseModel):
@@ -342,6 +350,43 @@ def _store_uploaded_asset(*, filename: str, content_type: str, content: bytes, t
 
 def _public_url(relative_path: str) -> str:
     return f"{PUBLIC_BASE_URL}/media/{relative_path.replace(os.sep, '/')}"
+
+
+def _office_output_url(relative_path: str) -> str:
+    return f"{OFFICE_OUTPUT_PUBLIC_BASE_URL}/{relative_path.replace(os.sep, '/')}"
+
+
+def _office_output_record(path: Path) -> dict[str, Any]:
+    resolved = path.resolve()
+    relative_path = str(resolved.relative_to(OFFICE_OUTPUT_ROOT)).replace(os.sep, "/")
+    stat = resolved.stat()
+    return {
+        "filename": resolved.name,
+        "relative_path": relative_path,
+        "extension": resolved.suffix.lower(),
+        "size": stat.st_size,
+        "modified_at": int(stat.st_mtime),
+        "public_url": _office_output_url(relative_path),
+        "download_url": _office_output_url(relative_path),
+    }
+
+
+def _list_office_output_files(limit: int = 200) -> list[dict[str, Any]]:
+    if not OFFICE_OUTPUT_ROOT.exists():
+        return []
+    safe_limit = max(1, min(int(limit or 200), 1000))
+    files = [
+        path.resolve()
+        for path in OFFICE_OUTPUT_ROOT.rglob("*")
+        if path.is_file() and path.suffix.lower() in OFFICE_OUTPUT_EXTENSIONS
+    ]
+    files.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return [_office_output_record(path) for path in files[:safe_limit]]
+
+
+@app.get("/office/files")
+async def list_office_output_files(limit: int = 200):
+    return {"root": str(OFFICE_OUTPUT_ROOT), "files": _list_office_output_files(limit)}
 
 
 def _sort_spec(sort: str, order: str) -> tuple[str, int]:
