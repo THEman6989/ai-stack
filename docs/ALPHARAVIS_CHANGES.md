@@ -31,9 +31,10 @@ can tell which patches are intentional and which ones can be removed.
   Office files are not treated as image/vision blocks.
 - Added `OfficePanel.tsx` and a Chat/Office header switch. The Office panel lives
   inside the existing `ChatProvider`, can send an OfficeCLI task prompt to the
-  agent, targets `/workspace/office-output`, lists Office files reported by the
-  thread state, links to the media-gallery Office output listing, and links to
-  the optional watch preview URL.
+  agent, targets `/workspace/office-output`, fetches and displays generated
+  Office files from the media-gallery `/office/files` endpoint with document
+  cards (type icon, filename, size, date), download/open links, and a refresh
+  button, and links to the optional watch preview URL.
 - Verification:
   - `pytest -q tests/test_media_server.py tests/test_deep_agents_office_ui.py tests/test_alpharavis_toolsets.py tests/test_prompt_assembly.py tests/test_mcp_client_config.py` → 32 passed.
   - `npm run lint` in `submodules/deep-agents-ui` → passed.

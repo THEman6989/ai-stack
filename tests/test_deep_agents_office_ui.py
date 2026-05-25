@@ -42,6 +42,15 @@ def test_office_panel_exists_and_sends_agent_officecli_prompt():
     assert "/workspace/office-output" in content
     assert "NEXT_PUBLIC_OFFICE_OUTPUT_FILES_URL" in content
     assert "http://localhost:8130/office/files" in content
+    assert "fetchOutputFiles" in content
+    assert "useEffect" in content
+    assert "outputFiles" in content
+    assert "formatSize" in content
+    assert "formatDate" in content
+    assert "OfficeOutputFile" in content
+    assert "download_url" in content
+    assert "Refresh" in content
+    assert "Download" in content
 
 
 def test_home_page_wires_chat_and_office_tabs():

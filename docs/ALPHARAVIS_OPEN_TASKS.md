@@ -30,9 +30,10 @@ Implemented:
 - Office base path: `OfficePanel.tsx` adds a Chat/Office switch in the
   `submodules/deep-agents-ui` fork. The Office panel stays inside `ChatProvider`,
   launches OfficeCLI tasks through `sendMessage()`, targets
-  `/workspace/office-output`, links to the media-gallery `/office/files` output
-  listing and the optional watch preview URL, and lists Office files reported by
-  thread state.
+  `/workspace/office-output`, fetches generated documents from
+  `/office/files`, shows rich document cards (type icon, size, date) with
+  download/open links and a refresh button, and links to the optional watch
+  preview URL.
 - Office upload support: DOCX/PPTX/XLSX MIME types are accepted and preserved as
   file blocks with original MIME types rather than image/vision blocks.
 - Backend/runtime support: `langgraph-api` installs OfficeCLI + Chromium,
@@ -56,8 +57,7 @@ Still needed:
   `Open Monaco editor`, and thread rename/delete including active-thread
   deletion recovery.
 - Office follow-ups: automatic `officecli view html|screenshot` preview
-  generation, richer generated-file cards instead of raw `/office/files` JSON,
-  and managed `officecli watch` lifecycle per file/session.
+  generation and managed `officecli watch` lifecycle per file/session.
 - Decide later whether to tackle AionUi Tier 3 items: i18n, inline tool-result
   streaming, and conversation tabs.
 - New: Office/Docs integration research completed. `docs/AIONUI_OFFICE_INTEGRATION.md`
