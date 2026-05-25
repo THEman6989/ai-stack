@@ -183,6 +183,7 @@ services:
       - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:8764:8764" # Computer/CUA UI
       - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:8766:8766" # Debugger UI
       - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:8768:8768" # Main Supervisor UI
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:${ALPHARAVIS_OFFICECLI_WATCH_PORT:-26315}:26315" # OfficeCLI live preview/watch
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -190,6 +191,7 @@ services:
       - ./langchain-bridge-repo/langchain_fastapi_chat_completion:/app/langchain_fastapi_chat_completion
       - ./local-deep-researcher-repo:/app/local_deep_researcher
       - ./:/workspace # WICHTIG: Die Sandbox braucht Zugriff auf deine Files zum Coden!
+      - ./office-output:/workspace/office-output
       - ./logs:/logs
     environment:
       # Most AlphaRavis switches live in .env. This block only pins container
@@ -202,6 +204,10 @@ services:
       - HERMES_API_KEY=${HERMES_API_KEY:-sk-hermes-local}
       - HERMES_MODEL=${HERMES_MODEL:-hermes-agent}
       - ALPHARAVIS_ARTIFACT_ROOT=${ALPHARAVIS_ARTIFACT_ROOT:-/workspace/artifacts/alpharavis}
+      - OFFICE_OUTPUT_DIR=${OFFICE_OUTPUT_DIR:-/workspace/office-output}
+      - OFFICECLI_CHROMIUM_PATH=${OFFICECLI_CHROMIUM_PATH:-/usr/bin/chromium}
+      - ALPHARAVIS_ENABLE_OFFICECLI=${ALPHARAVIS_ENABLE_OFFICECLI:-false}
+      - ALPHARAVIS_ENABLE_OFFICECLI_MCP=${ALPHARAVIS_ENABLE_OFFICECLI_MCP:-false}
       - ALPHARAVIS_PGVECTOR_DATABASE_URL=${ALPHARAVIS_PGVECTOR_DATABASE_URL:-postgresql://postgres:${POSTGRES_PASSWORD}@vectordb:5432/rag_api}
       - ALPHARAVIS_PGVECTOR_EMBEDDING_BASE_URL=${ALPHARAVIS_PGVECTOR_EMBEDDING_BASE_URL:-http://litellm:4000/v1}
       - ALPHARAVIS_PGVECTOR_EMBEDDING_API_KEY=${ALPHARAVIS_PGVECTOR_EMBEDDING_API_KEY:-sk-local-dev}

@@ -517,6 +517,11 @@ def load_mcp_config() -> Tuple[Dict[str, Any], List[str], List[str]]:
                 )
                 continue
             server_config = _expand_mcp_config_value(server_config)
+            enabled_env = str(server_config.get("enabled_env") or "").strip()
+            if enabled_env and not _env_bool(enabled_env, "false"):
+                continue
+            if server_config.get("enabled") is False:
+                continue
             transport = _mcp_transport(server_config)
             if transport == "stdio" and not allow_stdio:
                 warnings.append(

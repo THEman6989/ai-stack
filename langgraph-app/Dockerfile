@@ -6,6 +6,8 @@ RUN apt-get update && apt-get install -y \
     nodejs \
     npm \
     curl \
+    ca-certificates \
+    chromium \
     ffmpeg \
     xvfb \
     x11vnc \
@@ -24,6 +26,27 @@ ENV DISPLAY=:0
 ENV SCREEN_WIDTH=1280
 ENV SCREEN_HEIGHT=720
 ENV SCREEN_DEPTH=24
+ENV OFFICECLI_CHROMIUM_PATH=/usr/bin/chromium
+ENV OFFICE_OUTPUT_DIR=/workspace/office-output
+
+# Install OfficeCLI as a deterministic container binary. Pin OFFICECLI_VERSION
+# to a release tag for fully reproducible builds; default tracks latest.
+ARG OFFICECLI_VERSION=latest
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64) asset="officecli-linux-x64" ;; \
+      aarch64|arm64) asset="officecli-linux-arm64" ;; \
+      *) echo "Unsupported OfficeCLI architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    if [ "$OFFICECLI_VERSION" = "latest" ]; then \
+      base="https://github.com/iOfficeAI/OfficeCLI/releases/latest/download"; \
+    else \
+      base="https://github.com/iOfficeAI/OfficeCLI/releases/download/$OFFICECLI_VERSION"; \
+    fi; \
+    curl -fsSL -o /usr/local/bin/officecli "$base/$asset"; \
+    chmod +x /usr/local/bin/officecli; \
+    officecli --version
 
 # 1. Install Requirements
 COPY langgraph-app/requirements.txt .

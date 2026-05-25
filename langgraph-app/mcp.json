@@ -35,6 +35,14 @@
       "url": "${PIXELLE_URL}/pixelle/mcp/sse",
       "timeout": 300,
       "connect_timeout": 30
+    },
+    "officecli": {
+      "type": "stdio",
+      "command": "officecli",
+      "args": ["mcp", "start"],
+      "enabled_env": "ALPHARAVIS_ENABLE_OFFICECLI_MCP",
+      "timeout": 180,
+      "connect_timeout": 30
     }
   }
 }

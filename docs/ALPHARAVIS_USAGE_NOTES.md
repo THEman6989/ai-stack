@@ -29,11 +29,30 @@ when the service is running. It connects directly to the LangGraph API instead
 of going through LibreChat/Bridge. The fork lives in
 `submodules/deep-agents-ui/` and supports chat threads, tasks/tool approvals,
 multimodal upload through file picker, drag/drop, and paste, chat openers,
-thread rename/delete, artifact rendering, file preview, diff rendering, and a
-skills indicator. Code files use a lightweight preview by default; Monaco loads
-only after pressing `Open Monaco editor`, while DiffViewer stays lightweight for
-patch previews and agent-change review. The UI integration contract for future
-ports is documented in [`ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md`](ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md).
+thread rename/delete, artifact rendering, file preview, diff rendering, an
+Office tab, and a skills indicator. Code files use a lightweight preview by
+default; Monaco loads only after pressing `Open Monaco editor`, while DiffViewer
+stays lightweight for patch previews and agent-change review. The UI integration
+contract for future ports is documented in [`ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md`](ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md).
+
+The Office tab is a thin launcher for OfficeCLI work. It accepts DOCX/PPTX/XLSX
+uploads as file blocks, asks the agent to create or edit Office documents under
+`/workspace/office-output`, and links to the optional live preview endpoint. The
+feature is still opt-in at the agent/runtime layer:
+
+```bash
+ALPHARAVIS_ENABLE_OFFICECLI=true
+# Optional typed MCP tools; keep off unless explicitly needed/trusted.
+ALPHARAVIS_LOAD_MCP_TOOLS=true
+ALPHARAVIS_MCP_ALLOW_STDIO=true
+ALPHARAVIS_ENABLE_OFFICECLI_MCP=true
+```
+
+With Docker Compose, generated Office files are mounted at `./office-output` on
+the host and `/workspace/office-output` in `langgraph-api`. Live preview uses
+OfficeCLI watch on port `26315`, configurable with
+`ALPHARAVIS_OFFICECLI_WATCH_PORT`. Direct CLI use works without the MCP flags;
+MCP only adds typed OfficeCLI tools when enabled.
 
 For UI smoke testing after changes, verify file picker upload, drag & drop,
 paste upload, attachment remove/remove-all, preview panel, lightweight diff

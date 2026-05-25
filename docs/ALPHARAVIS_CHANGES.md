@@ -4,6 +4,47 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-25 — OfficeCLI + Deep Agents UI Office Tab Base Path
+
+- Added a default-off OfficeCLI integration path for AlphaRavis. The base
+  capability is controlled by `ALPHARAVIS_ENABLE_OFFICECLI=false`; the optional
+  stdio MCP server is separately controlled by
+  `ALPHARAVIS_ENABLE_OFFICECLI_MCP=false` and still requires
+  `ALPHARAVIS_MCP_ALLOW_STDIO=true` plus `ALPHARAVIS_LOAD_MCP_TOOLS=true`.
+- `langgraph-api` now installs the OfficeCLI single binary in
+  `/usr/local/bin/officecli`, adds Chromium for render/watch/screenshot support,
+  and exposes `/workspace/office-output` plus the OfficeCLI watch port `26315`
+  through Docker Compose.
+- Added `office/documents` to `langgraph-app/alpharavis_toolsets.py`. The toolset
+  includes bounded local command execution for direct CLI use and can select
+  OfficeCLI MCP tools by category when the MCP path is explicitly enabled.
+- `prompt_assembly.py` injects OfficeCLI operating policy only when
+  `ALPHARAVIS_ENABLE_OFFICECLI=true`, so normal non-Office requests keep the old
+  prompt surface.
+- `mcp_client.py` supports per-server `enabled_env` gating. The OfficeCLI MCP
+  entry is present in `langgraph-app/mcp.json` but skipped unless its env flag is
+  true, preventing eager stdio startup and prompt/tool bloat.
+- The `submodules/deep-agents-ui` fork now accepts `.docx`, `.pptx`, and `.xlsx`
+  uploads while preserving them as file blocks with their original MIME types.
+  Office files are not treated as image/vision blocks.
+- Added `OfficePanel.tsx` and a Chat/Office header switch. The Office panel lives
+  inside the existing `ChatProvider`, can send an OfficeCLI task prompt to the
+  agent, targets `/workspace/office-output`, lists Office files reported by the
+  thread state, and links to the optional watch preview URL.
+- Verification:
+  - `pytest -q tests/test_alpharavis_toolsets.py tests/test_prompt_assembly.py tests/test_mcp_client_config.py tests/test_deep_agents_office_ui.py` → 22 passed.
+  - `npm run lint` in `submodules/deep-agents-ui` → passed.
+  - `npm run build` in `submodules/deep-agents-ui` → passed.
+  - `docker compose config --quiet`, `docker compose build deep-agents-ui`, and
+    `docker compose build langgraph-api` → passed; runtime check
+    `docker compose run --rm --no-deps langgraph-api officecli --version` printed
+    `1.0.97`.
+
+Rationale: Office document support should be usable through the existing lazy
+AlphaRavis toolset/terminal path first, while keeping MCP and extra prompt text
+opt-in. This gives a working Office tab and document-output workflow without
+turning on extra local processes or tool schemas by default.
+
 ## 2026-05-24 — Deep Agents UI: Fork + Feature Migration
 
 - Forked `langchain-ai/deep-agents-ui` to `THEman6989/deep-agents-ui`,

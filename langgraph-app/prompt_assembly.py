@@ -29,6 +29,18 @@ DOCKER_ENVIRONMENT_HINT = (
     "mongo, or host.docker.internal depending on deployment."
 )
 
+OFFICECLI_POLICY_PROMPT = (
+    "OfficeCLI policy: when ALPHARAVIS_ENABLE_OFFICECLI=true and the user asks "
+    "for Office documents, use the office/documents toolset and OfficeCLI via "
+    "bounded terminal commands. Prefer L1 read/inspect commands before edits: "
+    "officecli create <file>.docx|.xlsx|.pptx; officecli view <file> "
+    "outline|text|issues|html|screenshot --json when supported; officecli get "
+    "or query for stable paths; officecli add/set for edits; officecli validate "
+    "before delivery. Write generated files under /workspace/office-output/ "
+    "unless the user gives another path. Use watch/live preview only when "
+    "explicitly needed."
+)
+
 STABLE_CONTEXT_POLICY = (
     "Stable prompt policy: keep identity, platform, safety, archive policy, "
     "toolset registry, and architecture hints separate from ephemeral user "
@@ -39,6 +51,10 @@ STABLE_CONTEXT_POLICY = (
 
 def env_bool(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def officecli_prompt_enabled() -> bool:
+    return env_bool("ALPHARAVIS_ENABLE_OFFICECLI", "false")
 
 
 def _is_wsl_runtime() -> bool:
@@ -129,6 +145,8 @@ def stable_prompt_sections(*, cwd: str | Path | None = None) -> list[str]:
         "Tool policy: start from toolset categories and bind/call concrete tools "
         "only when the task requires that capability."
     )
+    if officecli_prompt_enabled():
+        sections.append(OFFICECLI_POLICY_PROMPT)
     return sections
 
 

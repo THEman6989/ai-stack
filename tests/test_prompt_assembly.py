@@ -8,8 +8,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "langgraph-app"))
 
 from prompt_assembly import (  # noqa: E402
+    OFFICECLI_POLICY_PROMPT,
     build_environment_hints,
     build_stable_prompt_context,
+    officecli_prompt_enabled,
     truncate_context_content,
 )
 
@@ -38,6 +40,23 @@ def test_stable_prompt_context_separates_stable_from_ephemeral():
     assert "Stable prompt policy" in context
     assert "Tool policy" in context
     assert "archive" in context.lower()
+
+
+def test_officecli_prompt_is_default_off(monkeypatch):
+    monkeypatch.delenv("ALPHARAVIS_ENABLE_OFFICECLI", raising=False)
+
+    assert officecli_prompt_enabled() is False
+    assert OFFICECLI_POLICY_PROMPT not in build_stable_prompt_context(cwd="/workspace")
+
+
+def test_officecli_prompt_can_be_enabled(monkeypatch):
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_OFFICECLI", "true")
+
+    context = build_stable_prompt_context(cwd="/workspace")
+
+    assert officecli_prompt_enabled() is True
+    assert OFFICECLI_POLICY_PROMPT in context
+    assert "/workspace/office-output" in context
 
 
 def _run_all() -> None:

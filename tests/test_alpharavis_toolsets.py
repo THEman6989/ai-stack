@@ -64,6 +64,78 @@ def test_mcp_schema_cache_classifies_pixelle_tools():
     assert "video" in cache
 
 
+def test_office_toolset_is_discoverable_and_binds_cli_execution():
+    office = toolsets.get_toolset("office/documents")
+
+    assert office is not None
+    assert "office" in office.description.lower()
+    assert "coding/execute" in office.includes
+    assert "officecli" in office.mcp_categories
+    assert "office" in office.mcp_categories
+
+
+def test_infer_toolsets_from_text_skips_office_when_feature_disabled(monkeypatch):
+    monkeypatch.delenv("ALPHARAVIS_ENABLE_OFFICECLI", raising=False)
+
+    inferred = toolsets.infer_toolsets_from_text("Erstelle eine PPTX Präsentation mit drei Slides")
+
+    assert "office/documents" not in inferred
+
+
+def test_infer_toolsets_from_text_detects_office_document_requests_when_enabled(monkeypatch):
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_OFFICECLI", "true")
+
+    inferred = toolsets.infer_toolsets_from_text("Erstelle eine PPTX Präsentation mit drei Slides")
+
+    assert "office/documents" in inferred
+
+
+def test_mcp_schema_cache_classifies_officecli_tools():
+    cache = toolsets.build_mcp_schema_cache(
+        [
+            {
+                "name": "officecli",
+                "tools": [
+                    {"name": "officecli_create", "description": "Create a PowerPoint PPTX or Word DOCX document"},
+                    {"name": "officecli_view", "description": "Render spreadsheet XLSX preview"},
+                ],
+            }
+        ]
+    )
+
+    assert "officecli" in cache
+    assert "office" in cache
+    assert "document" in cache
+
+
+def test_materialize_office_toolset_selects_only_office_mcp_tools():
+    available = {"execute_local_command": FakeTool("execute_local_command")}
+    mcp = [FakeTool("officecli_create"), FakeTool("submit_image_job")]
+    cache = toolsets.build_mcp_schema_cache(
+        [
+            {
+                "name": "officecli",
+                "tools": [{"name": "officecli_create", "description": "create pptx docx xlsx"}],
+            },
+            {
+                "name": "pixelle",
+                "tools": [{"name": "submit_image_job", "description": "image prompt"}],
+            },
+        ]
+    )
+
+    materialized = toolsets.materialize_toolsets(
+        ["office/documents"],
+        available,
+        mcp_tools=mcp,
+        mcp_schema_cache=cache,
+    )
+
+    assert "execute_local_command" in materialized.tool_names
+    assert "officecli_create" in materialized.tool_names
+    assert "submit_image_job" not in materialized.tool_names
+
+
 def test_materialize_toolsets_filters_to_available_tools_and_mcp_category():
     available = {
         "read_repo_ai_skill": FakeTool("read_repo_ai_skill"),
@@ -110,6 +182,9 @@ def _run_all() -> None:
         test_resolve_toolset_includes_parents_and_dedupes_tools,
         test_cycle_detection_does_not_recurse_forever,
         test_mcp_schema_cache_classifies_pixelle_tools,
+        test_office_toolset_is_discoverable_and_binds_cli_execution,
+        test_mcp_schema_cache_classifies_officecli_tools,
+        test_materialize_office_toolset_selects_only_office_mcp_tools,
         test_materialize_toolsets_filters_to_available_tools_and_mcp_category,
         test_infer_toolsets_from_text_prefers_bounded_categories,
         test_agent_toolsets_are_bounded_by_role,

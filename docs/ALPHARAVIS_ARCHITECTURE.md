@@ -117,9 +117,10 @@ The current Docker architecture is split into these main roles:
   in `submodules/`). Features: chat, threads, tasks, tool approval, subagent
   indicators, multimodal file upload (picker, drag/drop, paste), chat openers,
   hardened thread rename/delete, artifact system, file preview panel, lightweight
-  diff viewer, on-demand Monaco editor for explicit code preview, and skills
-  indicator. Connects directly to LangGraph API on port 2024. Future UI ports
-  should follow `docs/ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md`.
+  diff viewer, on-demand Monaco editor for explicit code preview, Office tab for
+  OfficeCLI document creation/editing, and skills indicator. Connects directly to
+  LangGraph API on port 2024. Future UI ports should follow
+  `docs/ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md`.
 - `service-dashboard`: lightweight local redirector UI on port `8090` that
   lists host and Docker URLs for the stack services, separating Web Interfaces,
   APIs, and Infrastructure. API cards expose copyable Tailscale HTTPS, local
@@ -329,6 +330,12 @@ The config uses the familiar shape:
     "pixelle": {
       "type": "sse",
       "url": "${PIXELLE_URL}/pixelle/mcp/sse"
+    },
+    "officecli": {
+      "type": "stdio",
+      "command": "officecli",
+      "args": ["mcp", "start"],
+      "enabled_env": "ALPHARAVIS_ENABLE_OFFICECLI_MCP"
     }
   }
 }
@@ -353,8 +360,9 @@ When enabled, AlphaRavis loads configured MCP servers through the robust
   appropriate response messages.
 
 The loader prefixes tool names by server when supported, records server/tool
-metadata for ``describe_optional_tool_registry``, and keeps stdio MCP servers
-disabled unless explicitly trusted:
+metadata for ``describe_optional_tool_registry``, supports per-server
+`enabled_env` gates for config entries that should exist but remain disabled by
+default, and keeps stdio MCP servers disabled unless explicitly trusted:
 
 ```text
 ALPHARAVIS_MCP_ALLOW_STDIO=false
@@ -365,8 +373,8 @@ MCP configs start local processes by accident.
 
 AlphaRavis also has a Hermes-style toolset layer in
 `langgraph-app/alpharavis_toolsets.py`. Toolsets are composable categories such
-as `coding/read`, `media/image`, `rag/memory`, `system/docker`, and
-`system/power`. The run start node infers likely toolsets from the latest user
+such as `coding/read`, `media/image`, `rag/memory`, `office/documents`,
+`system/docker`, and `system/power`. The run start node infers likely toolsets
 request and stores them in `run_profile.selected_toolsets`; the planner injects
 only a short category context on the agent path. MCP schemas are cached by
 category, and concrete MCP tools are bound only to matching specialist bundles

@@ -1,6 +1,6 @@
 # AionUi / OfficeCLI — Office/Docs Integration Analysis & AlphaRavis Porting Plan
 
-> Erstellt 2026-05-24 · Letzte Aktualisierung: 2026-05-24 (OfficeCLI-Ergänzung)
+> Erstellt 2026-05-24 · Letzte Aktualisierung: 2026-05-25 (AlphaRavis base path implemented)
 
 ## 1. Die zwei Projekte: AionUi vs. OfficeCLI
 
@@ -174,7 +174,16 @@ eine reine Web-Vorschau ohne Agent-Tooling bräuchten.
 
 ## 6. AlphaRavis-Integration: Konkreter Plan
 
-### Phase 1 — OfficeCLI im Docker-Container (1 Tag)
+Status 2026-05-25: Der Basis-Pfad ist implementiert. `langgraph-api` installiert
+OfficeCLI + Chromium, Docker Compose mountet `./office-output` nach
+`/workspace/office-output` und veröffentlicht den Watch-Port `26315`. AlphaRavis
+hat das default-off Toolset `office/documents`, default-off OfficeCLI-Prompting,
+per `enabled_env` gegatetes OfficeCLI-MCP, und die DeepAgentsUI-Fork akzeptiert
+DOCX/PPTX/XLSX Uploads plus Office-Tab-Launcher. Noch offen sind automatische
+Download-/Preview-APIs, verwaltete Watch-Prozesse pro Datei/Session, und Live
+Browser-Smoke im UI.
+
+### Phase 1 — OfficeCLI im Docker-Container (implemented base path)
 
 1. Dockerfile: OfficeCLI Binary downloaden und in PATH legen
 2. `docker-compose.yml`: Volume für Output-Dateien

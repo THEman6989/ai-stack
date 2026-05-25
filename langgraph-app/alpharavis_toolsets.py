@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -118,6 +119,12 @@ TOOLSETS: dict[str, Toolset] = {
         "rag/documents",
         "Search existing document RAG and normalize external-document hits without duplicating docs into AlphaRavis.",
         tools=("ask_documents", "semantic_memory_search", "query_source", "query_sources", "check_external_service"),
+    ),
+    "office/documents": Toolset(
+        "office/documents",
+        "Create, inspect, edit, validate, and live-preview Office documents (.docx, .xlsx, .pptx) via OfficeCLI.",
+        includes=("coding/execute",),
+        mcp_categories=("officecli", "office", "document"),
     ),
     "rag/memory": Toolset(
         "rag/memory",
@@ -303,6 +310,25 @@ _TOOLSET_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
     ("media/video", ("video", "frame", "timecode")),
     ("media/audio", ("audio", "transcribe", "transkript")),
     ("rag/documents", ("pdf", "document", "dokument", "rag", "quelle")),
+    (
+        "office/documents",
+        (
+            "office",
+            "officecli",
+            "docx",
+            "pptx",
+            "xlsx",
+            "word",
+            "powerpoint",
+            "excel",
+            "präsentation",
+            "praesentation",
+            "slides",
+            "spreadsheet",
+            "arbeitsmappe",
+            "tabelle",
+        ),
+    ),
     ("rag/memory", ("memory", "archiv", "archive", "frueher", "damals", "erinner", "pgvector")),
     ("system/power", ("wake", "wol", "shutdown", "ollama", "llama", "power", "strom", "server")),
     ("web/research", ("search", "suche", "recherche", "research", "internet", "web")),
@@ -388,10 +414,20 @@ def resolve_multiple_toolsets(names: list[str] | tuple[str, ...] | set[str]) -> 
     )
 
 
+def _env_bool(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _officecli_enabled() -> bool:
+    return _env_bool("ALPHARAVIS_ENABLE_OFFICECLI", "false")
+
+
 def infer_toolsets_from_text(text: str, *, default: tuple[str, ...] = ("agent/general",)) -> list[str]:
     lowered = str(text or "").lower()
     selected: list[str] = []
     for toolset, keywords in _TOOLSET_KEYWORDS:
+        if toolset == "office/documents" and not _officecli_enabled():
+            continue
         if any(keyword in lowered for keyword in keywords):
             selected.append(toolset)
     if not selected:
@@ -545,6 +581,8 @@ def _mcp_categories_for(server_name: str, tool_name_value: str, description: str
         categories.update({"media", "audio"})
     if any(word in text for word in ("rag", "document", "pdf")):
         categories.update({"rag", "document"})
+    if any(word in text for word in ("officecli", "office", "docx", "pptx", "xlsx", "powerpoint", "spreadsheet")):
+        categories.update({"officecli", "office", "document"})
     if any(word in text for word in ("ssh", "power", "wake", "shutdown")):
         categories.update({"system", "power", "ssh"})
     if not categories:

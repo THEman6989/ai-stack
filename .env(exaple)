@@ -1646,6 +1646,8 @@ ALPHARAVIS_LOAD_MCP_TOOLS=false
 # Default in Docker:
 #   /workspace/langgraph-app/mcp.json
 # The default config exposes Pixelle MCP through SSE when MCP loading is enabled.
+# OfficeCLI MCP is present in mcp.json too, but remains disabled unless both
+# ALPHARAVIS_ENABLE_OFFICECLI_MCP=true and ALPHARAVIS_MCP_ALLOW_STDIO=true.
 ALPHARAVIS_MCP_CONFIG_PATH=/workspace/langgraph-app/mcp.json
 
 # Optional extra MCP config files, pipe-separated. Later files override earlier
@@ -1657,6 +1659,20 @@ ALPHARAVIS_MCP_CONFIG_PATHS=
 # trusted, because stdio MCP can start local processes.
 # Allowed values: true, false
 ALPHARAVIS_MCP_ALLOW_STDIO=false
+
+# Enables OfficeCLI guidance/toolset selection for .docx/.xlsx/.pptx creation
+# through bounded terminal commands. Default false keeps the normal prompt unchanged.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_OFFICECLI=false
+OFFICE_OUTPUT_DIR=/workspace/office-output
+OFFICECLI_CHROMIUM_PATH=/usr/bin/chromium
+ALPHARAVIS_OFFICECLI_WATCH_PORT=26315
+
+# Enables OfficeCLI's stdio MCP server from langgraph-app/mcp.json. Keep false
+# until you explicitly want typed OfficeCLI MCP tools; direct CLI works without it.
+# Requires ALPHARAVIS_LOAD_MCP_TOOLS=true and ALPHARAVIS_MCP_ALLOW_STDIO=true.
+# Allowed values: true, false
+ALPHARAVIS_ENABLE_OFFICECLI_MCP=false
 
 # Prefix MCP tool names with the server name when the adapter supports it.
 # This avoids collisions when several MCP servers expose similar tool names.
