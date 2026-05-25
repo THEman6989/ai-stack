@@ -51,6 +51,11 @@ def test_office_panel_exists_and_sends_agent_officecli_prompt():
     assert "download_url" in content
     assert "Refresh" in content
     assert "Download" in content
+    assert "handleScreenshot" in content
+    assert "Camera" in content
+    assert "Screenshot" in content
+    assert "officecli view" in content
+    assert "screenshot -o" in content
 
 
 def test_home_page_wires_chat_and_office_tabs():
