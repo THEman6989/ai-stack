@@ -548,6 +548,17 @@ def load_mcp_config() -> Tuple[Dict[str, Any], List[str], List[str]]:
                 continue
             servers[str(name)] = server_config
 
+    # Merge plugin-defined MCP servers (guarded — no crash if plugin system off)
+    try:
+        from plugin_loader import load_plugins as _load_plugins
+        _plugins = _load_plugins()
+        for _p in _plugins:
+            for _name, _cfg in _p.mcp_servers.items():
+                if _name not in servers:
+                    servers[str(_name)] = _cfg
+    except ImportError:
+        pass
+
     return {"mcpServers": servers}, config_paths, warnings
 
 

@@ -1,0 +1,40 @@
+# _example — Minimales Beispiel-Plugin
+#
+# Dieses Plugin ist standardmäßig deaktiviert.
+# Zum Aktivieren: .pluginenv auf ENABLED=true setzen.
+#
+# Verzeichnisse mit _-Prefix werden vom Plugin-Loader ignoriert.
+# Dieses Plugin dient nur als Referenz/Dokumentation.
+
+name: example-hello-world
+version: 0.1.0
+description: "Minimales Beispiel-Plugin — demonstriert das Manifest-Format"
+author: "AlphaRavis"
+
+mcp_servers:
+  example-hello:
+    type: sse
+    url: "http://example-hello:9999/mcp/sse"
+    timeout: 30
+
+toolsets:
+  example/greeting:
+    description: "Example greeting toolset — say hello and goodbye"
+    tools:
+      - example_say_hello
+      - example_say_goodbye
+    mcp_categories:
+      - example
+
+docker_compose:
+  services:
+    example-hello:
+      image: hello-world
+      profiles:
+        - plugins
+
+skills:
+  - path: skills/example-skill.md
+
+env_defaults:
+  EXAMPLE_GREETING: "Hello from plugin!"

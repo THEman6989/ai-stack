@@ -123,7 +123,7 @@ TOOLSETS: dict[str, Toolset] = {
     "office/documents": Toolset(
         "office/documents",
         "Create, inspect, edit, validate, and live-preview Office documents (.docx, .xlsx, .pptx) via OfficeCLI.",
-        includes=("coding/execute",),
+        tools=("execute_local_command", "check_external_service", "build_specialist_report"),
         mcp_categories=("officecli", "office", "document"),
     ),
     "rag/memory": Toolset(
@@ -280,6 +280,12 @@ TOOLSETS: dict[str, Toolset] = {
         tools=("describe_optional_tool_registry",),
         includes=("rag/memory", "rag/documents", "media/video", "skills/repo", "artifacts"),
     ),
+    "agent/office": Toolset(
+        "agent/office",
+        "Dedicated Office agent bundle for multi-step OfficeCLI create/edit/merge/validate/preview workflows.",
+        tools=("describe_optional_tool_registry",),
+        includes=("office/documents", "artifacts", "skills/repo", "rag/memory"),
+    ),
     "agent/power": Toolset(
         "agent/power",
         "Power/model management bundle for local owner-specific lifecycle management.",
@@ -301,6 +307,35 @@ TOOLSETS: dict[str, Toolset] = {
         ),
     ),
 }
+
+
+def _maybe_merge_plugin_toolsets() -> None:
+    """Merge plugin-defined toolsets into TOOLSETS at import time."""
+    if os.getenv("ALPHARAVIS_ENABLE_PLUGIN_SYSTEM", "").strip().lower() not in (
+        "1", "true", "yes", "on",
+    ):
+        return
+    try:
+        from plugin_loader import load_plugins as _load_plugins
+
+        _plugins = _load_plugins()
+        for _p in _plugins:
+            for _name, _ts in _p.toolsets.items():
+                if _name not in TOOLSETS:
+                    TOOLSETS[_name] = Toolset(
+                        name=_name,
+                        description=_ts.get(
+                            "description", f"Plugin {_p.name}"
+                        ),
+                        tools=tuple(_ts.get("tools", [])),
+                        includes=tuple(_ts.get("includes", [])),
+                        mcp_categories=tuple(_ts.get("mcp_categories", [])),
+                    )
+    except ImportError:
+        pass  # plugin_loader not available
+
+
+_maybe_merge_plugin_toolsets()
 
 
 _TOOLSET_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
@@ -422,6 +457,10 @@ def _officecli_enabled() -> bool:
     return _env_bool("ALPHARAVIS_ENABLE_OFFICECLI", "false")
 
 
+def _office_agent_enabled() -> bool:
+    return _env_bool("ALPHARAVIS_ENABLE_OFFICE_AGENT", "false")
+
+
 def infer_toolsets_from_text(text: str, *, default: tuple[str, ...] = ("agent/general",)) -> list[str]:
     lowered = str(text or "").lower()
     selected: list[str] = []
@@ -429,7 +468,10 @@ def infer_toolsets_from_text(text: str, *, default: tuple[str, ...] = ("agent/ge
         if toolset == "office/documents" and not _officecli_enabled():
             continue
         if any(keyword in lowered for keyword in keywords):
-            selected.append(toolset)
+            if toolset == "office/documents" and _office_agent_enabled():
+                selected.append("agent/office")
+            else:
+                selected.append(toolset)
     if not selected:
         selected.extend(default)
     if "coding/write" in selected and "coding/read" not in selected:

@@ -37,5 +37,6 @@ langsmith
 # --- SUPERVISOR & SEARCH ---
 langgraph-supervisor
 tavily-python
+pyyaml>=6.0
 # langgraph-cua
 scrapybara
