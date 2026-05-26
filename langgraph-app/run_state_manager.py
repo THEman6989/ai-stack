@@ -37,6 +37,17 @@ def _collection():
     ]
 
 
+def _workflow_collection():
+    if MongoClient is None:
+        raise RuntimeError(f"pymongo unavailable: {PYMONGO_IMPORT_ERROR}")
+    client = MongoClient(_mongodb_uri(), serverSelectionTimeoutMS=5000)
+    return client[
+        os.getenv("ALPHARAVIS_RUN_STATE_DB", "alpharavis_state")
+    ][
+        os.getenv("ALPHARAVIS_WORKFLOW_STATE_COLLECTION", "workflow_records")
+    ]
+
+
 def _json_safe(value: Any, *, max_chars: int = 20000) -> Any:
     try:
         encoded = json.dumps(value, ensure_ascii=False, default=str)
@@ -193,3 +204,74 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     tmp = target.with_name(f".{target.name}.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     os.replace(tmp, target)
+
+
+def save_workflow_record(*, namespace: str, workflow_id: str, record: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Persist a named workflow record through the existing AlphaRavis state manager.
+
+    This is intentionally generic so feature-specific workflows (Office, RAG,
+    UI jobs, etc.) do not grow separate state-manager modules.
+    """
+
+    if not _enabled():
+        return {"saved": False, "disabled": True}
+    ns = str(namespace or "workflow").strip() or "workflow"
+    wid = str(workflow_id or DEFAULT_CHECKPOINT_ID).strip() or DEFAULT_CHECKPOINT_ID
+    now = time.time()
+    payload = _json_safe(record or {}, max_chars=50000)
+    if not isinstance(payload, dict):
+        payload = {"value": payload}
+    previous = load_workflow_record(ns, wid)
+    stored: dict[str, Any] = {
+        **payload,
+        "_id": f"{ns}:{wid}",
+        "namespace": ns,
+        "workflow_id": wid,
+        "created_at": previous.get("created_at") if previous else now,
+        "updated_at": now,
+    }
+    try:
+        _workflow_collection().replace_one({"_id": stored["_id"]}, stored, upsert=True)
+    except Exception as exc:
+        return {"saved": False, "error": str(exc)[:2000], "record": stored}
+    return {"saved": True, "record": stored}
+
+
+def load_workflow_record(namespace: str, workflow_id: str) -> dict[str, Any] | None:
+    if not _enabled() or not namespace or not workflow_id:
+        return None
+    try:
+        record = _workflow_collection().find_one({"_id": f"{namespace}:{workflow_id}"})
+    except Exception:
+        return None
+    if not isinstance(record, dict):
+        return None
+    record["_id"] = str(record.get("_id") or "")
+    return record
+
+
+def list_workflow_records(
+    *,
+    namespace: str,
+    status: str = "",
+    file: str = "",
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    if not _enabled() or not namespace:
+        return []
+    query: dict[str, Any] = {"namespace": namespace}
+    if status:
+        query["status"] = status
+    if file:
+        query["file"] = file
+    try:
+        rows = _workflow_collection().find(query).sort("updated_at", -1).limit(max(1, min(int(limit), 500)))
+    except Exception:
+        return []
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row["_id"] = str(row.get("_id") or "")
+        records.append(row)
+    return records

@@ -102,6 +102,37 @@ def test_office_output_listing_returns_supported_files(monkeypatch, tmp_path: Pa
     assert all(item["download_url"].startswith("http://localhost:8130/office-output/") for item in files)
 
 
+def test_office_output_record_links_existing_preview_artifacts(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "office-output"
+    root.mkdir()
+    (root / "deck.pptx").write_bytes(b"PPTX")
+    (root / "deck-preview.png").write_bytes(b"PNG")
+    (root / "deck-preview.html").write_text("<html></html>", encoding="utf-8")
+    monkeypatch.setattr(media_server, "OFFICE_OUTPUT_ROOT", root.resolve())
+    monkeypatch.setattr(media_server, "OFFICE_OUTPUT_PUBLIC_BASE_URL", "http://localhost:8130/office-output")
+
+    record = media_server._office_output_record(root / "deck.pptx")
+
+    assert record["preview_available"] is True
+    assert record["preview_image_url"] == "http://localhost:8130/office-output/deck-preview.png"
+    assert record["preview_html_url"] == "http://localhost:8130/office-output/deck-preview.html"
+
+
+def test_office_output_listing_hides_sibling_preview_artifacts(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "office-output"
+    root.mkdir()
+    (root / "deck.pptx").write_bytes(b"PPTX")
+    (root / "deck-preview.png").write_bytes(b"PNG")
+    (root / "deck-preview.html").write_text("<html></html>", encoding="utf-8")
+    monkeypatch.setattr(media_server, "OFFICE_OUTPUT_ROOT", root.resolve())
+    monkeypatch.setattr(media_server, "OFFICE_OUTPUT_PUBLIC_BASE_URL", "http://localhost:8130/office-output")
+
+    files = media_server._list_office_output_files(limit=10)
+
+    assert [item["relative_path"] for item in files] == ["deck.pptx"]
+    assert files[0]["preview_available"] is True
+
+
 async def _call_list_office_output_files() -> dict:
     return await media_server.list_office_output_files(limit=10)
 
@@ -166,6 +197,236 @@ def test_store_office_uploaded_file_rejects_unsupported_extension(monkeypatch, t
         assert "unsupported office file type" in str(getattr(exc, "detail", ""))
     else:  # pragma: no cover - defensive assertion for stubbed environments
         raise AssertionError("unsupported office upload was accepted")
+
+
+def test_office_validate_phase5_plan_quotes_paths() -> None:
+    plan = media_server._office_validate_plan("nested/Quarterly Report.pptx")
+
+    assert plan["operation"] == "validate"
+    assert plan["phase"] == 5
+    assert plan["file"] == "/workspace/office-output/nested/Quarterly Report.pptx"
+    assert "officecli validate '/workspace/office-output/nested/Quarterly Report.pptx'" in plan["commands"][0]
+    assert "issues --json" in plan["commands"][1]
+
+
+def test_office_template_merge_phase5_plan_includes_json_payload() -> None:
+    plan = media_server._office_template_merge_plan(
+        template="templates/report-template.docx",
+        output="reports/report-merged.docx",
+        data={"title": "Annual Report", "author": "AlphaRavis"},
+    )
+
+    assert plan["operation"] == "template_merge"
+    assert plan["phase"] == 5
+    assert plan["template"] == "/workspace/office-output/templates/report-template.docx"
+    assert plan["output"] == "/workspace/office-output/reports/report-merged.docx"
+    assert "officecli merge" in plan["commands"][0]
+    assert "Annual Report" in plan["commands"][0]
+
+
+def test_office_batch_phase5_plan_uses_safe_input_path() -> None:
+    plan = media_server._office_batch_plan("templates/invoice.docx", "batch/input.json")
+
+    assert plan["operation"] == "batch"
+    assert plan["phase"] == 5
+    assert plan["file"] == "/workspace/office-output/templates/invoice.docx"
+    assert plan["input"] == "/workspace/office-output/batch/input.json"
+    assert "officecli batch" in plan["commands"][0]
+    assert "officecli validate" in plan["commands"][1]
+
+
+def test_office_roundtrip_phase5_plan_writes_blueprint_under_output() -> None:
+    plan = media_server._office_roundtrip_plan("decks/demo deck.pptx")
+
+    assert plan["operation"] == "roundtrip"
+    assert plan["phase"] == 5
+    assert plan["blueprint"] == "/workspace/office-output/decks/demo deck-blueprint.json"
+    assert "officecli dump '/workspace/office-output/decks/demo deck.pptx'" in plan["commands"][0]
+
+
+def test_office_phase5_plan_rejects_path_traversal() -> None:
+    try:
+        media_server._office_validate_plan("../secret.docx")
+    except media_server.HTTPException as exc:
+        assert getattr(exc, "status_code", None) == 400
+        assert "unsafe office path" in str(getattr(exc, "detail", ""))
+    else:  # pragma: no cover - defensive assertion for stubbed environments
+        raise AssertionError("unsafe office path was accepted")
+
+
+def test_office_phase6_preview_plan_generates_html_and_png_without_overwriting() -> None:
+    plan = media_server._office_preview_plan("reports/Quarterly Report.docx")
+
+    assert plan["phase"] == 6
+    assert plan["operation"] == "preview"
+    assert plan["status"] == "planned"
+    assert plan["preview_html"] == "/workspace/office-output/reports/Quarterly Report-preview.html"
+    assert plan["preview_image"] == "/workspace/office-output/reports/Quarterly Report-preview.png"
+    assert "officecli view '/workspace/office-output/reports/Quarterly Report.docx' html" in plan["commands"][0]
+    assert "screenshot -o '/workspace/office-output/reports/Quarterly Report-preview.png'" in plan["commands"][1]
+
+
+def test_office_phase6_repair_plan_writes_repaired_copy() -> None:
+    plan = media_server._office_repair_plan("reports/Quarterly Report.docx")
+
+    assert plan["phase"] == 6
+    assert plan["operation"] == "repair"
+    assert plan["status"] == "planned"
+    assert plan["file"] == "/workspace/office-output/reports/Quarterly Report.docx"
+    assert plan["output"] == "/workspace/office-output/reports/Quarterly Report-repaired.docx"
+    assert plan["output"] != plan["file"]
+    assert any("officecli validate" in command for command in plan["commands"])
+    assert any("repaired" in note.lower() for note in plan["notes"])
+
+
+def test_office_phase6_watch_manager_tracks_preview_status() -> None:
+    media_server._OFFICE_WATCH_STATE.clear()
+
+    started = media_server._office_watch_plan("reports/Quarterly Report.docx", action="start")
+    status = media_server._office_watch_status("reports/Quarterly Report.docx")
+    stopped = media_server._office_watch_plan("reports/Quarterly Report.docx", action="stop")
+
+    assert started["phase"] == 6
+    assert started["operation"] == "watch_start"
+    assert started["status"] == "planned"
+    assert started["preview_url"]
+    assert "iframe" in started["ui_hint"].lower()
+    assert status["status"] == "planned"
+    assert status["file"] == started["file"]
+    assert stopped["operation"] == "watch_stop"
+    assert stopped["status"] == "stopped"
+
+
+def test_office_phase6_blueprint_suggestion_and_create_plan(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "office-output"
+    root.mkdir()
+    (root / "reference.docx").write_bytes(b"DOCX")
+    (root / "reference-blueprint.json").write_text('{"kind":"docx"}', encoding="utf-8")
+    monkeypatch.setattr(media_server, "OFFICE_OUTPUT_ROOT", root.resolve())
+    monkeypatch.setattr(media_server, "OFFICE_OUTPUT_PUBLIC_BASE_URL", "http://localhost:8130/office-output")
+
+    suggestion = media_server._office_blueprint_suggestion()
+    plan = media_server._office_blueprint_create_plan("reference.docx")
+    blueprints = media_server._list_office_blueprints(limit=10)
+
+    assert suggestion["phase"] == 6
+    assert "If you like documents" in suggestion["message"]
+    assert "blueprint" in suggestion["message"].lower()
+    assert plan["operation"] == "blueprint_create"
+    assert plan["blueprint"] == "/workspace/office-output/reference-blueprint.json"
+    assert "officecli dump '/workspace/office-output/reference.docx'" in plan["commands"][0]
+    assert [item["relative_path"] for item in blueprints] == ["reference-blueprint.json"]
+
+
+def test_office_phase6_rejects_unsafe_paths() -> None:
+    for builder in (media_server._office_preview_plan, media_server._office_repair_plan, media_server._office_blueprint_create_plan):
+        try:
+            builder("../secret.docx")
+        except media_server.HTTPException as exc:
+            assert getattr(exc, "status_code", None) == 400
+        else:  # pragma: no cover - defensive assertion for stubbed environments
+            raise AssertionError("unsafe office path was accepted")
+
+
+def test_office_validation_result_persists_badge_in_run_state_manager(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "office-output"
+    root.mkdir()
+    doc = root / "demo.docx"
+    doc.write_bytes(b"DOCX")
+    saved: dict[str, dict] = {}
+
+    def fake_save(namespace: str, workflow_id: str, record: dict):
+        saved[f"{namespace}:{workflow_id}"] = dict(record)
+        return {"saved": True, "record": dict(record)}
+
+    def fake_load(namespace: str, workflow_id: str):
+        record = saved.get(f"{namespace}:{workflow_id}")
+        return dict(record) if record else None
+
+    monkeypatch.setattr(media_server, "OFFICE_OUTPUT_ROOT", root.resolve())
+    monkeypatch.setattr(media_server, "_office_state_save", fake_save)
+    monkeypatch.setattr(media_server, "_office_state_load", fake_load)
+
+    result = media_server._office_record_validation_result(
+        file="demo.docx",
+        status="warning",
+        issues=[{"level": "warning", "message": "missing alt text"}],
+        summary="1 warning",
+    )
+    record = media_server._office_output_record(doc.resolve())
+
+    assert result["status"] == "warning"
+    assert result["namespace"] == "office_validation"
+    assert record["validation_status"] == "warning"
+    assert record["validation_badge"] == "warning"
+    assert record["validation_issues"] == [{"level": "warning", "message": "missing alt text"}]
+
+
+def test_office_batch_job_creates_managed_progress_record(monkeypatch) -> None:
+    saved: dict[str, dict] = {}
+
+    def fake_save(namespace: str, workflow_id: str, record: dict):
+        saved[f"{namespace}:{workflow_id}"] = dict(record)
+        return {"saved": True, "record": dict(record)}
+
+    def fake_load(namespace: str, workflow_id: str):
+        record = saved.get(f"{namespace}:{workflow_id}")
+        return dict(record) if record else None
+
+    monkeypatch.setattr(media_server, "_office_state_save", fake_save)
+    monkeypatch.setattr(media_server, "_office_state_load", fake_load)
+
+    job = media_server._office_batch_job_plan(
+        template="templates/invoice.docx",
+        input_path="batch/customers.json",
+        output_dir="batch/output",
+        total=3,
+    )
+    loaded = media_server._office_batch_job_status(job["job_id"])
+    updated = media_server._office_update_batch_job(
+        job["job_id"],
+        status="running",
+        completed=1,
+        failed=0,
+        errors=[],
+    )
+
+    assert job["phase"] == 6
+    assert job["operation"] == "batch_job"
+    assert job["status"] == "planned"
+    assert job["progress"] == {"total": 3, "completed": 0, "failed": 0, "percent": 0}
+    assert "--output-dir '/workspace/office-output/batch/output'" in job["commands"][0]
+    assert loaded["job_id"] == job["job_id"]
+    assert updated["progress"]["completed"] == 1
+    assert updated["progress"]["percent"] == 33
+
+
+def test_office_template_placeholder_detection_and_merge_form_plan(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "office-output"
+    template_dir = root / "templates"
+    template_dir.mkdir(parents=True)
+    template = template_dir / "invoice.docx"
+    template.write_text("Hello {{customer_name}}, total {{ total }}. Again {{customer_name}}.", encoding="utf-8")
+    monkeypatch.setattr(media_server, "OFFICE_OUTPUT_ROOT", root.resolve())
+
+    placeholders = media_server._office_template_placeholders("templates/invoice.docx")
+    plan = media_server._office_template_merge_form_plan(
+        template="templates/invoice.docx",
+        output="invoices/acme.docx",
+        data={"customer_name": "ACME", "total": "42"},
+    )
+
+    assert placeholders["phase"] == 6
+    assert placeholders["operation"] == "template_placeholders"
+    assert placeholders["placeholders"] == ["customer_name", "total"]
+    assert placeholders["fields"] == [
+        {"name": "customer_name", "label": "customer_name", "required": True, "type": "text"},
+        {"name": "total", "label": "total", "required": True, "type": "text"},
+    ]
+    assert plan["operation"] == "template_merge_form"
+    assert plan["missing_fields"] == []
+    assert "officecli merge '/workspace/office-output/templates/invoice.docx' '/workspace/office-output/invoices/acme.docx'" in plan["commands"][0]
+    assert "customer_name" in plan["commands"][0]
 
 
 def test_media_gallery_cors_allows_browser_ui_origins() -> None:

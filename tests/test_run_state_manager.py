@@ -132,3 +132,40 @@ def test_atomic_write_json_replaces_complete_file(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8").strip().endswith("}")
     assert '"status": "completed"' in target.read_text(encoding="utf-8")
     assert not (tmp_path / ".state.json.tmp").exists()
+
+
+def test_save_workflow_record_uses_existing_state_manager_collection(monkeypatch) -> None:
+    collection = _FakeFindCollection()
+    monkeypatch.setattr(run_state_manager, "_workflow_collection", lambda: collection)
+
+    saved = run_state_manager.save_workflow_record(
+        namespace="office_validation",
+        workflow_id="reports/demo.docx",
+        record={"file": "reports/demo.docx", "status": "warning", "issues": [{"message": "missing title"}]},
+    )
+    loaded = run_state_manager.load_workflow_record("office_validation", "reports/demo.docx")
+
+    assert saved["saved"] is True
+    assert loaded is not None
+    assert loaded["_id"] == "office_validation:reports/demo.docx"
+    assert loaded["namespace"] == "office_validation"
+    assert loaded["workflow_id"] == "reports/demo.docx"
+    assert loaded["status"] == "warning"
+    assert loaded["issues"] == [{"message": "missing title"}]
+    assert loaded["created_at"] == loaded["updated_at"]
+
+
+def test_list_workflow_records_filters_namespace_file_and_status(monkeypatch) -> None:
+    collection = _FakeFindCollection()
+    collection.records = {
+        "office_validation:a.docx": {"_id": "office_validation:a.docx", "namespace": "office_validation", "workflow_id": "a.docx", "file": "a.docx", "status": "valid", "updated_at": 1},
+        "office_validation:b.docx": {"_id": "office_validation:b.docx", "namespace": "office_validation", "workflow_id": "b.docx", "file": "b.docx", "status": "warning", "updated_at": 3},
+        "office_batch:job-1": {"_id": "office_batch:job-1", "namespace": "office_batch", "workflow_id": "job-1", "file": "b.docx", "status": "warning", "updated_at": 2},
+    }
+    monkeypatch.setattr(run_state_manager, "_workflow_collection", lambda: collection)
+
+    records = run_state_manager.list_workflow_records(namespace="office_validation", status="warning", file="b.docx", limit=10)
+
+    assert [record["workflow_id"] for record in records] == ["b.docx"]
+    assert records[0]["namespace"] == "office_validation"
+    assert records[0]["file"] == "b.docx"

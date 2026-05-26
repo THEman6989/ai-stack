@@ -674,7 +674,27 @@ const previewUrl = `/office-preview/?doc=${encodeURIComponent(doc.path)}`;
 
 ---
 
-### Phase 5: Advanced Features (Week 2-3)
+### Phase 5: Advanced Features — Basis abgeschlossen
+
+**Status (2026-05-25): implemented as thin OfficeCLI plan/launcher layer.**
+Phase 5 intentionally does not introduce a background job engine. The UI and
+media-gallery expose safe plan endpoints and Agent launchers; managed execution,
+progress tracking, and persistence are now Phase 6.
+
+Implemented Phase-5 surface:
+
+- `GET /office/templates` lists DOCX/PPTX/XLSX templates under
+  `/workspace/office-output/templates/`.
+- `POST /office/template-merge` returns a quoted `officecli merge` plan plus
+  validation/issue commands.
+- `POST /office/batch` returns a quoted `officecli batch` plan and validation
+  follow-up.
+- `POST /office/validate` returns `officecli validate` plus
+  `officecli view ... issues --json`.
+- `POST /office/roundtrip` returns `officecli dump ... -o <blueprint>` plus a
+  follow-up `officecli batch ... --input <blueprint>` plan.
+- The Office panel fetches those plans, sends the commands to the agent, and
+  falls back to local prompt templates if the plan endpoint is unavailable.
 
 **5.1 Template Gallery**
 
@@ -690,32 +710,27 @@ officecli merge /workspace/office-output/templates/report.docx \
 **5.2 Batch Operations**
 
 ```bash
-# Agent generates 100 invoices
-for i in $(seq 1 100); do
-  officecli merge invoice-template.docx "invoice-$i.docx" \
-    "{\"number\":\"$i\",\"total\":\"$((RANDOM % 10000))\"}"
-done
+# Agent generates variants from an input JSON file
+officecli batch /workspace/office-output/templates/invoice-template.docx \
+  --input /workspace/office-output/batch-input.json
 ```
 
 **5.3 Document Validation Pipeline**
 
 ```bash
 # Pre-delivery check
-officecli validate report.docx
-officecli view report.docx issues --json
-# Fix issues automatically
-officecli set report.docx /body/p[1]/r[1] --prop font=Arial
+officecli validate /workspace/office-output/report.docx
+officecli view /workspace/office-output/report.docx issues --json
 ```
 
-**5.4 Round-trip Learning**
+**5.4 Round-trip Learning Launcher**
 
-Agent extracts structure from existing template:
+Agent extracts structure from an existing document:
 
 ```bash
-officecli dump template.docx -o blueprint.json
-# Agent studies blueprint.json
-# Agent generates variations:
-officecli batch new-report.docx --input variations.json
+officecli dump /workspace/office-output/template.docx \
+  -o /workspace/office-output/template-blueprint.json
+# Agent studies blueprint.json and can launch variations later.
 ```
 
 **5.5 MCP Tool Registration**
@@ -733,7 +748,198 @@ If LangGraph's MCP client supports external servers:
 }
 ```
 
-This gives the agent typed tool calls instead of raw shell commands.
+This gives the agent typed tool calls instead of raw shell commands. It remains
+feature-flagged/default-off to avoid eager token/tool overhead.
+
+---
+
+### Phase 6: Managed Office Workflows — implementiert
+
+**Status (2026-05-25): implemented as a non-destructive managed plan/status
+layer.** Phase 6 keeps the existing Agent-driven execution model, but removes
+manual prompt typing for common workflows: the Office panel now calls
+media-gallery workflow endpoints, receives quoted OfficeCLI command plans, and
+sends those plans to the agent. Every write-oriented flow creates sibling/copy
+artifacts instead of overwriting the source document.
+
+Implemented Phase-6 surface:
+
+- `POST /office/preview` returns an OfficeCLI plan for `<name>-preview.html` and
+  `<name>-preview.png` generation. It is non-destructive and only creates
+  sibling preview artifacts.
+- `POST /office/repair` returns a repair plan that validates the original,
+  reads issue JSON, writes `<name>-repaired.<ext>`, and validates the repaired
+  copy. The original is explicitly not overwritten.
+- `POST /office/watch/start`, `POST /office/watch/stop`, and
+  `GET /office/watch/status` provide a managed watch lifecycle/status layer.
+  The standalone OfficeCLI watch URL remains available for compatibility, while
+  the Office panel embeds the preview directly in an iframe Preview frame.
+- `GET /office/blueprints/suggest` returns a user-facing hint: if an operator
+  likes an existing/polished document, they can turn it into a blueprint.
+- `POST /office/blueprints/create` returns an `officecli dump` plan that writes
+  `<name>-blueprint.json` next to the source document.
+- `GET /office/blueprints` lists existing `*-blueprint.json` artifacts.
+- The Office panel exposes direct buttons for `Generate preview`, `Repair`,
+  `Make blueprint`, and managed `Watch` so the operator does not need to type
+  those prompts manually.
+
+**6.1 Automatic preview generation**
+
+The preview workflow is explicit and non-destructive:
+
+```bash
+officecli view '/workspace/office-output/report.docx' html \
+  -o '/workspace/office-output/report-preview.html'
+officecli view '/workspace/office-output/report.docx' screenshot \
+  -o '/workspace/office-output/report-preview.png'
+```
+
+The media-gallery `/office/files` response already links existing preview
+artifacts via `preview_available`, `preview_image_url`, and `preview_html_url`,
+so the UI can show `Preview ready`, `Preview PNG`, and `Preview HTML` without
+listing preview files as separate documents.
+
+**6.2 Managed watch lifecycle**
+
+The Watch button now asks `/office/watch/start` for a plan and opens the
+embedded Preview frame in the Office tab. The separate `http://localhost:26315`
+watch page stays supported for compatibility and direct debugging.
+
+```bash
+nohup officecli watch '/workspace/office-output/report.docx' --port 26315 \
+  > /tmp/officecli-watch.log 2>&1 &
+officecli unwatch '/workspace/office-output/report.docx'
+```
+
+**6.3 Repair button after validation**
+
+Validation remains a separate Phase-5 button, but Phase 6 adds a direct Repair
+button beside it. The repair workflow is intentionally copy-first:
+
+```bash
+officecli validate '/workspace/office-output/report.docx'
+officecli view '/workspace/office-output/report.docx' issues --json
+officecli repair '/workspace/office-output/report.docx' \
+  -o '/workspace/office-output/report-repaired.docx'
+officecli validate '/workspace/office-output/report-repaired.docx'
+```
+
+If `officecli repair` is unavailable for a document type, the agent uses the
+issue JSON to apply safe `officecli set/add` fixes to the repaired copy only.
+
+**6.4 Blueprint Library hints and creation**
+
+The UI now surfaces a lightweight helper text in the Template/Blueprint area:
+
+> If you like documents you already have, you can make a blueprint out of it and
+> reuse the structure later.
+
+The `Make blueprint` button calls `/office/blueprints/create` and launches:
+
+```bash
+officecli dump '/workspace/office-output/nice-reference.docx' \
+  -o '/workspace/office-output/nice-reference-blueprint.json'
+officecli view '/workspace/office-output/nice-reference.docx' outline --json
+```
+
+Blueprint JSON files are listed through `/office/blueprints` and become reusable
+layout/style recipes for future document creation.
+
+**6.5 Validation result persistence, Batch progress, Template merge forms**
+
+The extended Phase-6 implementation stores Office workflow state through the
+existing `langgraph-app/run_state_manager.py` instead of introducing an
+Office-only state manager. The same Mongo-backed collection now accepts generic
+workflow records keyed by namespace/workflow id.
+
+Implemented workflow-state endpoints:
+
+- `GET /office/validation-results` lists persisted validation records.
+- `POST /office/validation-results` records status, summary, issue count, and
+  issue details for a file.
+- `/office/files` enriches document cards with `validation_status`,
+  `validation_badge`, `validation_issues`, and `validation_summary` from the
+  latest persisted validation record.
+- `GET /office/batch/jobs` lists managed batch jobs.
+- `POST /office/batch/jobs` creates a batch job record with row-level progress
+  counters and a safe OfficeCLI command plan.
+- `GET /office/batch/jobs/{job_id}` returns one batch job status.
+- `POST /office/batch/jobs/{job_id}/progress` updates completed/failed/pending
+  counters and row error details.
+- `POST /office/templates/placeholders` detects `{{placeholder}}` tokens from a
+  template file and returns a typed field list. If plain extraction cannot see
+  all placeholders in a binary Office document, the returned command plan asks
+  the agent to run `officecli view ... text --json` and merge AI-detected fields
+  into the same flow.
+- `POST /office/templates/merge-form` builds a safe merge plan from a selected
+  template, output path, and collected form data.
+
+The Office panel now shows validation badges/issues on document cards, a
+Workflow State section with persisted validation results and batch progress, a
+Managed Batch button, and Template/Blueprint controls backed by those endpoints.
+Real OfficeCLI E2E coverage remains gated by the presence of real OfficeCLI and
+sample documents, but the browser/backend contract is now stable.
+
+---
+
+### Phase 7: Dedicated Office Agent — implemented
+
+Phase 7 makes Office a first-class peer in the existing AlphaRavis swarm instead
+of leaving substantial Office work on the generalist path. The Office tab still
+uses the existing media-gallery endpoints for lightweight list/upload/status/plan
+actions, but every generated Office workflow prompt now targets
+`active_agent=office_agent` when `NEXT_PUBLIC_OFFICE_AGENT_ENABLED=true`.
+
+Implemented architecture:
+
+1. `langgraph-app/alpharavis_toolsets.py` now defines `agent/office`.
+   - It includes `office/documents`, `artifacts`, and narrowly scoped
+     memory/reporting helpers.
+   - `office/documents` keeps local OfficeCLI execution and Office MCP category
+     selection, but no longer inherits Hermes delegation through
+     `coding/execute`; code/system fixes should be handed off explicitly.
+2. `_build_graph()` now registers `office_agent` in `agent_toolset_names` and
+   creates an `office_worker` behind `ALPHARAVIS_ENABLE_OFFICE_AGENT`.
+3. Peer handoff `transfer_to_office` is exposed from generalist, UI, research,
+   debugger, Hermes, and context agents when the feature is enabled.
+4. `office_agent` owns Office policy:
+   - inspect before modifying;
+   - copy-first/non-destructive repair;
+   - validate after create/edit/merge/repair;
+   - generate/refresh previews when useful;
+   - use the existing run_state_manager-backed media-gallery workflow APIs for
+     validation, batch, and placeholder state;
+   - delegate to research/debugger/Hermes/context only when that specialist is
+     actually needed.
+5. `submodules/deep-agents-ui` can submit an `active_agent` override through
+   `useChat.sendMessage(..., { activeAgent })`. The Office tab wraps all
+   generated prompts with an Office-Agent marker and sends
+   `{ active_agent: "office_agent" }` when enabled.
+6. Docker Compose enables the Office Agent path for the Office tab by default:
+   - `ALPHARAVIS_ENABLE_OFFICE_AGENT=${ALPHARAVIS_ENABLE_OFFICE_AGENT:-true}`
+   - `NEXT_PUBLIC_OFFICE_AGENT_ENABLED=${NEXT_PUBLIC_OFFICE_AGENT_ENABLED:-true}`
+   - `NEXT_PUBLIC_OFFICE_AGENT_NAME=${NEXT_PUBLIC_OFFICE_AGENT_NAME:-office_agent}`
+
+Routing rule after Phase 7:
+
+- Small/direct UI action: use the existing endpoint directly.
+  Examples: list files, refresh state, upload, list templates, read validation
+  results, read batch status, detect placeholders.
+- Substantial Office workflow: go through `office_agent`.
+  Examples: create a deck/report/spreadsheet, multi-step edits, template merge,
+  managed batch generation, validation+repair pipeline, preview/watch workflow,
+  round-trip blueprint work.
+- Other agents should transfer substantial Office work to `office_agent` instead
+  of loading broad Office/Hermes execution tools themselves.
+
+Verification targets:
+
+- `tests/test_alpharavis_toolsets.py` covers `agent/office`, Office keyword
+  inference, and Office MCP locality.
+- `tests/test_office_agent_phase7.py` covers the graph feature flag, handoff
+  wiring, Office policy prompt, and Office-tab active-agent routing.
+- `tests/test_deep_agents_office_ui.py` covers the visible Office UI contract.
+
 
 ---
 

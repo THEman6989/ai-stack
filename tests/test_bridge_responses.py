@@ -28,8 +28,8 @@ if importlib.util.find_spec("fastapi") is None:
     class FastAPI:
         openapi_version = "3.1.0"
 
-        def __init__(self, *args, openapi_version: str = "3.1.0", **kwargs) -> None:
-            self.openapi_version = openapi_version
+        def __init__(self, *args, **kwargs) -> None:
+            self.user_middleware = []
 
         def get(self, *args, **kwargs):
             return lambda fn: fn
@@ -46,6 +46,9 @@ if importlib.util.find_spec("fastapi") is None:
         def mount(self, *args, **kwargs) -> None:
             return None
 
+        def add_middleware(self, middleware_class, *args, **kwargs) -> None:
+            self.user_middleware.append(types.SimpleNamespace(cls=middleware_class, options=kwargs))
+
     fastapi_stub.FastAPI = FastAPI
     fastapi_stub.HTTPException = HTTPException
     fastapi_stub.Request = Request
@@ -59,6 +62,14 @@ if importlib.util.find_spec("fastapi") is None:
             super().__init__(content or {})
             self.status_code = status_code
 
+    class RedirectResponse(str):
+        status_code: int
+
+        def __new__(cls, url: str = "", *args, **kwargs):
+            obj = str.__new__(cls, url)
+            obj.status_code = kwargs.get("status_code", 307)
+            return obj
+
     class StreamingResponse:
         def __init__(self, content, media_type: str = "") -> None:
             self.content = content
@@ -71,6 +82,7 @@ if importlib.util.find_spec("fastapi") is None:
     responses_stub.JSONResponse = JSONResponse
     responses_stub.StreamingResponse = StreamingResponse
     responses_stub.HTMLResponse = HTMLResponse
+    setattr(responses_stub, "RedirectResponse", RedirectResponse)
     sys.modules["fastapi.responses"] = responses_stub
 
     staticfiles_stub = types.ModuleType("fastapi.staticfiles")
@@ -82,6 +94,19 @@ if importlib.util.find_spec("fastapi") is None:
 
     staticfiles_stub.StaticFiles = StaticFiles
     sys.modules["fastapi.staticfiles"] = staticfiles_stub
+
+    middleware_stub = types.ModuleType("fastapi.middleware")
+    middleware_stub.__spec__ = ModuleSpec("fastapi.middleware", loader=None)
+    cors_stub = types.ModuleType("fastapi.middleware.cors")
+    cors_stub.__spec__ = ModuleSpec("fastapi.middleware.cors", loader=None)
+
+    class CORSMiddleware:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    setattr(cors_stub, "CORSMiddleware", CORSMiddleware)
+    sys.modules["fastapi.middleware"] = middleware_stub
+    sys.modules["fastapi.middleware.cors"] = cors_stub
 
 if importlib.util.find_spec("langgraph_sdk") is None:
     sdk_stub = types.ModuleType("langgraph_sdk")

@@ -1,6 +1,6 @@
 # AionUi / OfficeCLI — Office/Docs Integration Analysis & AlphaRavis Porting Plan
 
-> Erstellt 2026-05-24 · Letzte Aktualisierung: 2026-05-25 (AlphaRavis base path implemented)
+> Erstellt 2026-05-24 · Letzte Aktualisierung: 2026-05-25 (AlphaRavis Office Agent implemented)
 
 ## 1. Die zwei Projekte: AionUi vs. OfficeCLI
 
@@ -179,14 +179,39 @@ OfficeCLI + Chromium, Docker Compose mountet `./office-output` nach
 `/workspace/office-output` und veröffentlicht den Watch-Port `26315`. AlphaRavis
 hat das default-off Toolset `office/documents`, default-off OfficeCLI-Prompting,
 per `enabled_env` gegatetes OfficeCLI-MCP, media-gallery Download-URLs unter
-`/office-output/*` plus `/office/files` inklusive konfigurierbarer Browser-CORS,
-und die DeepAgentsUI-Fork akzeptiert
-DOCX/PPTX/XLSX Uploads plus Office-Tab-Launcher. Der Office-Tab zeigt erzeugte
-Dateien als Cards, kann Screenshot-Aufträge senden und startet Watch-Aufträge
-über einen Shell-kompatiblen `nohup officecli watch ... --port <port>` Prompt;
-Stop läuft über `officecli unwatch`. Noch offen sind automatische Preview-
-Generierung, verwaltete Watch-Prozesse pro Datei/Session ohne Agent-Prompt, und
-vollständige Live-Browser-Smokes für Upload-/Preview-Flows.
+`/office-output/*` plus `/office/files`, `/office/upload` und
+`/office/templates` inklusive konfigurierbarer Browser-CORS, und die
+DeepAgentsUI-Fork akzeptiert DOCX/PPTX/XLSX Uploads plus Office-Tab-Launcher.
+Der Office-Tab zeigt erzeugte Dateien als Cards, kann Dateien in den shared
+Office-Output hochladen, Templates aus `/workspace/office-output/templates`
+listen, vorhandene `<name>-preview.png` / `<name>-preview.html` Artefakte als
+direkte Preview-Links anzeigen, Screenshot-Aufträge senden, Watch-Aufträge über einen Shell-kompatiblen
+`nohup officecli watch ... --port <port>` Prompt starten und per
+`officecli unwatch` stoppen. Uploads und die shared Office-Output-Wurzel werden
+auf `ALPHARAVIS_OFFICE_OUTPUT_HOST_UID/GID` gechowned, damit Docker-Uploads im
+Host-Checkout editierbar bleiben. Phase 5 ist als dünne Agent-Launcher-Basis für
+Template Merge, Batch, Validation und Round-trip Dump/Analyse umgesetzt und nutzt
+Media-Gallery-Plan-Endpunkte (`/office/template-merge`, `/office/validate`,
+`/office/batch`, `/office/roundtrip`) für gequotete OfficeCLI-Befehle. Phase 6
+ist als nicht-destruktive Managed-Workflow-Schicht umgesetzt: `/office/preview`
+erzeugt HTML/PNG-Preview-Pläne, `/office/repair` plant eine reparierte Kopie
+statt Original-Overwrite, `/office/watch/start|stop|status` kapseln den
+Watch-Lifecycle mit eingebettetem Preview-Frame in der UI und kompatibler
+Standalone-Watch-Seite, und `/office/blueprints/suggest|create` plus
+`/office/blueprints` machen aus guten bestehenden Dokumenten wiederverwendbare
+Blueprints. Der vollständige Phase-6-Ausbau verwendet den bestehenden
+`run_state_manager.py` für Office-Workflow-State: `/office/validation-results`
+persistiert Validation-Badges/Issues für Document Cards,
+`/office/batch/jobs` plus `/office/batch/jobs/{job_id}/progress` bilden echte
+Batch-Job-Records mit Fortschritt/Fehlern ab, und
+`/office/templates/placeholders` sowie `/office/templates/merge-form` liefern
+Placeholder-Erkennung und formulargetriebenes Template Merge. Für binäre Office-
+Templates kann der Agent zusätzlich per OfficeCLI/AI sichtbare Placeholder aus
+Text/Outline ergänzen. Phase 7 ergänzt den dedizierten `office_agent` als Peer im
+bestehenden AlphaRavis-Swarm. Substanzielle Office-Workflows werden jetzt über
+`active_agent=office_agent` aus dem Office Tab gestartet; kleine UI-Aktionen wie
+Listing, Uploads, Status, Placeholder-Erkennung und Validation-/Batch-State
+bleiben direkte Media-Gallery-Endpunkte.
 
 ### Phase 1 — OfficeCLI im Docker-Container (implemented base path)
 
@@ -219,7 +244,7 @@ RUN curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/instal
 | **Framework** | Electron 37 (Desktop) | Next.js 16 (Web) |
 | **UI Library** | Arco Design | shadcn/ui (Radix + Tailwind) |
 | **Agent-Protokoll** | ACP + CLI stdio | LangGraph SDK (REST/SSE) |
-| **Office Tool** | OfficeCLI (built-in) | ✅ OfficeCLI base path implemented (default-off prompt/toolset/MCP, Office tab, output listing) |
+| **Office Tool** | OfficeCLI (built-in) | ✅ OfficeCLI + Office tab + dedicated `office_agent` swarm peer |
 | **Code-Editor** | Monaco + Codemirror | Monaco (lazy) + DiffViewer |
 | **IM Channels** | ✅ Telegram, Lark, DingTalk | ❌ (Hermes Agent separat) |
 | **Multi-Agent** | ✅ Parallel CLI Sessions | ✅ Subagent-Indikatoren |

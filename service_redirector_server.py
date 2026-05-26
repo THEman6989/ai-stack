@@ -157,6 +157,18 @@ SERVICES: list[dict[str, Any]] = [
         "accent": "#bb7cff",
     },
     {
+        "name": "Hermes Web UI",
+        "service": "hermes-webui",
+        "kind": "Coding UI",
+        "category": "web",
+        "icon": "HW",
+        "description": "Browser interface for Hermes Agent — sessions, workspace, coding.",
+        "host_url": "http://localhost:8643",
+        "docker_url": "http://hermes-webui:8643",
+        "port": 8643,
+        "accent": "#c084fc",
+    },
+    {
         "name": "LiteLLM",
         "service": "litellm",
         "kind": "Model Gateway UI",

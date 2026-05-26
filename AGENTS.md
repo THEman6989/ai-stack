@@ -9,7 +9,9 @@ instructions, for example inside the `hermes-agent` submodule.
 Before changing behavior, read the relevant docs instead of guessing from one
 file:
 
-- `README.md`: operator-facing overview, common Makefile commands, service URLs.
+- `README.md`: operator-facing overview, service table, quickstart, Makefile
+  commands, feature gates.
+- `docs/MAKEFILE_README.md`: complete Makefile target and variable reference.
 - `docs/ALPHARAVIS_OPEN_TASKS.md`: active backlog and current implementation
   state. Start here for "what is still needed".
 - `docs/ALPHARAVIS_ARCHITECTURE.md`: system design, container roles, runtime
@@ -25,7 +27,17 @@ file:
   AlphaRavis-to-Hermes delegation.
 - `docs/AIONUI_LANGGRAPH_ACP_INTEGRATION.md`: ACP adapter behavior and AionUi
   debugging.
+- `docs/AIONUI_OFFICE_INTEGRATION.md`: OfficeCLI analysis and AlphaRavis
+  integration design.
+- `docs/OFFICECLI_AGENT_REFERENCE.md`: compact OfficeCLI command reference
+  for agents.
 - `docs/ALPHARAVIS_MODEL_MANAGEMENT.md`: custom model/power management.
+- `docs/ALPHARAVIS_RAG_HANDOFF.md`: RAG/compression, large-paste ingest,
+  retrieval routing design.
+- `docs/ALPHARAVIS_DEEPAGENTS_IMPROVEMENTS.md`: DeepAgents integration
+  improvements: subagents, skills, structured reports.
+- `docs/ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md`: contract for browser UIs
+  connecting to the AlphaRavis brain.
 
 ## Documentation Rules
 
@@ -44,8 +56,8 @@ infer runtime behavior only from code.
 - Update `docs/ALPHARAVIS_USAGE_NOTES.md` when a human operator needs to know a
   new workflow, flag, default, limitation, or UI behavior.
 - Update the focused doc for the touched area, for example Responses
-  compatibility, Hermes, AionUi ACP, model management, or deep-agent
-  improvements.
+  compatibility, Hermes, AionUi ACP, OfficeCLI, model management, RAG/retrieval,
+  or deep-agent improvements.
 - Prefer linking to the canonical doc over duplicating long explanations in
   multiple files.
 
@@ -73,6 +85,8 @@ Primary services:
 - `litellm`: model gateway on port `4000`.
 - `hermes-agent`: optional coding/system specialist on port `8642`.
 - `deep-agents-ui`: AlphaRavis custom agent UI (forked, in `submodules/`).
+- `media-gallery`: serves registered media, galleries, Office output, analysis assets on port `8130`.
+- `service-dashboard`: landing page and runtime settings UI on port `8090`.
 
 The stable default for DeepAgents Responses mode is hybrid streaming:
 

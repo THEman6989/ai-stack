@@ -1275,6 +1275,10 @@ ALPHARAVIS_RAG_CLASSIFIER_MODEL=unsloth/Qwen3.5-2B-GGUF:Q4_1
 ALPHARAVIS_RAG_CLASSIFIER_TIMEOUT_SECONDS=12
 ALPHARAVIS_RAG_CLASSIFIER_MAX_TOKENS=512
 ALPHARAVIS_RAG_CLASSIFIER_MIN_CONFIDENCE=0.5
+# Force the 2B classifier on every agent-path prompt regardless of length.
+# Default false: classifier only runs on prompts >= MIN_CHARS (6000).
+# Set true to always optimize the RAG query — adds ~1-3s latency per prompt.
+ALPHARAVIS_RAG_CLASSIFIER_ALWAYS=false
 ALPHARAVIS_AGENTIC_RAG_LLM_GRADING=false
 ALPHARAVIS_AGENTIC_RAG_GRADER_MODEL=openai/big-boss
 ALPHARAVIS_AGENTIC_RAG_GRADER_TIMEOUT_SECONDS=25
@@ -1364,6 +1368,9 @@ ALPHARAVIS_MEDIA_PUBLIC_BASE_URL=http://localhost:8130
 ALPHARAVIS_MEDIA_CORS_ALLOW_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://localhost:3080,http://127.0.0.1:3080
 ALPHARAVIS_MEDIA_PORT=8130
 ALPHARAVIS_MEDIA_ROOT=/media-data
+# Host ownership for Office files created through media-gallery uploads. Set to your host uid/gid if not 1000.
+ALPHARAVIS_OFFICE_OUTPUT_HOST_UID=1000
+ALPHARAVIS_OFFICE_OUTPUT_HOST_GID=1000
 ALPHARAVIS_MEDIA_MONGO_DB=alpharavis_media
 ALPHARAVIS_MEDIA_MONGO_COLLECTION=assets
 ALPHARAVIS_MEDIA_DOWNLOAD_ENABLED=true
@@ -1666,6 +1673,9 @@ ALPHARAVIS_MCP_ALLOW_STDIO=false
 # through bounded terminal commands. Default false keeps the normal prompt unchanged.
 # Allowed values: true, false
 ALPHARAVIS_ENABLE_OFFICECLI=false
+# Enables the dedicated office_agent in the AlphaRavis swarm. Docker defaults this
+# to true for the Office tab; set false to keep the pre-Phase-7 generalist path.
+ALPHARAVIS_ENABLE_OFFICE_AGENT=true
 OFFICE_OUTPUT_DIR=/workspace/office-output
 ALPHARAVIS_OFFICE_OUTPUT_ROOT=/workspace/office-output
 ALPHARAVIS_OFFICE_OUTPUT_PUBLIC_BASE_URL=http://localhost:8130/office-output
@@ -1677,6 +1687,24 @@ NEXT_PUBLIC_OFFICE_PREVIEW_URL=http://localhost:26315
 NEXT_PUBLIC_OFFICE_OUTPUT_FILES_URL=http://localhost:8130/office/files
 NEXT_PUBLIC_OFFICE_OUTPUT_UPLOAD_URL=http://localhost:8130/office/upload
 NEXT_PUBLIC_OFFICE_TEMPLATES_URL=http://localhost:8130/office/templates
+NEXT_PUBLIC_OFFICE_TEMPLATE_MERGE_URL=http://localhost:8130/office/template-merge
+NEXT_PUBLIC_OFFICE_VALIDATE_URL=http://localhost:8130/office/validate
+NEXT_PUBLIC_OFFICE_BATCH_URL=http://localhost:8130/office/batch
+NEXT_PUBLIC_OFFICE_ROUNDTRIP_URL=http://localhost:8130/office/roundtrip
+NEXT_PUBLIC_OFFICE_PREVIEW_GENERATE_URL=http://localhost:8130/office/preview
+NEXT_PUBLIC_OFFICE_REPAIR_URL=http://localhost:8130/office/repair
+NEXT_PUBLIC_OFFICE_WATCH_START_URL=http://localhost:8130/office/watch/start
+NEXT_PUBLIC_OFFICE_WATCH_STOP_URL=http://localhost:8130/office/watch/stop
+NEXT_PUBLIC_OFFICE_BLUEPRINTS_URL=http://localhost:8130/office/blueprints
+NEXT_PUBLIC_OFFICE_BLUEPRINT_CREATE_URL=http://localhost:8130/office/blueprints/create
+NEXT_PUBLIC_OFFICE_BLUEPRINT_SUGGEST_URL=http://localhost:8130/office/blueprints/suggest
+NEXT_PUBLIC_OFFICE_VALIDATION_RESULTS_URL=http://localhost:8130/office/validation-results
+NEXT_PUBLIC_OFFICE_BATCH_JOBS_URL=http://localhost:8130/office/batch/jobs
+NEXT_PUBLIC_OFFICE_BATCH_STATUS_URL=http://localhost:8130/office/batch/jobs
+NEXT_PUBLIC_OFFICE_TEMPLATE_PLACEHOLDERS_URL=http://localhost:8130/office/templates/placeholders
+NEXT_PUBLIC_OFFICE_TEMPLATE_MERGE_FORM_URL=http://localhost:8130/office/templates/merge-form
+NEXT_PUBLIC_OFFICE_AGENT_ENABLED=true
+NEXT_PUBLIC_OFFICE_AGENT_NAME=office_agent
 
 # Enables OfficeCLI's stdio MCP server from langgraph-app/mcp.json. Keep false
 # until you explicitly want typed OfficeCLI MCP tools; direct CLI works without it.

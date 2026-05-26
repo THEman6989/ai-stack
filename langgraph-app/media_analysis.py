@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -175,7 +176,7 @@ def _ensure_under_root(path: Path, root: Path) -> None:
     path.resolve().relative_to(root.resolve())
 
 
-async def _download_media(media_url: str, target: Path, max_bytes: int) -> dict[str, Any]:
+async def _download_media(media_url: str, target: Path, max_bytes: int, *, honor_limit: bool = False) -> dict[str, Any]:
     parsed = urlparse(media_url)
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("Only http/https media URLs are downloadable by default.")
@@ -194,7 +195,12 @@ async def _download_media(media_url: str, target: Path, max_bytes: int) -> dict[
                 async for chunk in response.aiter_bytes():
                     size += len(chunk)
                     if size > max_bytes:
-                        raise RuntimeError(f"download exceeds limit {max_bytes} bytes")
+                        if honor_limit:
+                            raise RuntimeError(f"download exceeds limit {max_bytes} bytes")
+                        logging.warning(
+                            "Download exceeds recommended limit of %d bytes (actual: %d). Proceeding anyway (ALPHARAVIS_VIDEO_ANALYSIS_HONOR_SIZE_LIMIT is false).",
+                            max_bytes, size,
+                        )
                     fh.write(chunk)
     tmp.replace(target)
     return {"bytes": size, "content_type": content_type, "local_path": str(target)}
@@ -340,7 +346,8 @@ async def prepare_media_for_model(
     run_dir = cache_root / _safe_segment(thread_id or "global", "global") / run_id
     local_media = run_dir / f"source{_extension_from_url(media_url, resolved_type)}"
     max_bytes = int(os.getenv("ALPHARAVIS_VIDEO_ANALYSIS_MAX_DOWNLOAD_BYTES", "2147483648"))
-    download_info = await _download_media(media_url, local_media, max_bytes=max_bytes)
+    honor_limit = _env_bool("ALPHARAVIS_VIDEO_ANALYSIS_HONOR_SIZE_LIMIT", "false")
+    download_info = await _download_media(media_url, local_media, max_bytes=max_bytes, honor_limit=honor_limit)
     result["downloaded"] = True
     result["download"] = download_info
 
