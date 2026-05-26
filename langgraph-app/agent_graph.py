@@ -484,11 +484,16 @@ try:
         build_execution_plan,
         log_parallelization_decision,
         parallel_execution_enabled,
+        parallel_planner_instruction_block,
         parse_planner_text_into_tasks,
     )
     _PARALLEL_EXECUTOR_AVAILABLE = True
 except ImportError:
-    pass
+    def parallel_execution_enabled() -> bool:
+        return False
+
+    def parallel_planner_instruction_block() -> str:
+        return ""
 
 # Source content analysis — pure text helpers extracted from agent_graph
 try:
@@ -541,6 +546,17 @@ except ImportError:
     _command_segments = None
     _first_shell_word = None
     _is_read_only_command = None
+
+
+# Content-block normalizer
+
+try:
+
+    from content_block_normalizer import normalize_file_content_blocks as _normalize_file_content_blocks
+
+except ImportError:
+
+    _normalize_file_content_blocks = None
 
 
 class AlphaRavisState(MessagesState):
@@ -900,6 +916,8 @@ async def _parallel_executor_node(state: AlphaRavisState) -> dict[str, Any]:
     if not plan.parallel_groups and not plan.serial_chain:
         return {}
 
+    trace_id = _state_trace_id(state)
+
     _log_event(
         logging.INFO,
         "parallel_executor.running",
@@ -908,9 +926,22 @@ async def _parallel_executor_node(state: AlphaRavisState) -> dict[str, Any]:
         total_tasks=len(tasks),
     )
 
-    # Build executor with DirectLLM worker wired to _ainvoke_direct_text
+    # Build executor with DirectLLM worker wired to _ainvoke_direct_text.
+    # DirectLLMWorker expects a compact callable of shape (prompt, max_tokens),
+    # while _ainvoke_direct_text expects LangChain messages plus model kwargs.
+    async def _parallel_llm_fn(prompt: str, max_tokens: int) -> str:
+        kwargs = _agent_thinking_bind_kwargs()
+        kwargs.update({"max_tokens": max_tokens, "temperature": 0})
+        return await _ainvoke_direct_text(
+            [SystemMessage(content=prompt)],
+            timeout_seconds=float(os.getenv("ALPHARAVIS_PARALLEL_WORKER_TIMEOUT_SECONDS", "120")),
+            model_kwargs=kwargs,
+            purpose="parallel_executor",
+            trace_id=trace_id,
+        )
+
     worker = DirectLLMWorker()
-    worker.set_llm_fn(_ainvoke_direct_text)
+    worker.set_llm_fn(_parallel_llm_fn)
     executor = ParallelExecutor(spawner=worker, merge_spawner=worker)
 
     task_brief = str(state.get("current_task_brief") or state.get("planner_context") or "")
@@ -5846,6 +5877,163 @@ async def call_hermes_agent(task: str, context: str = "", max_output_chars: int 
         return f"Hermes call failed at {HERMES_API_BASE}: {exc}"
 
 
+async def _call_hermes_streaming_sse(
+    message: str,
+    system_prompt: str = "",
+    max_output_chars: int = 24000,
+):
+    """Stream Hermes SSE with pre-loaded AlphaRavis context. Yields raw SSE lines."""
+
+    if not _env_bool("ALPHARAVIS_ENABLE_HERMES_AGENT", "false"):
+        yield f"data: {json.dumps({'error': 'Hermes integration disabled. Set ALPHARAVIS_ENABLE_HERMES_AGENT=true.'})}\n\n"
+        return
+
+    health = await _check_hermes_health_raw(timeout_seconds=float(os.getenv("HERMES_HEALTHCHECK_TIMEOUT_SECONDS", "10")))
+    if health.get("status") != "ok":
+        yield f"data: {json.dumps({'error': 'Hermes unreachable', 'health': health})}\n\n"
+        return
+
+    # ---- Pre-Load AlphaRavis Context (best-effort, non-blocking) ----
+    context_parts: list[str] = []
+
+    async def _safe_preload(name: str, coro):
+        try:
+            result = await coro
+            if result and str(result).strip():
+                context_parts.append(f"[{name}]\n{str(result)[:3000]}")
+        except Exception:
+            pass
+
+    await asyncio.gather(
+        _safe_preload("Memory", semantic_memory_search.ainvoke({"query": message, "limit": 3})),
+        _safe_preload("RAG", _preload_rag(message)),
+        _safe_preload("Skills", _preload_skills()),
+        _safe_preload("Sessions", _preload_sessions(message)),
+    )
+
+    context_block = "\n\n".join(context_parts) if context_parts else ""
+
+    # ---- Build Hermes system prompt with pre-loaded context ----
+    full_system = (
+        "You are Hermes, the AI coding agent called via AlphaRavis orchestrated mode. "
+        "You have access to terminal, file I/O, web search, and other tools. "
+        "Focus on code, files, terminal-oriented diagnosis, project structure, "
+        "patch suggestions, and implementation guidance. Do not call LangGraph, "
+        "AlphaRavis, MCP LangGraph tools, or any custom-agent flow. "
+        "If a task would require destructive commands, emit a pending_approval "
+        "event instead of executing blindly."
+    )
+    if system_prompt.strip():
+        full_system += f"\n\nUser Instructions:\n{system_prompt.strip()[:4000]}"
+    if context_block:
+        full_system += f"\n\nAlphaRavis Pre-Loaded Context:\n{context_block}"
+
+    # ---- Call Hermes with stream=true ----
+    headers = {
+        "Content-Type": "application/json",
+        "X-AlphaRavis-Origin": "langgraph",
+        "X-AlphaRavis-Disable-LangGraph-Tool": "true",
+    }
+    if HERMES_API_KEY:
+        headers["Authorization"] = f"Bearer {HERMES_API_KEY}"
+
+    payload = {
+        "model": HERMES_MODEL,
+        "messages": [
+            {"role": "system", "content": full_system},
+            {"role": "user", "content": message[:24000]},
+        ],
+        "stream": True,
+        "temperature": float(os.getenv("HERMES_TEMPERATURE", "0.2")),
+    }
+
+    full_output = ""
+    artifact_key = f"hermes-run-{int(time.time())}"
+
+    try:
+        async with httpx.AsyncClient(timeout=float(os.getenv("HERMES_TIMEOUT_SECONDS", "300"))) as client:
+            async with client.stream(
+                "POST",
+                f"{HERMES_API_BASE}/chat/completions",
+                headers=headers,
+                json=payload,
+            ) as response:
+                if response.status_code >= 400:
+                    error_body = (await response.aread()).decode(errors="replace")[:500]
+                    yield f"data: {json.dumps({'error': f'Hermes API error {response.status_code}: {error_body}'})}\n\n"
+                    return
+
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    # Relay Hermes SSE events directly
+                    yield f"{line}\n\n"
+                    # Accumulate text content for artifact saving
+                    data_str = line[5:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        parsed = json.loads(data_str)
+                        choice = parsed.get("choices", [{}])[0] if isinstance(parsed, dict) else {}
+                        delta = choice.get("delta", {}) if isinstance(choice, dict) else {}
+                        content = delta.get("content", "") if isinstance(delta, dict) else ""
+                        if content:
+                            full_output += str(content)
+                    except (json.JSONDecodeError, TypeError, KeyError):
+                        pass
+
+        # ---- Save artifact + memory ----
+        if full_output.strip():
+            try:
+                truncated = full_output[:max_output_chars]
+                await write_alpha_ravis_artifact.ainvoke({"title": artifact_key, "content": truncated})
+                summary = full_output[:200].strip().split("\n")[0] if full_output.strip() else "empty"
+                await record_agent_memory.ainvoke({
+                    "agent_id": "hermes_coding_agent",
+                    "memory": f"Hermes orchestrated run {artifact_key}: {summary}",
+                    "scope": "session",
+                })
+                yield f"data: {json.dumps({'type': 'artifact', 'key': artifact_key, 'memory_recorded': True})}\n\n"
+            except Exception as exc:
+                yield f"data: {json.dumps({'type': 'artifact_error', 'error': str(exc)[:200]})}\n\n"
+
+        yield "data: [DONE]\n\n"
+
+    except Exception as exc:
+        yield f"data: {json.dumps({'error': f'Hermes streaming failed: {exc}'})}\n\n"
+
+
+async def _preload_skills() -> str:
+    """Pre-load skill names for context injection (non-tool helper)."""
+    try:
+        result = list_repo_ai_skills(max_chars=2000)
+        return result if isinstance(result, str) else str(result)
+    except Exception:
+        return ""
+
+
+async def _preload_rag(query: str) -> str:
+    """Pre-load RAG snippets for context injection."""
+    try:
+        result = await agentic_rag_retrieve.ainvoke({
+            "query": query,
+            "source_keys": ["*"],
+            "limit": 3,
+        })
+        return result if isinstance(result, str) else str(result)
+    except Exception:
+        return ""
+
+
+async def _preload_sessions(query: str) -> str:
+    """Pre-load recent session summaries for context injection."""
+    try:
+        result = await search_session_history.ainvoke({"query": query, "limit": 3})
+        return result if isinstance(result, str) else str(result)
+    except Exception:
+        return ""
+
+
 @tool
 async def search_archived_context(query: str, limit: int = 5, include_other_threads: bool = False):
     """Search archived memory. Defaults to the current chat thread only."""
@@ -10325,6 +10513,10 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
             f"{', '.join(str(key) for key in archived_keys[-5:])}.\n"
         )
 
+    parallel_planner_hint = ""
+    if _PARALLEL_EXECUTOR_AVAILABLE and parallel_execution_enabled():
+        parallel_planner_hint = parallel_planner_instruction_block()
+
     prompt = (
         "Create a compact execution plan for AlphaRavis before the swarm acts. "
         "Do not solve the task. Do not include hidden reasoning. Name likely "
@@ -10336,6 +10528,7 @@ async def planner_node(state: AlphaRavisState) -> dict[str, Any]:
         "MCP tools unless the chosen category is needed.\n\n"
         f"{hermes_hint}"
         f"{archive_recall_hint}"
+        f"{parallel_planner_hint}"
         f"User request:\n{latest}"
     )
 
@@ -11191,6 +11384,29 @@ def _compression_debug_profile(result: CompressionResult | None, *, prefix: str,
         ),
     }
     return {key: value for key, value in fields.items() if value not in (None, "")}
+
+
+async def normalize_content_blocks_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
+
+    """Rewrite opaque file ContentBlocks (video/doc with Gallery URLs) as readable text."""
+
+    if _normalize_file_content_blocks is None:
+
+        return {}
+
+    messages = list(state.get("messages", []))
+
+    if not messages:
+
+        return {}
+
+    normalized = _normalize_file_content_blocks(messages)
+
+    if normalized is not messages:
+
+        return {"messages": normalized}
+
+    return {}
 
 
 async def pre_run_context_guard_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
@@ -13930,6 +14146,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     builder = StateGraph(AlphaRavisState)
     builder.add_node("run_profile_start", run_profile_start_node)
     builder.add_node("resume_prompt", resume_prompt_node)
+    builder.add_node("normalize_content_blocks", normalize_content_blocks_node)
     builder.add_node("pre_run_context_guard", pre_run_context_guard_node)
     builder.add_node("large_paste_post_compression", large_paste_post_compression_node)
     builder.add_node("route_decision", route_decision_node)
@@ -13958,9 +14175,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     builder.add_conditional_edges(
         "run_profile_start",
         route_after_run_profile_start,
-        {"resume_prompt": "resume_prompt", "continue": "pre_run_context_guard"},
+        {"resume_prompt": "resume_prompt", "continue": "normalize_content_blocks"},
     )
     builder.add_edge("resume_prompt", END)
+    builder.add_edge("normalize_content_blocks", "pre_run_context_guard")
     builder.add_edge("pre_run_context_guard", "large_paste_post_compression")
     builder.add_edge("large_paste_post_compression", "route_decision")
     builder.add_conditional_edges(

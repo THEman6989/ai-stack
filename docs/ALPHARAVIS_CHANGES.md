@@ -4,6 +4,101 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-26 — Parallel Executor Conflict/Grouping Hardening
+
+- Fixed the planner-to-DAG path so parsed planner bullets no longer receive an
+  implicit sequential dependency chain. Independent parsed tasks can now be
+  placed in one concurrent execution group instead of only the first task being
+  parallelizable.
+- Fixed parallelization decisions so overlapping write globs, chokepoint files,
+  and big-model/context-pressure resource conflicts force serialization instead
+  of only being logged as reasons while still allowing parallel execution.
+- Hardened file/glob conflict detection in both `task_graph.py` and
+  `file_lock.py` for concrete path vs wildcard glob pairs, such as
+  `src/api.py` vs `src/*.py`.
+- `ParallelExecutor` now reports skipped file-lock conflicts as failed run
+  results, so `ExecutionReport.ok` cannot be true when a concurrent write was
+  skipped for safety.
+- Fixed the live LangGraph integration adapter for `DirectLLMWorker`: the worker
+  still uses its compact `(prompt, max_tokens)` interface, while
+  `_parallel_executor_node()` now wraps that into `_ainvoke_direct_text()` with
+  `SystemMessage`, model kwargs, timeout, purpose, and trace ID. This keeps the
+  runtime path on the configured main direct model instead of failing on a
+  callable-signature mismatch.
+- When `ALPHARAVIS_PARALLEL_TASK_EXECUTION=true`, the planner prompt now asks
+  BigBoss to append a `<parallel-execution-plan>{...}</parallel-execution-plan>`
+  JSON block that declares whether parallel work is possible, which tasks may
+  run together, dependencies, file globs, model class, risk, and rationale. This
+  prompt addition is flag-gated; disabled runs keep the old planner prompt.
+- `parse_planner_text_into_tasks()` now prefers that structured BigBoss plan
+  when present. `analyze_parallelization()` treats BigBoss hints as advisory:
+  explicit `parallel=false` forces serial execution, safe group names are
+  preserved, and deterministic safety checks still override unsafe parallel
+  hints for file/glob conflicts, chokepoints, dependencies, merge/review, and
+  resource pressure.
+- Verification: `pytest -q tests/test_parallel_executor.py` → 59 passed;
+  `pytest -q tests/test_context_budget_router.py tests/test_llama_context_scheduler.py tests/test_parallel_executor.py`
+  → 115 passed. Direct `py_compile` was blocked by local `__pycache__`
+  permissions, so the changed Python files were also AST-parsed successfully
+  with `PYTHONDONTWRITEBYTECODE=1`. `git diff --check` passed.
+
+## 2026-05-26 — Coding Tab: Mode Switch + Hermes Orchestrator (Weg B)
+
+- Added `hermes-orch` service — dedicated FastAPI server on port 8650 for the
+  Coding Tab's orchestrated mode (Weg B). Handles `POST /hermes/stream` with
+  SSE relay from Hermes Agent. Pre-loads AlphaRavis context (Memory, RAG,
+  Skills, Sessions) before calling Hermes, saves output as artifact, records
+  memory. Runs standalone via uvicorn (`hermes_orch_server:app`). Depends on
+  `hermes-agent` being healthy.
+- `_call_hermes_streaming_sse()` in `agent_graph.py` — async generator that
+  pre-loads context (via `.ainvoke()` on @tool functions), calls Hermes with
+  stream=true, relays SSE events, auto-saves artifact + memory.
+- UI Mode Switch in Coding Tab: segmented control `[Direct] [+AlphaRavis]`
+  at top (empty state) and bottom (input bar). Direct = Weg A (SSE to :8642).
+  +AlphaRavis = Weg B (SSE through hermes-orch :8650 with pre-loaded context).
+- New hook `useHermesOrchestrated.ts` — SSE parsing for orchestrated mode,
+  targeting `NEXT_PUBLIC_HERMES_ORCH_URL` (default `http://localhost:8650`).
+- `NEXT_PUBLIC_HERMES_ORCH_URL` env var added to docker-compose for
+  `deep-agents-ui`.
+- Clean separation: endpoint removed from bridge_server.py. Bridge (8123)
+  remains exclusively LibreChat/OpenWebUI ↔ LangGraph.
+- Verification: `hermes-orch` health endpoint returns `{"status":"ok"}`.
+  SSE relay streams Hermes events correctly through the orchestrator.
+
+- Added a feature-flagged `office_agent` as a peer worker in the existing
+  AlphaRavis swarm. `ALPHARAVIS_ENABLE_OFFICE_AGENT` controls whether the graph
+  exposes the new worker, adds `transfer_to_office` handoff tools to the other
+  specialists, and includes the `office_agent` name/profile in graph metadata.
+- Added the `agent/office` toolset profile for substantial document workflows:
+  DOCX/PPTX/XLSX creation, template merge, validation, repair, preview/watch,
+  blueprint, and managed batch operations. `office/documents` remains the narrow
+  OfficeCLI/MCP category for direct Office tools; when the Office agent flag is
+  enabled, Office keyword inference prefers `agent/office` so heavy work does not
+  bloat the generalist path.
+- The Deep Agents UI Office tab now submits agent-launcher prompts with
+  `active_agent=office_agent` through the LangGraph SDK path. Lightweight
+  browser actions still call media-gallery endpoints directly for listing,
+  uploads, validation/batch state, placeholder detection, and template merge form
+  state.
+- Docker Compose wires `ALPHARAVIS_ENABLE_OFFICE_AGENT`,
+  `NEXT_PUBLIC_OFFICE_AGENT_ENABLED`, and `NEXT_PUBLIC_OFFICE_AGENT_NAME` for
+  `langgraph-api` and `deep-agents-ui`. `.env(exaple)` documents the same flags.
+- Test stubs for FastAPI were made import-order-safe for the full local suite by
+  including middleware/CORS and response shims used by `media_server.py`.
+- Verification:
+  - `pytest -q tests` → 534 passed.
+  - `pytest -q tests/test_bridge_responses.py tests/test_bridge_test_ui.py tests/test_media_server.py tests/test_alpharavis_toolsets.py tests/test_office_agent_phase7.py tests/test_deep_agents_office_ui.py` → 127 passed.
+  - `npm run lint && npm run build` in `submodules/deep-agents-ui` → passed.
+  - `docker compose config --quiet` → passed.
+  - `docker compose build langgraph-api deep-agents-ui` → passed.
+  - `docker compose up -d --no-deps --force-recreate langgraph-api deep-agents-ui` → passed; `langgraph-api` became healthy and `deep-agents-ui` started on port 3000.
+  - Runtime smoke: `/office/files`, `/office/templates`, `/office/validation-results`, `/office/batch/jobs`, `http://localhost:3000/`, and `http://localhost:2024/docs` all returned HTTP 200. Container env confirmed `ALPHARAVIS_ENABLE_OFFICE_AGENT=true`, `NEXT_PUBLIC_OFFICE_AGENT_ENABLED=true`, and `NEXT_PUBLIC_OFFICE_AGENT_NAME=office_agent`.
+  - Browser smoke on port 3000: Office tab renders, Office cards/state/actions are visible, and browser console has no JS errors.
+
+Rationale: substantial Office work should start on the dedicated document
+specialist when the user is in the Office tab, while cheap UI/status operations
+remain direct endpoints and the existing swarm/handoff architecture stays intact.
+
 ## 2026-05-25 — OfficeCLI + Deep Agents UI Office Tab Base Path
 
 - Added a default-off OfficeCLI integration path for AlphaRavis. The base
@@ -15,8 +110,18 @@ can tell which patches are intentional and which ones can be removed.
   `/usr/local/bin/officecli`, adds Chromium for render/watch/screenshot support,
   and exposes `/workspace/office-output` plus the OfficeCLI watch port `26315`
   through Docker Compose. The media-gallery service mounts the same output
-  directory read-only and serves Office artifacts through `/office-output/*` and
-  `/office/files` for lightweight listing/download URLs.
+  directory read/write so browser uploads can land in the shared Office output
+  tree, serves Office artifacts through `/office-output/*`, and exposes
+  `/office/files`, `/office/upload`, `/office/templates`, and Phase-5 plan
+  endpoints (`/office/template-merge`, `/office/validate`, `/office/batch`,
+  `/office/roundtrip`) for lightweight listing/upload/template discovery and
+  safe OfficeCLI command plans. Office file records now also link existing
+  sibling preview artifacts (`<name>-preview.png` and `<name>-preview.html`) so
+  the UI can surface generated previews without another scan path; those sibling
+  preview artifacts are hidden from the normal Office output card list. Uploads and
+  the shared Office output root are chowned to configurable host ownership
+  (`ALPHARAVIS_OFFICE_OUTPUT_HOST_UID/GID`, default `1000:1000`) to avoid
+  root-owned smoke/upload artifacts on the bind mount.
 - Added `office/documents` to `langgraph-app/alpharavis_toolsets.py`. The toolset
   includes bounded local command execution for direct CLI use and can select
   OfficeCLI MCP tools by category when the MCP path is explicitly enabled.
@@ -30,18 +135,40 @@ can tell which patches are intentional and which ones can be removed.
   uploads while preserving them as file blocks with their original MIME types.
   Office files are not treated as image/vision blocks.
 - Added `OfficePanel.tsx` and a Chat/Office header switch. The Office panel lives
-  inside the existing `ChatProvider`, can send an OfficeCLI task prompt to the
+  inside the existing `ChatProvider`, can send OfficeCLI task prompts to the
   agent, targets `/workspace/office-output`, fetches and displays generated
   Office files from the media-gallery `/office/files` endpoint with document
   cards (type icon, filename, size, date), download/open links, and a refresh
-  button, and links to the optional watch preview URL. The Watch button now
+  button, and links to the optional watch preview URL. Browser-side upload now
+  posts `.docx`/`.pptx`/`.xlsx` files to `/office/upload`. The panel also lists
+  templates from `/office/templates` and provides Phase-5 Agent-launcher buttons
+  backed by media-gallery plan endpoints for template merge, validation, batch,
+  and round-trip dump/analyze workflows. Phase 6 adds managed workflow plan/status
+  endpoints for `/office/preview`, `/office/repair`, `/office/watch/start`,
+  `/office/watch/stop`, `/office/watch/status`, `/office/blueprints`,
+  `/office/blueprints/create`, and `/office/blueprints/suggest`. The Office tab
+  now has direct `Generate preview`, `Repair`, and `Make blueprint` buttons, plus
+  a Blueprint Library hint (`If you like documents...`) so good existing files can
+  be reused as recipes without manual prompting. Repair is non-destructive and
+  targets `<name>-repaired.<ext>` instead of overwriting the source. Watch keeps
+  the standalone OfficeCLI page for compatibility but embeds the live Preview
+  frame directly in the UI. When
+  `/office/files` reports preview artifacts, document cards show a `Preview ready`
+  badge plus direct `Preview PNG` / `Preview HTML` links. Watch
   sends an AlphaRavis-shell-compatible `nohup officecli watch ... --port <port>`
   command and Stop uses `officecli unwatch`, instead of referring to Hermes-only
   background/process tool parameters. The media-gallery endpoint now sets
   configurable browser CORS origins via `ALPHARAVIS_MEDIA_CORS_ALLOW_ORIGINS`,
-  so the Deep Agents UI can fetch `/office/files` directly from port `8130`.
+  so the Deep Agents UI can fetch Office endpoints directly from port `8130`.
+  The expanded Phase-6 workflow state reuses `langgraph-app/run_state_manager.py`
+  instead of adding an Office-only state manager: `/office/validation-results`
+  persists validation summaries/issues, `/office/files` surfaces validation
+  badges on cards, `/office/batch/jobs` and
+  `/office/batch/jobs/{job_id}/progress` track managed batch job counters/errors,
+  and `/office/templates/placeholders` plus `/office/templates/merge-form` drive
+  placeholder-aware Template Merge forms.
 - Verification:
-  - `pytest -q tests/test_media_server.py tests/test_deep_agents_office_ui.py tests/test_alpharavis_toolsets.py tests/test_prompt_assembly.py tests/test_mcp_client_config.py` → 34 passed.
+  - `pytest -q tests/test_media_server.py tests/test_deep_agents_office_ui.py tests/test_alpharavis_toolsets.py tests/test_prompt_assembly.py tests/test_mcp_client_config.py` → 40 passed.
   - `npm run lint` in `submodules/deep-agents-ui` → passed.
   - `npm run build` in `submodules/deep-agents-ui` → passed.
   - `docker compose config --quiet`, `docker compose build deep-agents-ui`, and

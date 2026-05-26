@@ -114,11 +114,27 @@ Body:
 If `BRIDGE_LANGGRAPH_TOOL_API_KEY` is set, send:
 
 ```text
-Authorization: Bearer <BRIDGE_LANGGRAPH_TOOL_API_KEY>
+Authorization: Bearer <BRIDG...KEY>
 ```
 
 This endpoint rejects calls unless `explicit_user_request=true`, so Hermes can
 use LangGraph only when the user explicitly asks for it.
+
+### Mode E: Deep Agents UI Coding Tab → Hermes (Orchestrated)
+
+The Coding Tab in Deep Agents UI has two modes reachable via the `[Direct] [+AlphaRavis]`
+segmented control:
+
+- **Direct (Weg A):** Browser → Hermes SSE (:8642). Bare Hermes, no AlphaRavis overhead.
+- **+AlphaRavis (Weg B):** Browser → hermes-orch (:8650) → Hermes (:8642).
+  The `hermes-orch` service pre-loads AlphaRavis context (Memory, RAG, Skills,
+  Sessions) before calling Hermes, then saves the full output as an artifact and
+  records a memory entry. SSE events are relayed in real-time.
+
+The `hermes-orch` service is a standalone uvicorn FastAPI app on port 8650,
+defined in `docker-compose.yml`. It depends on `hermes-agent` being healthy.
+Endpoint: `POST /hermes/stream` — accepts `{"message": "...", "system_prompt": "..."}` and
+returns `text/event-stream`.
 
 ## LibreChat OpenAI Bucket
 
