@@ -4,9 +4,12 @@ import base64
 import binascii
 import hashlib
 import html
+import json
 import os
 import re
+import shlex
 import time
+import zipfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, unquote_to_bytes, urlparse
@@ -19,6 +22,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from file_safety import ensure_write_allowed
+
+try:
+    import run_state_manager
+except Exception:  # pragma: no cover - optional media-gallery runtime dependency
+    run_state_manager = None  # type: ignore[assignment]
 
 try:
     from pymongo import MongoClient
@@ -38,6 +46,38 @@ OFFICE_OUTPUT_PUBLIC_BASE_URL = os.getenv(
 ).rstrip("/")
 OFFICE_OUTPUT_EXTENSIONS = {".docx", ".pptx", ".xlsx", ".pdf", ".html", ".png", ".jpg", ".jpeg"}
 OFFICE_UPLOAD_EXTENSIONS = {".docx", ".pptx", ".xlsx"}
+OFFICE_OUTPUT_HOST_UID = os.getenv("ALPHARAVIS_OFFICE_OUTPUT_HOST_UID", "1000").strip()
+OFFICE_OUTPUT_HOST_GID = os.getenv("ALPHARAVIS_OFFICE_OUTPUT_HOST_GID", "1000").strip()
+OFFICE_OUTPUT_CLI_DIR = os.getenv("ALPHARAVIS_OFFICECLI_OUTPUT_DIR", "/workspace/office-output").rstrip("/")
+OFFICE_PREVIEW_URL = os.getenv("ALPHARAVIS_OFFICE_PREVIEW_URL", "http://localhost:26315").rstrip("/")
+OFFICE_VALIDATION_STATE_NAMESPACE = "office_validation"
+OFFICE_BATCH_STATE_NAMESPACE = "office_batch"
+_OFFICE_WATCH_STATE: dict[str, dict[str, Any]] = {}
+
+
+def _office_output_host_owner() -> tuple[int, int] | None:
+    if not OFFICE_OUTPUT_HOST_UID or not OFFICE_OUTPUT_HOST_GID:
+        return None
+    try:
+        uid = int(OFFICE_OUTPUT_HOST_UID)
+        gid = int(OFFICE_OUTPUT_HOST_GID)
+    except ValueError:
+        return None
+    if uid < 0 or gid < 0:
+        return None
+    return uid, gid
+
+
+def _chown_office_output_path(path: Path) -> None:
+    owner = _office_output_host_owner()
+    if owner is None:
+        return
+    try:
+        os.chown(path, owner[0], owner[1])
+    except (AttributeError, PermissionError, OSError):
+        return
+
+
 DEFAULT_CORS_ALLOW_ORIGINS = (
     "http://localhost:3000,"
     "http://127.0.0.1:3000,"
@@ -68,6 +108,12 @@ UPLOAD_MIME_TYPES = {
     "audio/wav": "audio",
     "audio/x-wav": "audio",
     "application/pdf": "document",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "document",
+    "application/vnd.oasis.opendocument.text": "document",
+    "application/vnd.oasis.opendocument.presentation": "document",
+    "application/vnd.oasis.opendocument.spreadsheet": "document",
     "text/plain": "document",
     "text/markdown": "document",
 }
@@ -104,6 +150,7 @@ ensure_write_allowed(MEDIA_ROOT, allowed_root=MEDIA_ROOT)
 MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
 app.mount("/media", StaticFiles(directory=str(MEDIA_ROOT)), name="media")
 OFFICE_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+_chown_office_output_path(OFFICE_OUTPUT_ROOT)
 app.mount("/office-output", StaticFiles(directory=str(OFFICE_OUTPUT_ROOT)), name="office-output")
 
 
@@ -132,6 +179,39 @@ class MediaRegisterRequest(BaseModel):
     caption: str = ""
     download: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OfficeFilePlanRequest(BaseModel):
+    file: str = ""
+    input: str = ""
+
+
+class OfficeTemplateMergePlanRequest(BaseModel):
+    template: str = ""
+    output: str = ""
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class OfficeValidationResultRequest(BaseModel):
+    file: str = ""
+    status: str = "unknown"
+    issues: list[dict[str, Any]] = Field(default_factory=list)
+    summary: str = ""
+
+
+class OfficeBatchJobRequest(BaseModel):
+    template: str = ""
+    input: str = "batch-input.json"
+    output_dir: str = "batch-output"
+    total: int = 0
+
+
+class OfficeBatchJobUpdateRequest(BaseModel):
+    job_id: str = ""
+    status: str = "running"
+    completed: int = 0
+    failed: int = 0
+    errors: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def _collection():
@@ -190,6 +270,27 @@ def _extension_from_url(url: str, media_type: str) -> str:
     if suffix and len(suffix) <= 12:
         return suffix
     return {"image": ".png", "video": ".mp4", "audio": ".wav", "document": ".bin"}.get(media_type, ".bin")
+
+
+ODF_MIME_TYPES = {
+    "application/vnd.oasis.opendocument.text",
+    "application/vnd.oasis.opendocument.presentation",
+    "application/vnd.oasis.opendocument.spreadsheet",
+}
+
+
+def _odf_enabled() -> bool:
+    return os.getenv("ALPHARAVIS_ENABLE_ODF_UPLOAD", "false").lower() in {"1", "true", "yes", "on"}
+
+
+def _reject_odf_if_disabled(mime_type: str) -> None:
+    """Reject ODF uploads unless ALPHARAVIS_ENABLE_ODF_UPLOAD is true."""
+    lowered = (mime_type or "").split(";", 1)[0].strip().lower()
+    if lowered in ODF_MIME_TYPES and not _odf_enabled():
+        raise HTTPException(
+            status_code=415,
+            detail="ODF uploads are not enabled. Set ALPHARAVIS_ENABLE_ODF_UPLOAD=true to enable OnlyOffice conversion.",
+        )
 
 
 def _media_type_from_upload(filename: str, mime_type: str) -> str:
@@ -380,6 +481,27 @@ def _office_output_url(relative_path: str) -> str:
     return f"{OFFICE_OUTPUT_PUBLIC_BASE_URL}/{relative_path.replace(os.sep, '/')}"
 
 
+def _office_preview_artifacts(path: Path) -> dict[str, Any]:
+    stem = path.with_suffix("")
+    preview_image = stem.with_name(f"{stem.name}-preview.png")
+    preview_html = stem.with_name(f"{stem.name}-preview.html")
+    image_relative = ""
+    html_relative = ""
+    if preview_image.exists() and preview_image.is_file():
+        image_relative = str(preview_image.resolve().relative_to(OFFICE_OUTPUT_ROOT)).replace(os.sep, "/")
+    if preview_html.exists() and preview_html.is_file():
+        html_relative = str(preview_html.resolve().relative_to(OFFICE_OUTPUT_ROOT)).replace(os.sep, "/")
+    return {
+        "preview_available": bool(image_relative or html_relative),
+        "preview_image_url": _office_output_url(image_relative) if image_relative else "",
+        "preview_html_url": _office_output_url(html_relative) if html_relative else "",
+    }
+
+
+def _is_office_preview_artifact(path: Path) -> bool:
+    return path.stem.endswith("-preview") and path.suffix.lower() in {".png", ".html"}
+
+
 def _office_output_record(path: Path) -> dict[str, Any]:
     resolved = path.resolve()
     relative_path = str(resolved.relative_to(OFFICE_OUTPUT_ROOT)).replace(os.sep, "/")
@@ -392,6 +514,8 @@ def _office_output_record(path: Path) -> dict[str, Any]:
         "modified_at": int(stat.st_mtime),
         "public_url": _office_output_url(relative_path),
         "download_url": _office_output_url(relative_path),
+        **_office_preview_artifacts(resolved),
+        **_office_validation_badge(relative_path),
     }
 
 
@@ -415,7 +539,431 @@ def _store_office_uploaded_file(*, filename: str, content: bytes) -> dict[str, A
     with tmp.open("wb") as fh:
         fh.write(content)
     os.replace(tmp, target)
+    _chown_office_output_path(target)
     return _office_output_record(target)
+
+
+def _office_relative_path(value: str) -> str:
+    raw = (value or "").strip().replace("\\", "/")
+    cli_prefix = f"{OFFICE_OUTPUT_CLI_DIR}/"
+    if raw.startswith(cli_prefix):
+        raw = raw[len(cli_prefix) :]
+    if not raw or raw.startswith("/"):
+        raise HTTPException(status_code=400, detail="unsafe office path")
+    normalized = os.path.normpath(raw).replace(os.sep, "/")
+    if normalized in {".", ".."} or normalized.startswith("../") or "/../" in f"/{normalized}/":
+        raise HTTPException(status_code=400, detail="unsafe office path")
+    return normalized
+
+
+def _office_cli_path(value: str) -> str:
+    return f"{OFFICE_OUTPUT_CLI_DIR}/{_office_relative_path(value)}"
+
+
+def _office_shell(value: str) -> str:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _office_state_save(namespace: str, workflow_id: str, record: dict[str, Any]) -> dict[str, Any]:
+    if run_state_manager is None:
+        return {"saved": False, "disabled": True, "record": record}
+    try:
+        return run_state_manager.save_workflow_record(namespace=namespace, workflow_id=workflow_id, record=record)
+    except Exception as exc:  # pragma: no cover - defensive runtime fallback
+        return {"saved": False, "error": str(exc)[:2000], "record": record}
+
+
+def _office_state_load(namespace: str, workflow_id: str) -> dict[str, Any] | None:
+    if run_state_manager is None:
+        return None
+    try:
+        return run_state_manager.load_workflow_record(namespace, workflow_id)
+    except Exception:
+        return None
+
+
+def _office_state_list(namespace: str, *, status: str = "", file: str = "", limit: int = 50) -> list[dict[str, Any]]:
+    if run_state_manager is None:
+        return []
+    try:
+        return run_state_manager.list_workflow_records(namespace=namespace, status=status, file=file, limit=limit)
+    except Exception:
+        return []
+
+
+def _office_validation_badge(relative_path: str) -> dict[str, Any]:
+    record = _office_state_load(OFFICE_VALIDATION_STATE_NAMESPACE, relative_path)
+    if not record:
+        return {"validation_status": "unknown", "validation_badge": "not_validated", "validation_issues": []}
+    status = str(record.get("status") or "unknown")
+    return {
+        "validation_status": status,
+        "validation_badge": status,
+        "validation_issues": record.get("issues") if isinstance(record.get("issues"), list) else [],
+        "validation_summary": str(record.get("summary") or ""),
+        "validation_updated_at": record.get("updated_at"),
+    }
+
+
+def _office_record_validation_result(*, file: str, status: str, issues: list[dict[str, Any]] | None = None, summary: str = "") -> dict[str, Any]:
+    relative = _office_relative_path(file)
+    normalized_status = (status or "unknown").strip().lower() or "unknown"
+    record = {
+        "namespace": OFFICE_VALIDATION_STATE_NAMESPACE,
+        "file": relative,
+        "status": normalized_status,
+        "issues": issues or [],
+        "summary": summary,
+        "phase": 6,
+        "operation": "validation_result",
+    }
+    saved = _office_state_save(OFFICE_VALIDATION_STATE_NAMESPACE, relative, record)
+    stored = saved.get("record") if isinstance(saved, dict) else None
+    return stored if isinstance(stored, dict) else record
+
+
+def _office_job_id(*parts: str) -> str:
+    raw = "|".join(parts + (str(time.time()),))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _office_progress(total: int = 0, completed: int = 0, failed: int = 0) -> dict[str, int]:
+    safe_total = max(0, int(total or 0))
+    safe_completed = max(0, int(completed or 0))
+    safe_failed = max(0, int(failed or 0))
+    denominator = safe_total or max(1, safe_completed + safe_failed)
+    percent = int((safe_completed + safe_failed) * 100 / denominator) if denominator else 0
+    return {"total": safe_total, "completed": safe_completed, "failed": safe_failed, "percent": max(0, min(percent, 100))}
+
+
+def _office_batch_job_plan(*, template: str, input_path: str = "batch-input.json", output_dir: str = "batch-output", total: int = 0) -> dict[str, Any]:
+    template_path = _office_cli_path(template)
+    input_cli_path = _office_cli_path(input_path or "batch-input.json")
+    output_relative = _office_relative_path(output_dir or "batch-output")
+    output_cli_dir = f"{OFFICE_OUTPUT_CLI_DIR}/{output_relative}"
+    job_id = _office_job_id(template_path, input_cli_path, output_cli_dir)
+    record = {
+        "phase": 6,
+        "operation": "batch_job",
+        "job_id": job_id,
+        "status": "planned",
+        "file": _office_relative_path(template),
+        "template": template_path,
+        "input": input_cli_path,
+        "output_dir": output_cli_dir,
+        "progress": _office_progress(total=total),
+        "errors": [],
+        "commands": [
+            f"officecli batch {_office_shell(template_path)} --input {_office_shell(input_cli_path)} --output-dir {_office_shell(output_cli_dir)}",
+            f"officecli validate {_office_shell(output_cli_dir)}",
+        ],
+        "notes": ["Managed Batch Job: persist progress/errors in the existing AlphaRavis run_state_manager workflow store."],
+    }
+    saved = _office_state_save(OFFICE_BATCH_STATE_NAMESPACE, job_id, record)
+    stored = saved.get("record") if isinstance(saved, dict) else None
+    return stored if isinstance(stored, dict) else record
+
+
+def _office_batch_job_status(job_id: str) -> dict[str, Any]:
+    record = _office_state_load(OFFICE_BATCH_STATE_NAMESPACE, job_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="office batch job not found")
+    return record
+
+
+def _office_update_batch_job(job_id: str, *, status: str, completed: int = 0, failed: int = 0, errors: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    record = _office_batch_job_status(job_id)
+    total = 0
+    if isinstance(record.get("progress"), dict):
+        total = int(record["progress"].get("total") or 0)
+    record.update(
+        {
+            "status": status or record.get("status") or "running",
+            "progress": _office_progress(total=total, completed=completed, failed=failed),
+            "errors": errors or [],
+        }
+    )
+    saved = _office_state_save(OFFICE_BATCH_STATE_NAMESPACE, job_id, record)
+    stored = saved.get("record") if isinstance(saved, dict) else None
+    return stored if isinstance(stored, dict) else record
+
+
+def _office_template_text(path: Path) -> str:
+    if zipfile.is_zipfile(path):
+        chunks: list[str] = []
+        with zipfile.ZipFile(path) as archive:
+            for name in archive.namelist():
+                lowered = name.lower()
+                if lowered.endswith(".xml") and any(part in lowered for part in ("word/", "ppt/", "xl/", "docprops/")):
+                    try:
+                        chunks.append(archive.read(name).decode("utf-8", errors="ignore"))
+                    except Exception:
+                        continue
+        return "\n".join(chunks)
+    return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _extract_placeholders(text: str) -> list[str]:
+    found: set[str] = set()
+    patterns = [
+        r"\{\{\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*\}\}",
+        r"\[\[\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*\]\]",
+        r"<<\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*>>",
+    ]
+    for pattern in patterns:
+        found.update(match.group(1) for match in re.finditer(pattern, text))
+    return sorted(found)
+
+
+def _office_template_placeholders(template: str) -> dict[str, Any]:
+    relative = _office_relative_path(template)
+    template_path = (OFFICE_OUTPUT_ROOT / relative).resolve()
+    try:
+        template_path.relative_to(OFFICE_OUTPUT_ROOT)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="unsafe office path")
+    if not template_path.exists() or not template_path.is_file():
+        raise HTTPException(status_code=404, detail="office template not found")
+    placeholders = _extract_placeholders(_office_template_text(template_path))
+    return {
+        "phase": 6,
+        "operation": "template_placeholders",
+        "template": f"{OFFICE_OUTPUT_CLI_DIR}/{relative}",
+        "relative_path": relative,
+        "placeholders": placeholders,
+        "fields": [{"name": name, "label": name, "required": True, "type": "text"} for name in placeholders],
+        "ai_hint": "If placeholders are missing because the Office file uses rich formatting, ask the AI to inspect the document text/outline and suggest likely fields.",
+    }
+
+
+def _office_template_merge_form_plan(*, template: str, output: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+    fields = _office_template_placeholders(template)
+    payload = data or {}
+    missing = [name for name in fields["placeholders"] if name not in payload or payload.get(name) in {None, ""}]
+    plan = _office_template_merge_plan(template=template, output=output, data=payload)
+    plan.update(
+        {
+            "phase": 6,
+            "operation": "template_merge_form",
+            "fields": fields["fields"],
+            "placeholders": fields["placeholders"],
+            "missing_fields": missing,
+            "status": "blocked" if missing else "planned",
+        }
+    )
+    return plan
+
+
+def _office_validate_plan(file: str) -> dict[str, Any]:
+    file_path = _office_cli_path(file)
+    return {
+        "phase": 5,
+        "operation": "validate",
+        "status": "planned",
+        "file": file_path,
+        "commands": [
+            f"officecli validate {_office_shell(file_path)}",
+            f"officecli view {_office_shell(file_path)} issues --json",
+        ],
+    }
+
+
+def _office_template_merge_plan(*, template: str, output: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+    template_path = _office_cli_path(template)
+    output_default = f"{Path(_office_relative_path(template)).stem}-merged{Path(template).suffix or '.docx'}"
+    output_path = _office_cli_path(output or output_default)
+    payload = json.dumps(data or {}, ensure_ascii=False, sort_keys=True)
+    return {
+        "phase": 5,
+        "operation": "template_merge",
+        "status": "planned",
+        "template": template_path,
+        "output": output_path,
+        "data": data or {},
+        "commands": [
+            f"officecli merge {_office_shell(template_path)} {_office_shell(output_path)} {_office_shell(payload)}",
+            f"officecli validate {_office_shell(output_path)}",
+            f"officecli view {_office_shell(output_path)} issues --json",
+        ],
+    }
+
+
+def _office_batch_plan(file: str, input_path: str = "batch-input.json") -> dict[str, Any]:
+    file_path = _office_cli_path(file)
+    batch_input = _office_cli_path(input_path or "batch-input.json")
+    return {
+        "phase": 5,
+        "operation": "batch",
+        "status": "planned",
+        "file": file_path,
+        "input": batch_input,
+        "commands": [
+            f"officecli batch {_office_shell(file_path)} --input {_office_shell(batch_input)}",
+            f"officecli validate {_office_shell(file_path)}",
+        ],
+        "notes": ["Phase 5 returns a safe execution plan; managed job status belongs to Phase 6."],
+    }
+
+
+def _office_roundtrip_plan(file: str) -> dict[str, Any]:
+    relative = _office_relative_path(file)
+    file_path = f"{OFFICE_OUTPUT_CLI_DIR}/{relative}"
+    source = Path(relative)
+    blueprint_relative = str(source.with_name(f"{source.stem}-blueprint.json")).replace(os.sep, "/")
+    blueprint_path = f"{OFFICE_OUTPUT_CLI_DIR}/{blueprint_relative}"
+    return {
+        "phase": 5,
+        "operation": "roundtrip",
+        "status": "planned",
+        "file": file_path,
+        "blueprint": blueprint_path,
+        "commands": [
+            f"officecli dump {_office_shell(file_path)} -o {_office_shell(blueprint_path)}",
+            f"officecli batch {_office_shell(file_path)} --input {_office_shell(blueprint_path)}",
+        ],
+        "notes": ["Blueprint persistence/reuse is tracked as Phase 6."],
+    }
+
+
+def _office_artifact_paths(file: str, suffix: str) -> tuple[str, str]:
+    relative = _office_relative_path(file)
+    source = Path(relative)
+    artifact_relative = str(source.with_name(f"{source.stem}{suffix}")).replace(os.sep, "/")
+    return f"{OFFICE_OUTPUT_CLI_DIR}/{artifact_relative}", artifact_relative
+
+
+def _office_preview_plan(file: str) -> dict[str, Any]:
+    file_path = _office_cli_path(file)
+    preview_html, _ = _office_artifact_paths(file, "-preview.html")
+    preview_image, _ = _office_artifact_paths(file, "-preview.png")
+    return {
+        "phase": 6,
+        "operation": "preview",
+        "status": "planned",
+        "file": file_path,
+        "preview_html": preview_html,
+        "preview_image": preview_image,
+        "preview_url": OFFICE_PREVIEW_URL,
+        "commands": [
+            f"officecli view {_office_shell(file_path)} html -o {_office_shell(preview_html)}",
+            f"officecli view {_office_shell(file_path)} screenshot -o {_office_shell(preview_image)}",
+        ],
+        "notes": [
+            "Generates sibling preview artifacts without modifying the source document.",
+            "Refresh /office/files after the commands complete to surface preview links.",
+        ],
+    }
+
+
+def _office_repair_plan(file: str) -> dict[str, Any]:
+    relative = _office_relative_path(file)
+    source = Path(relative)
+    repaired_relative = str(source.with_name(f"{source.stem}-repaired{source.suffix}")).replace(os.sep, "/")
+    file_path = f"{OFFICE_OUTPUT_CLI_DIR}/{relative}"
+    repaired_path = f"{OFFICE_OUTPUT_CLI_DIR}/{repaired_relative}"
+    return {
+        "phase": 6,
+        "operation": "repair",
+        "status": "planned",
+        "file": file_path,
+        "output": repaired_path,
+        "commands": [
+            f"officecli validate {_office_shell(file_path)}",
+            f"officecli view {_office_shell(file_path)} issues --json",
+            f"officecli repair {_office_shell(file_path)} -o {_office_shell(repaired_path)}",
+            f"officecli validate {_office_shell(repaired_path)}",
+        ],
+        "notes": [
+            "Non-destructive repair: write a repaired copy and keep the original unchanged.",
+            "If officecli repair is unavailable, use the issues JSON to apply safe OfficeCLI set/add fixes to the repaired copy only.",
+        ],
+    }
+
+
+def _office_watch_plan(file: str, action: str = "start") -> dict[str, Any]:
+    file_path = _office_cli_path(file)
+    key = _office_relative_path(file)
+    if action == "stop":
+        record = {
+            "phase": 6,
+            "operation": "watch_stop",
+            "status": "stopped",
+            "file": file_path,
+            "preview_url": OFFICE_PREVIEW_URL,
+            "commands": [f"officecli unwatch {_office_shell(file_path)}"],
+            "ui_hint": "Close or hide the embedded Preview frame after stopping the watch.",
+        }
+        _OFFICE_WATCH_STATE[key] = record
+        return record
+    record = {
+        "phase": 6,
+        "operation": "watch_start",
+        "status": "planned",
+        "file": file_path,
+        "preview_url": OFFICE_PREVIEW_URL,
+        "commands": [
+            f"nohup officecli watch {_office_shell(file_path)} --port {urlparse(OFFICE_PREVIEW_URL).port or '26315'} > /tmp/officecli-watch.log 2>&1 &",
+        ],
+        "ui_hint": "Open the embedded iframe Preview frame in the Office tab; the standalone preview URL remains available for compatibility.",
+    }
+    _OFFICE_WATCH_STATE[key] = record
+    return record
+
+
+def _office_watch_status(file: str = "") -> dict[str, Any]:
+    if file:
+        key = _office_relative_path(file)
+        return _OFFICE_WATCH_STATE.get(
+            key,
+            {"phase": 6, "operation": "watch_status", "status": "idle", "file": _office_cli_path(file), "preview_url": OFFICE_PREVIEW_URL},
+        )
+    return {"phase": 6, "operation": "watch_status", "status": "ok", "watches": list(_OFFICE_WATCH_STATE.values())}
+
+
+def _office_blueprint_suggestion() -> dict[str, Any]:
+    return {
+        "phase": 6,
+        "operation": "blueprint_suggestion",
+        "status": "available",
+        "message": "If you like documents you already have, you can make a blueprint out of it and reuse the structure later.",
+        "examples": [
+            "Upload a polished DOCX/PPTX/XLSX, then press Make blueprint.",
+            "Use blueprints as reusable layout/style recipes for future documents.",
+        ],
+    }
+
+
+def _office_blueprint_create_plan(file: str) -> dict[str, Any]:
+    relative = _office_relative_path(file)
+    source = Path(relative)
+    blueprint_relative = str(source.with_name(f"{source.stem}-blueprint.json")).replace(os.sep, "/")
+    file_path = f"{OFFICE_OUTPUT_CLI_DIR}/{relative}"
+    blueprint_path = f"{OFFICE_OUTPUT_CLI_DIR}/{blueprint_relative}"
+    return {
+        "phase": 6,
+        "operation": "blueprint_create",
+        "status": "planned",
+        "file": file_path,
+        "blueprint": blueprint_path,
+        "commands": [
+            f"officecli dump {_office_shell(file_path)} -o {_office_shell(blueprint_path)}",
+            f"officecli view {_office_shell(file_path)} outline --json",
+        ],
+        "notes": ["Persist the blueprint JSON and reuse it as a future document recipe."],
+    }
+
+
+def _list_office_blueprints(limit: int = 200) -> list[dict[str, Any]]:
+    if not OFFICE_OUTPUT_ROOT.exists():
+        return []
+    safe_limit = max(1, min(int(limit or 200), 1000))
+    files = [
+        path.resolve()
+        for path in OFFICE_OUTPUT_ROOT.rglob("*-blueprint.json")
+        if path.is_file()
+    ]
+    files.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return [_office_output_record(path) for path in files[:safe_limit]]
 
 
 def _list_office_files_under(root: Path, limit: int = 200, extensions: set[str] | None = None) -> list[dict[str, Any]]:
@@ -426,7 +974,7 @@ def _list_office_files_under(root: Path, limit: int = 200, extensions: set[str] 
     files = [
         path.resolve()
         for path in root.rglob("*")
-        if path.is_file() and path.suffix.lower() in allowed_extensions
+        if path.is_file() and path.suffix.lower() in allowed_extensions and not _is_office_preview_artifact(path)
     ]
     files.sort(key=lambda path: path.stat().st_mtime, reverse=True)
     return [_office_output_record(path) for path in files[:safe_limit]]
@@ -462,6 +1010,134 @@ async def upload_office_file(request: Request):
         content=uploaded.get("content") or b"",
     )
     return {"file": record}
+
+
+@app.post("/office/template-merge")
+async def office_template_merge_plan(request: OfficeTemplateMergePlanRequest):
+    return _office_template_merge_plan(template=request.template, output=request.output, data=request.data)
+
+
+@app.post("/office/validate")
+async def office_validate_plan(request: OfficeFilePlanRequest):
+    return _office_validate_plan(request.file)
+
+
+@app.post("/office/batch")
+async def office_batch_plan(request: OfficeFilePlanRequest):
+    return _office_batch_plan(request.file, request.input)
+
+
+@app.post("/office/roundtrip")
+async def office_roundtrip_plan(request: OfficeFilePlanRequest):
+    return _office_roundtrip_plan(request.file)
+
+
+@app.post("/office/preview")
+async def office_preview_plan(request: OfficeFilePlanRequest):
+    return _office_preview_plan(request.file)
+
+
+@app.post("/office/repair")
+async def office_repair_plan(request: OfficeFilePlanRequest):
+    return _office_repair_plan(request.file)
+
+
+@app.post("/office/watch/start")
+async def office_watch_start_plan(request: OfficeFilePlanRequest):
+    return _office_watch_plan(request.file, action="start")
+
+
+@app.post("/office/watch/stop")
+async def office_watch_stop_plan(request: OfficeFilePlanRequest):
+    return _office_watch_plan(request.file, action="stop")
+
+
+@app.get("/office/watch/status")
+async def office_watch_status(file: str = ""):
+    return _office_watch_status(file)
+
+
+@app.get("/office/blueprints")
+async def list_office_blueprints(limit: int = 200):
+    return {"root": str(OFFICE_OUTPUT_ROOT), "files": _list_office_blueprints(limit)}
+
+
+@app.get("/office/blueprints/suggest")
+async def office_blueprint_suggest():
+    return _office_blueprint_suggestion()
+
+
+@app.post("/office/blueprints/create")
+async def office_blueprint_create_plan(request: OfficeFilePlanRequest):
+    return _office_blueprint_create_plan(request.file)
+
+
+@app.get("/office/validation-results")
+async def list_office_validation_results(file: str = "", status: str = "", limit: int = 50):
+    relative = _office_relative_path(file) if file else ""
+    return {
+        "phase": 6,
+        "operation": "validation_results",
+        "results": _office_state_list(OFFICE_VALIDATION_STATE_NAMESPACE, status=status, file=relative, limit=limit),
+    }
+
+
+@app.post("/office/validation-results")
+async def save_office_validation_result(request: OfficeValidationResultRequest):
+    return _office_record_validation_result(file=request.file, status=request.status, issues=request.issues, summary=request.summary)
+
+
+@app.get("/office/batch/jobs")
+async def list_or_get_office_batch_jobs(job_id: str = "", status: str = "", limit: int = 50):
+    if job_id:
+        return _office_batch_job_status(job_id)
+    return {
+        "phase": 6,
+        "operation": "batch_jobs",
+        "jobs": _office_state_list(OFFICE_BATCH_STATE_NAMESPACE, status=status, limit=limit),
+    }
+
+
+@app.post("/office/batch/jobs")
+async def create_office_batch_job(request: OfficeBatchJobRequest):
+    return _office_batch_job_plan(template=request.template, input_path=request.input, output_dir=request.output_dir, total=request.total)
+
+
+@app.get("/office/batch/jobs/{job_id}")
+async def get_office_batch_job(job_id: str):
+    return _office_batch_job_status(job_id)
+
+
+@app.post("/office/batch/jobs/{job_id}/progress")
+async def update_office_batch_job_progress(job_id: str, request: OfficeBatchJobUpdateRequest):
+    return _office_update_batch_job(
+        job_id,
+        status=request.status,
+        completed=request.completed,
+        failed=request.failed,
+        errors=request.errors,
+    )
+
+
+@app.post("/office/batch/jobs/update")
+async def update_office_batch_job(request: OfficeBatchJobUpdateRequest):
+    return _office_update_batch_job(
+        request.job_id,
+        status=request.status,
+        completed=request.completed,
+        failed=request.failed,
+        errors=request.errors,
+    )
+
+
+@app.get("/office/templates/placeholders")
+async def office_template_placeholders(template: str):
+    return _office_template_placeholders(template)
+
+
+@app.post("/office/templates/merge-form")
+async def office_template_merge_form(request: OfficeTemplateMergePlanRequest):
+    return _office_template_merge_form_plan(template=request.template, output=request.output, data=request.data)
 
 
 def _sort_spec(sort: str, order: str) -> tuple[str, int]:
@@ -687,6 +1363,28 @@ async def upload_asset(request: Request):
         title=fields.get("title", ""),
     )
     return RedirectResponse(url="/gallery?view=all&group_by=day&sort=created_at&order=desc", status_code=303)
+
+
+@app.post("/api/assets/upload")
+async def api_upload_asset(request: Request):
+    """JSON API endpoint for programmatic uploads (agents, frontends). Returns {asset_id, public_url, ...}."""
+    fields, uploaded = _parse_gallery_upload_multipart(request.headers.get("content-type", ""), await request.body())
+    content_type = str(uploaded.get("content_type") or "application/octet-stream")
+    _reject_odf_if_disabled(content_type)
+    record = _store_uploaded_asset(
+        filename=str(uploaded.get("filename") or "upload.bin"),
+        content_type=str(uploaded.get("content_type") or "application/octet-stream"),
+        content=uploaded.get("content") or b"",
+        title=fields.get("title", ""),
+    )
+    return {
+        "asset_id": record["asset_id"],
+        "public_url": record["public_url"],
+        "media_type": record["media_type"],
+        "mime_type": record["mime_type"],
+        "filename": str(uploaded.get("filename") or ""),
+        "size": int(uploaded.get("size") or len(uploaded.get("content") or b"")),
+    }
 
 
 @app.get("/assets")

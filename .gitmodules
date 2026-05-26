@@ -26,3 +26,6 @@
 [submodule "submodules/OfficeCLI"]
 	path = submodules/OfficeCLI
 	url = https://github.com/iOfficeAI/OfficeCLI.git
+[submodule "submodules/hermes-webui"]
+	path = submodules/hermes-webui
+	url = https://github.com/nesquena/hermes-webui.git

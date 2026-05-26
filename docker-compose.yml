@@ -167,6 +167,57 @@ services:
       - hermes-agent
     restart: unless-stopped
 
+  # Hermes Web UI — browser interface for Hermes Agent
+  hermes-webui:
+    image: python:3.12-slim
+    container_name: hermes-webui
+    working_dir: /app
+    command:
+      - "sh"
+      - "-c"
+      - "pip install -q pyyaml cryptography && exec python /app/submodules/hermes-webui/server.py"
+    ports:
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:8643:8643"
+    volumes:
+      - ${HERMES_HOME_DIR:-./hermes-data}:/opt/data
+      - ./:/workspace:ro
+      - ./submodules/hermes-webui:/app/submodules/hermes-webui:ro
+    env_file:
+      - .env
+    environment:
+      - HERMES_HOME=/opt/data
+      - HERMES_WEBUI_HOST=0.0.0.0
+      - HERMES_WEBUI_PORT=8643
+      - HERMES_WEBUI_STATE_DIR=/opt/data/webui
+      - HERMES_WEBUI_DEFAULT_WORKSPACE=/workspace
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - hermes-agent
+    restart: unless-stopped
+
+  # --- HERMES ORCHESTRATOR (Coding Tab Weg B) ---
+  hermes-orch:
+    build:
+      context: .
+      dockerfile: ./langgraph-app/Dockerfile
+    container_name: hermes-orch
+    command: ["uvicorn", "hermes_orch_server:app", "--host", "0.0.0.0", "--port", "8650"]
+    ports:
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:8650:8650"
+    volumes:
+      - ./langgraph-app:/app
+      - ./:/workspace:ro
+    env_file:
+      - .env
+    environment:
+      - HERMES_API_BASE=${HERMES_API_BASE:-http://hermes-agent:8642/v1}
+      - HERMES_API_KEY=${HERMES_API_KEY:-sk-hermes-local}
+      - HERMES_MODEL=${HERMES_MODEL:-hermes-agent}
+    depends_on:
+      hermes-agent:
+        condition: service_healthy
+    restart: unless-stopped
+
   # --- DER BRAIN (AlphaRavis LangGraph API) ---
   langgraph-api:
     build:
@@ -207,6 +258,7 @@ services:
       - OFFICE_OUTPUT_DIR=${OFFICE_OUTPUT_DIR:-/workspace/office-output}
       - OFFICECLI_CHROMIUM_PATH=${OFFICECLI_CHROMIUM_PATH:-/usr/bin/chromium}
       - ALPHARAVIS_ENABLE_OFFICECLI=${ALPHARAVIS_ENABLE_OFFICECLI:-false}
+      - ALPHARAVIS_ENABLE_OFFICE_AGENT=${ALPHARAVIS_ENABLE_OFFICE_AGENT:-true}
       - ALPHARAVIS_ENABLE_OFFICECLI_MCP=${ALPHARAVIS_ENABLE_OFFICECLI_MCP:-false}
       - ALPHARAVIS_PGVECTOR_DATABASE_URL=${ALPHARAVIS_PGVECTOR_DATABASE_URL:-postgresql://postgres:${POSTGRES_PASSWORD}@vectordb:5432/rag_api}
       - ALPHARAVIS_PGVECTOR_EMBEDDING_BASE_URL=${ALPHARAVIS_PGVECTOR_EMBEDDING_BASE_URL:-http://litellm:4000/v1}
@@ -223,6 +275,7 @@ services:
       - ALPHARAVIS_DOCUMENT_RAG_BACKEND=${ALPHARAVIS_DOCUMENT_RAG_BACKEND:-alpharavis_pgvector}
       - ALPHARAVIS_DOCUMENT_INGEST_ROOT=${ALPHARAVIS_DOCUMENT_INGEST_ROOT:-/workspace}
       - ALPHARAVIS_MEDIA_GALLERY_URL=${ALPHARAVIS_MEDIA_GALLERY_URL:-http://media-gallery:8130}
+      - ALPHARAVIS_ONLYOFFICE_URL=${ALPHARAVIS_ONLYOFFICE_URL:-http://onlyoffice:80}
       - OPENWEBUI_URL=${OPENWEBUI_URL:-http://openwebui:8080}
       - ALPHARAVIS_ARCHITECTURE_DOC_PATH=${ALPHARAVIS_ARCHITECTURE_DOC_PATH:-/workspace/docs/ALPHARAVIS_ARCHITECTURE.md}
       - ALPHARAVIS_LOG_DIR=${ALPHARAVIS_DOCKER_LOG_DIR:-/logs}
@@ -292,6 +345,8 @@ services:
       - ALPHARAVIS_MEDIA_CORS_ALLOW_ORIGINS=${ALPHARAVIS_MEDIA_CORS_ALLOW_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:3080,http://127.0.0.1:3080}
       - ALPHARAVIS_OFFICE_OUTPUT_ROOT=${ALPHARAVIS_OFFICE_OUTPUT_ROOT:-/workspace/office-output}
       - ALPHARAVIS_OFFICE_OUTPUT_PUBLIC_BASE_URL=${ALPHARAVIS_OFFICE_OUTPUT_PUBLIC_BASE_URL:-http://localhost:8130/office-output}
+      - ALPHARAVIS_OFFICE_OUTPUT_HOST_UID=${ALPHARAVIS_OFFICE_OUTPUT_HOST_UID:-1000}
+      - ALPHARAVIS_OFFICE_OUTPUT_HOST_GID=${ALPHARAVIS_OFFICE_OUTPUT_HOST_GID:-1000}
     depends_on:
       mongodb:
         condition: service_healthy
@@ -426,6 +481,29 @@ services:
       - NEXT_PUBLIC_OFFICE_OUTPUT_FILES_URL=${NEXT_PUBLIC_OFFICE_OUTPUT_FILES_URL:-http://localhost:8130/office/files}
       - NEXT_PUBLIC_OFFICE_OUTPUT_UPLOAD_URL=${NEXT_PUBLIC_OFFICE_OUTPUT_UPLOAD_URL:-http://localhost:8130/office/upload}
       - NEXT_PUBLIC_OFFICE_TEMPLATES_URL=${NEXT_PUBLIC_OFFICE_TEMPLATES_URL:-http://localhost:8130/office/templates}
+      - NEXT_PUBLIC_OFFICE_TEMPLATE_MERGE_URL=${NEXT_PUBLIC_OFFICE_TEMPLATE_MERGE_URL:-http://localhost:8130/office/template-merge}
+      - NEXT_PUBLIC_OFFICE_VALIDATE_URL=${NEXT_PUBLIC_OFFICE_VALIDATE_URL:-http://localhost:8130/office/validate}
+      - NEXT_PUBLIC_OFFICE_BATCH_URL=${NEXT_PUBLIC_OFFICE_BATCH_URL:-http://localhost:8130/office/batch}
+      - NEXT_PUBLIC_OFFICE_ROUNDTRIP_URL=${NEXT_PUBLIC_OFFICE_ROUNDTRIP_URL:-http://localhost:8130/office/roundtrip}
+      - NEXT_PUBLIC_OFFICE_PREVIEW_GENERATE_URL=${NEXT_PUBLIC_OFFICE_PREVIEW_GENERATE_URL:-http://localhost:8130/office/preview}
+      - NEXT_PUBLIC_OFFICE_REPAIR_URL=${NEXT_PUBLIC_OFFICE_REPAIR_URL:-http://localhost:8130/office/repair}
+      - NEXT_PUBLIC_OFFICE_WATCH_START_URL=${NEXT_PUBLIC_OFFICE_WATCH_START_URL:-http://localhost:8130/office/watch/start}
+      - NEXT_PUBLIC_OFFICE_WATCH_STOP_URL=${NEXT_PUBLIC_OFFICE_WATCH_STOP_URL:-http://localhost:8130/office/watch/stop}
+      - NEXT_PUBLIC_OFFICE_BLUEPRINTS_URL=${NEXT_PUBLIC_OFFICE_BLUEPRINTS_URL:-http://localhost:8130/office/blueprints}
+      - NEXT_PUBLIC_OFFICE_BLUEPRINT_CREATE_URL=${NEXT_PUBLIC_OFFICE_BLUEPRINT_CREATE_URL:-http://localhost:8130/office/blueprints/create}
+      - NEXT_PUBLIC_OFFICE_BLUEPRINT_SUGGEST_URL=${NEXT_PUBLIC_OFFICE_BLUEPRINT_SUGGEST_URL:-http://localhost:8130/office/blueprints/suggest}
+      - NEXT_PUBLIC_OFFICE_VALIDATION_RESULTS_URL=${NEXT_PUBLIC_OFFICE_VALIDATION_RESULTS_URL:-http://localhost:8130/office/validation-results}
+      - NEXT_PUBLIC_OFFICE_BATCH_JOBS_URL=${NEXT_PUBLIC_OFFICE_BATCH_JOBS_URL:-http://localhost:8130/office/batch/jobs}
+      - NEXT_PUBLIC_OFFICE_BATCH_STATUS_URL=${NEXT_PUBLIC_OFFICE_BATCH_STATUS_URL:-http://localhost:8130/office/batch/jobs}
+      - NEXT_PUBLIC_OFFICE_TEMPLATE_PLACEHOLDERS_URL=${NEXT_PUBLIC_OFFICE_TEMPLATE_PLACEHOLDERS_URL:-http://localhost:8130/office/templates/placeholders}
+      - NEXT_PUBLIC_OFFICE_TEMPLATE_MERGE_FORM_URL=${NEXT_PUBLIC_OFFICE_TEMPLATE_MERGE_FORM_URL:-http://localhost:8130/office/templates/merge-form}
+      - NEXT_PUBLIC_OFFICE_AGENT_ENABLED=${NEXT_PUBLIC_OFFICE_AGENT_ENABLED:-true}
+      - NEXT_PUBLIC_HERMES_API_URL=${NEXT_PUBLIC_HERMES_API_URL:-http://localhost:8642/v1}
+      - NEXT_PUBLIC_HERMES_API_KEY=${HERMES_API_KEY:-sk-hermes-local}
+      - NEXT_PUBLIC_HERMES_MODEL=${HERMES_MODEL:-hermes-agent}
+      - NEXT_PUBLIC_OFFICE_AGENT_NAME=${NEXT_PUBLIC_OFFICE_AGENT_NAME:-office_agent}
+      - NEXT_PUBLIC_ALPHARAVIS_ENABLE_ODF_UPLOAD=${ALPHARAVIS_ENABLE_ODF_UPLOAD:-false}
+      - NEXT_PUBLIC_ONLYOFFICE_URL=${ALPHARAVIS_ONLYOFFICE_URL:-http://localhost:8088}
     depends_on:
       - langgraph-api
 
@@ -514,6 +592,21 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+  # --- ONLYOFFICE DOCUMENT SERVER (ODF profile) ---
+  onlyoffice:
+    image: onlyoffice/documentserver:latest
+    container_name: onlyoffice
+    ports:
+      - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:${ALPHARAVIS_ONLYOFFICE_PORT:-8088}:80"
+    environment:
+      - JWT_ENABLED=false
+    volumes:
+      - onlyoffice_data:/var/www/onlyoffice/Data
+      - onlyoffice_log:/var/log/onlyoffice
+    profiles:
+      - odf
+    restart: unless-stopped
+
   # --- PIXELLE MCP ---
   pixelle:
     build:
@@ -537,3 +630,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+
+volumes:
+  onlyoffice_data:
+  onlyoffice_log:
