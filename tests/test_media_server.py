@@ -638,6 +638,74 @@ def test_store_uploaded_asset_writes_file_and_record(monkeypatch, tmp_path: Path
     assert collection.replacements[0][2] is True
 
 
+def test_internal_media_url_uses_container_reachable_base(monkeypatch) -> None:
+    monkeypatch.setattr(media_server, "MEDIA_INTERNAL_BASE_URL", "http://media-gallery:8130")
+
+    assert media_server._internal_media_url("2026-05-26/gallery upload/doc.odt") == (
+        "http://media-gallery:8130/media/2026-05-26/gallery upload/doc.odt"
+    )
+
+
+def test_maybe_convert_odf_upload_registers_converted_asset(monkeypatch, tmp_path: Path) -> None:
+    import odf_converter
+
+    collection = _FakeCollection([])
+    monkeypatch.setattr(media_server, "MEDIA_ROOT", tmp_path)
+    monkeypatch.setattr(media_server, "MEDIA_INTERNAL_BASE_URL", "http://media-gallery:8130")
+    monkeypatch.setattr(media_server, "_collection", lambda: collection)
+
+    original = media_server._store_uploaded_asset(
+        filename="sample.odt",
+        content_type="application/vnd.oasis.opendocument.text",
+        content=b"ODT",
+        title="sample.odt",
+    )
+    seen: dict[str, str] = {}
+
+    async def fake_convert(input_path: str, mime_type: str, output_dir: str, *, source_url: str):
+        seen["input_path"] = input_path
+        seen["mime_type"] = mime_type
+        seen["source_url"] = source_url
+        output_path = Path(output_dir) / "sample_converted.docx"
+        output_path.write_bytes(b"DOCX")
+        return {
+            "output_path": str(output_path),
+            "output_format": "docx",
+            "output_mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "output_ext": ".docx",
+            "output_size": 4,
+        }
+
+    monkeypatch.setattr(odf_converter, "convert_odf_to_ooxml", fake_convert)
+
+    converted = asyncio.run(media_server._maybe_convert_odf_upload(original))
+
+    assert converted is not None
+    assert converted["mime_type"] == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    assert converted["asset_kind"] == "converted"
+    assert converted["origin"] == "onlyoffice_conversion"
+    assert converted["parent_asset_id"] == original["asset_id"]
+    assert converted["metadata"]["conversion_provider"] == "onlyoffice"
+    assert converted["metadata"]["original_asset_id"] == original["asset_id"]
+    assert seen["source_url"].startswith("http://media-gallery:8130/media/")
+    assert len(collection.replacements) >= 3  # original, converted upload, converted metadata update
+
+
+def test_maybe_convert_odf_upload_skips_non_odf(monkeypatch, tmp_path: Path) -> None:
+    collection = _FakeCollection([])
+    monkeypatch.setattr(media_server, "MEDIA_ROOT", tmp_path)
+    monkeypatch.setattr(media_server, "_collection", lambda: collection)
+
+    record = media_server._store_uploaded_asset(
+        filename="image.png",
+        content_type="image/png",
+        content=b"PNG",
+        title="image.png",
+    )
+    result = asyncio.run(media_server._maybe_convert_odf_upload(record))
+    assert result is None
+
+
 def test_parse_gallery_upload_multipart_extracts_file_and_fields() -> None:
     body = (
         b"--abc\r\n"

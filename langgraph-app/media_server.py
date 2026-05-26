@@ -39,6 +39,7 @@ else:
 
 MEDIA_ROOT = Path(os.getenv("ALPHARAVIS_MEDIA_ROOT", "/media-data")).expanduser().resolve()
 PUBLIC_BASE_URL = os.getenv("ALPHARAVIS_MEDIA_PUBLIC_BASE_URL", "http://localhost:8130").rstrip("/")
+MEDIA_INTERNAL_BASE_URL = os.getenv("ALPHARAVIS_MEDIA_INTERNAL_BASE_URL", "http://media-gallery:8130").rstrip("/")
 OFFICE_OUTPUT_ROOT = Path(os.getenv("ALPHARAVIS_OFFICE_OUTPUT_ROOT", "/workspace/office-output")).expanduser().resolve()
 OFFICE_OUTPUT_PUBLIC_BASE_URL = os.getenv(
     "ALPHARAVIS_OFFICE_OUTPUT_PUBLIC_BASE_URL",
@@ -291,6 +292,65 @@ def _reject_odf_if_disabled(mime_type: str) -> None:
             status_code=415,
             detail="ODF uploads are not enabled. Set ALPHARAVIS_ENABLE_ODF_UPLOAD=true to enable OnlyOffice conversion.",
         )
+
+
+def _internal_media_url(relative_path: str) -> str:
+    return f"{MEDIA_INTERNAL_BASE_URL}/media/{relative_path.replace(os.sep, '/')}"
+
+
+async def _maybe_convert_odf_upload(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Convert an uploaded ODF asset to OOXML and register the converted asset.
+
+    Returns the converted media record, or None for non-ODF uploads.
+    """
+    mime_type = str(record.get("mime_type") or "")
+    try:
+        from odf_converter import convert_odf_to_ooxml, is_odf
+    except Exception as exc:  # pragma: no cover - import/runtime dependency guard
+        raise HTTPException(status_code=500, detail=f"ODF converter is unavailable: {exc}") from exc
+
+    if not is_odf(mime_type):
+        return None
+
+    source_url = _internal_media_url(str(record.get("relative_path") or ""))
+    local_path = Path(str(record.get("local_path") or ""))
+    try:
+        conversion = await convert_odf_to_ooxml(
+            str(local_path),
+            mime_type,
+            str(local_path.parent),
+            source_url=source_url,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    converted_path = Path(str(conversion["output_path"]))
+    converted_record = _store_uploaded_asset(
+        filename=converted_path.name,
+        content_type=str(conversion["output_mime"]),
+        content=converted_path.read_bytes(),
+        title=f"{record.get('title') or converted_path.name} converted",
+    )
+    converted_record.update(
+        {
+            "asset_kind": "converted",
+            "origin": "onlyoffice_conversion",
+            "parent_asset_id": record.get("asset_id", ""),
+            "root_asset_id": record.get("root_asset_id") or record.get("asset_id", ""),
+            "derivation_group_id": record.get("derivation_group_id") or record.get("asset_id", ""),
+        }
+    )
+    converted_record.setdefault("metadata", {})
+    converted_record["metadata"].update(
+        {
+            "conversion_provider": "onlyoffice",
+            "original_asset_id": record.get("asset_id", ""),
+            "original_mime_type": mime_type,
+            "output_format": conversion.get("output_format"),
+        }
+    )
+    _collection().replace_one({"_id": converted_record["asset_id"]}, converted_record, upsert=True)
+    return converted_record
 
 
 def _media_type_from_upload(filename: str, mime_type: str) -> str:
@@ -1377,14 +1437,32 @@ async def api_upload_asset(request: Request):
         content=uploaded.get("content") or b"",
         title=fields.get("title", ""),
     )
-    return {
-        "asset_id": record["asset_id"],
-        "public_url": record["public_url"],
-        "media_type": record["media_type"],
-        "mime_type": record["mime_type"],
-        "filename": str(uploaded.get("filename") or ""),
-        "size": int(uploaded.get("size") or len(uploaded.get("content") or b"")),
+    converted_record = await _maybe_convert_odf_upload(record) if _odf_enabled() else None
+    response_record = converted_record or record
+    response = {
+        "asset_id": response_record["asset_id"],
+        "public_url": response_record["public_url"],
+        "media_type": response_record["media_type"],
+        "mime_type": response_record["mime_type"],
+        "filename": Path(str(response_record.get("local_path") or uploaded.get("filename") or "")).name,
+        "size": int(response_record.get("metadata", {}).get("bytes") or uploaded.get("size") or len(uploaded.get("content") or b"")),
     }
+    if converted_record:
+        response["converted_asset"] = {
+            "asset_id": converted_record["asset_id"],
+            "public_url": converted_record["public_url"],
+            "mime_type": converted_record["mime_type"],
+            "filename": Path(str(converted_record.get("local_path") or "")).name,
+            "size": int(converted_record.get("metadata", {}).get("bytes") or 0),
+        }
+        response["original_asset"] = {
+            "asset_id": record["asset_id"],
+            "public_url": record["public_url"],
+            "mime_type": record["mime_type"],
+            "filename": str(uploaded.get("filename") or ""),
+            "size": int(uploaded.get("size") or len(uploaded.get("content") or b"")),
+        }
+    return response
 
 
 @app.get("/assets")

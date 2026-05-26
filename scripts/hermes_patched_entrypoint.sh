@@ -23,6 +23,13 @@ updates = {
     "default": os.environ.get("HERMES_INFERENCE_MODEL", "").strip(),
     "provider": os.environ.get("HERMES_INFERENCE_PROVIDER", "").strip(),
     "base_url": os.environ.get("OPENAI_BASE_URL", "").strip(),
+    # Hermes reads custom-provider credentials from the persisted model config.
+    # Keep it aligned with the Compose-provided LiteLLM key so old configs with
+    # placeholder values (for example "no-key-required") do not override env.
+    "api_key": (
+        os.environ.get("OPENAI_API_KEY", "").strip()
+        or os.environ.get("HERMES_OPENAI_API_KEY", "").strip()
+    ),
 }
 updates = {key: value for key, value in updates.items() if value}
 if not updates:

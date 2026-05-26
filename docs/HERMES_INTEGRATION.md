@@ -34,9 +34,9 @@ HERMES_OPENAI_API_KEY=sk-local-dev
 
 The Compose entrypoint now synchronizes the persisted Hermes
 `$HERMES_HOME/config.yaml` model fields from these environment values at
-startup. This prevents an old Hermes volume from silently keeping upstream
-defaults such as OpenRouter/Claude when AlphaRavis is configured for local
-LiteLLM.
+startup, including the LiteLLM API key (`model.api_key`). This prevents an old
+Hermes volume from silently keeping upstream defaults or placeholder local keys
+such as `no-key-required` when AlphaRavis is configured for local LiteLLM.
 
 ## Modes
 

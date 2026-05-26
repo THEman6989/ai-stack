@@ -1364,6 +1364,13 @@ ALPHARAVIS_ENABLE_RAG_ARCHIVE_MIRROR=false
 ALPHARAVIS_ENABLE_MEDIA_GALLERY=true
 ALPHARAVIS_MEDIA_GALLERY_URL=http://media-gallery:8130
 ALPHARAVIS_MEDIA_PUBLIC_BASE_URL=http://localhost:8130
+# Container-reachable media base URL used by OnlyOffice DocumentServer to fetch
+# uploaded ODF sources for conversion. Keep this on the Docker service name.
+ALPHARAVIS_MEDIA_INTERNAL_BASE_URL=http://media-gallery:8130
+# Optional ODF upload/conversion path. Default OFF; requires
+# `docker compose --profile odf up -d onlyoffice`.
+ALPHARAVIS_ENABLE_ODF_UPLOAD=false
+ALPHARAVIS_ONLYOFFICE_URL=http://onlyoffice:80
 # Comma-separated browser origins allowed to fetch media-gallery JSON/static files.
 ALPHARAVIS_MEDIA_CORS_ALLOW_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://localhost:3080,http://127.0.0.1:3080
 ALPHARAVIS_MEDIA_PORT=8130

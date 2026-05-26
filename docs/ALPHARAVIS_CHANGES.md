@@ -4,6 +4,47 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-26 — ODF/OnlyOffice: URL-Based Conversion + Auto-Convert on Upload
+
+- Refactored `odf_converter.py` from multipart file upload to JSON URL-based
+  OnlyOffice DocumentServer conversion. The previous multipart approach is not
+  supported by the standard DocumentServer `/ConvertService.ashx` endpoint; it
+  expects a JSON payload with a fetchable `url` field.
+- Added `source_url` parameter to `convert_odf_to_ooxml()`. The caller (media
+  server) must provide an internal container-reachable URL (via
+  `MEDIA_INTERNAL_BASE_URL`) so the OnlyOffice container can download the file.
+- Added XML response parsing (`_parse_conversion_response()`) with boolean
+  coercion and lower-camel key normalization, plus all 8 OnlyOffice error
+  codes with human-readable messages (`_format_onlyoffice_error()`).
+- Added `MEDIA_INTERNAL_BASE_URL` env var (default `http://media-gallery:8130`)
+  and `_internal_media_url()` helper for building container-reachable source URLs.
+- Added `_maybe_convert_odf_upload()` to the media server: ODF uploads are
+  auto-converted to OOXML and the converted asset is registered as a child of the
+  original, with `origin: "onlyoffice_conversion"` and derivation-chain metadata.
+- The upload response now includes `converted_asset` and `original_asset` blocks
+  when an ODF upload triggers conversion.
+- Configured OnlyOffice container with `ALLOW_PRIVATE_IP_ADDRESS=true` so it can
+  fetch from the media-gallery Docker service name on an RFC1918 address.
+- Verification: 41/41 ODF+media tests pass (8 odf_converter, 33 media_server).
+
+## 2026-05-26 — Hermes LiteLLM Auth Sync Fix
+
+- Fixed the Compose-managed Hermes entrypoint so it synchronizes
+  `model.api_key` in the persisted `$HERMES_HOME/config.yaml` from the
+  Compose-provided LiteLLM key (`OPENAI_API_KEY` / `HERMES_OPENAI_API_KEY`), in
+  addition to `default`, `provider`, and `base_url`.
+- Rationale: older Hermes volumes can contain no active custom-provider key or a
+  placeholder value such as `no-key-required`. Hermes reads the custom-provider
+  credential from its persisted config, so the env-only LiteLLM key was not
+  enough; calls through Hermes failed with LiteLLM HTTP 401 even though direct
+  LiteLLM calls from the container succeeded.
+- Verification: after restarting only `hermes-agent`, `/opt/data/config.yaml`
+  contained an active redacted `model.api_key`; direct LiteLLM `/models` and
+  `big-boss` chat from `hermes-agent` returned HTTP 200; Hermes
+  `/v1/chat/completions` returned HTTP 200 with `ok`; `hermes-orch`
+  `/hermes/stream` emitted SSE `content: "ok"`; recent Hermes logs showed no
+  new LiteLLM 401 entries after the fix.
+
 ## 2026-05-26 — Parallel Executor Conflict/Grouping Hardening
 
 - Fixed the planner-to-DAG path so parsed planner bullets no longer receive an

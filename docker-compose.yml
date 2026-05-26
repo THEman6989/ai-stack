@@ -342,6 +342,9 @@ services:
       - MONGODB_URI=mongodb://mongodb:27017
       - ALPHARAVIS_MEDIA_ROOT=${ALPHARAVIS_MEDIA_ROOT:-/media-data}
       - ALPHARAVIS_MEDIA_PUBLIC_BASE_URL=${ALPHARAVIS_MEDIA_PUBLIC_BASE_URL:-http://localhost:8130}
+      - ALPHARAVIS_MEDIA_INTERNAL_BASE_URL=${ALPHARAVIS_MEDIA_INTERNAL_BASE_URL:-http://media-gallery:8130}
+      - ALPHARAVIS_ENABLE_ODF_UPLOAD=${ALPHARAVIS_ENABLE_ODF_UPLOAD:-false}
+      - ALPHARAVIS_ONLYOFFICE_URL=${ALPHARAVIS_ONLYOFFICE_URL:-http://onlyoffice:80}
       - ALPHARAVIS_MEDIA_CORS_ALLOW_ORIGINS=${ALPHARAVIS_MEDIA_CORS_ALLOW_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:3080,http://127.0.0.1:3080}
       - ALPHARAVIS_OFFICE_OUTPUT_ROOT=${ALPHARAVIS_OFFICE_OUTPUT_ROOT:-/workspace/office-output}
       - ALPHARAVIS_OFFICE_OUTPUT_PUBLIC_BASE_URL=${ALPHARAVIS_OFFICE_OUTPUT_PUBLIC_BASE_URL:-http://localhost:8130/office-output}
@@ -499,6 +502,7 @@ services:
       - NEXT_PUBLIC_OFFICE_TEMPLATE_MERGE_FORM_URL=${NEXT_PUBLIC_OFFICE_TEMPLATE_MERGE_FORM_URL:-http://localhost:8130/office/templates/merge-form}
       - NEXT_PUBLIC_OFFICE_AGENT_ENABLED=${NEXT_PUBLIC_OFFICE_AGENT_ENABLED:-true}
       - NEXT_PUBLIC_HERMES_API_URL=${NEXT_PUBLIC_HERMES_API_URL:-http://localhost:8642/v1}
+      - NEXT_PUBLIC_HERMES_ORCH_URL=${NEXT_PUBLIC_HERMES_ORCH_URL:-http://localhost:8650}
       - NEXT_PUBLIC_HERMES_API_KEY=${HERMES_API_KEY:-sk-hermes-local}
       - NEXT_PUBLIC_HERMES_MODEL=${HERMES_MODEL:-hermes-agent}
       - NEXT_PUBLIC_OFFICE_AGENT_NAME=${NEXT_PUBLIC_OFFICE_AGENT_NAME:-office_agent}
@@ -600,6 +604,10 @@ services:
       - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:${ALPHARAVIS_ONLYOFFICE_PORT:-8088}:80"
     environment:
       - JWT_ENABLED=false
+      # DocumentServer blocks private RFC1918 targets by default; ODF conversion
+      # needs to fetch Media Gallery via the Docker service name.
+      - ALLOW_PRIVATE_IP_ADDRESS=true
+      - USE_UNAUTHORIZED_STORAGE=true
     volumes:
       - onlyoffice_data:/var/www/onlyoffice/Data
       - onlyoffice_log:/var/log/onlyoffice
