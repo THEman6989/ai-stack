@@ -9,20 +9,25 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from ai_stack.parallel_executor import (
     DryRunWorker,
+    DirectLLMWorker,
     ModelClass,
     PlannedTask,
+    RiskLevel,
     TaskDAG,
     TaskType,
     WorktreeManager,
     analyze_parallelization,
     log_parallelization_decision,
     parallel_execution_enabled,
+    parallel_planner_instruction_block,
     parse_planner_text_into_tasks,
     repo_has_uncommitted_changes,
 )
@@ -72,6 +77,14 @@ class TestParsePlannerText:
         assert tasks[0].task_type == TaskType.WRITE_IMPLEMENTATION
         assert tasks[0].write_enabled is True
 
+    def test_parser_does_not_add_sequential_dependencies_by_default(self):
+        text = """- Analyze frontend code
+- Analyze backend code
+- Analyze docs"""
+        tasks = parse_planner_text_into_tasks(text)
+        assert len(tasks) == 3
+        assert [task.dependencies for task in tasks] == [[], [], []]
+
     def test_parses_numbered_tasks(self):
         text = """1. Build frontend component
 2. Build backend API
@@ -108,6 +121,64 @@ class TestParsePlannerText:
         text = "- Edit `src/components/Button.tsx`"
         tasks = parse_planner_text_into_tasks(text)
         assert tasks[0].shared_chokepoint_files == []
+
+    def test_parses_bigboss_structured_parallel_plan(self):
+        text = """- fallback bullets should not be used when JSON block exists
+
+<parallel-execution-plan>{
+  "parallel_possible": true,
+  "tasks": [
+    {
+      "title": "Analyze frontend boundaries",
+      "task_type": "read_only_analysis",
+      "parallel": true,
+      "parallel_group": "analysis",
+      "files": ["frontend/*.tsx"],
+      "model": "big_model",
+      "risk": "low",
+      "reason": "independent read-only area"
+    },
+    {
+      "title": "Run focused tests",
+      "task_type": "test",
+      "parallel": false,
+      "depends_on": ["task_001"],
+      "files": ["tests/test_frontend.py"],
+      "reason": "tests wait for analysis"
+    }
+  ]
+}</parallel-execution-plan>"""
+
+        tasks = parse_planner_text_into_tasks(text)
+
+        assert len(tasks) == 2
+        assert tasks[0].title == "Analyze frontend boundaries"
+        assert tasks[0].planner_parallel_allowed is True
+        assert tasks[0].parallel_group_id == "analysis"
+        assert tasks[0].affected_file_globs == ["frontend/*.tsx"]
+        assert tasks[0].required_model_class == ModelClass.BIG_MODEL
+        assert tasks[0].risk_level == RiskLevel.LOW
+        assert tasks[1].planner_parallel_allowed is False
+        assert tasks[1].dependencies == ["task_001"]
+
+    def test_structured_parallel_possible_false_serializes_all_tasks(self):
+        text = """<parallel-execution-plan>{
+  "parallel_possible": false,
+  "tasks": [
+    {"title": "Inspect shared API", "parallel": true, "parallel_group": "g1"},
+    {"title": "Inspect shared UI", "parallel": true, "parallel_group": "g1"}
+  ]
+}</parallel-execution-plan>"""
+
+        tasks = parse_planner_text_into_tasks(text)
+
+        assert [task.planner_parallel_allowed for task in tasks] == [False, False]
+
+    def test_parallel_planner_instruction_block_is_machine_readable(self):
+        block = parallel_planner_instruction_block()
+        assert "<parallel-execution-plan>" in block
+        assert '\"parallel_possible\"' in block
+        assert '\"parallel_group\"' in block
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +217,10 @@ class TestFileConflicts:
 
     def test_conflict_shared_basename(self):
         assert _globs_overlap(["package.json"], ["package.json"]) is True
+
+    def test_conflict_concrete_path_against_wildcard_glob(self):
+        assert _globs_overlap(["src/api.py"], ["src/*.py"]) is True
+        assert _globs_overlap(["frontend/Button.tsx"], ["backend/*.py"]) is False
 
     def test_empty_globs_no_conflict(self):
         assert _globs_overlap([], ["src/a.py"]) is False
@@ -190,8 +265,12 @@ class TestAnalyzeParallelization:
         # They conflict on src/x.py — file_conflicts stores conflicting task IDs
         task_a = dag.get_task("a")
         task_b = dag.get_task("b")
+        assert task_a is not None
+        assert task_b is not None
         assert task_a.file_conflicts or task_b.file_conflicts  # at least one has conflicts
         assert "b" in task_a.file_conflicts or "a" in task_b.file_conflicts
+        assert task_a.can_parallelize is False
+        assert task_b.can_parallelize is False
 
     def test_write_tasks_no_conflict_parallelize(self):
         tasks = [
@@ -203,7 +282,9 @@ class TestAnalyzeParallelization:
                        affected_file_globs=["backend/api.py"]),
         ]
         dag = analyze_parallelization(tasks)
-        assert dag.parallelizable_count >= 0  # may or may not depending on deps
+        assert dag.parallelizable_count == 2
+        assert len(dag.parallel_groups) == 1
+        assert set(next(iter(dag.parallel_groups.values()))) == {"a", "b"}
 
     def test_chokepoint_files_force_serialization(self):
         tasks = [
@@ -214,7 +295,9 @@ class TestAnalyzeParallelization:
         ]
         dag = analyze_parallelization(tasks)
         task = dag.get_task("a")
+        assert task is not None
         assert "chokepoint" in task.reason_for_parallelization_decision.lower()
+        assert task.can_parallelize is False
 
     def test_tests_wait_for_implementation(self):
         tasks = [
@@ -246,7 +329,9 @@ class TestAnalyzeParallelization:
         ]
         dag = analyze_parallelization(tasks, active_big_model_busy=True)
         task = dag.get_task("a")
+        assert task is not None
         assert "big_model_busy" in task.resource_conflicts
+        assert task.can_parallelize is False
 
     def test_context_pressure_resource_conflict(self):
         tasks = [
@@ -255,7 +340,9 @@ class TestAnalyzeParallelization:
         ]
         dag = analyze_parallelization(tasks, context_pressure_high=True)
         task = dag.get_task("a")
+        assert task is not None
         assert "context_pressure_high" in task.resource_conflicts
+        assert task.can_parallelize is False
 
     def test_parallel_group_assignment(self):
         tasks = [
@@ -268,7 +355,95 @@ class TestAnalyzeParallelization:
         tasks[1].dependencies = []
         dag = analyze_parallelization(tasks)
         assert dag.parallelizable_count == 2
-        assert len(dag.parallel_groups) >= 1
+        assert len(dag.parallel_groups) == 1
+        assert set(next(iter(dag.parallel_groups.values()))) == {"a", "b"}
+
+    def test_parsed_independent_read_only_tasks_build_one_concurrent_group(self):
+        tasks = parse_planner_text_into_tasks("""- Analyze frontend
+- Analyze backend
+- Summarize docs""")
+        dag = analyze_parallelization(tasks)
+        assert dag.parallelizable_count == 3
+        assert len(dag.parallel_groups) == 1
+        assert set(next(iter(dag.parallel_groups.values()))) == {"task_001", "task_002", "task_003"}
+
+    def test_bigboss_serial_hint_is_respected(self):
+        tasks = [
+            PlannedTask(
+                task_id="a",
+                title="Inspect shared state",
+                task_type=TaskType.READ_ONLY_ANALYSIS,
+                read_only=True,
+                write_enabled=False,
+                planner_parallel_allowed=False,
+                planner_parallel_reason="BigBoss says shared context must stay serial",
+                parallel_group_id="analysis",
+            )
+        ]
+
+        dag = analyze_parallelization(tasks)
+        task = dag.get_task("a")
+
+        assert task is not None
+        assert task.can_parallelize is False
+        assert task.parallel_group_id == ""
+        assert "planner requested serial" in task.reason_for_parallelization_decision
+
+    def test_bigboss_group_hint_is_preserved_when_safe(self):
+        tasks = [
+            PlannedTask(
+                task_id="a",
+                title="Analyze frontend",
+                task_type=TaskType.READ_ONLY_ANALYSIS,
+                read_only=True,
+                write_enabled=False,
+                planner_parallel_allowed=True,
+                parallel_group_id="analysis",
+            ),
+            PlannedTask(
+                task_id="b",
+                title="Analyze backend",
+                task_type=TaskType.READ_ONLY_ANALYSIS,
+                read_only=True,
+                write_enabled=False,
+                planner_parallel_allowed=True,
+                parallel_group_id="analysis",
+            ),
+        ]
+
+        dag = analyze_parallelization(tasks)
+
+        assert dag.parallel_groups == {"analysis": ["a", "b"]}
+
+    def test_safety_overrides_bigboss_parallel_hint_for_file_conflicts(self):
+        tasks = [
+            PlannedTask(
+                task_id="a",
+                title="Edit API one",
+                task_type=TaskType.WRITE_IMPLEMENTATION,
+                read_only=False,
+                write_enabled=True,
+                affected_file_globs=["src/api.py"],
+                planner_parallel_allowed=True,
+                parallel_group_id="impl",
+            ),
+            PlannedTask(
+                task_id="b",
+                title="Edit API two",
+                task_type=TaskType.WRITE_IMPLEMENTATION,
+                read_only=False,
+                write_enabled=True,
+                affected_file_globs=["src/*.py"],
+                planner_parallel_allowed=True,
+                parallel_group_id="impl",
+            ),
+        ]
+
+        dag = analyze_parallelization(tasks)
+
+        assert dag.parallelizable_count == 0
+        assert dag.parallel_groups == {}
+        assert set(dag.serial_chain) == {"a", "b"}
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +514,31 @@ class TestDryRunWorker:
         task = PlannedTask(task_id="t1", title="T1", task_type=TaskType.READ_ONLY_ANALYSIS, read_only=True, write_enabled=False)
         asyncio.run(worker.spawn(task))
         assert worker.spawned_count == 1
+
+
+class TestDirectLLMWorker:
+    def test_spawn_uses_compact_prompt_max_tokens_adapter_contract(self):
+        calls = []
+
+        async def llm_fn(prompt: str, max_tokens: int) -> str:
+            calls.append((prompt, max_tokens))
+            return "worker output"
+
+        worker = DirectLLMWorker(llm_fn)
+        task = PlannedTask(
+            task_id="t1",
+            title="Analyze module boundaries",
+            task_type=TaskType.READ_ONLY_ANALYSIS,
+            read_only=True,
+            write_enabled=False,
+            required_model_class=ModelClass.SMALL_MODEL,
+        )
+
+        result = asyncio.run(worker.spawn(task, task_brief="Brief"))
+
+        assert result.status == "completed"
+        assert result.output == "worker output"
+        assert calls == [("Task: Analyze module boundaries\nType: read_only_analysis\nContext: Brief\n", 1024)]
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +643,36 @@ class TestParallelExecutor:
         assert report.failed == 1
         assert report.ok is False
 
+    def test_executor_reports_skipped_lock_conflict_as_failure(self, tmp_path):
+        from ai_stack.parallel_executor.executor import ParallelExecutor
+        from ai_stack.parallel_executor.file_lock import FileLockManager
+        from ai_stack.parallel_executor.worker_spawner import WorkerSpawner, WorkerResult
+
+        class SlowWorker(WorkerSpawner):
+            async def spawn(self, task, **kwargs):
+                await asyncio.sleep(0.01)
+                return WorkerResult(task_id=task.task_id, status="completed", output="ok")
+
+        tasks = [
+            PlannedTask(task_id="a", title="Edit API", task_type=TaskType.WRITE_IMPLEMENTATION,
+                       read_only=False, write_enabled=True, affected_file_globs=["src/api.py"],
+                       can_parallelize=True, parallel_group_id="group_01"),
+            PlannedTask(task_id="b", title="Edit API again", task_type=TaskType.WRITE_IMPLEMENTATION,
+                       read_only=False, write_enabled=True, affected_file_globs=["src/api.py"],
+                       can_parallelize=True, parallel_group_id="group_01"),
+        ]
+        dag = TaskDAG(tasks=tasks)
+        executor = ParallelExecutor(
+            spawner=SlowWorker(),
+            worktree_manager=WorktreeManager(repo_root=str(tmp_path)),
+            file_lock_manager=FileLockManager(),
+        )
+        report = asyncio.run(executor.execute(dag))
+        assert report.completed == 1
+        assert report.failed == 1
+        assert report.ok is False
+        assert any("file lock conflict" in error for error in report.errors)
+
     def test_execution_report_to_dict(self):
         from ai_stack.parallel_executor.executor import ExecutionReport
         report = ExecutionReport(total_tasks=2, completed=2)
@@ -498,6 +728,15 @@ class TestFileLockManager:
         no_conflicts = asyncio.run(mgr.check_conflict(["src/c.py"]))
         assert no_conflicts == []
 
+        asyncio.run(mgr.release_all())
+
+    def test_wildcard_glob_conflict_detected(self):
+        from ai_stack.parallel_executor.file_lock import FileLockManager
+        mgr = FileLockManager()
+        lock_a = asyncio.run(mgr.try_acquire("task_a", ["src/*.py"]))
+        assert lock_a is not None
+        lock_b = asyncio.run(mgr.try_acquire("task_b", ["src/api.py"]))
+        assert lock_b is None
         asyncio.run(mgr.release_all())
 
 

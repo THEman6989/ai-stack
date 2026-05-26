@@ -36,12 +36,18 @@ stays lightweight for patch previews and agent-change review. The UI integration
 contract for future ports is documented in [`ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md`](ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md).
 
 The Office tab is a thin launcher for OfficeCLI work. It accepts DOCX/PPTX/XLSX
-uploads as file blocks, asks the agent to create or edit Office documents under
-`/workspace/office-output`, and links to the optional live preview endpoint. The
-feature is still opt-in at the agent/runtime layer:
+uploads as file blocks, can upload existing Office files directly into the shared
+Office output directory through `media-gallery`, asks the dedicated
+`office_agent` to create or edit Office documents under `/workspace/office-output`,
+and links to the optional live preview endpoint. In Docker Compose the Office tab
+routes generated prompts directly to `office_agent` by default; the switch remains
+env-controlled for rollback:
 
 ```bash
 ALPHARAVIS_ENABLE_OFFICECLI=true
+ALPHARAVIS_ENABLE_OFFICE_AGENT=true
+NEXT_PUBLIC_OFFICE_AGENT_ENABLED=true
+NEXT_PUBLIC_OFFICE_AGENT_NAME=office_agent
 # Optional typed MCP tools; keep off unless explicitly needed/trusted.
 ALPHARAVIS_LOAD_MCP_TOOLS=true
 ALPHARAVIS_MCP_ALLOW_STDIO=true
@@ -49,17 +55,70 @@ ALPHARAVIS_ENABLE_OFFICECLI_MCP=true
 ```
 
 With Docker Compose, generated Office files are mounted at `./office-output` on
-the host and `/workspace/office-output` in `langgraph-api`. The media-gallery
-service mounts the same directory read-only and serves files at
-`http://localhost:8130/office-output/<relative-path>` plus a JSON listing at
-`http://localhost:8130/office/files`; the Office tab's `Output files` button
-opens that listing. Browser fetches from the UI are allowed by the configurable
-`ALPHARAVIS_MEDIA_CORS_ALLOW_ORIGINS` list. Live preview uses OfficeCLI watch on port `26315`,
-configurable with `ALPHARAVIS_OFFICECLI_WATCH_PORT`; the Office tab sends a
-shell-compatible `nohup officecli watch ... --port <port>` instruction to the
-agent and uses `officecli unwatch` for Stop until managed per-session watch
-lifecycles are implemented. Direct CLI use works
-without the MCP flags; MCP only adds typed OfficeCLI tools when enabled.
+the host and `/workspace/office-output` in both `langgraph-api` and
+`media-gallery`. `media-gallery` serves files at
+`http://localhost:8130/office-output/<relative-path>`, provides JSON listings at
+`http://localhost:8130/office/files` and
+`http://localhost:8130/office/templates`, and accepts browser uploads at
+`http://localhost:8130/office/upload` for `.docx`, `.pptx`, and `.xlsx` files.
+The Office tab's `Output files` button opens the listing, the upload control
+posts into the shared output directory, and the Template Gallery lists files
+under `/workspace/office-output/templates`. If an Office document has sibling
+preview artifacts named `<name>-preview.png` or `<name>-preview.html`, the JSON
+listing includes direct preview URLs and the Office tab shows Preview links on
+the document card while hiding those preview siblings from the normal document
+card list. Browser fetches from the UI are allowed by the configurable
+`ALPHARAVIS_MEDIA_CORS_ALLOW_ORIGINS` list. Files written through browser upload
+and the Office output root are chowned to `ALPHARAVIS_OFFICE_OUTPUT_HOST_UID` /
+`ALPHARAVIS_OFFICE_OUTPUT_HOST_GID` (default `1000:1000`) so bind-mounted output
+remains editable from the host. Live
+preview uses OfficeCLI watch on port `26315`, configurable with
+`ALPHARAVIS_OFFICECLI_WATCH_PORT`. The Office tab now asks the media-gallery
+managed workflow endpoints for start/stop plans and embeds the Preview frame
+inside the UI; the standalone `http://localhost:26315` watch page remains
+available for compatibility and debugging. Direct CLI use works without the MCP
+flags; MCP only adds typed OfficeCLI tools when enabled. Substantial Office
+workflows now go through the feature-flagged `office_agent` swarm peer rather
+than relying on the generalist. The Office tab still calls lightweight
+media-gallery endpoints directly for listing, uploads, validation/batch status,
+and placeholder detection; generated create/edit/template/batch/repair/preview
+prompts are submitted with `active_agent=office_agent` when
+`NEXT_PUBLIC_OFFICE_AGENT_ENABLED=true`.
+
+The Phase-5 Office buttons are intentionally thin Agent launchers, not a separate
+managed job engine. Before sending the agent prompt, the Office tab fetches safe
+command plans from `media-gallery`: `/office/template-merge`, `/office/validate`,
+`/office/batch`, and `/office/roundtrip`. Template Merge asks the agent to run
+`officecli merge`, Validate asks for `officecli validate` plus issue inspection,
+Batch asks for an `officecli batch` plan, and Round-trip asks for
+`officecli dump`/analysis. The agent remains responsible for choosing safe
+commands and writing outputs under `/workspace/office-output`.
+
+Phase 6 adds direct managed workflow buttons/endpoints for common follow-ups so
+the operator does not need to type prompts manually:
+
+- `POST /office/preview` → generate `<name>-preview.html` and
+  `<name>-preview.png` as sibling artifacts.
+- `POST /office/repair` → validate + inspect issues, then write a
+  non-destructive `<name>-repaired.<ext>` copy and validate that copy.
+- `POST /office/watch/start`, `POST /office/watch/stop`,
+  `GET /office/watch/status` → managed watch lifecycle/status; embedded Preview
+  frame in the Office tab, standalone watch URL kept for compatibility.
+- `GET /office/blueprints/suggest` → user-facing helper text: if a document is
+  good-looking/useful, turn it into a blueprint.
+- `POST /office/blueprints/create` and `GET /office/blueprints` → create/list
+  `*-blueprint.json` files from polished Office documents.
+- `GET`/`POST /office/validation-results` → persisted validation status,
+  summary, and issue details through the existing `run_state_manager.py`; Office
+  cards show validation badges and issue summaries.
+- `GET`/`POST /office/batch/jobs` plus
+  `POST /office/batch/jobs/{job_id}/progress` → managed batch job records with
+  completed/failed/pending counters and row error details.
+- `POST /office/templates/placeholders` and `POST /office/templates/merge-form`
+  → placeholder-aware Template Merge flow. The backend extracts `{{field}}`
+  tokens from readable template content and also returns an OfficeCLI text-view
+  command plan so the agent/AI can add placeholders it sees in rendered Office
+  content.
 
 For UI smoke testing after changes, verify file picker upload, drag & drop,
 paste upload, attachment remove/remove-all, preview panel, lightweight diff
@@ -718,12 +777,28 @@ ALPHARAVIS_PARALLEL_TASK_EXECUTION=false
 ```
 
 When disabled (default), the `parallel_executor` graph node returns `{}`
-(complete no-op) and the existing sequential swarm path is fully unchanged.
-When enabled, tasks are analyzed for parallelization potential based on file
-conflicts, chokepoint files, dependencies, and resource constraints. Write
-tasks use git worktrees for isolation. Workers are spawned via
-`DirectLLMWorker` (wired to the main BigBoss model) or `DryRunWorker` for
-testing.
+(complete no-op) and the existing sequential swarm path is fully unchanged. The
+planner prompt also stays unchanged.
+
+When enabled, the BigBoss planner receives an additional instruction to append a
+machine-readable `<parallel-execution-plan>{...}</parallel-execution-plan>` JSON
+block after its normal compact bullets. That block may declare:
+
+- `parallel_possible`: whether the planner thinks any parallel work is safe.
+- `tasks[]`: task titles, type, `parallel` true/false, `parallel_group`,
+  dependencies, affected files/globs, model class, risk, and rationale.
+
+The executor treats these BigBoss hints as advisory plus conservative safety
+policy. An explicit planner `parallel=false` forces serial execution. Planner
+parallel groups are preserved only when deterministic checks agree they are safe.
+Tasks are still analyzed for file conflicts, chokepoint files, dependencies, and
+resource constraints. Independent tasks are placed into concurrent groups; tasks
+that touch overlapping file paths/globs, chokepoint files, or constrained
+big-model/context resources are serialized. Write tasks use git worktrees for
+isolation, and a process-local file/glob lock is acquired before spawning the
+worker so late-detected write conflicts are reported as failed/skipped safety
+results rather than silent success. Workers are spawned via `DirectLLMWorker`
+(wired to the main BigBoss model) or `DryRunWorker` for testing.
 
 Background work is allowed only for latency hiding. Read-only non-LLM work may
 run in parallel. Small LLM jobs, such as Router, Judge, Summarizer, RAG

@@ -13,6 +13,7 @@ Key design:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -91,6 +92,8 @@ class PlannedTask:
     dependencies: list[str] = field(default_factory=list)
     can_parallelize: bool = False
     parallel_group_id: str = ""
+    planner_parallel_allowed: bool | None = None
+    planner_parallel_reason: str = ""
     required_model_class: ModelClass = ModelClass.BIG_MODEL
     risk_level: RiskLevel = RiskLevel.MEDIUM
     reason_for_parallelization_decision: str = ""
@@ -115,6 +118,8 @@ class PlannedTask:
             "dependencies": self.dependencies,
             "can_parallelize": self.can_parallelize,
             "parallel_group_id": self.parallel_group_id,
+            "planner_parallel_allowed": self.planner_parallel_allowed,
+            "planner_parallel_reason": self.planner_parallel_reason,
             "required_model_class": self.required_model_class.value,
             "risk_level": self.risk_level.value,
             "reason_for_parallelization_decision": self.reason_for_parallelization_decision,
@@ -139,6 +144,8 @@ class PlannedTask:
             dependencies=list(data.get("dependencies", [])),
             can_parallelize=data.get("can_parallelize", False),
             parallel_group_id=data.get("parallel_group_id", ""),
+            planner_parallel_allowed=data.get("planner_parallel_allowed"),
+            planner_parallel_reason=data.get("planner_parallel_reason", ""),
             required_model_class=ModelClass(data.get("required_model_class", "big_model")),
             risk_level=RiskLevel(data.get("risk_level", "medium")),
             reason_for_parallelization_decision=data.get("reason_for_parallelization_decision", ""),
@@ -183,6 +190,45 @@ class TaskDAG:
 # ---------------------------------------------------------------------------
 
 
+_PARALLEL_PLAN_RE = re.compile(
+    r"<parallel-execution-plan>\s*(.*?)\s*</parallel-execution-plan>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def parallel_planner_instruction_block() -> str:
+    """Instruction block appended to the BigBoss planner only when parallel execution is enabled."""
+    return (
+        "\nParallel execution is enabled for this run. BigBoss must decide whether "
+        "parallel work is safe before the executor acts. Keep the normal compact "
+        "bullets, then append exactly one machine-readable JSON block with this "
+        "shape, no markdown fence:\n"
+        "<parallel-execution-plan>{\n"
+        '  "parallel_possible": true,\n'
+        '  "tasks": [\n'
+        "    {\n"
+        '      "task_id": "task_001",\n'
+        '      "title": "short task title",\n'
+        '      "task_type": "read_only_analysis|write_implementation|test|integration_review|merge_review|summarization|classification",\n'
+        '      "parallel": true,\n'
+        '      "parallel_group": "group_01",\n'
+        '      "depends_on": [],\n'
+        '      "files": ["relative/path.py"],\n'
+        '      "model": "big_model|small_model",\n'
+        '      "risk": "low|medium|high",\n'
+        '      "reason": "why this can or cannot run concurrently"\n'
+        "    }\n"
+        "  ]\n"
+        "}</parallel-execution-plan>\n"
+        "Rules: set parallel=false for shared state, uncertain dependencies, tests "
+        "that need implementation output, merge/review, chokepoints, or overlapping "
+        "write paths. Put only tasks that may run at the same time in the same "
+        "parallel_group. Use concrete relative file paths/globs whenever known. "
+        "The executor will still apply deterministic safety checks and may override "
+        "your hints to serial.\n"
+    )
+
+
 def parse_planner_text_into_tasks(planner_text: str) -> list[PlannedTask]:
     """Convert planner bullet output into structured PlannedTask list.
 
@@ -192,6 +238,10 @@ def parse_planner_text_into_tasks(planner_text: str) -> list[PlannedTask]:
     """
     if not planner_text or not planner_text.strip():
         return []
+
+    structured_tasks = _parse_structured_parallel_plan(planner_text)
+    if structured_tasks is not None:
+        return structured_tasks
 
     lines = planner_text.strip().splitlines()
     tasks: list[PlannedTask] = []
@@ -237,13 +287,219 @@ def parse_planner_text_into_tasks(planner_text: str) -> list[PlannedTask]:
             )
         )
 
-    # Assign dependencies: each task depends on the previous one in order by default
-    # (parser doesn't know real dependencies; the graph analyzer can refine)
-    for i in range(1, len(tasks)):
-        if not tasks[i].dependencies:
-            tasks[i].dependencies = [tasks[i - 1].task_id]
-
     return tasks
+
+
+def _parse_structured_parallel_plan(planner_text: str) -> list[PlannedTask] | None:
+    """Parse BigBoss' optional JSON parallel plan block.
+
+    Returns None when no valid block exists so the legacy bullet parser remains
+    the graceful fallback. The planner hint is advisory: later static/runtime
+    safety checks may still serialize tasks.
+    """
+    match = _PARALLEL_PLAN_RE.search(planner_text)
+    if not match:
+        return None
+
+    payload_text = _strip_json_fence(match.group(1).strip())
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    raw_tasks = payload.get("tasks")
+    if not isinstance(raw_tasks, list):
+        return None
+
+    parallel_possible = _coerce_optional_bool(payload.get("parallel_possible"))
+    tasks: list[PlannedTask] = []
+    raw_id_map: dict[str, str] = {}
+
+    for index, item in enumerate(raw_tasks, start=1):
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or item.get("task") or "").strip()
+        if not title:
+            continue
+
+        default_type, default_read_only, default_write_enabled, default_model = _classify_task_from_title(title)
+        task_type = _task_type_from_value(item.get("task_type") or item.get("type"), default_type)
+        read_only = _coerce_bool(item.get("read_only"), default_read_only)
+        write_enabled = _coerce_bool(item.get("write_enabled") or item.get("write"), default_write_enabled)
+        model_class = _model_class_from_value(item.get("model") or item.get("required_model_class"), default_model)
+        risk_level = _risk_level_from_value(item.get("risk") or item.get("risk_level"), _assess_risk(title, task_type, write_enabled))
+
+        task_id = _safe_identifier(str(item.get("task_id") or item.get("id") or "").strip())
+        if not task_id:
+            task_id = f"task_{index:03d}"
+        raw_id = str(item.get("id") or item.get("task_id") or "").strip()
+        if raw_id:
+            raw_id_map[raw_id] = task_id
+
+        affected = _coerce_str_list(
+            item.get("files") or item.get("affected_files") or item.get("affected_file_globs")
+        )
+        forbidden = _coerce_str_list(item.get("forbidden_files") or item.get("forbidden_file_globs"))
+        chokepoints = _coerce_str_list(item.get("shared_chokepoint_files") or item.get("chokepoints"))
+        for path in affected:
+            if _is_chokepoint(path) and path not in chokepoints:
+                chokepoints.append(path)
+
+        planner_parallel_allowed = _coerce_optional_bool(item.get("parallel"))
+        if parallel_possible is False:
+            planner_parallel_allowed = False
+
+        tasks.append(
+            PlannedTask(
+                task_id=task_id,
+                title=title,
+                task_type=task_type,
+                read_only=read_only,
+                write_enabled=write_enabled,
+                affected_file_globs=affected,
+                forbidden_file_globs=forbidden,
+                shared_chokepoint_files=chokepoints,
+                dependencies=_coerce_str_list(item.get("depends_on") or item.get("dependencies")),
+                parallel_group_id=_safe_identifier(str(item.get("parallel_group") or item.get("group") or "").strip()),
+                planner_parallel_allowed=planner_parallel_allowed,
+                planner_parallel_reason=str(item.get("reason") or "").strip(),
+                required_model_class=model_class,
+                risk_level=risk_level,
+            )
+        )
+
+    if not tasks:
+        return None
+
+    _normalize_structured_dependencies(tasks, raw_id_map)
+    return tasks
+
+
+def _strip_json_fence(text: str) -> str:
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        return "\n".join(lines).strip()
+    return text
+
+
+def _safe_identifier(value: str) -> str:
+    if not value:
+        return ""
+    value = re.sub(r"[^a-zA-Z0-9_.:-]+", "_", value.strip())
+    return value.strip("_")[:80]
+
+
+def _coerce_str_list(value: Any) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        result: list[str] = []
+        for item in value:
+            item_text = str(item).strip()
+            if item_text:
+                result.append(item_text)
+        return result
+    return [str(value).strip()]
+
+
+def _coerce_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    coerced = _coerce_optional_bool(value)
+    return default if coerced is None else coerced
+
+
+def _task_type_from_value(value: Any, default: TaskType) -> TaskType:
+    if isinstance(value, TaskType):
+        return value
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    aliases = {
+        "read": TaskType.READ_ONLY_ANALYSIS,
+        "readonly": TaskType.READ_ONLY_ANALYSIS,
+        "analysis": TaskType.READ_ONLY_ANALYSIS,
+        "write": TaskType.WRITE_IMPLEMENTATION,
+        "implementation": TaskType.WRITE_IMPLEMENTATION,
+        "impl": TaskType.WRITE_IMPLEMENTATION,
+        "tests": TaskType.TEST,
+        "review": TaskType.INTEGRATION_REVIEW,
+        "merge": TaskType.MERGE_REVIEW,
+        "summary": TaskType.SUMMARIZATION,
+        "classify": TaskType.CLASSIFICATION,
+    }
+    if text in aliases:
+        return aliases[text]
+    try:
+        return TaskType(text)
+    except ValueError:
+        return default
+
+
+def _model_class_from_value(value: Any, default: ModelClass) -> ModelClass:
+    if isinstance(value, ModelClass):
+        return value
+    text = str(value or "").strip().lower().replace("-", "_")
+    if text in {"big", "bigboss", "big_boss", "main", "main_model"}:
+        return ModelClass.BIG_MODEL
+    if text in {"small", "2b", "small_2b", "classifier"}:
+        return ModelClass.SMALL_MODEL
+    try:
+        return ModelClass(text)
+    except ValueError:
+        return default
+
+
+def _risk_level_from_value(value: Any, default: RiskLevel) -> RiskLevel:
+    if isinstance(value, RiskLevel):
+        return value
+    text = str(value or "").strip().lower()
+    try:
+        return RiskLevel(text)
+    except ValueError:
+        return default
+
+
+def _normalize_structured_dependencies(tasks: list[PlannedTask], raw_id_map: dict[str, str]) -> None:
+    title_map = {task.title.lower(): task.task_id for task in tasks}
+    task_ids = {task.task_id for task in tasks}
+    for task in tasks:
+        normalized: list[str] = []
+        for dep in task.dependencies:
+            dep_text = str(dep).strip()
+            if not dep_text:
+                continue
+            mapped = raw_id_map.get(dep_text)
+            if mapped:
+                normalized.append(mapped)
+                continue
+            if dep_text.isdigit():
+                normalized.append(f"task_{int(dep_text):03d}")
+                continue
+            title_match = title_map.get(dep_text.lower())
+            if title_match:
+                normalized.append(title_match)
+                continue
+            normalized.append(dep_text if dep_text in task_ids else dep_text)
+        task.dependencies = normalized
 
 
 def _classify_task_from_title(title: str) -> tuple[TaskType, bool, bool, ModelClass]:
@@ -333,18 +589,39 @@ def _assess_risk(title: str, task_type: TaskType, write_enabled: bool) -> RiskLe
 # ---------------------------------------------------------------------------
 
 
+def _has_glob_chars(value: str) -> bool:
+    return any(ch in value for ch in "*?[")
+
+
 def _globs_overlap(globs_a: list[str], globs_b: list[str]) -> bool:
-    """Simple overlap check: any glob from A appears in B (exact match or shared basename)."""
+    """Return True when two file/glob claim sets may touch the same path.
+
+    The check is intentionally conservative: exact matches, concrete path vs
+    glob matches in either direction, and same concrete basename all conflict.
+    That avoids concurrent writes when a planner emits one specific path
+    (``src/api.py``) and another broader glob (``src/*.py``).
+    """
+    import fnmatch
+
     if not globs_a or not globs_b:
         return False
-    set_a = set(globs_a)
-    set_b = set(globs_b)
-    if set_a & set_b:
-        return True
-    # Also check basename overlap
-    basenames_a = {os.path.basename(g) for g in globs_a}
-    basenames_b = {os.path.basename(g) for g in globs_b}
-    return bool(basenames_a & basenames_b)
+    for glob_a in globs_a:
+        for glob_b in globs_b:
+            if glob_a == glob_b:
+                return True
+            if fnmatch.fnmatch(glob_a, glob_b) or fnmatch.fnmatch(glob_b, glob_a):
+                return True
+            base_a = os.path.basename(glob_a)
+            base_b = os.path.basename(glob_b)
+            if base_a in {"", "*", "**"} or base_b in {"", "*", "**"}:
+                continue
+            if base_a == base_b and not (_has_glob_chars(base_a) or _has_glob_chars(base_b)):
+                return True
+            if not _has_glob_chars(base_a) and _has_glob_chars(base_b) and fnmatch.fnmatch(base_a, base_b):
+                return True
+            if _has_glob_chars(base_a) and not _has_glob_chars(base_b) and fnmatch.fnmatch(base_b, base_a):
+                return True
+    return False
 
 
 def detect_file_conflicts(tasks: list[PlannedTask]) -> dict[str, list[str]]:
@@ -380,6 +657,7 @@ def analyze_parallelization(
     file_conflicts = detect_file_conflicts(tasks)
     dag = TaskDAG(tasks=tasks)
     group_counter = 0
+    default_parallel_group_id = ""
 
     for task in tasks:
         reasons: list[str] = []
@@ -387,6 +665,18 @@ def analyze_parallelization(
         task_file_conflicts: list[str] = []
         resource_conflicts: list[str] = []
         can_parallel = True
+        planner_group_hint = task.parallel_group_id
+
+        # --- Rule 0: BigBoss planner hints are advisory but can force serial ---
+        if task.planner_parallel_allowed is False:
+            can_parallel = False
+            task.parallel_group_id = ""
+            reason = "planner requested serial"
+            if task.planner_parallel_reason:
+                reason = f"{reason}: {task.planner_parallel_reason}"
+            reasons.append(reason)
+        elif task.planner_parallel_allowed is True:
+            reasons.append("planner marked parallel candidate")
 
         # --- Rule 1: Dependencies must be serialized ---
         for dep_id in task.dependencies:
@@ -401,10 +691,12 @@ def analyze_parallelization(
             if conflicting:
                 task_file_conflicts = list(conflicting)
                 reasons.append(f"file conflict with {', '.join(conflicting)}")
+                can_parallel = False
 
         # --- Rule 3: Chokepoint files force serialization ---
         if task.shared_chokepoint_files:
             reasons.append(f"chokepoint files: {', '.join(task.shared_chokepoint_files[:3])}")
+            can_parallel = False
 
         # --- Rule 4: Test tasks wait for implementation ---
         if task.task_type == TaskType.TEST:
@@ -422,10 +714,12 @@ def analyze_parallelization(
         if task.required_model_class == ModelClass.BIG_MODEL and active_big_model_busy:
             resource_conflicts.append("big_model_busy")
             reasons.append("big model busy; consider queue/defer or small model")
+            can_parallel = False
 
         if task.required_model_class == ModelClass.BIG_MODEL and context_pressure_high:
             resource_conflicts.append("context_pressure_high")
             reasons.append("high context pressure; consider chunk/summarize first")
+            can_parallel = False
 
         # --- Rule 7: Read-only tasks can parallelize freely ---
         # Only if not already forced serial by an earlier rule.
@@ -442,14 +736,22 @@ def analyze_parallelization(
 
         # --- Assign parallel group ---
         if can_parallel and not blocking:
-            group_counter += 1
-            task.parallel_group_id = f"group_{group_counter:02d}"
+            group_id = _safe_identifier(planner_group_hint) if planner_group_hint else ""
+            if not group_id:
+                if not default_parallel_group_id:
+                    group_counter += 1
+                    default_parallel_group_id = f"group_{group_counter:02d}"
+                group_id = default_parallel_group_id
+            task.parallel_group_id = group_id
+            dag.parallel_groups.setdefault(group_id, [])
             reasons.append(f"assigned to {task.parallel_group_id}")
         elif blocking and can_parallel and not task_file_conflicts:
             # Can parallelize after dependencies complete
             task.can_parallelize = False  # must wait for deps first
+            task.parallel_group_id = ""
             reasons.append("can parallelize after dependencies complete")
         else:
+            task.parallel_group_id = ""
             reasons.append("serialized")
 
         # --- Finalize ---
@@ -466,6 +768,7 @@ def analyze_parallelization(
         )
 
     # --- Build parallel groups ---
+    dag.parallel_groups = {}
     for task in dag.tasks:
         if task.can_parallelize and task.parallel_group_id:
             dag.parallel_groups.setdefault(task.parallel_group_id, []).append(task.task_id)
@@ -499,6 +802,8 @@ def log_parallelization_decision(task: PlannedTask) -> dict[str, Any]:
         "title": task.title,
         "can_parallelize": task.can_parallelize,
         "parallel_group_id": task.parallel_group_id,
+        "planner_parallel_allowed": task.planner_parallel_allowed,
+        "planner_parallel_reason": task.planner_parallel_reason,
         "blocking_dependencies": task.blocking_dependencies,
         "file_conflicts": task.file_conflicts,
         "resource_conflicts": task.resource_conflicts,

@@ -208,12 +208,12 @@ class ParallelExecutor:
         # ---- Finalize ----
         report.results = all_results
         report.completed = sum(1 for r in all_results if r.ok)
-        report.failed = sum(1 for r in all_results if r.status == "failed")
+        report.failed = sum(1 for r in all_results if not r.ok)
         report.elapsed_seconds = time.perf_counter() - started
 
-        for r in all_results:
-            if r.status == "failed":
-                report.errors.append(f"{r.task_id}: {r.error}")
+        for r in [*all_results, *([report.merge_result] if report.merge_result else [])]:
+            if r and not r.ok:
+                report.errors.append(f"{r.task_id}: {r.error or r.status}")
 
         LOGGER.info(
             "parallel_executor: done — %d/%d OK, %d failed, %.1fs",

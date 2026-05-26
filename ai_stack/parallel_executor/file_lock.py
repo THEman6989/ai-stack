@@ -134,22 +134,39 @@ class FileLockManager:
             del self._locks[lid]
 
 
+def _has_glob_chars(value: str) -> bool:
+    return any(ch in value for ch in "*?[")
+
+
 def _globs_overlap(globs_a: list[str], globs_b: list[str]) -> bool:
-    """Check if any globs overlap."""
+    """Check if any file/glob claims may overlap.
+
+    Mirrors the planner-side conflict check and is intentionally conservative
+    for concrete path vs wildcard glob pairs, e.g. ``src/api.py`` vs
+    ``src/*.py``.
+    """
     import fnmatch
     import os
 
     if not globs_a or not globs_b:
         return False
-
-    set_a = set(globs_a)
-    set_b = set(globs_b)
-    if set_a & set_b:
-        return True
-
-    basenames_a = {os.path.basename(g) for g in globs_a}
-    basenames_b = {os.path.basename(g) for g in globs_b}
-    return bool(basenames_a & basenames_b)
+    for glob_a in globs_a:
+        for glob_b in globs_b:
+            if glob_a == glob_b:
+                return True
+            if fnmatch.fnmatch(glob_a, glob_b) or fnmatch.fnmatch(glob_b, glob_a):
+                return True
+            base_a = os.path.basename(glob_a)
+            base_b = os.path.basename(glob_b)
+            if base_a in {"", "*", "**"} or base_b in {"", "*", "**"}:
+                continue
+            if base_a == base_b and not (_has_glob_chars(base_a) or _has_glob_chars(base_b)):
+                return True
+            if not _has_glob_chars(base_a) and _has_glob_chars(base_b) and fnmatch.fnmatch(base_a, base_b):
+                return True
+            if _has_glob_chars(base_a) and not _has_glob_chars(base_b) and fnmatch.fnmatch(base_b, base_a):
+                return True
+    return False
 
 
 # Global instance

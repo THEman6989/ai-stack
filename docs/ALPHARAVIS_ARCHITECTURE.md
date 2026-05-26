@@ -67,17 +67,28 @@ The current Docker architecture is split into these main roles:
   about output limits in natural language.
 - Parallel task executor (`ai_stack/parallel_executor/`): Parses planner output
   into a structured `TaskDAG` with classification, file conflict detection,
-  chokepoint detection, and parallelization analysis. Git worktree isolation
-  (`worktree_manager.py`) adapted from Hermes CLI patterns. Abstract worker
+  chokepoint detection, and parallelization analysis. When the feature flag is
+  enabled, `planner_node` asks BigBoss to append a machine-readable
+  `<parallel-execution-plan>{...}</parallel-execution-plan>` JSON block with
+  `parallel_possible`, per-task `parallel` hints, groups, dependencies, files,
+  model class, risk, and rationale. The parser prefers that block when present
+  and falls back to legacy bullet parsing otherwise. BigBoss hints are advisory:
+  `parallel=false` forces serial execution, safe planner groups are preserved,
+  and deterministic safety checks still override unsafe parallel hints.
+  Independent tasks are grouped for real concurrent `asyncio.gather()` execution;
+  overlapping write globs, chokepoint files, dependencies, merge/review, and
+  constrained big-model/context resources remain serial. Git worktree isolation
+  (`worktree_manager.py`) is adapted from Hermes CLI patterns. Abstract worker
   spawner interface (`worker_spawner.py`) with `DryRunWorker` mock and
   `DirectLLMWorker` for real LLM calls. `executor.py` runs parallel groups
   concurrently via `asyncio.gather()`, then serial chain, then merge/review.
-  `file_lock.py` provides process-local file/glob locking for concurrent
-  write safety.
+  `file_lock.py` provides process-local file/glob locking for concurrent write
+  safety, including concrete-path vs wildcard-glob conflicts.
   Feature-flagged via `ALPHARAVIS_PARALLEL_TASK_EXECUTION=false` (default OFF).
-  When disabled, the `parallel_executor` graph node returns `{}` (no-op) and
-  existing sequential swarm path is unchanged. When enabled, workers run
-  concurrently before the swarm, results are collected and merged.
+  When disabled, the `parallel_executor` graph node returns `{}` (no-op), the
+  planner prompt is unchanged, and the existing sequential swarm path is
+  unchanged. When enabled, workers run concurrently before the swarm, results are
+  collected and merged.
 - `Server Model Manager`: a dedicated LangGraph/Bridge access mode for
   `power_management_agent`. LibreChat sees it as the `server-model-manager`
   model/preset on the existing AlphaRavis Bridge, while native LangGraph
@@ -382,6 +393,17 @@ instead of attaching every loaded MCP tool to the generalist. Specialist
 workers now also bind their local tools from those materialized bundles at graph
 build time, with handoff tools added explicitly. The loaded per-agent bundle
 profiles are recorded in `run_profile.loaded_toolsets`.
+
+Office is now represented twice by design: `office/documents` remains the narrow
+OfficeCLI/MCP tool category, while `agent/office` is the dedicated swarm-agent
+bundle for multi-step document workflows. When `ALPHARAVIS_ENABLE_OFFICE_AGENT`
+is enabled, `_build_graph()` adds `office_agent` as a peer worker in the existing
+swarm and exposes `transfer_to_office` from the other specialists. The Deep
+Agents UI Office tab can submit `active_agent=office_agent`, so opening the Office
+workflow path starts directly on the Office specialist instead of relying on the
+generalist to infer and hand off. Lightweight list/upload/status/placeholder
+calls still go straight to `media-gallery`; create/edit/template/batch/repair and
+preview workflows go through `office_agent`.
 
 ## Core Request Flow
 
@@ -876,6 +898,12 @@ atomically as a full Mongo document. The record includes phase, status,
 active agent, compact run profile, and provider error classification. Completed
 runs are marked `completed`; interrupted provider/swarm runs stay
 `awaiting_resume`.
+
+The same manager also exposes generic workflow-record helpers for feature-local
+status/history without creating separate state-manager implementations. Records
+are keyed by `namespace` and `workflow_id`, support status/file filters, and are
+used by the Office managed-workflow layer for validation history, validation
+badges, managed batch progress/error counters, and template-merge form state.
 
 On the next message in the same thread, an open checkpoint restores the planner
 context and task brief. By default AlphaRavis asks the user whether to continue
@@ -2119,9 +2147,26 @@ Media is safe-by-default:
 - Pixelle output URLs are registered with `media-gallery`.
 - The gallery downloads/stores returned assets under `media-data` and records
   metadata in MongoDB. For OfficeCLI output it also mounts
-  `/workspace/office-output` read-only and exposes static download URLs under
-  `/office-output/<relative-path>` plus a lightweight JSON listing at
-  `/office/files`; Office outputs are not copied into MongoDB by this path.
+  `/workspace/office-output` and exposes static download URLs under
+  `/office-output/<relative-path>`, lightweight JSON listings at `/office/files`
+  and `/office/templates`, a constrained `/office/upload` endpoint for
+  `.docx`, `.pptx`, and `.xlsx` files, and Phase-5 plan endpoints
+  (`/office/template-merge`, `/office/validate`, `/office/batch`,
+  `/office/roundtrip`) that return safe quoted OfficeCLI command plans without
+  starting a managed job. Phase-6 managed workflow endpoints add non-destructive
+  Office follow-ups: `/office/preview` plans sibling HTML/PNG previews,
+  `/office/repair` plans a `<name>-repaired.<ext>` copy instead of overwriting
+  the original, `/office/watch/start|stop|status` tracks the watch lifecycle
+  while keeping the standalone OfficeCLI watch URL compatible with an embedded
+  UI iframe, and `/office/blueprints`, `/office/blueprints/create`, plus
+  `/office/blueprints/suggest` expose blueprint listing/creation/hints for
+  polished existing documents. Office file records include direct links to
+  existing sibling preview artifacts named `<name>-preview.png` and
+  `<name>-preview.html`, while those preview artifacts are hidden from normal
+  document records. The shared output root and upload results are chowned to
+  configurable host ownership (`ALPHARAVIS_OFFICE_OUTPUT_HOST_UID/GID`, default
+  `1000:1000`) so Docker-created files remain editable on the bind-mounted host
+  checkout. Office outputs are not copied into MongoDB by this path.
 - `media-gallery` accepts normal HTTP(S) image/video URLs and inline `data:`
   image/video blocks. Inline payloads are written to disk but not copied back
   into MongoDB asset metadata.

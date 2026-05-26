@@ -35,6 +35,20 @@ Implemented:
   download/open links and a refresh button, sends screenshot prompts with an
   explicit `.png` output path, and starts/stops watch prompts using
   AlphaRavis-shell-compatible `officecli watch` / `officecli unwatch` commands.
+- Office upload + Phase-5 launcher base: `media-gallery` exposes
+  `/office/upload` for DOCX/PPTX/XLSX files, `/office/templates` for files
+  under `/workspace/office-output/templates`, and Phase-5 plan endpoints
+  (`/office/template-merge`, `/office/validate`, `/office/batch`,
+  `/office/roundtrip`) for safe OfficeCLI command plans. The Office panel uploads existing
+  Office files into the shared output directory, lists templates, and has thin
+  Agent-launcher buttons for template merge, validation, batch, and round-trip
+  dump/analyze workflows. `/office/files` also reports existing
+  `<name>-preview.png` / `<name>-preview.html` artifacts, and the Office panel
+  displays a `Preview ready` badge plus direct preview links when those artifacts
+  exist; the preview artifacts themselves are hidden from the normal document
+  card list. `media-gallery` also chowns the Office output root and uploaded files to
+  configurable host ownership (`ALPHARAVIS_OFFICE_OUTPUT_HOST_UID/GID`, default
+  `1000:1000`) so browser uploads do not leave root-owned bind-mount artifacts.
 - Office upload support: DOCX/PPTX/XLSX MIME types are accepted and preserved as
   file blocks with original MIME types rather than image/vision blocks.
 - Backend/runtime support: `langgraph-api` installs OfficeCLI + Chromium,
@@ -42,10 +56,10 @@ Implemented:
   configurable watch port, and the `office/documents` toolset plus default-off
   prompt policy and optional MCP entry are wired. `media-gallery` exposes
   configurable CORS origins via `ALPHARAVIS_MEDIA_CORS_ALLOW_ORIGINS` so the
-  Office tab can fetch `/office/files` directly from the browser.
+  Office tab can fetch Office endpoints directly from the browser.
 - Feature flags stay default OFF: `ALPHARAVIS_ENABLE_OFFICECLI=false` for prompt
   guidance and `ALPHARAVIS_ENABLE_OFFICECLI_MCP=false` for the stdio MCP server.
-- Verification for the Office pass: focused Python tests pass (34 tests),
+- Verification for the Office pass: focused Python tests pass (40 tests),
   `npm run lint`, `npm run build`, `docker compose config --quiet`,
   `docker compose build deep-agents-ui`, and `docker compose build langgraph-api`
   pass. `docker compose run --rm --no-deps langgraph-api officecli --version`
@@ -55,12 +69,32 @@ Still needed:
 
 - Live browser smoke test on port 3000: file picker upload, drag/drop upload,
   paste upload, attachment remove/remove-all, Office tab launch flow,
-  DOCX/PPTX/XLSX upload preview/state handling, optional watch-preview link,
-  preview panel, lightweight diff rendering, code preview before/after
+  Office output upload control, template gallery, Phase-5 launcher buttons,
+  optional watch-preview link, preview panel, lightweight diff rendering, code preview before/after
   `Open Monaco editor`, and thread rename/delete including active-thread
   deletion recovery.
-- Office follow-ups: automatic `officecli view html|screenshot` preview
-  generation and managed `officecli watch` lifecycle per file/session.
+- Office Phase 6 / Managed Office Workflows: implemented as a non-destructive
+  managed plan/status layer. `media-gallery` exposes `/office/preview`,
+  `/office/repair`, `/office/watch/start`, `/office/watch/stop`,
+  `/office/watch/status`, `/office/blueprints`, `/office/blueprints/create`, and
+  `/office/blueprints/suggest`; the Office panel exposes direct Generate Preview,
+  Repair, Watch/Stop with embedded Preview frame, and Make Blueprint actions.
+  The expanded workflow state reuses the existing `run_state_manager.py` for
+  persisted validation records and managed batch jobs. `media-gallery` now also
+  exposes `/office/validation-results`, `/office/batch/jobs`,
+  `/office/batch/jobs/{job_id}/progress`, `/office/templates/placeholders`, and
+  `/office/templates/merge-form`; Office cards show validation badges/issues,
+  managed batches expose completed/failed/pending counters, and Template Merge
+  can be driven from detected `{{placeholder}}` fields plus AI/OfficeCLI text
+  inspection.
+- Office Phase 7 / Dedicated Office Agent: implemented. AlphaRavis now has a
+  feature-flagged `office_agent` peer in the existing swarm, backed by the new
+  `agent/office` tool bundle and `transfer_to_office` handoff. The Office tab
+  submits generated create/edit/template/batch/repair/preview prompts with
+  `active_agent=office_agent` when `NEXT_PUBLIC_OFFICE_AGENT_ENABLED=true`, while
+  direct media-gallery endpoints remain for small UI/status/list/upload actions.
+  Plan details and verification targets live in
+  `.hermes/plans/office-tab-implementation.md`.
 - Decide later whether to tackle AionUi Tier 3 items: i18n, inline tool-result
   streaming, and conversation tabs.
 - New: Office/Docs integration research completed. `docs/AIONUI_OFFICE_INTEGRATION.md`
@@ -81,17 +115,32 @@ Implemented:
 - `ai_stack/parallel_executor/executor.py`: `ParallelExecutor` runs parallel
   groups concurrently via `asyncio.gather()`, then serial chain sequentially,
   then merge/review. `build_execution_plan()` converts `TaskDAG` to ordered
-  `ExecutionPlan`.
+  `ExecutionPlan`. Safety hardening now treats skipped file-lock conflicts as
+  failed run results.
 - `ai_stack/parallel_executor/worker_spawner.py`: Added `DirectLLMWorker`
-  that integrates with `_ainvoke_direct_text` via callable injection (avoids
-  circular imports with agent_graph).
+  with a compact `(prompt, max_tokens)` callable contract. The LangGraph
+  `_parallel_executor_node` wraps that contract into `_ainvoke_direct_text`
+  message/model-kwargs calls to avoid circular imports with agent_graph.
 - `agent_graph.py`: Added `parallel_executor` graph node wired between
   `final_budget_rescue` and `swarm_trace_start`. When disabled, returns `{}`
-  (complete no-op).
+  (complete no-op). When enabled, planner prompts include a BigBoss-only
+  structured parallel-plan instruction block; disabled planner prompts are
+  unchanged.
+- `ai_stack/parallel_executor/task_graph.py`: Parses BigBoss
+  `<parallel-execution-plan>{...}</parallel-execution-plan>` JSON hints when
+  present, including `parallel_possible`, per-task `parallel`, groups,
+  dependencies, files, model class, risk, and rationale. Hints are advisory:
+  planner serial decisions are respected, safe groups are preserved, and static
+  safety analysis still serializes unsafe conflicts.
+- Parsed independent planner bullets are no longer chained by default; tasks
+  without dependencies share one concurrent group. File/glob conflicts,
+  chokepoints, and resource pressure serialize affected tasks.
 - `_parallel_executor_node` builds executor with DirectLLM worker, runs DAG,
   logs results, and appends result messages to state.
-- 41 tests covering Stage 1 + Stage 2 (execution plan, dry-run executor,
-  failing worker, merge/review, report serialization). All 91 tests pass.
+- 59 tests cover Stage 1 + Stage 2 (execution plan, BigBoss structured parallel
+  hints, planner flag gating, real grouping behavior, dry-run executor,
+  DirectLLM worker adapter contract, failing/skipped workers, file/glob locks,
+  merge/review, report serialization).
 
 Still needed:
 

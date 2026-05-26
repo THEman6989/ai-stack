@@ -16,6 +16,7 @@ from ai_stack.parallel_executor.task_graph import (
     analyze_parallelization,
     log_parallelization_decision,
     parallel_execution_enabled,
+    parallel_planner_instruction_block,
     parse_planner_text_into_tasks,
 )
 
@@ -60,6 +61,7 @@ __all__ = [
     "analyze_parallelization",
     "log_parallelization_decision",
     "parallel_execution_enabled",
+    "parallel_planner_instruction_block",
     "parse_planner_text_into_tasks",
     # Worktree
     "WorktreeInfo",
