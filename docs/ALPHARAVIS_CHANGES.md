@@ -3403,3 +3403,44 @@ dead tool. These are the same problems Hermes' `tools/mcp_tool.py` solved.
 python -c "from mcp_client import load_robust_mcp_tools; print('ok')"
 python -m pytest tests/ -k mcp
 ```
+
+## 2026-05-26 — Big Boss NP/Context Tuning
+
+### What Changed
+
+**Ubuntu Llama Manager (remote llama.cpp instances on 192.168.178.153):**
+- **Primary (Big Boss, port 8033)**: `ctx=256k→264k`, `NP=2→1`
+- **Secondary (Qwen 2B, port 8001)**: `NP=2→4` (unchanged ctx=60k)
+
+### Stress-Test Results
+
+Full context saturation test with 310K tokens confirmed:
+
+| Test | Result | Time | Prefill | Generation |
+|------|--------|------|---------|------------|
+| BigBoss 310K single-slot | ❌ HTTP 400 (ctx overflow) | 0.67s | — | — |
+| Qwen2B 55K | ✅ | 13.2s | 4,528 tok/s | 106.5 tok/s |
+| BigBoss 155K (slot 1/2) | ✅ | 7 min | 827 tok/s | 0.44 tok/s |
+| BigBoss 150K (slot 2/2) | ✅ | 19 min | 132 tok/s | 33.4 tok/s |
+
+### Key Finding: NP>1 Is Counterproductive
+
+At 150K+ context, a single Big Boss slot fully saturates the GPU.
+With NP=4 and two concurrent requests:
+- **Prefill is serial** (second request waits for first to complete)
+- **Generation collapses** under parallel attention: 0.44 tok/s contended vs 33.4 tok/s alone (75x difference)
+- Total wall time with NP=4: 26 min. Expected with NP=1 (sequential): ~23 min — same throughput, no benefit.
+
+Qwen 2B (NP=4) is unaffected — 2B parameter model has abundant GPU headroom.
+
+### Rationale
+
+NP=1 for Big Boss avoids the false promise of parallelism. The GPU compute is the bottleneck, not the context pool. Single-slot gives predictable, consistent throughput without the generation-collapse pathology.
+
+### Verification
+
+```bash
+# Check actual slots/context (not /v1/models — it doesn't reflect -c)
+curl -s http://192.168.178.153:8033/slots  # Big Boss: 1 slot, 262144 ctx
+curl -s http://192.168.178.153:8001/slots  # Qwen2B: 4 slots, 60160 ctx
+```
