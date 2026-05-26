@@ -825,6 +825,10 @@ def _crisis_manager_enabled() -> bool:
     return _advanced_model_management_enabled() and _env_bool("ALPHARAVIS_ENABLE_CRISIS_MANAGER", "false")
 
 
+def _office_agent_enabled() -> bool:
+    return _env_bool("ALPHARAVIS_ENABLE_OFFICE_AGENT", "false")
+
+
 def _storage_manager_enabled() -> bool:
     return _env_bool("ALPHARAVIS_STORAGE_MANAGER_ENABLED", "false")
 
@@ -13030,6 +13034,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     server_model_manager_enabled = _server_model_manager_enabled()
     owner_power_tools_enabled = _owner_power_tools_enabled()
     crisis_manager_enabled = _crisis_manager_enabled()
+    office_agent_enabled = _office_agent_enabled()
     server_management_tools = (
         [
             inspect_model_management_status,
@@ -13148,6 +13153,14 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             f"conversation memory. {handoff_requirement}"
         ),
     )
+    transfer_to_office = create_handoff_tool(
+        agent_name="office_agent",
+        description=(
+            "Transfer to the Office Agent for substantial document workflows "
+            f"(DOCX/PPTX/XLSX creation, template merge, validation, repair, "
+            f"preview, batch operations, or blueprint management). {handoff_requirement}"
+        ),
+    )
     transfer_to_power = None
     if advanced_model_management_enabled or server_model_manager_enabled:
         transfer_to_power = create_handoff_tool(
@@ -13169,6 +13182,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             ),
         )
     crisis_handoff_tools = [transfer_to_crisis] if transfer_to_crisis is not None else []
+    office_handoff_tools = [transfer_to_office] if office_agent_enabled else []
 
     local_tool_map = _tools_by_name(
         [
@@ -13257,6 +13271,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         "power_management_agent": ["agent/power"],
         "crisis_manager_agent": ["agent/crisis"],
     }
+    if office_agent_enabled:
+        agent_toolset_names["office_agent"] = ["agent/office"]
     agent_toolset_profiles: dict[str, dict[str, Any]] = {}
     agent_toolset_tools: dict[str, list[Any]] = {}
     true_lazy_toolsets_enabled = _env_bool("ALPHARAVIS_ENABLE_TRUE_LAZY_TOOLSETS", "true")
@@ -13330,6 +13346,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_context,
             *power_handoff_tools,
             *crisis_handoff_tools,
+            *office_handoff_tools,
         ]),
         name="research_expert",
         system_prompt=(
@@ -13435,6 +13452,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_context,
             *power_handoff_tools,
             *crisis_handoff_tools,
+            *office_handoff_tools,
         ]),
         name="general_assistant",
         system_prompt=(
@@ -13501,6 +13519,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_context,
             *power_handoff_tools,
             *crisis_handoff_tools,
+            *office_handoff_tools,
         ],
     )
 
@@ -13555,6 +13574,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_context,
             *power_handoff_tools,
             *crisis_handoff_tools,
+            *office_handoff_tools,
         ],
     )
 
@@ -13599,6 +13619,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_context,
             *power_handoff_tools,
             *crisis_handoff_tools,
+            *office_handoff_tools,
         ]),
         name="hermes_coding_agent",
         system_prompt=(
@@ -13677,6 +13698,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             transfer_to_hermes,
             *power_handoff_tools,
             *crisis_handoff_tools,
+            *office_handoff_tools,
         ]),
         name="context_retrieval_agent",
         system_prompt=(
@@ -13734,6 +13756,58 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         hermes_worker,
         context_worker,
     ]
+    if office_agent_enabled:
+        office_worker = _create_budgeted_deep_agent(
+            model=llm,
+            tools=_agent_tools("office_agent", [
+                execute_local_command,
+                check_external_service,
+                build_specialist_report,
+                search_agent_memory,
+                record_agent_memory,
+                search_curated_memory,
+                record_curated_memory,
+                search_session_history,
+                semantic_memory_search,
+                query_source,
+                query_sources,
+                agentic_rag_retrieve,
+                write_alpha_ravis_artifact,
+                read_alpha_ravis_artifact,
+                list_alpha_ravis_artifacts,
+                locate_repo_surface,
+                list_repo_ai_skills,
+                read_repo_ai_skill,
+                suggest_thread_title,
+                extract_review_insights,
+                inspect_context_budget,
+            ], [
+                transfer_to_generalist,
+                transfer_to_research,
+                transfer_to_debugger,
+                transfer_to_hermes,
+                transfer_to_context,
+                *power_handoff_tools,
+                *crisis_handoff_tools,
+            ]),
+            name="office_agent",
+            system_prompt=(
+                "You are the dedicated Office Agent. Handle all substantial "
+                "Office document workflows including DOCX/PPTX/XLSX creation, "
+                "template merge, validation, repair, preview/watch, managed "
+                "batch, or blueprint operations. For small quick reads, the UI "
+                "uses direct endpoints. Focus on multi-step document generation, "
+                "validation, and execution tasks. Always inspect before modifying "
+                "files and prefer copy-first patterns when making changes. Use "
+                "run_state_manager for workflow state persistence. Use "
+                "agent_id=`office_agent` for Office-specific memories. "
+                "Use write_alpha_ravis_artifact for long reports or outputs "
+                "before summarizing them."
+            )
+            + " "
+            + AGENT_POLICY_PROMPT,
+        )
+        swarm_workers.append(office_worker)
     if advanced_model_management_enabled or server_model_manager_enabled:
         power_llm = _server_model_manager_model()
         big_boss_up = _big_boss_llama_reachable()

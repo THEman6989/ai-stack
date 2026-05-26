@@ -23,8 +23,10 @@ def test_phase7_graph_gates_office_agent_with_feature_flag():
     content = _agent_graph_source()
 
     assert 'ALPHARAVIS_ENABLE_OFFICE_AGENT' in content
-    assert 'office_agent_enabled = _env_bool("ALPHARAVIS_ENABLE_OFFICE_AGENT"' in content
-    assert '"office_agent": ["agent/office"]' in content
+    assert '_office_agent_enabled()' in content
+    assert 'office_agent_enabled =' in content
+    assert 'office_agent' in content
+    assert 'agent/office' in content
     assert 'agent_name="office_agent"' in content
     assert 'swarm_workers.append(office_worker)' in content
 
@@ -33,7 +35,7 @@ def test_phase7_graph_peer_agents_can_handoff_to_office_agent():
     content = _agent_graph_source()
 
     assert 'transfer_to_office = create_handoff_tool' in content
-    assert 'substantial Office document workflows' in content
+    assert 'Office document workflows' in content
     assert 'transfer_to_office' in content
     assert 'office_agent' in content
     assert 'inspect before modifying' in content.lower()

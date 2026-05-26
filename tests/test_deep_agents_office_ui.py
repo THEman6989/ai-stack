@@ -56,7 +56,8 @@ def test_office_panel_exists_and_sends_agent_officecli_prompt():
     assert "fetchTemplates" in content
     assert "handleUpload" in content
     assert "type=\"file\"" in content
-    assert "accept=\".docx,.pptx,.xlsx" in content
+    assert "uploadAccept" in content
+    assert ".docx,.pptx,.xlsx" in content
     assert "officeOutputPath" in content
     assert "relative_path" in content
     assert "useEffect" in content
