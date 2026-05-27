@@ -17,7 +17,7 @@ from urllib.parse import urlencode, unquote_to_bytes, urlparse
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -97,6 +97,15 @@ async def _comfyui_proxy_call(operation: str, *args: Any) -> dict[str, Any]:
         if operation == "models":
             folder = str(args[0] if args else "checkpoints")
             return {"ok": True, "base_url": client.base_url, "folder": folder, "models": await client.models(folder)}
+        if operation == "history":
+            prompt_id = str(args[0] if args else "")
+            return {"ok": True, "base_url": client.base_url, **await client.history_outputs(prompt_id)}
+        if operation == "clear_queue":
+            return {"ok": True, "base_url": client.base_url, "result": await client.clear_queue()}
+        if operation == "interrupt":
+            return {"ok": True, "base_url": client.base_url, "result": await client.interrupt()}
+        if operation == "free_memory":
+            return {"ok": True, "base_url": client.base_url, "result": await client.free_memory()}
     except Exception as exc:
         return {"ok": False, "base_url": getattr(client, "base_url", ""), "error": str(exc)}
     return {"ok": False, "base_url": getattr(client, "base_url", ""), "error": f"unsupported ComfyUI operation: {operation}"}
@@ -202,6 +211,42 @@ async def comfyui_queue_endpoint():
 async def comfyui_models_endpoint(folder: str = "checkpoints"):
     return await _comfyui_proxy_call("models", folder)
 
+@app.get("/comfyui/history/{prompt_id}")
+async def comfyui_history_endpoint(prompt_id: str):
+    return await _comfyui_proxy_call("history", prompt_id)
+
+@app.get("/comfyui/view")
+async def comfyui_view_endpoint(filename: str, subfolder: str = "", type: str = "output"):
+    """Proxy a ComfyUI /view output for browser use when Docker can reach ComfyUI."""
+
+    client = _comfyui_media_client()
+    if client is None:
+        return await _comfyui_proxy_error()
+    try:
+        url = client.view_url(filename, subfolder=subfolder, file_type=type)
+        async with httpx.AsyncClient(timeout=getattr(client, "timeout", 30)) as http_client:
+            response = await http_client.get(url)
+        response.raise_for_status()
+        return Response(
+            content=response.content,
+            media_type=response.headers.get("content-type") or "application/octet-stream",
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+@app.post("/comfyui/queue/clear")
+async def comfyui_clear_queue_endpoint():
+    return await _comfyui_proxy_call("clear_queue")
+
+@app.post("/comfyui/interrupt")
+async def comfyui_interrupt_endpoint():
+    return await _comfyui_proxy_call("interrupt")
+
+@app.post("/comfyui/free")
+async def comfyui_free_memory_endpoint():
+    return await _comfyui_proxy_call("free_memory")
+
 
 @app.get("/favicon.svg", include_in_schema=False)
 async def favicon():
@@ -240,6 +285,19 @@ class MediaRegisterRequest(BaseModel):
     prompt: str = ""
     caption: str = ""
     download: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ComfyUIRegisterOutputsRequest(BaseModel):
+    prompt_id: str = ""
+    outputs: list[dict[str, Any]] = Field(default_factory=list)
+    source_base_url: str = ""
+    prompt: str = ""
+    thread_id: str = ""
+    thread_key: str = ""
+    group_id: str = ""
+    title_prefix: str = "ComfyUI"
+    download: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -428,6 +486,89 @@ def _media_type_from_upload(filename: str, mime_type: str) -> str:
     if suffix:
         return "document"
     return "unknown"
+
+
+def _comfyui_output_media_type(output: dict[str, Any]) -> str:
+    output_type = str(output.get("output_type") or "").lower()
+    if output_type in {"images", "gifs"}:
+        return "image"
+    if output_type == "videos":
+        return "video"
+    if output_type == "audio":
+        return "audio"
+    return _media_type_from_upload(str(output.get("filename") or ""), "")
+
+
+def _comfyui_output_url(output: dict[str, Any], source_base_url: str = "") -> str:
+    explicit = str(output.get("url") or "").strip()
+    if explicit:
+        return explicit
+    base_url = (source_base_url or "").strip().rstrip("/")
+    filename = str(output.get("filename") or "").strip()
+    if not base_url or not filename:
+        return ""
+    query = urlencode(
+        {
+            "filename": filename,
+            "subfolder": str(output.get("subfolder") or ""),
+            "type": str(output.get("type") or "output"),
+        }
+    )
+    return f"{base_url}/view?{query}"
+
+
+async def _register_comfyui_outputs(request: ComfyUIRegisterOutputsRequest) -> dict[str, Any]:
+    prompt_id = (request.prompt_id or "").strip()
+    outputs = request.outputs or []
+    if not prompt_id:
+        raise HTTPException(status_code=400, detail="prompt_id is required")
+    if not outputs:
+        raise HTTPException(status_code=400, detail="outputs are required")
+
+    limit = max(1, min(int(os.getenv("ALPHARAVIS_COMFYUI_REGISTER_OUTPUT_LIMIT", "16")), 64))
+    records: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for index, output in enumerate(outputs[:limit]):
+        filename = str(output.get("filename") or "").strip()
+        source_url = _comfyui_output_url(output, request.source_base_url)
+        if not filename or not source_url:
+            errors.append({"index": index, "filename": filename, "error": "missing filename or source URL"})
+            continue
+        source_key = f"comfyui:{prompt_id}:{output.get('node_id', '')}:{filename}:{index}"
+        register_request = MediaRegisterRequest(
+            source_url=source_url,
+            source_key=source_key,
+            thread_id=request.thread_id,
+            thread_key=request.thread_key,
+            group_id=request.group_id or prompt_id,
+            role="output",
+            asset_kind="processed",
+            origin="comfyui_output",
+            processing_provider="comfyui",
+            processing_prompt=request.prompt,
+            media_type=_comfyui_output_media_type(output),
+            title=f"{request.title_prefix or 'ComfyUI'} {filename}",
+            prompt=request.prompt,
+            caption=f"ComfyUI output from prompt {prompt_id}",
+            download=bool(request.download),
+            metadata={
+                **(request.metadata or {}),
+                "provider": "comfyui",
+                "prompt_id": prompt_id,
+                "node_id": str(output.get("node_id") or ""),
+                "filename": filename,
+                "subfolder": str(output.get("subfolder") or ""),
+                "type": str(output.get("type") or "output"),
+                "output_type": str(output.get("output_type") or ""),
+                "source_base_url": request.source_base_url,
+                "reference_reason": "comfyui_output",
+            },
+        )
+        try:
+            records.append(await register_asset(register_request))
+        except Exception as exc:
+            errors.append({"index": index, "filename": filename, "error": str(exc)})
+    return {"ok": not errors and bool(records), "prompt_id": prompt_id, "registered": records, "errors": errors}
 
 
 def _extension_from_upload(filename: str, media_type: str) -> str:
@@ -1364,6 +1505,35 @@ def _derivation_group(request: MediaRegisterRequest, asset_id: str) -> str:
         or asset_id
     )
     return _safe_segment(group, "ungrouped")
+
+
+@app.post("/comfyui/outputs/register")
+async def comfyui_register_outputs_endpoint(request: ComfyUIRegisterOutputsRequest):
+    """Register already-known ComfyUI history outputs as media-gallery assets.
+
+    The UI can use this after fetching history directly from ComfyUI, which keeps
+    local-host setups working even when Docker cannot reach host port 8188.
+    """
+
+    return await _register_comfyui_outputs(request)
+
+
+@app.post("/comfyui/history/{prompt_id}/register")
+async def comfyui_register_history_endpoint(prompt_id: str, request: ComfyUIRegisterOutputsRequest | None = None):
+    """Fetch a prompt history through the backend proxy and register its outputs."""
+
+    client = _comfyui_media_client()
+    if client is None:
+        return await _comfyui_proxy_error()
+    try:
+        result = await client.history_outputs(prompt_id)
+    except Exception as exc:
+        return {"ok": False, "base_url": getattr(client, "base_url", ""), "prompt_id": prompt_id, "error": str(exc)}
+    request = request or ComfyUIRegisterOutputsRequest()
+    request.prompt_id = prompt_id
+    request.outputs = result.get("outputs") or []
+    request.source_base_url = request.source_base_url or getattr(client, "base_url", "")
+    return await _register_comfyui_outputs(request)
 
 
 @app.get("/health")

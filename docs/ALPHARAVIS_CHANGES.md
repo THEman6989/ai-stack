@@ -116,15 +116,22 @@ Not implemented yet (separate plan):
 - Added explicit `preflight_comfyui_workflow` and `manage_comfyui_queue` tools to
   the `comfyui/workflows` toolset and ComfyUI swarm worker so agents can inspect
   workflows and perform bounded queue/memory actions without enabling submit.
+- Added ComfyUI output registration: `register_comfyui_outputs` in the agent,
+  media-gallery `/comfyui/history/{prompt_id}`, `/comfyui/view`, and
+  `/comfyui/outputs/register` endpoints, plus ComfyUI-tab history extraction and
+  `Register Outputs`. URL-only registration is the default so local browser
+  access to `localhost:8188` works even when Docker cannot reach that host port.
+- Added ComfyUI tab live progress: direct-mode WebSocket to ComfyUI `/ws` when
+  available plus queue/history polling fallback for direct/proxy/auto modes.
 - Verification so far:
-  - `pytest -q tests/test_comfyui_client.py tests/test_alpharavis_toolsets.py tests/test_media_server.py` → 61 passed.
+  - `pytest -q tests/test_comfyui_client.py tests/test_alpharavis_toolsets.py tests/test_media_server.py` → 62 passed.
   - Python AST parse passed for `comfyui_client.py`, `agent_graph.py`,
     `alpharavis_toolsets.py`, and `media_server.py`; direct `py_compile` is still
     blocked by local `__pycache__` permissions.
   - `npx eslint src/app/components/ComfyUIPanel.tsx src/app/page.tsx` → passed.
   - `npm run build` in `submodules/deep-agents-ui` → passed.
   - `docker compose config --quiet` → passed.
-  - `docker compose build deep-agents-ui langgraph-api` → passed.
+  - `docker compose build deep-agents-ui langgraph-api media-gallery` → passed.
 
 ## 2026-05-26 — ODF/OnlyOffice: URL-Based Conversion + Auto-Convert on Upload
 

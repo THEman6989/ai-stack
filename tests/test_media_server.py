@@ -72,7 +72,9 @@ if "pydantic" not in sys.modules and importlib.util.find_spec("pydantic") is Non
     pydantic_stub = types.ModuleType("pydantic")
 
     class BaseModel:
-        pass
+        def __init__(self, **kwargs) -> None:
+            for name, value in kwargs.items():
+                setattr(self, name, value)
 
     def Field(default=None, *, default_factory=None, **kwargs):
         return default_factory() if default_factory is not None else default
@@ -162,13 +164,33 @@ class _FakeComfyClient:
     async def system_stats(self) -> dict:
         return {"system": {"os": "test"}}
 
+    async def history_outputs(self, prompt_id: str) -> dict:
+        return {
+            "prompt_id": prompt_id,
+            "history": {prompt_id: {"outputs": {}}},
+            "outputs": [
+                {
+                    "node_id": "9",
+                    "output_type": "images",
+                    "filename": "ComfyUI_00001_.png",
+                    "subfolder": "",
+                    "type": "output",
+                    "url": f"{self.base_url}/view?filename=ComfyUI_00001_.png&subfolder=&type=output",
+                }
+            ],
+        }
 
 async def _call_comfy_queue() -> dict:
+
     return await media_server.comfyui_queue_endpoint()
 
 
 async def _call_comfy_models() -> dict:
     return await media_server.comfyui_models_endpoint("checkpoints")
+
+
+async def _call_comfy_history() -> dict:
+    return await media_server.comfyui_history_endpoint("abc")
 
 
 def test_comfyui_proxy_endpoints_use_configured_client(monkeypatch) -> None:
@@ -177,11 +199,46 @@ def test_comfyui_proxy_endpoints_use_configured_client(monkeypatch) -> None:
 
     queue = asyncio.run(_call_comfy_queue())
     models = asyncio.run(_call_comfy_models())
+    history = asyncio.run(_call_comfy_history())
 
     assert queue["ok"] is True
     assert queue["base_url"] == "http://comfypc:8188"
     assert len(queue["queue"]["queue_pending"]) == 2
     assert models["models"] == ["checkpoints/model.safetensors"]
+    assert history["ok"] is True
+    assert history["prompt_id"] == "abc"
+    assert history["outputs"][0]["filename"] == "ComfyUI_00001_.png"
+
+
+def test_comfyui_register_outputs_endpoint_writes_media_records(monkeypatch) -> None:
+    collection = _FakeCollection([])
+    monkeypatch.setattr(media_server, "_collection", lambda: collection)
+
+    request = media_server.ComfyUIRegisterOutputsRequest()
+    request.prompt_id = "abc"
+    request.source_base_url = "http://localhost:8188"
+    request.download = False
+    request.outputs = [
+        {
+            "node_id": "9",
+            "output_type": "images",
+            "filename": "ComfyUI_00001_.png",
+            "subfolder": "",
+            "type": "output",
+        }
+    ]
+
+    result = asyncio.run(media_server.comfyui_register_outputs_endpoint(request))
+
+    assert result["ok"] is True
+    assert len(collection.replacements) == 1
+    record = collection.replacements[0][1]
+    assert record["origin"] == "comfyui_output"
+    assert record["asset_kind"] == "processed"
+    assert record["media_type"] == "image"
+    assert record["group_id"] == "abc"
+    assert record["download_url"].startswith("http://localhost:8188/view?filename=ComfyUI_00001_.png")
+    assert record["metadata"]["prompt_id"] == "abc"
 
 
 async def _call_list_office_templates() -> dict:

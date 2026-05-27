@@ -371,13 +371,23 @@ reports. The dedicated `comfyui_agent` peer is only registered when
 by `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=false` by default because arbitrary
 ComfyUI workflows/custom nodes have Python-code trust level.
 
-`media-gallery` exposes `/comfyui/status`, `/comfyui/queue`, and
-`/comfyui/models/{folder}` as lightweight browser-safe proxy endpoints. The
-ComfyUI tab can use direct native ComfyUI paths (`/system_stats`, `/queue`,
-`/models/{folder}`) or those proxy paths, with an `auto` mode that tries direct
-first and falls back to proxy. Runtime overrides are stored in browser
-`localStorage`; Compose only provides defaults through `NEXT_PUBLIC_COMFYUI_PANEL_API_BASE`
-and `NEXT_PUBLIC_COMFYUI_PROXY_API_BASE`.
+`media-gallery` exposes `/comfyui/status`, `/comfyui/queue`,
+`/comfyui/models/{folder}`, `/comfyui/history/{prompt_id}`, `/comfyui/view`,
+and `/comfyui/outputs/register` as lightweight browser-safe ComfyUI endpoints.
+The ComfyUI tab can use direct native ComfyUI paths (`/system_stats`, `/queue`,
+`/models/{folder}`, `/history/{prompt_id}`, `/view`) or those proxy paths, with
+an `auto` mode that tries direct first and falls back to proxy. Runtime overrides
+are stored in browser `localStorage`; Compose only provides defaults through
+`NEXT_PUBLIC_COMFYUI_PANEL_API_BASE` and `NEXT_PUBLIC_COMFYUI_PROXY_API_BASE`.
+
+For generated outputs, the tab accepts a ComfyUI `prompt_id`, fetches history,
+extracts image/video/audio output records, and can register them in the Media
+Gallery through `POST /comfyui/outputs/register`. Registration defaults to
+`download=false` so local-host deployments keep working even when Docker cannot
+reach the host ComfyUI port; the gallery stores the browser-reachable ComfyUI
+`/view` URL and metadata (`origin=comfyui_output`, `processing_provider=comfyui`).
+Live progress in the tab opens a direct ComfyUI WebSocket (`/ws?clientId=...`)
+when direct mode is available and also polls queue/history as a fallback.
 
 ## MCP Integration
 

@@ -112,9 +112,12 @@ Still needed:
   `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=false`; preflight remains available
   to validate API-format workflow JSON and report missing node classes/models.
   `media-gallery` exposes `/comfyui/status`, `/comfyui/queue`, and
-  `/comfyui/models/{folder}` as proxy endpoints, while the DeepAgents UI tab can
-  use direct/proxy/auto connection modes with browser-local URL overrides. Plan
-  details live in `.hermes/plans/comfyui-swarm-tab-integration.md`.
+  `/comfyui/models/{folder}`, `/comfyui/history/{prompt_id}`,
+  `/comfyui/view`, and `/comfyui/outputs/register` as proxy/registration
+  endpoints, while the DeepAgents UI tab can use direct/proxy/auto connection
+  modes with browser-local URL overrides, live WebSocket+polling progress, and
+  prompt-history output registration into the Media Gallery. Plan details live in
+  `.hermes/plans/comfyui-swarm-tab-integration.md`.
 - Decide later whether to tackle AionUi Tier 3 items: i18n, inline tool-result
   streaming, and conversation tabs.
 - New: Office/Docs integration research completed. `docs/AIONUI_OFFICE_INTEGRATION.md`

@@ -3122,6 +3122,52 @@ async def get_comfyui_history(prompt_id: str) -> str:
 
 
 @tool
+async def register_comfyui_outputs(prompt_id: str, prompt: str = "", download: bool = False) -> str:
+    """Register extracted ComfyUI prompt outputs in the Media Gallery without dumping media into context."""
+
+    client = _comfyui_client()
+    if client is None:
+        return _json_tool_result({"ok": False, "error": _comfyui_client_unavailable()})
+    try:
+        result = await client.history_outputs(prompt_id)
+    except Exception as exc:
+        return _json_tool_result({"ok": False, "base_url": getattr(client, "base_url", ""), "prompt_id": prompt_id, "error": str(exc)})
+
+    records: list[dict[str, Any]] = []
+    for index, output in enumerate((result.get("outputs") or [])[: int(os.getenv("ALPHARAVIS_COMFYUI_REGISTER_OUTPUT_LIMIT", "16"))]):
+        filename = str(output.get("filename") or "")
+        source_url = str(output.get("url") or "")
+        output_type = str(output.get("output_type") or "")
+        if not filename or not source_url:
+            continue
+        fallback_type = "image" if output_type in {"images", "gifs"} else "video" if output_type == "videos" else "audio" if output_type == "audio" else "unknown"
+        records.append(
+            await _register_media_asset(
+                source_url=source_url,
+                source_key=f"comfyui:{prompt_id}:{output.get('node_id', '')}:{filename}:{index}",
+                media_type=_media_type_from_value(filename, fallback_type),
+                role="output",
+                title=f"ComfyUI {filename}",
+                caption=f"ComfyUI output from prompt {prompt_id}",
+                prompt=prompt,
+                group_id=prompt_id,
+                download=download,
+                metadata={
+                    "provider": "comfyui",
+                    "prompt_id": prompt_id,
+                    "node_id": str(output.get("node_id") or ""),
+                    "filename": filename,
+                    "subfolder": str(output.get("subfolder") or ""),
+                    "type": str(output.get("type") or "output"),
+                    "output_type": output_type,
+                    "source_base_url": getattr(client, "base_url", ""),
+                },
+            )
+        )
+    return _json_tool_result({"ok": any(item.get("ok") for item in records), "base_url": client.base_url, "prompt_id": prompt_id, "outputs": result.get("outputs") or [], "registrations": records})
+
+
+@tool
 async def preflight_comfyui_workflow(workflow_json: str, check_server: bool = True) -> str:
     """Validate ComfyUI API-format workflow JSON and report missing nodes/models before submit."""
 

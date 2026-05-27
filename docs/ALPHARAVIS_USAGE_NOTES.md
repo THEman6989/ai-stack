@@ -99,10 +99,21 @@ The proxy endpoints remain available for deployments where the Docker container
 can reach the ComfyUI host:
 
 ```text
-GET http://localhost:8130/comfyui/status
-GET http://localhost:8130/comfyui/queue
-GET http://localhost:8130/comfyui/models/{folder}
+GET  http://localhost:8130/comfyui/status
+GET  http://localhost:8130/comfyui/queue
+GET  http://localhost:8130/comfyui/models/{folder}
+GET  http://localhost:8130/comfyui/history/{prompt_id}
+GET  http://localhost:8130/comfyui/view?filename=...&subfolder=&type=output
+POST http://localhost:8130/comfyui/outputs/register
 ```
+
+The tab can also watch a specific ComfyUI `prompt_id`: direct mode opens the
+native ComfyUI WebSocket for progress/status messages and all modes poll
+queue/history as a fallback. `Register Outputs` stores extracted history outputs
+in the Media Gallery with `origin=comfyui_output`. It defaults to URL-only
+registration (`download=false`) so the local Docker→host-port limitation does not
+block gallery entries; if a deployment has a working proxy or container-reachable
+ComfyUI URL, downloads can be enabled later.
 
 Configure the backend target with either an explicit base URL or the existing
 remote-PC map. Configure the browser defaults separately; operators can override
