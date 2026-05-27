@@ -30,10 +30,11 @@ of going through LibreChat/Bridge. The fork lives in
 `submodules/deep-agents-ui/` and supports chat threads, tasks/tool approvals,
 multimodal upload through file picker, drag/drop, and paste, chat openers,
 thread rename/delete, artifact rendering, file preview, diff rendering, an
-Office tab, and a skills indicator. Code files use a lightweight preview by
-default; Monaco loads only after pressing `Open Monaco editor`, while DiffViewer
-stays lightweight for patch previews and agent-change review. The UI integration
-contract for future ports is documented in [`ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md`](ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md).
+Office tab, a ComfyUI tab for LAN ComfyPC status/queue/model handling, and a
+skills indicator. Code files use a lightweight preview by default; Monaco loads
+only after pressing `Open Monaco editor`, while DiffViewer stays lightweight for
+patch previews and agent-change review. The UI integration contract for future
+ports is documented in [`ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md`](ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md).
 
 The Office tab is a thin launcher for OfficeCLI work. It accepts DOCX/PPTX/XLSX
 uploads as file blocks, can upload existing Office files directly into the shared
@@ -84,6 +85,43 @@ media-gallery endpoints directly for listing, uploads, validation/batch status,
 and placeholder detection; generated create/edit/template/batch/repair/preview
 prompts are submitted with `active_agent=office_agent` when
 `NEXT_PUBLIC_OFFICE_AGENT_ENABLED=true`.
+
+The ComfyUI tab is a lightweight controller for the remote ComfyPC. Browser
+requests go to `media-gallery` on port `8130`, not directly to ComfyUI, through:
+
+```text
+GET http://localhost:8130/comfyui/status
+GET http://localhost:8130/comfyui/queue
+GET http://localhost:8130/comfyui/models/{folder}
+```
+
+Configure the target with either an explicit base URL or the existing remote-PC
+map:
+
+```bash
+ALPHARAVIS_COMFY_PC=comfy_server
+ALPHARAVIS_COMFYUI_PORT=8188
+# Optional explicit override; otherwise resolved from REMOTE_PCS.
+ALPHARAVIS_COMFYUI_API_BASE=http://<comfypc-lan-ip>:8188
+NEXT_PUBLIC_COMFYUI_PANEL_API_BASE=http://localhost:8130/comfyui
+```
+
+Substantial ComfyUI work can be routed to the dedicated swarm peer when enabled:
+
+```bash
+ALPHARAVIS_ENABLE_COMFYUI_AGENT=true
+```
+
+Workflow submission remains separately disabled by default because arbitrary
+ComfyUI workflows/custom nodes can execute Python:
+
+```bash
+ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=false
+```
+
+The ComfyUI tab itself only reads health/queue/model state and provides launcher
+prompts for the agent; it does not submit unknown workflows unless that explicit
+workflow-submit flag is enabled on the backend.
 
 The Phase-5 Office buttons are intentionally thin Agent launchers, not a separate
 managed job engine. Before sending the agent prompt, the Office tab fetches safe

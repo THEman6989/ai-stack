@@ -583,6 +583,15 @@ ALPHARAVIS_PRIMARY_CONTEXT_HIGH=200000
 # Hardware identity from REMOTE_PCS.
 ALPHARAVIS_BIG_LLM_PC=main_pc
 ALPHARAVIS_COMFY_PC=comfy_server
+ALPHARAVIS_COMFYUI_PORT=8188
+# Optional explicit ComfyUI base URL. When empty, AlphaRavis derives
+# http://REMOTE_PCS[ALPHARAVIS_COMFY_PC].ip:ALPHARAVIS_COMFYUI_PORT.
+ALPHARAVIS_COMFYUI_API_BASE=
+# Dedicated ComfyUI swarm agent is opt-in; Pixelle image generation still works separately.
+ALPHARAVIS_ENABLE_COMFYUI_AGENT=false
+# Submitting arbitrary ComfyUI workflow JSON can execute custom-node Python.
+# Keep false unless you trust the workflow source.
+ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=false
 
 # Service probes. BIG_BOSS_API_BASE is used as fallback for big LLM health.
 # For ComfyUI, /system_stats is the default if REMOTE_PCS.comfy_server.ip exists.
@@ -1712,6 +1721,11 @@ NEXT_PUBLIC_OFFICE_TEMPLATE_PLACEHOLDERS_URL=http://localhost:8130/office/templa
 NEXT_PUBLIC_OFFICE_TEMPLATE_MERGE_FORM_URL=http://localhost:8130/office/templates/merge-form
 NEXT_PUBLIC_OFFICE_AGENT_ENABLED=true
 NEXT_PUBLIC_OFFICE_AGENT_NAME=office_agent
+
+# ComfyUI tab UI env vars (NEXT_PUBLIC_* are exposed to the browser).
+NEXT_PUBLIC_COMFYUI_PANEL_API_BASE=http://localhost:8130/comfyui
+NEXT_PUBLIC_COMFYUI_AGENT_ENABLED=false
+NEXT_PUBLIC_COMFYUI_AGENT_NAME=comfyui_agent
 
 # Enables OfficeCLI's stdio MCP server from langgraph-app/mcp.json. Keep false
 # until you explicitly want typed OfficeCLI MCP tools; direct CLI works without it.

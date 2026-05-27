@@ -154,6 +154,22 @@ else:
     MEDIA_ANALYSIS_IMPORT_ERROR = None
 
 try:
+    from comfyui_client import (
+        ComfyUIClient as _ComfyUIClient,
+        comfyui_status as _comfyui_status,
+        comfyui_workflow_submit_enabled as _comfyui_workflow_submit_enabled,
+        resolve_comfyui_base_url as _resolve_comfyui_base_url,
+    )
+except Exception as exc:  # pragma: no cover - optional local helper/deps
+    _ComfyUIClient = None
+    _comfyui_status = None
+    _comfyui_workflow_submit_enabled = None
+    _resolve_comfyui_base_url = None
+    COMFYUI_CLIENT_IMPORT_ERROR: Exception | None = exc
+else:
+    COMFYUI_CLIENT_IMPORT_ERROR = None
+
+try:
     from model_management import (
         apply_model_context_policy as _model_mgmt_apply_context_policy,
         check_ollama_models as _model_mgmt_check_ollama_models,
@@ -827,6 +843,10 @@ def _crisis_manager_enabled() -> bool:
 
 def _office_agent_enabled() -> bool:
     return _env_bool("ALPHARAVIS_ENABLE_OFFICE_AGENT", "false")
+
+
+def _comfyui_agent_enabled() -> bool:
+    return _env_bool("ALPHARAVIS_ENABLE_COMFYUI_AGENT", "false")
 
 
 def _storage_manager_enabled() -> bool:
@@ -2893,6 +2913,85 @@ async def check_pixelle_job(job_id: str):
         )
         return _format_pixelle_failure(job_id, data.get("logs", "No logs returned."))
     return f"Pixelle job `{job_id}` status: {status}\n\n{data.get('logs', '')}"
+
+
+def _comfyui_client_unavailable() -> str:
+    if COMFYUI_CLIENT_IMPORT_ERROR:
+        return f"ComfyUI client unavailable: {COMFYUI_CLIENT_IMPORT_ERROR}"
+    return "ComfyUI client unavailable."
+
+
+def _comfyui_client() -> Any | None:
+    if _ComfyUIClient is None:
+        return None
+    base_url = _resolve_comfyui_base_url(REMOTE_PCS) if _resolve_comfyui_base_url is not None else ""
+    return _ComfyUIClient(base_url=base_url)
+
+
+@tool
+async def check_comfyui_status() -> str:
+    """Check the configured remote/local ComfyUI server status."""
+
+    if _comfyui_status is None:
+        return _json_tool_result({"ok": False, "error": _comfyui_client_unavailable()})
+    return _json_tool_result(await _comfyui_status(REMOTE_PCS))
+
+
+@tool
+async def list_comfyui_queue() -> str:
+    """Return the current ComfyUI queue from the configured ComfyUI server."""
+
+    client = _comfyui_client()
+    if client is None:
+        return _json_tool_result({"ok": False, "error": _comfyui_client_unavailable()})
+    try:
+        return _json_tool_result({"ok": True, "base_url": client.base_url, "queue": await client.queue()})
+    except Exception as exc:
+        return _json_tool_result({"ok": False, "base_url": getattr(client, "base_url", ""), "error": str(exc)})
+
+
+@tool
+async def list_comfyui_models(folder: str = "checkpoints") -> str:
+    """List ComfyUI models in a model folder such as checkpoints, vae, loras, or controlnet."""
+
+    client = _comfyui_client()
+    if client is None:
+        return _json_tool_result({"ok": False, "error": _comfyui_client_unavailable()})
+    try:
+        return _json_tool_result({"ok": True, "base_url": client.base_url, "folder": folder, "models": await client.models(folder)})
+    except Exception as exc:
+        return _json_tool_result({"ok": False, "base_url": getattr(client, "base_url", ""), "folder": folder, "error": str(exc)})
+
+
+@tool
+async def get_comfyui_history(prompt_id: str) -> str:
+    """Fetch ComfyUI history/output metadata for a prompt_id."""
+
+    client = _comfyui_client()
+    if client is None:
+        return _json_tool_result({"ok": False, "error": _comfyui_client_unavailable()})
+    try:
+        return _json_tool_result({"ok": True, "base_url": client.base_url, "prompt_id": prompt_id, "history": await client.history(prompt_id)})
+    except Exception as exc:
+        return _json_tool_result({"ok": False, "base_url": getattr(client, "base_url", ""), "prompt_id": prompt_id, "error": str(exc)})
+
+
+@tool
+async def submit_comfyui_workflow(workflow_json: str, client_id: str = "alpharavis") -> str:
+    """Submit a ComfyUI API-format workflow JSON when explicit workflow submission is enabled."""
+
+    client = _comfyui_client()
+    if client is None:
+        return _json_tool_result({"ok": False, "error": _comfyui_client_unavailable()})
+    try:
+        workflow = json.loads(workflow_json)
+    except Exception as exc:
+        return _json_tool_result({"ok": False, "error": f"Invalid workflow_json: {exc}"})
+    try:
+        result = await client.submit_workflow(workflow, client_id=client_id)
+        return _json_tool_result({"ok": not bool(result.get("blocked")) and not bool(result.get("error")), "base_url": client.base_url, "result": result})
+    except Exception as exc:
+        return _json_tool_result({"ok": False, "base_url": getattr(client, "base_url", ""), "error": str(exc)})
 
 
 @tool
@@ -13035,6 +13134,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     owner_power_tools_enabled = _owner_power_tools_enabled()
     crisis_manager_enabled = _crisis_manager_enabled()
     office_agent_enabled = _office_agent_enabled()
+    comfyui_agent_enabled = _comfyui_agent_enabled()
     server_management_tools = (
         [
             inspect_model_management_status,
@@ -13161,6 +13261,14 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             f"preview, batch operations, or blueprint management). {handoff_requirement}"
         ),
     )
+    transfer_to_comfyui = create_handoff_tool(
+        agent_name="comfyui_agent",
+        description=(
+            "Transfer to the ComfyUI Agent for direct ComfyUI LAN control, "
+            "workflow JSON inspection/submission, queue/status/model checks, "
+            f"or ComfyPC readiness separate from Pixelle. {handoff_requirement}"
+        ),
+    )
     transfer_to_power = None
     if advanced_model_management_enabled or server_model_manager_enabled:
         transfer_to_power = create_handoff_tool(
@@ -13183,12 +13291,18 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
         )
     crisis_handoff_tools = [transfer_to_crisis] if transfer_to_crisis is not None else []
     office_handoff_tools = [transfer_to_office] if office_agent_enabled else []
+    comfyui_handoff_tools = [transfer_to_comfyui] if comfyui_agent_enabled else []
 
     local_tool_map = _tools_by_name(
         [
             start_pixelle_remote,
             start_pixelle_async,
             check_pixelle_job,
+            check_comfyui_status,
+            list_comfyui_queue,
+            list_comfyui_models,
+            get_comfyui_history,
+            submit_comfyui_workflow,
             register_media_asset,
             semantic_media_search,
             plan_media_analysis,
@@ -13273,6 +13387,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     }
     if office_agent_enabled:
         agent_toolset_names["office_agent"] = ["agent/office"]
+    if comfyui_agent_enabled:
+        agent_toolset_names["comfyui_agent"] = ["agent/comfyui"]
     agent_toolset_profiles: dict[str, dict[str, Any]] = {}
     agent_toolset_tools: dict[str, list[Any]] = {}
     true_lazy_toolsets_enabled = _env_bool("ALPHARAVIS_ENABLE_TRUE_LAZY_TOOLSETS", "true")
@@ -13347,6 +13463,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             *power_handoff_tools,
             *crisis_handoff_tools,
             *office_handoff_tools,
+            *comfyui_handoff_tools,
         ]),
         name="research_expert",
         system_prompt=(
@@ -13394,6 +13511,11 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             start_pixelle_remote,
             start_pixelle_async,
             check_pixelle_job,
+            check_comfyui_status,
+            list_comfyui_queue,
+            list_comfyui_models,
+            get_comfyui_history,
+            submit_comfyui_workflow,
             register_media_asset,
             semantic_media_search,
             plan_media_analysis,
@@ -13453,6 +13575,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             *power_handoff_tools,
             *crisis_handoff_tools,
             *office_handoff_tools,
+            *comfyui_handoff_tools,
         ]),
         name="general_assistant",
         system_prompt=(
@@ -13520,6 +13643,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             *power_handoff_tools,
             *crisis_handoff_tools,
             *office_handoff_tools,
+            *comfyui_handoff_tools,
         ],
     )
 
@@ -13575,6 +13699,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             *power_handoff_tools,
             *crisis_handoff_tools,
             *office_handoff_tools,
+            *comfyui_handoff_tools,
         ],
     )
 
@@ -13620,6 +13745,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             *power_handoff_tools,
             *crisis_handoff_tools,
             *office_handoff_tools,
+            *comfyui_handoff_tools,
         ]),
         name="hermes_coding_agent",
         system_prompt=(
@@ -13699,6 +13825,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             *power_handoff_tools,
             *crisis_handoff_tools,
             *office_handoff_tools,
+            *comfyui_handoff_tools,
         ]),
         name="context_retrieval_agent",
         system_prompt=(
@@ -13808,6 +13935,66 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             + AGENT_POLICY_PROMPT,
         )
         swarm_workers.append(office_worker)
+    if comfyui_agent_enabled:
+        comfyui_worker = _create_budgeted_deep_agent(
+            model=llm,
+            tools=_agent_tools("comfyui_agent", [
+                check_comfyui_status,
+                list_comfyui_queue,
+                list_comfyui_models,
+                get_comfyui_history,
+                submit_comfyui_workflow,
+                prepare_comfy_for_pixelle,
+                register_media_asset,
+                semantic_media_search,
+                inspect_media_index_status,
+                build_specialist_report,
+                search_agent_memory,
+                record_agent_memory,
+                search_curated_memory,
+                record_curated_memory,
+                search_session_history,
+                semantic_memory_search,
+                query_source,
+                query_sources,
+                agentic_rag_retrieve,
+                write_alpha_ravis_artifact,
+                read_alpha_ravis_artifact,
+                list_alpha_ravis_artifacts,
+                list_repo_ai_skills,
+                read_repo_ai_skill,
+                inspect_context_budget,
+            ], [
+                transfer_to_generalist,
+                transfer_to_research,
+                transfer_to_debugger,
+                transfer_to_hermes,
+                transfer_to_context,
+                *power_handoff_tools,
+                *crisis_handoff_tools,
+                *office_handoff_tools,
+            ]),
+            name="comfyui_agent",
+            system_prompt=(
+                "You are the dedicated ComfyUI Agent. Control the configured "
+                "ComfyUI server over LAN, usually the ComfyPC from REMOTE_PCS. "
+                "Start with check_comfyui_status when reachability is unknown, "
+                "then inspect queue/models/history as needed. Pixelle is the "
+                "simple text-to-image path; use direct ComfyUI tools when the "
+                "user asks for workflows, models, queues, prompt_id history, or "
+                "ComfyPC status. Direct workflow submission is intentionally "
+                "blocked unless ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=true; "
+                "unknown workflow JSON can execute custom-node Python and must be "
+                "treated as trusted code only. For power/wake/shutdown actions, "
+                "transfer to power_management_agent unless an explicit safe "
+                "readiness tool is enough. Register output URLs as media metadata "
+                "instead of dumping image/video bytes into context. Use "
+                "build_specialist_report when returning findings to another agent."
+            )
+            + " "
+            + AGENT_POLICY_PROMPT,
+        )
+        swarm_workers.append(comfyui_worker)
     if advanced_model_management_enabled or server_model_manager_enabled:
         power_llm = _server_model_manager_model()
         big_boss_up = _big_boss_llama_reachable()

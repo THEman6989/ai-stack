@@ -18,7 +18,7 @@ Implemented:
 - Chat openers, hardened thread rename/delete (pending state, Escape cancel,
   duplicate rename guard, metadata title display, active-thread delete recovery),
   artifact rendering, file preview panel, lightweight diff rendering, on-demand
-  Monaco editor, and skills indicator are present.
+  Monaco editor, ComfyUI tab, and skills indicator are present.
 - Dependency hygiene: `monaco-editor` peer dependency explicit, `yarn.lock`
   regenerated, unused `diff` / `@types/diff` removed.
 - Docker hygiene: `.dockerignore` keeps local `node_modules`/`.next` out of the
@@ -73,6 +73,12 @@ Still needed:
   optional watch-preview link, preview panel, lightweight diff rendering, code preview before/after
   `Open Monaco editor`, and thread rename/delete including active-thread
   deletion recovery.
+- Live ComfyUI runtime smoke with an actual ComfyPC: build/recreate
+  `langgraph-api`, `media-gallery`, and `deep-agents-ui`; verify
+  `/comfyui/status`, `/comfyui/queue`, `/comfyui/models/checkpoints`, ComfyUI tab
+  rendering on port 3000, and one safe agent-launcher prompt routed to
+  `comfyui_agent` when `ALPHARAVIS_ENABLE_COMFYUI_AGENT=true`. Keep workflow
+  submission disabled unless testing a trusted API-format workflow explicitly.
 - Office Phase 6 / Managed Office Workflows: implemented as a non-destructive
   managed plan/status layer. `media-gallery` exposes `/office/preview`,
   `/office/repair`, `/office/watch/start`, `/office/watch/stop`,
@@ -95,6 +101,16 @@ Still needed:
   direct media-gallery endpoints remain for small UI/status/list/upload actions.
   Plan details and verification targets live in
   `.hermes/plans/office-tab-implementation.md`.
+- ComfyUI Swarm Agent + Tab: implemented as a first pass. AlphaRavis now has a
+  default-off `comfyui_agent` peer (`ALPHARAVIS_ENABLE_COMFYUI_AGENT=false`), a
+  narrow `comfyui/workflows` toolset, `transfer_to_comfyui` handoff, and a shared
+  `comfyui_client.py` that resolves the ComfyPC from `ALPHARAVIS_COMFYUI_API_BASE`
+  or `REMOTE_PCS[ALPHARAVIS_COMFY_PC]` plus `ALPHARAVIS_COMFYUI_PORT`. Workflow
+  submission is separately blocked by default via
+  `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=false`. `media-gallery` exposes
+  `/comfyui/status`, `/comfyui/queue`, and `/comfyui/models/{folder}` so the new
+  DeepAgents UI ComfyUI tab can inspect ComfyUI without direct browser-to-LAN
+  access. Plan details live in `.hermes/plans/comfyui-swarm-tab-integration.md`.
 - Decide later whether to tackle AionUi Tier 3 items: i18n, inline tool-result
   streaming, and conversation tabs.
 - New: Office/Docs integration research completed. `docs/AIONUI_OFFICE_INTEGRATION.md`

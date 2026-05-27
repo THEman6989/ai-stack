@@ -95,6 +95,20 @@ TOOLSETS: dict[str, Toolset] = {
         ),
         mcp_categories=("pixelle", "media", "image"),
     ),
+    "comfyui/workflows": Toolset(
+        "comfyui/workflows",
+        "Inspect and control a configured ComfyUI server over LAN: status, queue, models, prompt history, and gated workflow submit.",
+        tools=(
+            "check_comfyui_status",
+            "list_comfyui_queue",
+            "list_comfyui_models",
+            "get_comfyui_history",
+            "submit_comfyui_workflow",
+            "prepare_comfy_for_pixelle",
+            "check_external_service",
+        ),
+        mcp_categories=("comfyui", "comfy", "workflow", "image", "video"),
+    ),
     "media/video": Toolset(
         "media/video",
         "Register videos, preserve URLs/file ids, prepare explicit analysis, inspect indexing, and search indexed media.",
@@ -286,6 +300,13 @@ TOOLSETS: dict[str, Toolset] = {
         tools=("describe_optional_tool_registry",),
         includes=("office/documents", "artifacts", "skills/repo", "rag/memory"),
     ),
+    "agent/comfyui": Toolset(
+        "agent/comfyui",
+        "Dedicated ComfyUI agent bundle for LAN ComfyPC status, queue/model/history checks, Pixelle readiness, and gated workflow execution.",
+        tools=("describe_optional_tool_registry", "build_specialist_report"),
+        includes=("comfyui/workflows", "media/image", "artifacts", "skills/repo", "rag/memory"),
+        mcp_categories=("comfyui", "comfy", "pixelle", "image", "video"),
+    ),
     "agent/power": Toolset(
         "agent/power",
         "Power/model management bundle for local owner-specific lifecycle management.",
@@ -341,7 +362,8 @@ _maybe_merge_plugin_toolsets()
 _TOOLSET_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
     ("coding/execute", ("terminal", "shell", "docker", "logs", "debug", "ssh", "command", "befehl")),
     ("coding/write", ("implement", "patch", "refactor", "code", "repo", "datei", "file", "fix")),
-    ("media/image", ("bild", "image", "pixelle", "comfy", "comfyui")),
+    ("comfyui/workflows", ("comfy", "comfyui", "comfypc", "workflow", "prompt_id", "checkpoint", "loras", "queue")),
+    ("media/image", ("bild", "image", "pixelle")),
     ("media/video", ("video", "frame", "timecode")),
     ("media/audio", ("audio", "transcribe", "transkript")),
     ("rag/documents", ("pdf", "document", "dokument", "rag", "quelle")),
@@ -461,6 +483,10 @@ def _office_agent_enabled() -> bool:
     return _env_bool("ALPHARAVIS_ENABLE_OFFICE_AGENT", "false")
 
 
+def _comfyui_agent_enabled() -> bool:
+    return _env_bool("ALPHARAVIS_ENABLE_COMFYUI_AGENT", "false")
+
+
 def infer_toolsets_from_text(text: str, *, default: tuple[str, ...] = ("agent/general",)) -> list[str]:
     lowered = str(text or "").lower()
     selected: list[str] = []
@@ -470,6 +496,8 @@ def infer_toolsets_from_text(text: str, *, default: tuple[str, ...] = ("agent/ge
         if any(keyword in lowered for keyword in keywords):
             if toolset == "office/documents" and _office_agent_enabled():
                 selected.append("agent/office")
+            elif toolset == "comfyui/workflows" and _comfyui_agent_enabled():
+                selected.append("agent/comfyui")
             else:
                 selected.append(toolset)
     if not selected:

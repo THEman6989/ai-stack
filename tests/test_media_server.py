@@ -149,6 +149,41 @@ def test_office_files_endpoint_uses_office_output_root(monkeypatch, tmp_path: Pa
     assert result["files"][0]["filename"] == "sheet.xlsx"
 
 
+class _FakeComfyClient:
+    def __init__(self, base_url: str = "") -> None:
+        self.base_url = base_url or "http://comfypc:8188"
+
+    async def queue(self) -> dict:
+        return {"queue_running": ["run"], "queue_pending": ["one", "two"]}
+
+    async def models(self, folder: str = "checkpoints") -> list[str]:
+        return [f"{folder}/model.safetensors"]
+
+    async def system_stats(self) -> dict:
+        return {"system": {"os": "test"}}
+
+
+async def _call_comfy_queue() -> dict:
+    return await media_server.comfyui_queue_endpoint()
+
+
+async def _call_comfy_models() -> dict:
+    return await media_server.comfyui_models_endpoint("checkpoints")
+
+
+def test_comfyui_proxy_endpoints_use_configured_client(monkeypatch) -> None:
+    monkeypatch.setattr(media_server, "ComfyUIClient", _FakeComfyClient)
+    monkeypatch.setattr(media_server, "resolve_comfyui_base_url", lambda remote_pcs: "http://comfypc:8188")
+
+    queue = asyncio.run(_call_comfy_queue())
+    models = asyncio.run(_call_comfy_models())
+
+    assert queue["ok"] is True
+    assert queue["base_url"] == "http://comfypc:8188"
+    assert len(queue["queue"]["queue_pending"]) == 2
+    assert models["models"] == ["checkpoints/model.safetensors"]
+
+
 async def _call_list_office_templates() -> dict:
     return await media_server.list_office_templates(limit=10)
 

@@ -24,6 +24,16 @@ from pydantic import BaseModel, Field
 from file_safety import ensure_write_allowed
 
 try:
+    from comfyui_client import ComfyUIClient, comfyui_status, resolve_comfyui_base_url
+except Exception as exc:  # pragma: no cover - optional helper unavailable in minimal tests
+    ComfyUIClient = None  # type: ignore[assignment]
+    comfyui_status = None  # type: ignore[assignment]
+    resolve_comfyui_base_url = None  # type: ignore[assignment]
+    COMFYUI_CLIENT_IMPORT_ERROR: Exception | None = exc
+else:
+    COMFYUI_CLIENT_IMPORT_ERROR = None
+
+try:
     import run_state_manager
 except Exception:  # pragma: no cover - optional media-gallery runtime dependency
     run_state_manager = None  # type: ignore[assignment]
@@ -54,6 +64,42 @@ OFFICE_PREVIEW_URL = os.getenv("ALPHARAVIS_OFFICE_PREVIEW_URL", "http://localhos
 OFFICE_VALIDATION_STATE_NAMESPACE = "office_validation"
 OFFICE_BATCH_STATE_NAMESPACE = "office_batch"
 _OFFICE_WATCH_STATE: dict[str, dict[str, Any]] = {}
+try:
+    REMOTE_PCS = json.loads(os.getenv("REMOTE_PCS", "{}"))
+except Exception:
+    REMOTE_PCS = {}
+
+
+def _comfyui_media_client() -> Any | None:
+    if ComfyUIClient is None:
+        return None
+    base_url = resolve_comfyui_base_url(REMOTE_PCS) if resolve_comfyui_base_url is not None else ""
+    return ComfyUIClient(base_url=base_url)
+
+
+async def _comfyui_proxy_error(base_url: str = "") -> dict[str, Any]:
+    if COMFYUI_CLIENT_IMPORT_ERROR:
+        return {"ok": False, "base_url": base_url, "error": f"ComfyUI client unavailable: {COMFYUI_CLIENT_IMPORT_ERROR}"}
+    return {"ok": False, "base_url": base_url, "error": "ComfyUI client unavailable"}
+
+
+async def _comfyui_proxy_call(operation: str, *args: Any) -> dict[str, Any]:
+    client = _comfyui_media_client()
+    if client is None:
+        return await _comfyui_proxy_error()
+    try:
+        if operation == "status":
+            if comfyui_status is not None:
+                return await comfyui_status(REMOTE_PCS)
+            return {"ok": True, "base_url": client.base_url, "system_stats": await client.system_stats()}
+        if operation == "queue":
+            return {"ok": True, "base_url": client.base_url, "queue": await client.queue()}
+        if operation == "models":
+            folder = str(args[0] if args else "checkpoints")
+            return {"ok": True, "base_url": client.base_url, "folder": folder, "models": await client.models(folder)}
+    except Exception as exc:
+        return {"ok": False, "base_url": getattr(client, "base_url", ""), "error": str(exc)}
+    return {"ok": False, "base_url": getattr(client, "base_url", ""), "error": f"unsupported ComfyUI operation: {operation}"}
 
 
 def _office_output_host_owner() -> tuple[int, int] | None:
@@ -140,6 +186,21 @@ app.add_middleware(
 @app.get("/", include_in_schema=False)
 async def root_redirect():
     return RedirectResponse(url="/gallery")
+
+
+@app.get("/comfyui/status")
+async def comfyui_status_endpoint():
+    return await _comfyui_proxy_call("status")
+
+
+@app.get("/comfyui/queue")
+async def comfyui_queue_endpoint():
+    return await _comfyui_proxy_call("queue")
+
+
+@app.get("/comfyui/models/{folder}")
+async def comfyui_models_endpoint(folder: str = "checkpoints"):
+    return await _comfyui_proxy_call("models", folder)
 
 
 @app.get("/favicon.svg", include_in_schema=False)

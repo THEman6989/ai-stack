@@ -4,6 +4,40 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-27 — ComfyUI Swarm Agent + DeepAgents UI Tab
+
+- Added `langgraph-app/comfyui_client.py`, a small async REST client for LAN or
+  local ComfyUI servers. It resolves the server from
+  `ALPHARAVIS_COMFYUI_API_BASE`, `ALPHARAVIS_COMFY_HEALTH_URL`, or
+  `REMOTE_PCS[ALPHARAVIS_COMFY_PC]` plus `ALPHARAVIS_COMFYUI_PORT` instead of
+  hardcoding the ComfyPC address.
+- Added bounded ComfyUI tools to `agent_graph.py`: status, queue, model folder
+  listing, prompt history, and workflow submit. Workflow submission is blocked by
+  default and requires `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=true` because
+  ComfyUI workflows and custom nodes can execute Python.
+- Added `comfyui/workflows` and feature-flagged `agent/comfyui` toolsets. When
+  `ALPHARAVIS_ENABLE_COMFYUI_AGENT=true`, AlphaRavis registers a peer
+  `comfyui_agent` in the existing swarm with `transfer_to_comfyui` handoffs;
+  when disabled, ComfyUI keyword routing stays on the narrower direct toolset.
+- `media-gallery` now exposes lightweight browser-safe ComfyUI proxy endpoints:
+  `/comfyui/status`, `/comfyui/queue`, and `/comfyui/models/{folder}`. This keeps
+  the DeepAgents UI from needing direct LAN access to the ComfyPC.
+- Added `ComfyUIPanel.tsx` and a ComfyUI header tab in the DeepAgents UI. The tab
+  shows server reachability, queue count, model-folder counts/listing, and helper
+  prompts for handing substantial work to the ComfyUI swarm agent.
+- Docker Compose and `.env(exaple)` document/wire the new default-off flags and
+  UI env vars. The UI tab is visible, but the dedicated swarm agent remains opt-in
+  via `ALPHARAVIS_ENABLE_COMFYUI_AGENT=false` by default.
+- Verification so far:
+  - `pytest -q tests/test_comfyui_client.py tests/test_alpharavis_toolsets.py tests/test_media_server.py` → 55 passed.
+  - Python AST parse passed for `comfyui_client.py`, `agent_graph.py`,
+    `alpharavis_toolsets.py`, and `media_server.py`; direct `py_compile` is still
+    blocked by local `__pycache__` permissions.
+  - `npx eslint src/app/components/ComfyUIPanel.tsx src/app/page.tsx` → passed.
+  - `npm run build` in `submodules/deep-agents-ui` → passed.
+  - `docker compose config --quiet` → passed.
+  - `docker compose build deep-agents-ui langgraph-api` → passed.
+
 ## 2026-05-26 — ODF/OnlyOffice: URL-Based Conversion + Auto-Convert on Upload
 
 - Refactored `odf_converter.py` from multipart file upload to JSON URL-based

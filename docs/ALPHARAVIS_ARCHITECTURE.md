@@ -129,9 +129,10 @@ The current Docker architecture is split into these main roles:
   indicators, multimodal file upload (picker, drag/drop, paste), chat openers,
   hardened thread rename/delete, artifact system, file preview panel, lightweight
   diff viewer, on-demand Monaco editor for explicit code preview, Office tab for
-  OfficeCLI document creation/editing, and skills indicator. Connects directly to
-  LangGraph API on port 2024. Future UI ports should follow
-  `docs/ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md`.
+  OfficeCLI document creation/editing, ComfyUI tab for remote ComfyPC status/
+  model/queue handling, and skills indicator. Connects directly to LangGraph API
+  on port 2024 and to `media-gallery` for lightweight Office/ComfyUI browser
+  endpoints. Future UI ports should follow `docs/ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md`.
 - `service-dashboard`: lightweight local redirector UI on port `8090` that
   lists host and Docker URLs for the stack services, separating Web Interfaces,
   APIs, and Infrastructure. API cards expose copyable Tailscale HTTPS, local
@@ -322,6 +323,38 @@ POST /tools/langgraph/run
 That endpoint requires `explicit_user_request=true` in the request body. This
 prevents Hermes from silently invoking LangGraph unless the user explicitly asks
 for AlphaRavis/LangGraph/custom-agent flow.
+
+## ComfyUI / ComfyPC Integration
+
+ComfyUI is integrated in two layers so LAN control stays centralized and the
+browser does not need to talk directly to the remote ComfyPC:
+
+```text
+DeepAgents UI ComfyUI tab -> media-gallery /comfyui/* -> ComfyUI REST API
+AlphaRavis LangGraph -> comfyui_agent / comfyui tools -> ComfyUI REST API
+Pixelle flows -> prepare_comfy_for_pixelle / ComfyPC power tools -> Pixelle
+```
+
+`langgraph-app/comfyui_client.py` resolves the ComfyUI base URL in this order:
+
+```text
+ALPHARAVIS_COMFYUI_API_BASE
+ALPHARAVIS_COMFY_HEALTH_URL
+REMOTE_PCS[ALPHARAVIS_COMFY_PC] + ALPHARAVIS_COMFYUI_PORT
+http://127.0.0.1:8188
+```
+
+The narrow `comfyui/workflows` toolset exposes status, queue, model listing,
+history lookup, and gated workflow submission. The dedicated `comfyui_agent`
+peer is only registered when `ALPHARAVIS_ENABLE_COMFYUI_AGENT=true`; other swarm
+workers then get `transfer_to_comfyui` handoff tools. Workflow submission remains
+separately gated by `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=false` by default
+because arbitrary ComfyUI workflows/custom nodes have Python-code trust level.
+
+`media-gallery` exposes `/comfyui/status`, `/comfyui/queue`, and
+`/comfyui/models/{folder}` as lightweight browser-safe proxy endpoints. The
+ComfyUI tab uses those endpoints for health/queue/model visibility and uses
+agent-launcher prompts for substantial generate/inspect/fix workflow tasks.
 
 ## MCP Integration
 

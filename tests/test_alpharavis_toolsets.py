@@ -200,6 +200,62 @@ def test_office_agent_toolset_concentrates_heavy_office_execution():
     assert "call_hermes_agent" not in office.tools
 
 
+def test_comfyui_toolset_is_discoverable_and_gated_to_comfy_tools():
+    comfy = toolsets.resolve_toolset("agent/comfyui")
+
+    assert "agent/comfyui" in comfy.resolved_toolsets
+    assert "comfyui/workflows" in comfy.resolved_toolsets
+    assert "check_comfyui_status" in comfy.tools
+    assert "list_comfyui_queue" in comfy.tools
+    assert "submit_comfyui_workflow" in comfy.tools
+    assert "call_hermes_agent" not in comfy.tools
+
+
+def test_infer_toolsets_from_text_prefers_comfyui_agent_when_enabled(monkeypatch):
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_COMFYUI_AGENT", "true")
+
+    inferred = toolsets.infer_toolsets_from_text("Pruefe ComfyUI Queue und Checkpoints auf dem ComfyPC")
+
+    assert "agent/comfyui" in inferred
+    assert "comfyui/workflows" not in inferred
+
+
+def test_infer_toolsets_from_text_uses_comfyui_workflow_bundle_when_agent_disabled(monkeypatch):
+    monkeypatch.delenv("ALPHARAVIS_ENABLE_COMFYUI_AGENT", raising=False)
+
+    inferred = toolsets.infer_toolsets_from_text("Pruefe ComfyUI Queue und Checkpoints auf dem ComfyPC")
+
+    assert "comfyui/workflows" in inferred
+
+
+def test_materialize_comfyui_toolset_selects_comfy_mcp_tools():
+    available = {"check_comfyui_status": FakeTool("check_comfyui_status")}
+    mcp = [FakeTool("comfyui_submit_workflow"), FakeTool("officecli_create")]
+    cache = toolsets.build_mcp_schema_cache(
+        [
+            {
+                "name": "comfyui",
+                "tools": [{"name": "comfyui_submit_workflow", "description": "submit ComfyUI workflow"}],
+            },
+            {
+                "name": "officecli",
+                "tools": [{"name": "officecli_create", "description": "create pptx docx xlsx"}],
+            },
+        ]
+    )
+
+    materialized = toolsets.materialize_toolsets(
+        ["comfyui/workflows"],
+        available,
+        mcp_tools=mcp,
+        mcp_schema_cache=cache,
+    )
+
+    assert "check_comfyui_status" in materialized.tool_names
+    assert "comfyui_submit_workflow" in materialized.tool_names
+    assert "officecli_create" not in materialized.tool_names
+
+
 def test_materialize_office_agent_toolset_keeps_office_mcp_local_to_agent():
     available = {
         "execute_local_command": FakeTool("execute_local_command"),
