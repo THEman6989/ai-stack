@@ -4,6 +4,86 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-27 — Alpha-Hermes-Kontrollstrategie: Node-Verdrahtung
+
+- Rewired `_parallel_executor_node` in `agent_graph.py` to support:
+  - **HermesWorker** for write tasks when `ALPHARAVIS_PARALLEL_HERMES_WORKER=true`.
+    Inline `call_hermes_agent` wrapped as `hermes_fn` callable. Write tasks route
+    to Hermes; read-only tasks stay with DirectLLM.
+  - **ParallelContextPlanner** admission control when
+    `ALPHARAVIS_PARALLEL_CONTEXT_PLANNER=true`. Pre-estimates token budgets
+    via `ContextPreEstimator`, admits/rejects workers via `SlotBudget`, assigns
+    asymmetric budgets (e.g. Worker A 120k, Worker B 30k). Pool config derived
+    from ContextScheduler (`primary` instance) or env
+    (`ALPHARAVIS_PARALLEL_CONTEXT_POOL_TOTAL` / `_SLOTS`).
+  - When ContextPlanner fails (exception), falls through gracefully — runs
+    without budgets, workers are not blocked.
+- Added `_bigboss_ctx_total_from_scheduler()` and
+  `_bigboss_parallel_from_scheduler()` helpers to read live BigBoss config.
+- Guarded import block now imports `HermesWorker`, `ParallelContextPlanner`,
+  `parallel_context_planner_enabled`, `parallel_hermes_worker_enabled`, and
+  `GLOBAL_WORKER_REGISTRY` with matching fallback stubs.
+- `GLOBAL_WORKER_REGISTRY` now pre-registers `direct_llm` and `hermes` workers
+  at graph-build time.
+- `run_profile` now includes `parallel_hermes_worker`, `parallel_context_planner`,
+  and `parallel_admission` fields for observability.
+- Admission events logged: `parallel_executor.admission`,
+  `parallel_executor.workers_refused`, `parallel_executor.context_planner_failed`.
+- New plan: `docs/plans/2026-05-27-alpha-hermes-control-strategy.md` covers
+  the 7-point Alpha-Hermes control strategy (Plan-Validation, Admission Gate,
+  Budget Enforcement, Tool Restriction, Output Truncation, Result Merge, Error
+  Escalation) plus dynamic BigBoss config discovery.
+- 10 new integration tests in `tests/test_parallel_executor.py`:
+  `TestParallelExecutorNodeIntegration` (6 tests) and
+  `TestFullIntegrationAdmissionToSpawn` (2 tests). Also: registry test,
+  DirectLLMWorker budget kwarg test, HermesWorker callable signature test.
+
+## 2026-05-27 — Parallel Executor: HermesWorker + Konservativer ContextPlanner
+
+- Added `HermesWorker` to `ai_stack/parallel_executor/worker_spawner.py`.
+  Wraps the existing `call_hermes_agent` path as a controlled `WorkerSpawner`.
+  Hermes gets a bounded task with context, allowed tools, and a context budget.
+  Does NOT call LangGraph/AlphaRavis back. No Codex adapter — explicitly excluded.
+  Feature flag: `ALPHARAVIS_PARALLEL_HERMES_WORKER=false` (default OFF).
+
+- Added `ai_stack/parallel_executor/context_planner.py` with three components:
+  - `SlotBudget`: Tracks KV-unified context pool (e.g. 320k, np=4) with 8%
+    global safety reserve. Supports asymmetric distribution (Worker A 120k,
+    Worker B 30k). Refuses admission when pool is full or slots exhausted.
+  - `ContextPreEstimator`: Tokenizes worker material (RAG, files, tools) via
+    llama.cpp `/tokenize` API. Material is NOT loaded into own context.
+    20% safety overhead per estimate, minimum 512 tokens.
+  - `ParallelContextPlanner`: Orchestrates `estimate_all()` → `admit_all()` →
+    `release()`. Workers are capped at `max_ratio=0.85` of pool. Refused
+    workers must wait, reduce material, or run serially.
+  Feature flag: `ALPHARAVIS_PARALLEL_CONTEXT_PLANNER=false` (default OFF).
+
+- Updated `DirectLLMWorker` to accept `context_budget` kwarg and inject
+  `MAX_CONTEXT_BUDGET` into the worker prompt. Backward-compatible: existing
+  behavior unchanged when budget is not passed.
+
+- Plan document: `docs/plans/2026-05-27-parallel-executor-hermes-control.md`
+  covers Stage 1 (HermesWorker), Stage 2 (ContextPlanner), Stage 3 (BigBoss
+  config: np=4, KV unified, 320k), and Stage 4 (Integration + Tests).
+
+- BigBoss target config documented: np=4, KV unified, 320k context pool.
+  Asymmetric slot distribution. 2B model stays at 60k. No automatic np
+  switching — scheduler manages admission only.
+
+- 22 new tests in `tests/test_parallel_executor.py`: `TestHermesWorker`,
+  `TestSlotBudget`, `TestContextPreEstimator`, `TestParallelContextPlanner`,
+  `TestHermesWorkerWithBudget`. Total: 81 tests (59 existing + 22 new), all
+  passing.
+
+- Updated: `docs/ALPHARAVIS_OPEN_TASKS.md`, `docs/ALPHARAVIS_ARCHITECTURE.md`.
+
+Not implemented yet (separate plan):
+- ~~`_parallel_executor_node` integration with `ParallelContextPlanner`~~ — done 2026-05-27
+- ~~HermesWorker registration in `_parallel_executor_node`~~ — done 2026-05-27
+- Live smoke tests with real BigBoss np=4
+- Alpha-Hermes control strategy (step-by-step intervention) — plan written
+- Automatic np adjustment
+
 ## 2026-05-27 — ComfyUI Swarm Agent + DeepAgents UI Tab
 
 - Added `langgraph-app/comfyui_client.py`, a small async REST client for LAN or

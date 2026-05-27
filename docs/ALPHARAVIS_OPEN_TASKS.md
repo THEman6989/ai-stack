@@ -160,10 +160,61 @@ Implemented:
 
 Still needed:
 
-- Codex CLI adapter and Hermes agent adapter for `WorkerSpawner` interface.
+- ~~Codex CLI adapter~~ — explicitly excluded per user direction.
 - Live test with real BigBoss calls through the DirectLLM worker.
 - Profile parallel execution overhead and resource usage.
 - DeepAgents Responses compatibility testing with parallel executor messages.
+
+### Stage 3: Kontrollierte Hermes-Integration + Konservativer Context Scheduler
+
+Status: Stage 3 implemented — node wiring complete. Plan:
+`docs/plans/2026-05-27-alpha-hermes-control-strategy.md`.
+Live smoke test still needed.
+
+Hermes soll als kontrollierter Worker-Layer genutzt werden (kein autonomer
+Hauptentscheider). Kein neuer Hermes-Adapter — die bestehende
+`call_hermes_agent`-Funktion wird via `HermesWorker` in das
+`WorkerSpawner`-Interface eingehängt.
+
+BigBoss-Konfiguration: np=4, KV unified, 320k Kontext-Pool mit asymmetrischer
+Slot-Verteilung. 2B-Modell bleibt bei 60k.
+
+Kernkomponenten (implementiert):
+
+- `ai_stack/parallel_executor/worker_spawner.py`: `HermesWorker`
+  wrappt `call_hermes_agent`. Hermes bekommt Task, Kontext, erlaubte Tools,
+  Budget. Keine LangGraph/AlphaRavis-Tools.
+
+- `ai_stack/parallel_executor/context_planner.py`:
+  `ContextPreEstimator` tokenisiert Worker-Material (RAG, Tools, Files) via
+  llama.cpp `/tokenize` API — NICHT in eigenen Kontext geladen.
+  `SlotBudget` tracked KV-unified Pool (320k) mit 8% Reserve.
+  Asymmetrische Verteilung: Worker A 120k, Worker B 30k etc.
+  Admission Control: kein Worker-Start wenn `available < requested`.
+
+- `agent_graph.py` `_parallel_executor_node`: Pre-Estimation vor Spawn,
+  Budget-Enforcement im Worker-Prompt (`MAX_CONTEXT_BUDGET`),
+  `NEED_MORE_CONTEXT`-Eskalation. HermesWorker für Write-Tasks,
+  DirectLLMWorker für Read-Only. Pool-Daten aus ContextScheduler
+  (`_bigboss_ctx_total_from_scheduler`, `_bigboss_parallel_from_scheduler`)
+  oder Env-Fallback.
+
+- `GLOBAL_WORKER_REGISTRY` registriert `direct_llm` und `hermes` Worker
+  bei Graph-Build-Zeit.
+
+- Feature Flags (alle default OFF):
+  `ALPHARAVIS_PARALLEL_HERMES_WORKER`, `ALPHARAVIS_PARALLEL_CONTEXT_PLANNER`,
+  `ALPHARAVIS_PARALLEL_CONTEXT_SAFETY_RESERVE` (0.08),
+  `ALPHARAVIS_PARALLEL_WORKER_MAX_CONTEXT_RATIO` (0.85).
+
+- 91 tests in `tests/test_parallel_executor.py`: 59 original + 22 Stage 2
+  (HermesWorker + ContextPlanner) + 10 Stage 3 (Node-Integration), all passing.
+
+Offen für späteren Plan (nicht in Stage 3):
+- Alpha-Hermes-Kontrollstrategie (Schritt-für-Schritt-Intervention)
+- Automatische np-Anpassung
+- Worker-Priorisierung
+- Preemption
 
 ## Percentage-Based Context Budget Router
 

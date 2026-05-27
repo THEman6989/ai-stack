@@ -89,6 +89,21 @@ The current Docker architecture is split into these main roles:
   planner prompt is unchanged, and the existing sequential swarm path is
   unchanged. When enabled, workers run concurrently before the swarm, results are
   collected and merged.
+
+  **HermesWorker** (`worker_spawner.py`): Wraps the existing `call_hermes_agent`
+  path as a controlled WorkerSpawner. Hermes gets a bounded task with context,
+  allowed tools, and a context budget — it cannot call AlphaRavis/LangGraph back
+  or spawn further workers autonomously. Feature-flagged via
+  `ALPHARAVIS_PARALLEL_HERMES_WORKER=false`.
+
+  **ParallelContextPlanner** (`context_planner.py`): Conservative admission
+  control for KV-unified context pools (e.g. BigBoss np=4, 320k). `SlotBudget`
+  tracks pool usage with an 8% global safety reserve, supporting asymmetric
+  distribution (Worker A 120k, Worker B 30k). `ContextPreEstimator` tokenizes
+  worker material (RAG, files, tools) via llama.cpp `/tokenize` API — material
+  is NOT loaded into the estimator's own context. Workers are refused admission
+  when the pool is full. Feature-flagged via
+  `ALPHARAVIS_PARALLEL_CONTEXT_PLANNER=false`.
 - `Server Model Manager`: a dedicated LangGraph/Bridge access mode for
   `power_management_agent`. LibreChat sees it as the `server-model-manager`
   model/preset on the existing AlphaRavis Bridge, while native LangGraph
