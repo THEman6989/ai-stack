@@ -3109,20 +3109,61 @@ async def list_comfyui_models(folder: str = "checkpoints") -> str:
 
 @tool
 async def get_comfyui_history(prompt_id: str) -> str:
-    """Fetch ComfyUI history/output metadata for a prompt_id."""
+    """Fetch ComfyUI history plus extracted output URLs for a prompt_id."""
 
     client = _comfyui_client()
     if client is None:
         return _json_tool_result({"ok": False, "error": _comfyui_client_unavailable()})
     try:
-        return _json_tool_result({"ok": True, "base_url": client.base_url, "prompt_id": prompt_id, "history": await client.history(prompt_id)})
+        result = await client.history_outputs(prompt_id)
+        return _json_tool_result({"ok": True, "base_url": client.base_url, **result})
     except Exception as exc:
         return _json_tool_result({"ok": False, "base_url": getattr(client, "base_url", ""), "prompt_id": prompt_id, "error": str(exc)})
 
 
 @tool
+async def preflight_comfyui_workflow(workflow_json: str, check_server: bool = True) -> str:
+    """Validate ComfyUI API-format workflow JSON and report missing nodes/models before submit."""
+
+    client = _comfyui_client()
+    if client is None:
+        return _json_tool_result({"ok": False, "error": _comfyui_client_unavailable()})
+    try:
+        workflow = json.loads(workflow_json)
+    except Exception as exc:
+        return _json_tool_result({"ok": False, "error": f"Invalid workflow_json: {exc}"})
+    try:
+        report = await client.preflight_workflow(workflow, check_server=check_server)
+        return _json_tool_result({"ok": bool(report.get("ok")), "base_url": client.base_url, "preflight": report})
+    except Exception as exc:
+        return _json_tool_result({"ok": False, "base_url": getattr(client, "base_url", ""), "error": str(exc)})
+
+
+@tool
+async def manage_comfyui_queue(action: str = "free_memory") -> str:
+    """Run a bounded ComfyUI queue/system action: free_memory, interrupt, or clear_queue."""
+
+    client = _comfyui_client()
+    if client is None:
+        return _json_tool_result({"ok": False, "error": _comfyui_client_unavailable()})
+    action_key = (action or "free_memory").strip().lower().replace("-", "_")
+    try:
+        if action_key == "free_memory":
+            result = await client.free_memory()
+        elif action_key == "interrupt":
+            result = await client.interrupt()
+        elif action_key == "clear_queue":
+            result = await client.clear_queue()
+        else:
+            return _json_tool_result({"ok": False, "base_url": client.base_url, "error": "action must be one of: free_memory, interrupt, clear_queue"})
+        return _json_tool_result({"ok": True, "base_url": client.base_url, "action": action_key, "result": result})
+    except Exception as exc:
+        return _json_tool_result({"ok": False, "base_url": getattr(client, "base_url", ""), "action": action_key, "error": str(exc)})
+
+
+@tool
 async def submit_comfyui_workflow(workflow_json: str, client_id: str = "alpharavis") -> str:
-    """Submit a ComfyUI API-format workflow JSON when explicit workflow submission is enabled."""
+    """Preflight and submit ComfyUI API-format workflow JSON when explicit submission is enabled."""
 
     client = _comfyui_client()
     if client is None:
@@ -13446,6 +13487,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             list_comfyui_queue,
             list_comfyui_models,
             get_comfyui_history,
+            preflight_comfyui_workflow,
+            manage_comfyui_queue,
             submit_comfyui_workflow,
             register_media_asset,
             semantic_media_search,
@@ -13659,6 +13702,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             list_comfyui_queue,
             list_comfyui_models,
             get_comfyui_history,
+            preflight_comfyui_workflow,
+            manage_comfyui_queue,
             submit_comfyui_workflow,
             register_media_asset,
             semantic_media_search,
@@ -14087,6 +14132,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 list_comfyui_queue,
                 list_comfyui_models,
                 get_comfyui_history,
+                preflight_comfyui_workflow,
+                manage_comfyui_queue,
                 submit_comfyui_workflow,
                 prepare_comfy_for_pixelle,
                 register_media_asset,
@@ -14126,7 +14173,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 "then inspect queue/models/history as needed. Pixelle is the "
                 "simple text-to-image path; use direct ComfyUI tools when the "
                 "user asks for workflows, models, queues, prompt_id history, or "
-                "ComfyPC status. Direct workflow submission is intentionally "
+                "ComfyPC status. Always preflight workflow JSON before submit: "
+                "verify API format, node classes, and model dependencies. Direct "
+                "workflow submission is intentionally "
                 "blocked unless ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=true; "
                 "unknown workflow JSON can execute custom-node Python and must be "
                 "treated as trusted code only. For power/wake/shutdown actions, "

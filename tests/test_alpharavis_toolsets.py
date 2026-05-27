@@ -207,6 +207,8 @@ def test_comfyui_toolset_is_discoverable_and_gated_to_comfy_tools():
     assert "comfyui/workflows" in comfy.resolved_toolsets
     assert "check_comfyui_status" in comfy.tools
     assert "list_comfyui_queue" in comfy.tools
+    assert "preflight_comfyui_workflow" in comfy.tools
+    assert "manage_comfyui_queue" in comfy.tools
     assert "submit_comfyui_workflow" in comfy.tools
     assert "call_hermes_agent" not in comfy.tools
 

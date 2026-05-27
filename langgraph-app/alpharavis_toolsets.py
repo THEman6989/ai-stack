@@ -103,6 +103,8 @@ TOOLSETS: dict[str, Toolset] = {
             "list_comfyui_queue",
             "list_comfyui_models",
             "get_comfyui_history",
+            "preflight_comfyui_workflow",
+            "manage_comfyui_queue",
             "submit_comfyui_workflow",
             "prepare_comfy_for_pixelle",
             "check_external_service",

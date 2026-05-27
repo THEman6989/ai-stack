@@ -1723,7 +1723,10 @@ NEXT_PUBLIC_OFFICE_AGENT_ENABLED=true
 NEXT_PUBLIC_OFFICE_AGENT_NAME=office_agent
 
 # ComfyUI tab UI env vars (NEXT_PUBLIC_* are exposed to the browser).
-NEXT_PUBLIC_COMFYUI_PANEL_API_BASE=http://localhost:8130/comfyui
+# Direct points at ComfyUI itself; proxy points at media-gallery's /comfyui endpoints.
+# The tab can switch direct/proxy/auto at runtime and stores operator overrides in browser localStorage.
+NEXT_PUBLIC_COMFYUI_PANEL_API_BASE=http://localhost:8188
+NEXT_PUBLIC_COMFYUI_PROXY_API_BASE=http://localhost:8130/comfyui
 NEXT_PUBLIC_COMFYUI_AGENT_ENABLED=false
 NEXT_PUBLIC_COMFYUI_AGENT_NAME=comfyui_agent
 

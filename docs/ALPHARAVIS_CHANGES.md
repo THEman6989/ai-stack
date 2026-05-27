@@ -108,8 +108,16 @@ Not implemented yet (separate plan):
 - Docker Compose and `.env(exaple)` document/wire the new default-off flags and
   UI env vars. The UI tab is visible, but the dedicated swarm agent remains opt-in
   via `ALPHARAVIS_ENABLE_COMFYUI_AGENT=false` by default.
+- Hardened the ComfyUI integration follow-up: the UI tab now supports direct,
+  proxy, and auto-fallback connection modes with browser-local runtime overrides;
+  `ComfyUIClient` now has object-info, model-folder whitelisting, queue/free/
+  interrupt helpers, upload/view URL helpers, and history output extraction; and
+  workflow submission now runs a dependency preflight before `/prompt`.
+- Added explicit `preflight_comfyui_workflow` and `manage_comfyui_queue` tools to
+  the `comfyui/workflows` toolset and ComfyUI swarm worker so agents can inspect
+  workflows and perform bounded queue/memory actions without enabling submit.
 - Verification so far:
-  - `pytest -q tests/test_comfyui_client.py tests/test_alpharavis_toolsets.py tests/test_media_server.py` → 55 passed.
+  - `pytest -q tests/test_comfyui_client.py tests/test_alpharavis_toolsets.py tests/test_media_server.py` → 61 passed.
   - Python AST parse passed for `comfyui_client.py`, `agent_graph.py`,
     `alpharavis_toolsets.py`, and `media_server.py`; direct `py_compile` is still
     blocked by local `__pycache__` permissions.

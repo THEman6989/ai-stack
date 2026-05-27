@@ -341,11 +341,12 @@ for AlphaRavis/LangGraph/custom-agent flow.
 
 ## ComfyUI / ComfyPC Integration
 
-ComfyUI is integrated in two layers so LAN control stays centralized and the
-browser does not need to talk directly to the remote ComfyPC:
+ComfyUI is integrated in three paths so both local-host and LAN ComfyPC setups
+work without rebuilding the UI:
 
 ```text
-DeepAgents UI ComfyUI tab -> media-gallery /comfyui/* -> ComfyUI REST API
+DeepAgents UI ComfyUI tab -> ComfyUI REST API directly (default localhost:8188)
+DeepAgents UI ComfyUI tab -> media-gallery /comfyui/* -> ComfyUI REST API (proxy fallback)
 AlphaRavis LangGraph -> comfyui_agent / comfyui tools -> ComfyUI REST API
 Pixelle flows -> prepare_comfy_for_pixelle / ComfyPC power tools -> Pixelle
 ```
@@ -360,16 +361,23 @@ http://127.0.0.1:8188
 ```
 
 The narrow `comfyui/workflows` toolset exposes status, queue, model listing,
-history lookup, and gated workflow submission. The dedicated `comfyui_agent`
-peer is only registered when `ALPHARAVIS_ENABLE_COMFYUI_AGENT=true`; other swarm
-workers then get `transfer_to_comfyui` handoff tools. Workflow submission remains
-separately gated by `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=false` by default
-because arbitrary ComfyUI workflows/custom nodes have Python-code trust level.
+history lookup with output URL extraction, queue/memory management, explicit
+workflow preflight, and gated workflow submission. Preflight validates API-format
+JSON, rejects editor-format workflows, checks node classes through `/object_info`,
+and extracts checkpoint/LoRA/VAE/ControlNet/embedding references for dependency
+reports. The dedicated `comfyui_agent` peer is only registered when
+`ALPHARAVIS_ENABLE_COMFYUI_AGENT=true`; other swarm workers then get
+`transfer_to_comfyui` handoff tools. Workflow submission remains separately gated
+by `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=false` by default because arbitrary
+ComfyUI workflows/custom nodes have Python-code trust level.
 
 `media-gallery` exposes `/comfyui/status`, `/comfyui/queue`, and
 `/comfyui/models/{folder}` as lightweight browser-safe proxy endpoints. The
-ComfyUI tab uses those endpoints for health/queue/model visibility and uses
-agent-launcher prompts for substantial generate/inspect/fix workflow tasks.
+ComfyUI tab can use direct native ComfyUI paths (`/system_stats`, `/queue`,
+`/models/{folder}`) or those proxy paths, with an `auto` mode that tries direct
+first and falls back to proxy. Runtime overrides are stored in browser
+`localStorage`; Compose only provides defaults through `NEXT_PUBLIC_COMFYUI_PANEL_API_BASE`
+and `NEXT_PUBLIC_COMFYUI_PROXY_API_BASE`.
 
 ## MCP Integration
 

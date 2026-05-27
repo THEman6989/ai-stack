@@ -86,8 +86,17 @@ and placeholder detection; generated create/edit/template/batch/repair/preview
 prompts are submitted with `active_agent=office_agent` when
 `NEXT_PUBLIC_OFFICE_AGENT_ENABLED=true`.
 
-The ComfyUI tab is a lightweight controller for the remote ComfyPC. Browser
-requests go to `media-gallery` on port `8130`, not directly to ComfyUI, through:
+The ComfyUI tab is a lightweight controller for the configured ComfyUI server.
+It supports runtime connection switching without rebuilding the UI:
+
+```text
+direct: Browser -> ComfyUI native API, default http://localhost:8188
+auto:   try direct first, then media-gallery proxy
+proxy:  Browser -> media-gallery /comfyui endpoints on port 8130
+```
+
+The proxy endpoints remain available for deployments where the Docker container
+can reach the ComfyUI host:
 
 ```text
 GET http://localhost:8130/comfyui/status
@@ -95,15 +104,19 @@ GET http://localhost:8130/comfyui/queue
 GET http://localhost:8130/comfyui/models/{folder}
 ```
 
-Configure the target with either an explicit base URL or the existing remote-PC
-map:
+Configure the backend target with either an explicit base URL or the existing
+remote-PC map. Configure the browser defaults separately; operators can override
+both direct/proxy URLs in the tab and the values are stored in browser
+`localStorage`:
 
 ```bash
 ALPHARAVIS_COMFY_PC=comfy_server
 ALPHARAVIS_COMFYUI_PORT=8188
-# Optional explicit override; otherwise resolved from REMOTE_PCS.
+# Optional explicit backend override; otherwise resolved from REMOTE_PCS.
 ALPHARAVIS_COMFYUI_API_BASE=http://<comfypc-lan-ip>:8188
-NEXT_PUBLIC_COMFYUI_PANEL_API_BASE=http://localhost:8130/comfyui
+# Browser direct default and proxy fallback.
+NEXT_PUBLIC_COMFYUI_PANEL_API_BASE=http://localhost:8188
+NEXT_PUBLIC_COMFYUI_PROXY_API_BASE=http://localhost:8130/comfyui
 ```
 
 Substantial ComfyUI work can be routed to the dedicated swarm peer when enabled:
@@ -113,13 +126,17 @@ ALPHARAVIS_ENABLE_COMFYUI_AGENT=true
 ```
 
 Workflow submission remains separately disabled by default because arbitrary
-ComfyUI workflows/custom nodes can execute Python:
+ComfyUI workflows/custom nodes can execute Python. The ComfyUI Agent can still
+run a preflight while submit is disabled: it validates API-format JSON, detects
+editor-format workflows, checks known node classes via `/object_info`, extracts
+checkpoint/LoRA/VAE/ControlNet/embedding references, and reports missing models
+before any `/prompt` call is attempted.
 
 ```bash
 ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=false
 ```
 
-The ComfyUI tab itself only reads health/queue/model state and provides launcher
+The ComfyUI tab itself reads health/queue/model state and provides launcher
 prompts for the agent; it does not submit unknown workflows unless that explicit
 workflow-submit flag is enabled on the backend.
 
