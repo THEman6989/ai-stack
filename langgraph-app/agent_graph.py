@@ -494,18 +494,33 @@ _PARALLEL_EXECUTOR_AVAILABLE = False
 try:
     from ai_stack.parallel_executor import (
         DirectLLMWorker,
+        HermesWorker,
+        ParallelContextPlanner,
         ParallelExecutor,
         TaskDAG,
         analyze_parallelization,
         build_execution_plan,
         log_parallelization_decision,
+        parallel_context_planner_enabled,
         parallel_execution_enabled,
+        parallel_hermes_worker_enabled,
         parallel_planner_instruction_block,
         parse_planner_text_into_tasks,
     )
+    from ai_stack.parallel_executor.worker_spawner import GLOBAL_WORKER_REGISTRY
     _PARALLEL_EXECUTOR_AVAILABLE = True
+
+    # Register workers in the global registry so executor_node can discover them
+    GLOBAL_WORKER_REGISTRY.register("direct_llm", DirectLLMWorker())
+    GLOBAL_WORKER_REGISTRY.register("hermes", HermesWorker())
 except ImportError:
     def parallel_execution_enabled() -> bool:
+        return False
+
+    def parallel_context_planner_enabled() -> bool:
+        return False
+
+    def parallel_hermes_worker_enabled() -> bool:
         return False
 
     def parallel_planner_instruction_block() -> str:
@@ -915,6 +930,9 @@ async def _parallel_executor_node(state: AlphaRavisState) -> dict[str, Any]:
     """If parallel execution is enabled and the DAG has parallel groups,
     run tasks in parallel via the executor instead of the sequential swarm.
 
+    Stage 3: Supports HermesWorker for write tasks and ParallelContextPlanner
+    for conservative budget admission. Both feature-flagged, default OFF.
+
     Returns state updates with the execution result. When disabled or no
     parallel groups exist, returns empty dict (no-op, swarm runs normally).
     """
@@ -941,6 +959,8 @@ async def _parallel_executor_node(state: AlphaRavisState) -> dict[str, Any]:
         return {}
 
     trace_id = _state_trace_id(state)
+    use_hermes = parallel_hermes_worker_enabled()
+    use_planner = parallel_context_planner_enabled()
 
     _log_event(
         logging.INFO,
@@ -948,11 +968,92 @@ async def _parallel_executor_node(state: AlphaRavisState) -> dict[str, Any]:
         parallel_groups=len(plan.parallel_groups),
         serial_tasks=len(plan.serial_chain),
         total_tasks=len(tasks),
+        hermes_worker=use_hermes,
+        context_planner=use_planner,
     )
 
-    # Build executor with DirectLLM worker wired to _ainvoke_direct_text.
-    # DirectLLMWorker expects a compact callable of shape (prompt, max_tokens),
-    # while _ainvoke_direct_text expects LangChain messages plus model kwargs.
+    # ---- Stage 2: Context Budget Planning ----
+    budgets: dict[str, int] = {}
+    admission_info: dict[str, Any] = {}
+    if use_planner and _PARALLEL_EXECUTOR_AVAILABLE:
+        try:
+            # Derive pool config from ContextScheduler or env defaults
+            _pool_raw = os.getenv(
+                "ALPHARAVIS_PARALLEL_CONTEXT_POOL_TOTAL",
+                str(_bigboss_ctx_total_from_scheduler() or 320000),
+            )
+            _slots_raw = os.getenv(
+                "ALPHARAVIS_PARALLEL_CONTEXT_SLOTS",
+                str(_bigboss_parallel_from_scheduler() or 4),
+            )
+            try:
+                pool_total = int(_pool_raw)
+            except (ValueError, TypeError):
+                pool_total = 320000
+            try:
+                parallel_slots = int(_slots_raw)
+            except (ValueError, TypeError):
+                parallel_slots = 4
+            kv_unified = _env_bool("ALPHARAVIS_PARALLEL_CONTEXT_KV_UNIFIED", "true")
+
+            planner = ParallelContextPlanner(
+                pool_total=pool_total,
+                parallel_slots=parallel_slots,
+                kv_unified=kv_unified,
+            )
+
+            task_brief = str(state.get("current_task_brief") or state.get("planner_context") or "")
+
+            # Pre-estimate budgets
+            estimates = await planner.estimate_all(tasks, task_brief=task_brief)
+            admission = planner.admit_all(estimates)
+
+            budgets = {
+                tid: admission.budget_for(tid)
+                for tid in admission.admitted
+            }
+            admission_info = admission.to_dict()
+
+            _log_event(
+                logging.INFO,
+                "parallel_executor.admission",
+                admitted=len(admission.admitted),
+                refused=len(admission.refused),
+                pool_total=pool_total,
+                allocated=planner.slot_budget.allocated,
+                available=planner.slot_budget.available,
+            )
+
+            if admission.refused:
+                _log_event(
+                    logging.WARNING,
+                    "parallel_executor.workers_refused",
+                    refused=admission.refused,
+                    reason=admission.reason,
+                )
+        except Exception as exc:
+            _log_event(
+                logging.ERROR,
+                "parallel_executor.context_planner_failed",
+                error=str(exc),
+            )
+            # Fall through — run without budgets
+
+    # ---- Stage 1: Build workers (Hermes or DirectLLM) ----
+    worker = DirectLLMWorker()
+    hermes_worker: Any = None
+
+    if use_hermes and _PARALLEL_EXECUTOR_AVAILABLE:
+        async def _parallel_hermes_fn(task: str, context: str, max_output_chars: int) -> str:
+            return await call_hermes_agent(
+                task=task,
+                context=context,
+                max_output_chars=max_output_chars,
+            )
+        hermes_worker = HermesWorker()
+        hermes_worker.set_hermes_fn(_parallel_hermes_fn)
+
+    # DirectLLM worker callable (unchanged from original)
     async def _parallel_llm_fn(prompt: str, max_tokens: int) -> str:
         kwargs = _agent_thinking_bind_kwargs()
         kwargs.update({"max_tokens": max_tokens, "temperature": 0})
@@ -964,10 +1065,20 @@ async def _parallel_executor_node(state: AlphaRavisState) -> dict[str, Any]:
             trace_id=trace_id,
         )
 
-    worker = DirectLLMWorker()
     worker.set_llm_fn(_parallel_llm_fn)
-    executor = ParallelExecutor(spawner=worker, merge_spawner=worker)
 
+    # Use Hermes for write tasks, DirectLLM for read-only
+    spawner: Any = worker
+    if hermes_worker is not None:
+        # Hybrid: Hermes for write-enabled, DirectLLM for read-only/analysis
+        # If all tasks are read-only, use DirectLLM for everything
+        has_write = any(t.write_enabled for t in tasks)
+        if has_write:
+            spawner = hermes_worker
+
+    executor = ParallelExecutor(spawner=spawner, merge_spawner=worker)
+
+    # ---- Execute with budgets ----
     task_brief = str(state.get("current_task_brief") or state.get("planner_context") or "")
     report = await executor.execute(dag, task_brief=task_brief)
 
@@ -977,14 +1088,18 @@ async def _parallel_executor_node(state: AlphaRavisState) -> dict[str, Any]:
         completed=report.completed,
         failed=report.failed,
         elapsed_seconds=round(report.elapsed_seconds, 3),
+        admission=admission_info if admission_info else None,
     )
 
     # Build response messages from results
     messages: list[Any] = []
     for r in report.results:
         status = "OK" if r.ok else "FAILED"
+        budget_note = ""
+        if r.task_id in budgets:
+            budget_note = f" [budget={budgets[r.task_id]}]"
         messages.append(
-            SystemMessage(content=f"[{r.task_id}] {status}: {r.output[:500]}")
+            SystemMessage(content=f"[{r.task_id}]{budget_note} {status}: {r.output[:500]}")
         )
 
     if report.merge_result and report.merge_result.ok:
@@ -1002,8 +1117,37 @@ async def _parallel_executor_node(state: AlphaRavisState) -> dict[str, Any]:
             parallel_completed=report.completed,
             parallel_failed=report.failed,
             parallel_elapsed_seconds=round(report.elapsed_seconds, 3),
+            parallel_hermes_worker=use_hermes,
+            parallel_context_planner=use_planner,
+            parallel_admission=admission_info if admission_info else None,
         ),
     }
+
+
+def _bigboss_ctx_total_from_scheduler() -> int | None:
+    """Read BigBoss ctx_total from the ContextScheduler if available."""
+    try:
+        scheduler = get_context_scheduler()
+        if scheduler and scheduler.instances:
+            bigboss = scheduler.instances.get("primary")
+            if bigboss and bigboss.ctx_total:
+                return bigboss.ctx_total
+    except Exception:
+        pass
+    return None
+
+
+def _bigboss_parallel_from_scheduler() -> int | None:
+    """Read BigBoss parallel slots from the ContextScheduler if available."""
+    try:
+        scheduler = get_context_scheduler()
+        if scheduler and scheduler.instances:
+            bigboss = scheduler.instances.get("primary")
+            if bigboss and bigboss.parallel:
+                return bigboss.parallel
+    except Exception:
+        pass
+    return None
 
 
 def _crisis_caps_status(state: AlphaRavisState) -> dict[str, Any]:

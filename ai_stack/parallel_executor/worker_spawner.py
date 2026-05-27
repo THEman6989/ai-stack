@@ -1,19 +1,21 @@
 """Worker spawner for parallel task execution.
 
-Provides an adapter interface for spawning workers (Codex, Hermes, direct LLM)
+Provides an adapter interface for spawning workers (Hermes, direct LLM)
 in isolated worktrees. Ships with a dry-run / mock worker for testing.
-Real Codex/Hermes adapters can be plugged in later.
 
 Design:
 - Abstract base class defines the spawner contract.
 - DryRunWorker logs what it would do without executing.
-- Real adapters (CodexSpawner, HermesSpawner) can be added later.
+- DirectLLMWorker calls BigBoss directly via a callable.
+- HermesWorker wraps the existing call_hermes_agent path.
+- No Codex adapter — explicitly excluded.
 """
 
 from __future__ import annotations
 
 import abc
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -76,7 +78,7 @@ class DryRunWorker(WorkerSpawner):
     """Logs what it would do without actually executing code.
 
     Useful for testing the parallel executor end-to-end without
-    real Codex/Hermes calls.
+    real Hermes/DirectLLM calls.
     """
 
     def __init__(self, *, simulate_success: bool = True) -> None:
@@ -155,20 +157,39 @@ class DirectLLMWorker(WorkerSpawner):
             dry = DryRunWorker()
             return await dry.spawn(task, worktree=worktree, task_brief=task_brief)
 
+        context_budget = kwargs.get("context_budget", 0)
+        max_tokens = kwargs.get(
+            "max_tokens",
+            4096 if task.required_model_class == ModelClass.BIG_MODEL else 1024,
+        )
+
+        # Build budget-aware prompt
+        budget_line = ""
+        if context_budget > 0:
+            budget_line = (
+                f"\nMAX_CONTEXT_BUDGET: {context_budget} tokens. "
+                f"Your total context (prompt + output + tool results) MUST NOT exceed this. "
+                f"If you approach the limit, summarize intermediate results. "
+                f"If you need more, signal NEED_MORE_CONTEXT.\n"
+            )
+
         prompt = (
             f"Task: {task.title}\n"
             f"Type: {task.task_type.value}\n"
             f"Context: {task_brief}\n"
+            f"{budget_line}"
         )
-        max_tokens = 4096 if task.required_model_class == ModelClass.BIG_MODEL else 1024
 
         try:
+            start = time.time()
             output = await self._llm_fn(prompt, max_tokens)
+            elapsed = time.time() - start
             return WorkerResult(
                 task_id=task.task_id,
                 status="completed",
                 output=str(output),
                 worktree=worktree,
+                elapsed_seconds=round(elapsed, 3),
             )
         except Exception as exc:
             return WorkerResult(
@@ -180,7 +201,124 @@ class DirectLLMWorker(WorkerSpawner):
 
 
 # ---------------------------------------------------------------------------
-# Adapter registry (for future real adapters)
+# Hermes worker (wraps the existing call_hermes_agent path)
+# ---------------------------------------------------------------------------
+
+
+HermesAgentFn = Any  # async callable: (task: str, context: str, max_output_chars: int) -> str
+
+
+class HermesWorker(WorkerSpawner):
+    """Worker that delegates to the external Hermes Agent via its OpenAI API.
+
+    Uses the existing call_hermes_agent tool path. A callable is injected
+    at construction to avoid circular imports with agent_graph.
+
+    Hermes is a controlled worker — it gets a bounded task with context,
+    allowed tools, and a context budget. It does NOT:
+    - Call LangGraph or AlphaRavis back
+    - Spawn further workers autonomously
+    - Make destructive decisions without approval
+    """
+
+    def __init__(
+        self,
+        hermes_fn: HermesAgentFn | None = None,
+        *,
+        model_override: str = "",
+    ) -> None:
+        self._hermes_fn = hermes_fn
+        self.model_override = model_override
+
+    def set_hermes_fn(self, fn: HermesAgentFn) -> None:
+        """Inject the Hermes callable (call_hermes_agent from agent_graph)."""
+        self._hermes_fn = fn
+
+    async def spawn(
+        self,
+        task: PlannedTask,
+        *,
+        worktree: WorktreeInfo | None = None,
+        task_brief: str = "",
+        **kwargs: Any,
+    ) -> WorkerResult:
+        if self._hermes_fn is None:
+            dry = DryRunWorker()
+            return await dry.spawn(task, worktree=worktree, task_brief=task_brief)
+
+        context_budget = kwargs.get("context_budget", 0)
+        extra_context_parts: list[str] = []
+
+        if task_brief:
+            extra_context_parts.append(f"Task Brief: {task_brief}")
+
+        if task.affected_file_globs:
+            extra_context_parts.append(
+                f"Affected files: {', '.join(task.affected_file_globs[:10])}"
+            )
+
+        if task.dependencies:
+            extra_context_parts.append(
+                f"Dependencies: {', '.join(task.dependencies)}"
+            )
+
+        if context_budget > 0:
+            extra_context_parts.append(
+                f"MAX_CONTEXT_BUDGET: {context_budget} tokens. "
+                f"Your total context MUST NOT exceed this. "
+                f"Summarize intermediate results if approaching limit. "
+                f"Signal NEED_MORE_CONTEXT if you need more."
+            )
+
+        if task.write_enabled:
+            extra_context_parts.append(
+                "You MAY write files within the approved workspace. "
+                "Respect AlphaRavis file safety: no credentials, caches, "
+                "shell profiles, or OS/system paths."
+            )
+        else:
+            extra_context_parts.append(
+                "READ-ONLY mode: inspect, analyze, report. Do NOT write files."
+            )
+
+        extra_context = "\n".join(extra_context_parts)
+        max_output_chars = min(
+            kwargs.get("max_output_chars", 6000),
+            context_budget if context_budget > 0 else 6000,
+        )
+        max_output_chars = max(1000, max_output_chars)
+
+        try:
+            start = time.time()
+            output = await self._hermes_fn(
+                task=task.title,
+                context=extra_context,
+                max_output_chars=max_output_chars,
+            )
+            elapsed = time.time() - start
+            return WorkerResult(
+                task_id=task.task_id,
+                status="completed",
+                output=str(output),
+                worktree=worktree,
+                elapsed_seconds=round(elapsed, 3),
+                metadata={
+                    "worker_type": "hermes",
+                    "max_output_chars": max_output_chars,
+                    "context_budget": context_budget,
+                },
+            )
+        except Exception as exc:
+            return WorkerResult(
+                task_id=task.task_id,
+                status="failed",
+                error=f"HermesWorker: {type(exc).__name__}: {exc}",
+                worktree=worktree,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Adapter registry
 # ---------------------------------------------------------------------------
 
 
@@ -198,9 +336,11 @@ class WorkerAdapterRegistry:
 
     def get_for_task(self, task: PlannedTask) -> WorkerSpawner:
         """Select a spawner based on task type and model class."""
-        # For now, always return dry-run unless a real spawner is registered
+        # Hermes worker selection is controlled by feature flag,
+        # not derived from task metadata. The caller (executor_node)
+        # decides which worker type to use.
         if task.write_enabled:
-            return self._spawners.get("codex", DryRunWorker())
+            return self._spawners.get("hermes", DryRunWorker())
         if task.task_type.value in {"summarization", "classification"}:
             return self._spawners.get("direct_llm", DryRunWorker())
         return self._spawners.get("default", DryRunWorker())

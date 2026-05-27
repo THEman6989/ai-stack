@@ -33,6 +33,8 @@ from ai_stack.parallel_executor.worker_spawner import (
     DryRunWorker,
     DirectLLMWorker,
     DirectLLMFn,
+    HermesWorker,
+    HermesAgentFn,
     WorkerAdapterRegistry,
     GLOBAL_WORKER_REGISTRY,
 )
@@ -49,6 +51,16 @@ from ai_stack.parallel_executor.executor import (
     ParallelExecutor,
     build_execution_plan,
     get_executor,
+)
+
+from ai_stack.parallel_executor.context_planner import (
+    WorkerContextEstimate,
+    SlotBudget,
+    ContextPreEstimator,
+    AdmissionResult,
+    ParallelContextPlanner,
+    parallel_context_planner_enabled,
+    parallel_hermes_worker_enabled,
 )
 
 __all__ = [
@@ -74,6 +86,8 @@ __all__ = [
     "DryRunWorker",
     "DirectLLMWorker",
     "DirectLLMFn",
+    "HermesWorker",
+    "HermesAgentFn",
     "WorkerAdapterRegistry",
     "GLOBAL_WORKER_REGISTRY",
     # File lock
@@ -86,4 +100,12 @@ __all__ = [
     "ParallelExecutor",
     "build_execution_plan",
     "get_executor",
+    # Context planner
+    "WorkerContextEstimate",
+    "SlotBudget",
+    "ContextPreEstimator",
+    "AdmissionResult",
+    "ParallelContextPlanner",
+    "parallel_context_planner_enabled",
+    "parallel_hermes_worker_enabled",
 ]

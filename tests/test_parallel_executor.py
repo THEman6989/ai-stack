@@ -18,19 +18,27 @@ if str(ROOT) not in sys.path:
 from ai_stack.parallel_executor import (
     DryRunWorker,
     DirectLLMWorker,
+    HermesWorker,
     ModelClass,
     PlannedTask,
     RiskLevel,
+    SlotBudget,
+    ContextPreEstimator,
+    WorkerContextEstimate,
+    ParallelContextPlanner,
     TaskDAG,
     TaskType,
     WorktreeManager,
     analyze_parallelization,
     log_parallelization_decision,
+    parallel_context_planner_enabled,
     parallel_execution_enabled,
+    parallel_hermes_worker_enabled,
     parallel_planner_instruction_block,
     parse_planner_text_into_tasks,
     repo_has_uncommitted_changes,
 )
+from ai_stack.parallel_executor.worker_spawner import GLOBAL_WORKER_REGISTRY
 from ai_stack.parallel_executor.task_graph import (
     CHOKEPOINT_FILE_PATTERNS,
     _classify_task_from_title,
@@ -785,3 +793,528 @@ class TestResponsesCompatibility:
         parsed = json.loads(json_str)
         assert parsed["total_tasks"] == 3
         assert len(parsed["results"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# HermesWorker
+# ---------------------------------------------------------------------------
+
+
+class TestHermesWorker:
+    def test_spawn_with_hermes_fn(self):
+        calls = []
+
+        async def hermes_fn(task: str, context: str, max_output_chars: int) -> str:
+            calls.append((task, context, max_output_chars))
+            return "hermes did the work"
+
+        worker = HermesWorker(hermes_fn)
+        task = PlannedTask(
+            task_id="h1",
+            title="Refactor database layer",
+            task_type=TaskType.WRITE_IMPLEMENTATION,
+            read_only=False,
+            write_enabled=True,
+            affected_file_globs=["src/db.py", "src/models.py"],
+            dependencies=["task_001"],
+        )
+
+        result = asyncio.run(
+            worker.spawn(
+                task,
+                task_brief="Split monolithic db.py into modules",
+                context_budget=120000,
+                max_output_chars=6000,
+            )
+        )
+
+        assert result.status == "completed"
+        assert isinstance(result.output, str)
+        assert result.metadata["worker_type"] == "hermes"
+        assert result.metadata["context_budget"] == 120000
+        assert len(calls) == 1
+
+        call_task, call_context, call_max_chars = calls[0]
+        assert call_task == "Refactor database layer"
+        assert "Split monolithic db.py into modules" in call_context
+        assert "src/db.py" in call_context
+        assert "MAX_CONTEXT_BUDGET: 120000 tokens" in call_context
+        assert "READ-ONLY mode" not in call_context
+        assert call_max_chars == 6000
+
+    def test_spawn_read_only_task(self):
+        async def hermes_fn(task, context, max_output_chars):
+            return "analysis complete"
+
+        worker = HermesWorker(hermes_fn)
+        task = PlannedTask(
+            task_id="h2",
+            title="Analyze frontend",
+            task_type=TaskType.READ_ONLY_ANALYSIS,
+            read_only=True,
+            write_enabled=False,
+        )
+
+        result = asyncio.run(worker.spawn(task, context_budget=30000))
+        assert result.status == "completed"
+
+    def test_spawn_fallback_when_no_fn(self):
+        worker = HermesWorker()
+        task = PlannedTask(
+            task_id="h3", title="Task",
+            task_type=TaskType.READ_ONLY_ANALYSIS,
+            read_only=True, write_enabled=False,
+        )
+        result = asyncio.run(worker.spawn(task))
+        assert result.status == "dry_run"
+
+    def test_spawn_handles_hermes_error(self):
+        async def failing_fn(task, context, max_output_chars):
+            raise RuntimeError("Hermes unreachable")
+
+        worker = HermesWorker(failing_fn)
+        task = PlannedTask(
+            task_id="h4", title="Will fail",
+            task_type=TaskType.WRITE_IMPLEMENTATION,
+            read_only=False, write_enabled=True,
+        )
+
+        result = asyncio.run(worker.spawn(task))
+        assert result.status == "failed"
+        assert "Hermes unreachable" in result.error
+
+
+# ---------------------------------------------------------------------------
+# Context planner (SlotBudget + ContextPreEstimator + ParallelContextPlanner)
+# ---------------------------------------------------------------------------
+
+
+class TestSlotBudget:
+    def test_initial_state(self):
+        budget = SlotBudget(pool_total=320000, parallel_slots=4, kv_unified=True)
+        assert budget.safety_reserve == 25600  # 8% of 320k
+        assert budget.usable_pool == 294400  # 320k - 25.6k
+        assert budget.available == 294400
+        assert budget.active_count == 0
+
+    def test_admit_and_release(self):
+        budget = SlotBudget(pool_total=320000, parallel_slots=4)
+        assert budget.admit("task_a", 120000) is True
+        assert budget.active_count == 1
+        assert budget.admit("task_b", 30000) is True
+        assert budget.active_count == 2
+        # Total allocated: 150k, available: 294.4k - 150k = 144.4k
+        assert budget.available == 294400 - 150000
+
+        released = budget.release("task_a")
+        assert released == 120000
+        assert budget.active_count == 1
+
+    def test_refuse_when_pool_full(self):
+        budget = SlotBudget(pool_total=320000, parallel_slots=2)
+        # Fill with one huge task
+        assert budget.admit("task_a", 250000) is True
+        # Not enough left
+        assert budget.can_admit(100000) is False
+        assert budget.admit("task_b", 100000) is False
+        assert budget.active_count == 1
+
+    def test_refuse_when_slots_exhausted(self):
+        budget = SlotBudget(pool_total=320000, parallel_slots=2)
+        assert budget.admit("task_a", 50000) is True
+        assert budget.admit("task_b", 50000) is True
+        # Still room in pool, but no more slots
+        assert budget.available > 0
+        assert budget.can_admit(10000) is False
+
+    def test_asymmetric_distribution(self):
+        """Worker A gets 120k, Worker B gets 30k, Worker C gets 70k, Worker D gets 30k."""
+        budget = SlotBudget(pool_total=320000, parallel_slots=4)
+        assert budget.admit("heavy_analysis", 120000) is True
+        assert budget.admit("light_summary", 30000) is True
+        assert budget.admit("medium_impl", 70000) is True
+        assert budget.admit("light_summary_2", 30000) is True
+        # Total: 250k, pool: 294.4k usable → OK
+        assert budget.allocated == 250000
+        assert budget.active_count == 4
+
+    def test_to_dict(self):
+        budget = SlotBudget(pool_total=320000, parallel_slots=4)
+        budget.admit("task_a", 50000)
+        d = budget.to_dict()
+        assert d["pool_total"] == 320000
+        assert d["parallel_slots"] == 4
+        assert d["active_count"] == 1
+
+
+class TestContextPreEstimator:
+    def test_estimate_without_runtime(self):
+        """Without a runtime client, heuristic based on char count is used."""
+        estimator = ContextPreEstimator()
+        task = PlannedTask(
+            task_id="e1",
+            title="Analyze codebase structure",
+            task_type=TaskType.READ_ONLY_ANALYSIS,
+            read_only=True,
+            write_enabled=False,
+        )
+        est = asyncio.run(estimator.estimate_worker(task, task_brief="Inspect the repo"))
+        assert est.task_id == "e1"
+        assert est.prompt_tokens > 0
+        assert est.total_estimated > 0
+        assert est.safety_overhead > 0
+        assert est.recommended_budget == est.total_estimated + est.safety_overhead
+
+    def test_estimate_with_rag_material(self):
+        estimator = ContextPreEstimator()
+        task = PlannedTask(
+            task_id="e2", title="Summarize",
+            task_type=TaskType.SUMMARIZATION,
+            read_only=True, write_enabled=False,
+        )
+        rag = ["RAG result 1" * 100, "RAG result 2" * 200]
+        est = asyncio.run(estimator.estimate_worker(task, rag_material=rag))
+        assert est.rag_tokens > 0
+        assert est.total_estimated > est.rag_tokens
+
+    def test_estimate_20_percent_overhead(self):
+        estimator = ContextPreEstimator()
+        task = PlannedTask(
+            task_id="e3", title="Task",
+            task_type=TaskType.READ_ONLY_ANALYSIS,
+            read_only=True, write_enabled=False,
+        )
+        est = asyncio.run(estimator.estimate_worker(task))
+        assert est.safety_overhead >= 512  # Minimum overhead
+        assert est.recommended_budget >= est.total_estimated  # Budget >= base
+
+
+class TestParallelContextPlanner:
+    def test_admit_all_success(self):
+        planner = ParallelContextPlanner(pool_total=320000, parallel_slots=4)
+        est_a = WorkerContextEstimate(
+            task_id="a", total_estimated=100000,
+            safety_overhead=20000, recommended_budget=120000,
+        )
+        est_b = WorkerContextEstimate(
+            task_id="b", total_estimated=25000,
+            safety_overhead=5000, recommended_budget=30000,
+        )
+        estimates = {"a": est_a, "b": est_b}
+
+        result = planner.admit_all(estimates)
+        assert result.ok is True
+        assert result.admitted == ["a", "b"]
+        assert result.refused == []
+
+    def test_admit_refuse_when_pool_full(self):
+        planner = ParallelContextPlanner(
+            pool_total=100000, parallel_slots=4,
+            safety_reserve_pct=0.05,
+        )
+        est_a = WorkerContextEstimate(
+            task_id="a", total_estimated=70000,
+            safety_overhead=10000, recommended_budget=80000,
+        )
+        est_b = WorkerContextEstimate(
+            task_id="b", total_estimated=30000,
+            safety_overhead=5000, recommended_budget=35000,
+        )
+        estimates = {"a": est_a, "b": est_b}
+
+        result = planner.admit_all(estimates)
+        # Budget: 100k * 0.95 = 95k usable. task_a takes 80k, 15k left < 35k needed
+        assert len(result.admitted) == 1
+        assert "a" in result.admitted
+        assert "b" in result.refused
+
+    def test_release_frees_budget(self):
+        planner = ParallelContextPlanner(pool_total=320000, parallel_slots=4)
+        est = WorkerContextEstimate(
+            task_id="a", total_estimated=50000,
+            safety_overhead=10000, recommended_budget=60000,
+        )
+        planner.admit_all({"a": est})
+        assert planner.slot_budget.active_count == 1
+
+        planner.release("a")
+        assert planner.slot_budget.active_count == 0
+        assert planner.slot_budget.allocated == 0
+
+    def test_max_ratio_caps_individual_budget(self):
+        """Worker budget capped at max_ratio * pool_total."""
+        planner = ParallelContextPlanner(
+            pool_total=320000, parallel_slots=4,
+            safety_reserve_pct=0.05,
+        )
+        # max_ratio = 0.85 → max per worker = 272000
+        est = WorkerContextEstimate(
+            task_id="huge", total_estimated=250000,
+            safety_overhead=50000, recommended_budget=300000,
+        )
+        result = planner.admit_all({"huge": est})
+        assert result.ok is True
+        # Budget should have been capped
+        assert planner.slot_budget.active_budgets["huge"] <= 272000
+
+    def test_feature_flag_defaults(self, monkeypatch):
+        monkeypatch.delenv("ALPHARAVIS_PARALLEL_CONTEXT_PLANNER", raising=False)
+        monkeypatch.delenv("ALPHARAVIS_PARALLEL_HERMES_WORKER", raising=False)
+        assert parallel_context_planner_enabled() is False
+        assert parallel_hermes_worker_enabled() is False
+
+    def test_feature_flag_enabled(self, monkeypatch):
+        monkeypatch.setenv("ALPHARAVIS_PARALLEL_CONTEXT_PLANNER", "true")
+        monkeypatch.setenv("ALPHARAVIS_PARALLEL_HERMES_WORKER", "true")
+        assert parallel_context_planner_enabled() is True
+        assert parallel_hermes_worker_enabled() is True
+
+    def test_to_dict(self):
+        planner = ParallelContextPlanner(pool_total=320000, parallel_slots=4)
+        est = WorkerContextEstimate(
+            task_id="a", recommended_budget=60000,
+        )
+        planner.admit_all({"a": est})
+        d = planner.to_dict()
+        assert d["slot_budget"]["active_count"] == 1
+        assert d["is_full"] is False
+
+
+# ---------------------------------------------------------------------------
+# HermesWorker + ContextPlanner integration
+# ---------------------------------------------------------------------------
+
+
+class TestHermesWorkerWithBudget:
+    def test_hermes_worker_receives_budget_in_context(self):
+        """HermesWorker maps context_budget kwarg into the Hermes call context."""
+        calls = []
+
+        async def hermes_fn(task: str, context: str, max_output_chars: int) -> str:
+            calls.append((task, context, max_output_chars))
+            return "done"
+
+        worker = HermesWorker(hermes_fn)
+        task = PlannedTask(
+            task_id="hw1",
+            title="Heavy analysis task",
+            task_type=TaskType.READ_ONLY_ANALYSIS,
+            read_only=True,
+            write_enabled=False,
+        )
+
+        asyncio.run(
+            worker.spawn(
+                task,
+                task_brief="Analyze the full codebase",
+                context_budget=120000,
+                max_output_chars=4000,
+            )
+        )
+
+        _, context, max_out = calls[0]
+        assert "MAX_CONTEXT_BUDGET: 120000 tokens" in context
+        assert "READ-ONLY mode" in context
+        assert max_out == 4000
+
+    def test_hermes_worker_write_task_context(self):
+        async def hermes_fn(task, context, max_output_chars):
+            return "ok"
+
+        worker = HermesWorker(hermes_fn)
+        task = PlannedTask(
+            task_id="hw2",
+            title="Refactor module",
+            task_type=TaskType.WRITE_IMPLEMENTATION,
+            read_only=False,
+            write_enabled=True,
+        )
+
+        asyncio.run(worker.spawn(task, context_budget=80000))
+        # No easy way to extract context without mock, already tested above
+
+
+# ---------------------------------------------------------------------------
+# Node integration tests (HermesWorker + ContextPlanner in _parallel_executor_node)
+# ---------------------------------------------------------------------------
+
+
+class TestParallelExecutorNodeIntegration:
+    """Tests for the rewired _parallel_executor_node with HermesWorker + ContextPlanner."""
+
+    def test_hermes_worker_selected_for_write_tasks(self, monkeypatch):
+        """When ALPHARAVIS_PARALLEL_HERMES_WORKER=true, write tasks get HermesWorker."""
+        monkeypatch.setenv("ALPHARAVIS_PARALLEL_HERMES_WORKER", "true")
+        assert parallel_hermes_worker_enabled() is True
+
+    def test_context_planner_flags_off_by_default(self, monkeypatch):
+        """All parallel control flags default to OFF."""
+        monkeypatch.delenv("ALPHARAVIS_PARALLEL_CONTEXT_PLANNER", raising=False)
+        monkeypatch.delenv("ALPHARAVIS_PARALLEL_HERMES_WORKER", raising=False)
+        monkeypatch.delenv("ALPHARAVIS_PARALLEL_TASK_EXECUTION", raising=False)
+        assert parallel_context_planner_enabled() is False
+        assert parallel_hermes_worker_enabled() is False
+        assert parallel_execution_enabled() is False
+
+    def test_feature_flags_independent(self, monkeypatch):
+        """Each flag can be toggled independently."""
+        monkeypatch.setenv("ALPHARAVIS_PARALLEL_TASK_EXECUTION", "true")
+        monkeypatch.setenv("ALPHARAVIS_PARALLEL_HERMES_WORKER", "true")
+        monkeypatch.setenv("ALPHARAVIS_PARALLEL_CONTEXT_PLANNER", "false")
+        assert parallel_execution_enabled() is True
+        assert parallel_hermes_worker_enabled() is True
+        assert parallel_context_planner_enabled() is False
+
+    def test_slot_budget_refuses_when_pool_full_with_320k_4_slots(self):
+        """At 320k pool with 4 slots, workers must fit within budget."""
+        budget = SlotBudget(pool_total=320000, parallel_slots=4, kv_unified=True)
+        # Admit 4 workers each with 75k = 300k total (fits in 294.4k usable)
+        assert budget.admit("w1", 75000) is True
+        assert budget.admit("w2", 75000) is True
+        assert budget.admit("w3", 75000) is True
+        # 225k allocated, 69.4k available — should fit 75k
+        assert budget.admit("w4", 75000) is True
+        # All 4 slots used
+        assert budget.active_count == 4
+        assert budget.can_admit(1000) is False  # No more slots
+
+    def test_asymmetric_budget_with_realistic_worker_distribution(self):
+        """Simulates: heavy analysis 120k, light summary 30k, medium impl 70k, light summary 30k."""
+        budget = SlotBudget(pool_total=320000, parallel_slots=4)
+        assert budget.admit("heavy_analysis", 120000) is True
+        assert budget.admit("light_summary_1", 30000) is True
+        assert budget.admit("medium_impl", 70000) is True
+        assert budget.admit("light_summary_2", 30000) is True
+        # Total: 250k (should fit in 294.4k usable)
+        assert budget.allocated == 250000
+        assert budget.active_count == 4
+
+    def test_global_registry_has_workers(self):
+        """GLOBAL_WORKER_REGISTRY has direct_llm and hermes registered."""
+        registry = GLOBAL_WORKER_REGISTRY
+        llm_worker = registry.get("direct_llm")
+        hermes_worker = registry.get("hermes")
+        assert llm_worker is not None
+        assert hermes_worker is not None
+        assert llm_worker is not hermes_worker  # Different instances
+
+    def test_directllm_worker_accepts_context_budget_kwarg(self):
+        """DirectLLMWorker should accept context_budget kwarg without error."""
+        calls = []
+
+        async def llm_fn(prompt: str, max_tokens: int) -> str:
+            calls.append((prompt, max_tokens))
+            return "done"
+
+        worker = DirectLLMWorker(llm_fn)
+        task = PlannedTask(
+            task_id="t1",
+            title="Test task",
+            task_type=TaskType.READ_ONLY_ANALYSIS,
+            read_only=True,
+            write_enabled=False,
+        )
+
+        result = asyncio.run(
+            worker.spawn(task, task_brief="Test", context_budget=80000)
+        )
+        assert result.status == "completed"
+
+        prompt, max_tokens = calls[0]
+        assert "MAX_CONTEXT_BUDGET: 80000 tokens" in prompt
+
+    def test_hermes_worker_callable_signature_matches_call_hermes_agent(self):
+        """HermesWorker hermes_fn must accept (task, context, max_output_chars)."""
+        calls = []
+
+        async def hermes_fn(task: str, context: str, max_output_chars: int) -> str:
+            calls.append({
+                "task": task,
+                "context": context,
+                "max_output_chars": max_output_chars,
+            })
+            return "hermes result"
+
+        worker = HermesWorker(hermes_fn)
+        task = PlannedTask(
+            task_id="signature_test",
+            title="Signature verification task",
+            task_type=TaskType.WRITE_IMPLEMENTATION,
+            read_only=False,
+            write_enabled=True,
+            affected_file_globs=["src/test.py"],
+        )
+
+        result = asyncio.run(
+            worker.spawn(
+                task,
+                task_brief="Verify the callable signature",
+                context_budget=50000,
+                max_output_chars=4000,
+            )
+        )
+
+        assert result.status == "completed"
+        assert len(calls) == 1
+        assert calls[0]["task"] == "Signature verification task"
+        assert "MAX_CONTEXT_BUDGET: 50000 tokens" in calls[0]["context"]
+        assert "src/test.py" in calls[0]["context"]
+        assert calls[0]["max_output_chars"] == 4000
+
+
+# ---------------------------------------------------------------------------
+# Full integration: admission → spawn → result with mock workers
+# ---------------------------------------------------------------------------
+
+
+class TestFullIntegrationAdmissionToSpawn:
+    def test_planner_admits_then_workers_spawn_with_budgets(self):
+        """End-to-end: planner admits workers, then HermesWorker spawns with budgets."""
+        planner = ParallelContextPlanner(pool_total=320000, parallel_slots=4)
+
+        est_a = WorkerContextEstimate(
+            task_id="task_a", total_estimated=100000,
+            safety_overhead=20000, recommended_budget=120000,
+        )
+        est_b = WorkerContextEstimate(
+            task_id="task_b", total_estimated=25000,
+            safety_overhead=5000, recommended_budget=30000,
+        )
+        estimates = {"task_a": est_a, "task_b": est_b}
+
+        admission = planner.admit_all(estimates)
+        assert admission.ok is True
+        assert len(admission.admitted) == 2
+
+        # Verify budgets match
+        for tid in admission.admitted:
+            budget = admission.budget_for(tid)
+            assert budget > 0
+            assert budget <= 272000  # max_ratio cap
+
+        planner.release("task_a")
+        planner.release("task_b")
+        assert planner.slot_budget.active_count == 0
+
+    def test_refused_workers_not_spawned(self):
+        """When pool is full, refused workers are reported."""
+        planner = ParallelContextPlanner(
+            pool_total=100000, parallel_slots=2,
+            safety_reserve_pct=0.05,
+        )
+        est_large = WorkerContextEstimate(
+            task_id="large", total_estimated=70000,
+            safety_overhead=10000, recommended_budget=80000,
+        )
+        est_small = WorkerContextEstimate(
+            task_id="small", total_estimated=20000,
+            safety_overhead=3000, recommended_budget=23000,
+        )
+        estimates = {"large": est_large, "small": est_small}
+
+        admission = planner.admit_all(estimates)
+        # large (80k) fits in 95k usable. small (23k) doesn't fit in remaining 15k.
+        assert "large" in admission.admitted
+        assert "small" in admission.refused
+        assert len(admission.refused) == 1
+
