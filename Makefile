@@ -25,12 +25,21 @@ TAILSCALE_AUTO ?= apply
 TAILSCALE_EXTRA ?=
 CONFIG_HOST ?= 127.0.0.1
 CONFIG_PORT ?= 8765
+COMFYUI_RELAY_SOCKET ?= runtime/comfyui.sock
+COMFYUI_RELAY_TARGET_HOST ?= 127.0.0.1
+COMFYUI_RELAY_TARGET_PORT ?= 8188
+COMFYUI_SMOKE_DIRECT_BASE ?=
+COMFYUI_SMOKE_PROXY_BASE ?=
+COMFYUI_SMOKE_REQUIRE_SOCKET ?= auto
+COMFYUI_SMOKE_VIEW_FILENAME ?=
+COMFYUI_SMOKE_TIMEOUT_SECONDS ?= 5
+COMFYUI_SMOKE_ARGS := $(if $(COMFYUI_SMOKE_DIRECT_BASE),--direct-base "$(COMFYUI_SMOKE_DIRECT_BASE)",) $(if $(COMFYUI_SMOKE_PROXY_BASE),--proxy-base "$(COMFYUI_SMOKE_PROXY_BASE)",) --socket "$(COMFYUI_RELAY_SOCKET)" --require-socket "$(COMFYUI_SMOKE_REQUIRE_SOCKET)" $(if $(COMFYUI_SMOKE_VIEW_FILENAME),--view-filename "$(COMFYUI_SMOKE_VIEW_FILENAME)",) --timeout "$(COMFYUI_SMOKE_TIMEOUT_SECONDS)"
 VISION_ARGS := --vision-enabled "$(VISION_ENABLED)" --vision-url "$(VISION_URL)" --vision-base-url "$(VISION_BASE_URL)" --vision-model "$(VISION_MODEL)" --vision-fallback "$(VISION_FALLBACK)"
 VISION_CONFIG_SET := $(strip $(VISION_ENABLED)$(VISION_URL)$(VISION_BASE_URL)$(VISION_MODEL)$(VISION_FALLBACK))
 TAILSCALE_DASHBOARD_ARG := $(if $(filter false no 0,$(TAILSCALE_DASHBOARD)),--exclude-dashboard,)
 TAILSCALE_SUDO_ARG := $(if $(filter true yes 1 always,$(TAILSCALE_SUDO)),--sudo,$(if $(filter false no 0 never off,$(TAILSCALE_SUDO)),--sudo-mode never,--sudo-mode auto))
 
-.PHONY: help install install-fullstreaming install-hybrid install-nonstreaming install-chat install-chat-fullstreaming install-chat-nonstreaming config configure profiles streaming fullstreaming full-streaming hybrid-streaming nonstreaming chat-completions chat-fullstreaming chat-nonstreaming model-management owner-model-management media-vision vision-embedding video-analysis openwebui update update-no-start status up up-fullstreaming up-chat-fullstreaming service-dashboard dashboard test-ui tailscale-prep tailscale-auto tailscale-plan tailscale-overrides tailscale-routes-apply tailscale-routes-disable tailscale-apply tailscale-disable disable-tailscale tailscale-status down logs submodules build bridge-smoke hermes-smoke media-smoke openwebui-smoke
+.PHONY: help install install-fullstreaming install-hybrid install-nonstreaming install-chat install-chat-fullstreaming install-chat-nonstreaming config configure profiles streaming fullstreaming full-streaming hybrid-streaming nonstreaming chat-completions chat-fullstreaming chat-nonstreaming model-management owner-model-management media-vision vision-embedding video-analysis openwebui update update-no-start status up up-fullstreaming up-chat-fullstreaming service-dashboard dashboard test-ui comfyui-relay comfyui-relay-status comfyui-relay-smoke comfyui-smoke tailscale-prep tailscale-auto tailscale-plan tailscale-overrides tailscale-routes-apply tailscale-routes-disable tailscale-apply tailscale-disable disable-tailscale tailscale-status down logs submodules build bridge-smoke hermes-smoke media-smoke openwebui-smoke
 
 help:
 	@printf '%s\n' \
@@ -56,6 +65,9 @@ help:
 		'  make up-chat-fullstreaming   # set Chat Completions streaming, then recreate langgraph-api/api-bridge/test UI' \
 		'  make service-dashboard       # start only the AlphaRavis service dashboard on port 8090' \
 		'  make test-ui                 # start/rebuild only the Bridge test UI on port 8140' \
+		'  make comfyui-relay           # foreground Unix-socket relay: runtime/comfyui.sock -> 127.0.0.1:8188' \
+		'  make comfyui-smoke           # ComfyUI host/proxy/socket fail-closed integration smoke' \
+		'  make comfyui-relay-status    # check the configured Unix relay socket path' \
 		'  make down | make logs | make status' \
 		'' \
 		'Tailscale Serve HTTPS:' \
@@ -69,7 +81,7 @@ help:
 		'  make tailscale-status' \
 		'' \
 		'Smoke checks:' \
-		'  make bridge-smoke | make hermes-smoke | make media-smoke | make openwebui-smoke'
+		'  make bridge-smoke | make hermes-smoke | make media-smoke | make openwebui-smoke | make comfyui-smoke'
 
 install:
 	$(MAKE) tailscale-prep
@@ -201,6 +213,17 @@ dashboard: service-dashboard
 
 test-ui:
 	$(COMPOSE) up -d --build bridge-test-ui
+
+comfyui-relay:
+	$(PYTHON) scripts/comfyui_unix_relay.py --socket "$(COMFYUI_RELAY_SOCKET)" --target-host "$(COMFYUI_RELAY_TARGET_HOST)" --target-port "$(COMFYUI_RELAY_TARGET_PORT)"
+
+comfyui-relay-status:
+	@test -S "$(COMFYUI_RELAY_SOCKET)" && printf '%s\n' "ComfyUI relay socket exists: $(COMFYUI_RELAY_SOCKET)" || (printf '%s\n' "ComfyUI relay socket missing: $(COMFYUI_RELAY_SOCKET)"; exit 1)
+
+comfyui-relay-smoke: comfyui-relay-status
+
+comfyui-smoke:
+	$(PYTHON) scripts/comfyui_smoke.py $(COMFYUI_SMOKE_ARGS)
 
 tailscale-prep:
 	@case "$(TAILSCALE_AUTO)" in \

@@ -243,6 +243,7 @@ services:
       - ./local-deep-researcher-repo:/app/local_deep_researcher
       - ./:/workspace # WICHTIG: Die Sandbox braucht Zugriff auf deine Files zum Coden!
       - ./office-output:/workspace/office-output
+      - ./runtime:/workspace/runtime
       - ./logs:/logs
     environment:
       # Most AlphaRavis switches live in .env. This block only pins container
@@ -263,6 +264,7 @@ services:
       - ALPHARAVIS_COMFYUI_WORKFLOW_SUBMIT=${ALPHARAVIS_COMFYUI_WORKFLOW_SUBMIT:-false}
       - ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=${ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT:-false}
       - ALPHARAVIS_COMFYUI_API_BASE=${ALPHARAVIS_COMFYUI_API_BASE:-}
+      - ALPHARAVIS_COMFYUI_PUBLIC_BASE_URL=${ALPHARAVIS_COMFYUI_PUBLIC_BASE_URL:-http://localhost:8188}
       - ALPHARAVIS_COMFYUI_PORT=${ALPHARAVIS_COMFYUI_PORT:-8188}
       - ALPHARAVIS_ENABLE_OFFICECLI_MCP=${ALPHARAVIS_ENABLE_OFFICECLI_MCP:-false}
       - ALPHARAVIS_PGVECTOR_DATABASE_URL=${ALPHARAVIS_PGVECTOR_DATABASE_URL:-postgresql://postgres:${POSTGRES_PASSWORD}@vectordb:5432/rag_api}
@@ -355,6 +357,7 @@ services:
       - REMOTE_PCS=${REMOTE_PCS:-{}}
       - ALPHARAVIS_COMFY_PC=${ALPHARAVIS_COMFY_PC:-comfy_server}
       - ALPHARAVIS_COMFYUI_API_BASE=${ALPHARAVIS_COMFYUI_API_BASE:-}
+      - ALPHARAVIS_COMFYUI_PUBLIC_BASE_URL=${ALPHARAVIS_COMFYUI_PUBLIC_BASE_URL:-http://localhost:8188}
       - ALPHARAVIS_COMFYUI_PORT=${ALPHARAVIS_COMFYUI_PORT:-8188}
       - ALPHARAVIS_OFFICE_OUTPUT_ROOT=${ALPHARAVIS_OFFICE_OUTPUT_ROOT:-/workspace/office-output}
       - ALPHARAVIS_OFFICE_OUTPUT_PUBLIC_BASE_URL=${ALPHARAVIS_OFFICE_OUTPUT_PUBLIC_BASE_URL:-http://localhost:8130/office-output}
@@ -485,6 +488,8 @@ services:
     build:
       context: ./submodules/deep-agents-ui
       dockerfile: ../../docker/deep-agents-ui/Dockerfile
+      # NEXT_PUBLIC_* args are baked into the Next.js browser bundle at build time.
+      # Rebuild deep-agents-ui after changing ComfyUI browser-visible defaults/flags.
       args:
         NEXT_PUBLIC_COMFYUI_PANEL_API_BASE: ${NEXT_PUBLIC_COMFYUI_PANEL_API_BASE:-http://localhost:8188}
         NEXT_PUBLIC_COMFYUI_PROXY_API_BASE: ${NEXT_PUBLIC_COMFYUI_PROXY_API_BASE:-http://localhost:8130/comfyui}

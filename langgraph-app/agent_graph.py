@@ -3219,6 +3219,34 @@ async def submit_comfyui_workflow(workflow_json: str, client_id: str = "alpharav
     except Exception as exc:
         return _json_tool_result({"ok": False, "error": f"Invalid workflow_json: {exc}"})
     try:
+        if _env_bool("ALPHARAVIS_COMFYUI_AGENT_SUBMIT_VIA_MEDIA_GALLERY", "true"):
+            payload = {"workflow": workflow, "client_id": client_id or "alpharavis", "check_server": True}
+            media_gallery_prompt_url = f"{MEDIA_GALLERY_URL}" + "/comfyui/prompt"
+            async with httpx.AsyncClient(timeout=float(os.getenv("ALPHARAVIS_MEDIA_GALLERY_TIMEOUT_SECONDS", "45"))) as gallery_client:
+                response = await gallery_client.post(media_gallery_prompt_url, json=payload)
+            if response.status_code >= 400:
+                return _json_tool_result(
+                    {
+                        "ok": False,
+                        "base_url": client.base_url,
+                        "submit_via": media_gallery_prompt_url,
+                        "status_code": response.status_code,
+                        "error": response.text[:500],
+                    }
+                )
+            data = response.json() if response.content else {}
+            if not isinstance(data, dict):
+                data = {"data": data}
+            raw_result_payload = data.get("result")
+            result_payload = raw_result_payload if isinstance(raw_result_payload, dict) else {}
+            return _json_tool_result(
+                {
+                    "ok": not bool(data.get("blocked") or data.get("error") or result_payload.get("blocked")),
+                    "base_url": client.base_url,
+                    "submit_via": media_gallery_prompt_url,
+                    "result": data,
+                }
+            )
         result = await client.submit_workflow(workflow, client_id=client_id)
         return _json_tool_result({"ok": not bool(result.get("blocked")) and not bool(result.get("error")), "base_url": client.base_url, "result": result})
     except Exception as exc:

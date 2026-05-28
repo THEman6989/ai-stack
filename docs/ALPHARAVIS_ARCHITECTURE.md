@@ -360,12 +360,24 @@ REMOTE_PCS[ALPHARAVIS_COMFY_PC] + ALPHARAVIS_COMFYUI_PORT
 http://127.0.0.1:8188
 ```
 
+`ALPHARAVIS_COMFYUI_API_BASE` can also be a Unix-domain socket URL such as
+`unix:///workspace/runtime/comfyui.sock`. This is the preferred workaround for
+local Linux setups where Docker bridge traffic cannot reach a host-local
+ComfyUI port: run `make comfyui-relay` on the host, mount `./runtime` into both
+`langgraph-api` and `media-gallery`, and keep
+`ALPHARAVIS_COMFYUI_PUBLIC_BASE_URL` pointed at the browser-reachable ComfyUI
+base (normally `http://localhost:8188`) so extracted `/view` links stay usable
+from the UI. The media-gallery `/comfyui/view` proxy itself fetches bytes through
+the configured `ComfyUIClient` transport, so it also works when the internal
+ComfyUI base is `unix://...` instead of container-reachable TCP.
+
 The narrow `comfyui/workflows` toolset exposes status, queue, model listing,
 history lookup with output URL extraction, queue/memory management, explicit
 workflow preflight, and gated workflow submission. Preflight validates API-format
 JSON, rejects editor-format workflows, checks node classes through `/object_info`,
-and extracts checkpoint/LoRA/VAE/ControlNet/embedding references for dependency
-reports. The dedicated `comfyui_agent` peer is only registered when
+and extracts checkpoint/LoRA/VAE/ControlNet/CLIP/DualCLIP/TripleCLIP,
+CLIP-vision, diffusion-model, style-model, upscale-model, and embedding
+references for dependency reports. The dedicated `comfyui_agent` peer is only registered when
 `ALPHARAVIS_ENABLE_COMFYUI_AGENT=true`; other swarm workers then get
 `transfer_to_comfyui` handoff tools. Workflow submission remains separately gated
 by `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=false` by default because arbitrary
@@ -379,13 +391,23 @@ The ComfyUI tab can use direct native ComfyUI paths (`/system_stats`, `/queue`,
 `/models/{folder}`, `/history/{prompt_id}`, `/object_info`, `/view`) or those
 proxy paths, with an `auto` mode that tries direct first and falls back to proxy.
 Draft mode performs preflight without queue submission. Live Submit is disabled
-by default and posts through `media-gallery` `/comfyui/prompt` only, so native
-browser direct mode cannot bypass `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT`.
-Runtime overrides are stored in browser `localStorage`; Compose provides defaults
-through `NEXT_PUBLIC_COMFYUI_PANEL_API_BASE` and
+by default and always uses `media-gallery` as the single execution path: the UI
+posts proxy `/comfyui/preflight` first and only then proxy `/comfyui/prompt`, so
+native browser direct mode cannot validate one ComfyUI instance while executing
+another or bypass `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT`. Proxy payloads
+with `ok=false` or `result.blocked=true` are treated as blocked/failed in the UI
+instead of being displayed as successful submissions. Agent-side
+`submit_comfyui_workflow` uses the same media-gallery `/comfyui/prompt` route by
+default (`ALPHARAVIS_COMFYUI_AGENT_SUBMIT_VIA_MEDIA_GALLERY=true`) and keeps the
+low-level direct client submit only as an explicit compatibility fallback when
+that route is disabled. Runtime overrides are stored in browser `localStorage`;
+Compose provides defaults through `NEXT_PUBLIC_COMFYUI_PANEL_API_BASE` and
 `NEXT_PUBLIC_COMFYUI_PROXY_API_BASE` and mirrors
 `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT` into
-`NEXT_PUBLIC_COMFYUI_WORKFLOW_SUBMIT_ENABLED`.
+`NEXT_PUBLIC_COMFYUI_WORKFLOW_SUBMIT_ENABLED`. Those `NEXT_PUBLIC_*` values are
+Next.js browser build-time values: backend flag changes need a container recreate,
+but browser-visible ComfyUI flag/default changes require rebuilding
+`deep-agents-ui`.
 
 For generated outputs, the tab accepts a ComfyUI `prompt_id`, fetches history,
 extracts image/video/audio output records, and can register them in the Media

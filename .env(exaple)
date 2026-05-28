@@ -586,12 +586,20 @@ ALPHARAVIS_COMFY_PC=comfy_server
 ALPHARAVIS_COMFYUI_PORT=8188
 # Optional explicit ComfyUI base URL. When empty, AlphaRavis derives
 # http://REMOTE_PCS[ALPHARAVIS_COMFY_PC].ip:ALPHARAVIS_COMFYUI_PORT.
+# If Docker cannot reach a host-local ComfyUI port, run `make comfyui-relay`
+# on the host and set this to unix:///workspace/runtime/comfyui.sock.
 ALPHARAVIS_COMFYUI_API_BASE=
+# Browser-reachable base used for ComfyUI /view URLs when the backend talks over
+# a Unix socket or another internal-only address.
+ALPHARAVIS_COMFYUI_PUBLIC_BASE_URL=http://localhost:8188
 # Dedicated ComfyUI swarm agent is opt-in; Pixelle image generation still works separately.
 ALPHARAVIS_ENABLE_COMFYUI_AGENT=false
 # Submitting arbitrary ComfyUI workflow JSON can execute custom-node Python.
-# Keep false unless you trust the workflow source.
+# Keep false unless you trust the workflow source. This is the canonical backend gate;
+# an older non-canonical alias is accepted only when this is unset.
 ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=false
+# Keep agent-triggered submit on the same media-gallery policy/gating route as the UI.
+ALPHARAVIS_COMFYUI_AGENT_SUBMIT_VIA_MEDIA_GALLERY=true
 
 # Service probes. BIG_BOSS_API_BASE is used as fallback for big LLM health.
 # For ComfyUI, /system_stats is the default if REMOTE_PCS.comfy_server.ip exists.
@@ -1727,8 +1735,10 @@ NEXT_PUBLIC_OFFICE_AGENT_NAME=office_agent
 # The tab can switch direct/proxy/auto at runtime and stores operator overrides in browser localStorage.
 NEXT_PUBLIC_COMFYUI_PANEL_API_BASE=http://localhost:8188
 NEXT_PUBLIC_COMFYUI_PROXY_API_BASE=http://localhost:8130/comfyui
-# UI-side switch for the Live Submit button. Backend submit still requires
-# ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=true.
+# UI-side switch for local/non-Compose UI builds. Compose mirrors ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT
+# into this NEXT_PUBLIC_* value at build time. Backend submit still requires
+# ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=true. After changing browser-visible
+# ComfyUI NEXT_PUBLIC_* values, rebuild deep-agents-ui; container recreate alone is not enough.
 NEXT_PUBLIC_COMFYUI_WORKFLOW_SUBMIT_ENABLED=false
 NEXT_PUBLIC_COMFYUI_AGENT_ENABLED=false
 NEXT_PUBLIC_COMFYUI_AGENT_NAME=comfyui_agent

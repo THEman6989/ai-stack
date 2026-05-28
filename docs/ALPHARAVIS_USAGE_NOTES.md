@@ -132,10 +132,82 @@ NEXT_PUBLIC_COMFYUI_PANEL_API_BASE=http://localhost:8188
 NEXT_PUBLIC_COMFYUI_PROXY_API_BASE=http://localhost:8130/comfyui
 ```
 
+If the stack runs in Docker and cannot reach a host-local ComfyUI port, use the
+Unix-socket relay instead of changing firewall/iptables rules:
+
+```bash
+# Terminal 1 on the host; keep running, or supervise it with pm2/systemd.
+make comfyui-relay
+
+# .env for the Docker services:
+ALPHARAVIS_COMFYUI_API_BASE=unix:///workspace/runtime/comfyui.sock
+ALPHARAVIS_COMFYUI_PUBLIC_BASE_URL=http://localhost:8188
+NEXT_PUBLIC_COMFYUI_PANEL_API_BASE=http://localhost:8188
+NEXT_PUBLIC_COMFYUI_PROXY_API_BASE=http://localhost:8130/comfyui
+```
+
+`docker-compose.yml` mounts `./runtime` into `langgraph-api` and
+`media-gallery`, so both the Agent path and browser proxy path can use the same
+socket. `ALPHARAVIS_COMFYUI_PUBLIC_BASE_URL` is only for generated `/view` links;
+do not set it to the `unix://` value. The `/comfyui/view` proxy fetches output
+bytes through the same internal client transport, so it is also Unix-socket aware.
+Browser-direct mode still needs ComfyUI to allow cross-origin reads, e.g. launch
+ComfyUI with `--enable-cors-header '*'`.
+
+Useful relay checks:
+
+```bash
+make comfyui-relay-status
+make comfyui-relay-smoke
+make comfyui-smoke
+# Optional /comfyui/view check when you know an output filename:
+make comfyui-smoke COMFYUI_SMOKE_VIEW_FILENAME=ComfyUI_00001_.png
+```
+
+`make comfyui-smoke` checks host-direct `/system_stats`, the relay socket when
+`ALPHARAVIS_COMFYUI_API_BASE=unix://...` is configured, proxy `/comfyui/status`,
+proxy `/comfyui/queue`, fail-closed `/comfyui/prompt`, and optionally proxy
+`/comfyui/view`.
+
+For reboot-safe relay supervision, either use a `systemd --user` unit:
+
+```ini
+# ~/.config/systemd/user/alpharavis-comfyui-relay.service
+[Unit]
+Description=AlphaRavis ComfyUI Unix-socket relay
+After=network-online.target
+
+[Service]
+WorkingDirectory=/path/to/ai-stack
+ExecStart=/usr/bin/env python scripts/comfyui_unix_relay.py --socket runtime/comfyui.sock --target-host 127.0.0.1 --target-port 8188
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now alpharavis-comfyui-relay.service
+systemctl --user status alpharavis-comfyui-relay.service
+```
+
+or PM2:
+
+```bash
+pm2 start scripts/comfyui_unix_relay.py --name alpharavis-comfyui-relay --interpreter python -- --socket runtime/comfyui.sock --target-host 127.0.0.1 --target-port 8188
+pm2 save
+pm2 status alpharavis-comfyui-relay
+```
+
 Substantial ComfyUI work can be routed to the dedicated swarm peer when enabled:
 
 ```bash
 ALPHARAVIS_ENABLE_COMFYUI_AGENT=true
+# Agent workflow submit normally uses media-gallery /comfyui/prompt as the
+# central policy/gating route. Set false only for explicit legacy direct-submit testing.
+ALPHARAVIS_COMFYUI_AGENT_SUBMIT_VIA_MEDIA_GALLERY=true
 ```
 
 Workflow submission remains separately disabled by default because arbitrary
@@ -144,11 +216,22 @@ still run a Draft preflight while submit is disabled: it validates API-format JS
 editor-format workflows, checks known node classes via `/object_info`, extracts
 checkpoint/LoRA/VAE/ControlNet/embedding references, and reports missing models
 before any `/prompt` call is attempted. In the UI, Live Submit is a separate mode
-and is wired through `media-gallery` `/comfyui/prompt` only, so it still honors
-the backend gate instead of posting directly to native ComfyUI from the browser.
+and always uses the media-gallery proxy path for both `/comfyui/preflight` and
+`/comfyui/prompt`; browser-direct mode is only for status/draft inspection and
+cannot validate one backend while submitting through another. Proxy `ok=false`
+and `result.blocked=true` responses are surfaced as blocked/failed instead of as
+successful submissions.
 
 ```bash
 ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=false
+# Canonical backend gate. Legacy alias ALPHARAVIS_COMFYUI_WORKFLOW_SUBMIT is
+# accepted only when the canonical variable is unset; prefer the canonical name.
+
+# NEXT_PUBLIC_* values are build-time browser flags in Next.js. Container recreate reicht
+# for backend flags, but changing browser-visible ComfyUI flags requires:
+docker compose build deep-agents-ui
+docker compose up -d deep-agents-ui
+
 # Compose mirrors the backend gate into the UI build/runtime env.
 NEXT_PUBLIC_COMFYUI_WORKFLOW_SUBMIT_ENABLED=false
 ```

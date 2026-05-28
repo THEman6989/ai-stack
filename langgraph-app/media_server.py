@@ -248,19 +248,16 @@ async def comfyui_prompt_endpoint(request: ComfyUIWorkflowRequest):
 
 @app.get("/comfyui/view")
 async def comfyui_view_endpoint(filename: str, subfolder: str = "", type: str = "output"):
-    """Proxy a ComfyUI /view output for browser use when Docker can reach ComfyUI."""
+    """Proxy a ComfyUI /view output through the configured internal transport."""
 
     client = _comfyui_media_client()
     if client is None:
         return await _comfyui_proxy_error()
     try:
-        url = client.view_url(filename, subfolder=subfolder, file_type=type)
-        async with httpx.AsyncClient(timeout=getattr(client, "timeout", 30)) as http_client:
-            response = await http_client.get(url)
-        response.raise_for_status()
+        result = await client.view_bytes(filename, subfolder=subfolder, file_type=type)
         return Response(
-            content=response.content,
-            media_type=response.headers.get("content-type") or "application/octet-stream",
+            content=result.get("content", b""),
+            media_type=result.get("content_type") or "application/octet-stream",
             headers={"Cache-Control": "public, max-age=3600"},
         )
     except Exception as exc:

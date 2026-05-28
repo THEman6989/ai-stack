@@ -4,6 +4,59 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-28 — ComfyUI Docker Host-Proxy Hardening
+
+- Added a supported Unix-domain-socket path for local ComfyUI deployments where
+  Docker containers cannot reach the host ComfyUI TCP port. The host runs
+  `scripts/comfyui_unix_relay.py` (or `make comfyui-relay`) and containers talk
+  to `unix:///workspace/runtime/comfyui.sock`.
+- `docker-compose.yml` now mounts `./runtime` into both `langgraph-api` and
+  `media-gallery`, and explicitly passes
+  `ALPHARAVIS_COMFYUI_PUBLIC_BASE_URL` so ComfyUI history output `/view` links
+  remain browser-reachable even when the backend uses a socket.
+- `.env(exaple)` documents the socket relay variables while keeping the ComfyUI
+  agent and workflow submission feature flags default OFF.
+- The ComfyUI tab agent launcher remains a thin `sendMessage(...,
+  activeAgent=comfyui_agent)` handoff when `NEXT_PUBLIC_COMFYUI_AGENT_ENABLED`
+  is enabled; otherwise it falls back to copying prompts.
+- Hardened the proxy/output path after audit: `media-gallery` `/comfyui/view`
+  now fetches bytes through `ComfyUIClient.view_bytes()`, so Unix-socket
+  deployments no longer fall back to broken container-local `localhost:8188`.
+- Live Submit in the ComfyUI tab now always performs proxy `/comfyui/preflight`
+  followed by proxy `/comfyui/prompt`; direct/browser preflight remains draft-only.
+  Proxy payloads with `ok=false` or `result.blocked=true` are shown as blocked
+  instead of logged as successful submissions.
+- Agent-side `submit_comfyui_workflow` now prefers the same media-gallery
+  `/comfyui/prompt` route by default via
+  `ALPHARAVIS_COMFYUI_AGENT_SUBMIT_VIA_MEDIA_GALLERY=true`, while keeping direct
+  client submit only as an explicit compatibility fallback.
+- Extended ComfyUI workflow preflight model extraction to cover DualCLIP/
+  TripleCLIP inputs (`clip_name1/2/3`), CLIP-vision, diffusion-model, style-model,
+  and upscale-model references. Backend and ComfyUI tab mapping now stay in sync
+  for those folders.
+- Added `make comfyui-smoke` plus `scripts/comfyui_smoke.py` to verify host-direct
+  `/system_stats`, optional Unix relay socket, media-gallery `/comfyui/status`,
+  `/comfyui/queue`, fail-closed `/comfyui/prompt`, and optional `/comfyui/view`.
+  Added relay lifecycle helpers `make comfyui-relay-status` and
+  `make comfyui-relay-smoke`.
+- Documented copy-paste user-systemd and PM2 supervision examples for
+  `scripts/comfyui_unix_relay.py` so the relay can survive reboot/crashes.
+- Clarified ComfyUI env handling: `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT` is
+  the canonical backend gate, the older alias is accepted only when the canonical
+  variable is unset, and `NEXT_PUBLIC_COMFYUI_*` browser values are build-time
+  Next.js values requiring `docker compose build deep-agents-ui` after changes.
+- Verification completed on the local stack: focused ComfyUI/media/toolset/source
+  tests passed (`78 passed`, including model mapping and smoke-doc source tests),
+  Python py_compile passed with a temporary pycache, `docker compose config --quiet`
+  passed, UI eslint passed,
+  `docker compose build deep-agents-ui` plus recreate of `langgraph-api`,
+  `media-gallery`, and `deep-agents-ui` completed, `make comfyui-smoke` passed
+  host-direct/proxy/socket/fail-closed checks, media-gallery `/comfyui/*`
+  proxy endpoints reached ComfyUI through the socket including `/comfyui/view`
+  output byte proxying, browser direct/proxy fetches
+  worked, `active_agent=comfyui_agent` ran status/queue/model tools, and a trusted
+  tiny SD1.5 Live Submit produced and URL-registered one output.
+
 ## 2026-05-27 — Alpha-Hermes-Kontrollstrategie: Node-Verdrahtung
 
 - Rewired `_parallel_executor_node` in `agent_graph.py` to support:

@@ -82,16 +82,19 @@ Still needed:
   panel, file picker) verified functional. Drag/drop, paste, Monaco editor, and
   thread rename/delete not specifically exercised this pass — revisit when those
   paths change.
-- Live ComfyUI runtime smoke with an actual ComfyUI host: direct host checks are
-  verified on `http://localhost:8188` (`/system_stats`, `/queue`,
-  `/models/checkpoints`, `/object_info`) and a trusted API-format preflight report
-  returns `ready=true` without submitting. The rebuilt ComfyUI tab renders on
-  port 3000 and shows Draft/Live workflow controls with Live disabled by default.
-  Current local blockers are explicit: browser direct API reads fail unless
-  ComfyUI is started with permissive CORS, and media-gallery proxy calls time out
-  because Docker cannot reach the host ComfyUI port on this CachyOS/Arch setup.
-  Keep workflow submission disabled unless testing a trusted API-format workflow
-  explicitly, and only enable Live after CORS/proxy reachability is fixed.
+- Live ComfyUI runtime smoke with an actual ComfyUI host: completed
+  (2026-05-28). Direct host checks pass on `http://localhost:8188`
+  (`/system_stats`, `/queue`, `/models/checkpoints`, `/object_info`), browser
+  direct reads work with ComfyUI launched using `--enable-cors-header '*'`, and
+  media-gallery proxy calls work through the supported Unix-socket relay
+  (`make comfyui-relay`,
+  `ALPHARAVIS_COMFYUI_API_BASE=unix:///workspace/runtime/comfyui.sock`) mounted
+  into both `langgraph-api` and `media-gallery`. The ComfyUI tab renders on port
+  3000, auto mode selects direct when available, proxy endpoints report status /
+  queue / checkpoints via the socket, `comfyui_agent` handoff runs the ComfyUI
+  status/queue/models tools, and a trusted tiny SD1.5 API-format Live Submit
+  completed and registered its output in the Media Gallery with URL-only output
+  registration. Workflow submission remains feature-flagged default OFF.
 - Office Phase 6 / Managed Office Workflows: implemented and smoke-verified
   (2026-05-28). `media-gallery` exposes `/office/preview`,
   `/office/repair`, `/office/watch/start`, `/office/watch/stop`,
@@ -139,10 +142,20 @@ Still needed:
   `media-gallery` exposes `/comfyui/status`, `/comfyui/queue`, and
   `/comfyui/models/{folder}`, `/comfyui/history/{prompt_id}`,
   `/comfyui/view`, and `/comfyui/outputs/register` as proxy/registration
-  endpoints, while the DeepAgents UI tab can use direct/proxy/auto connection
-  modes with browser-local URL overrides, live WebSocket+polling progress, and
-  prompt-history output registration into the Media Gallery. Plan details live in
-  `.hermes/plans/comfyui-swarm-tab-integration.md`.
+  endpoints. `/comfyui/view` is now Unix-socket aware through
+  `ComfyUIClient.view_bytes()`, Live Submit always uses proxy preflight plus
+  proxy prompt, proxy `ok=false`/`blocked=true` responses are surfaced as blocks,
+  and agent-side `submit_comfyui_workflow` defaults to the same media-gallery
+  `/comfyui/prompt` route. Follow-up hardening extended the preflight model
+  mapping for DualCLIP/TripleCLIP, CLIP-vision, diffusion, style, and upscale
+  model inputs; added `make comfyui-smoke`, `make comfyui-relay-status`, and
+  `make comfyui-relay-smoke`; documented systemd-user/PM2 relay supervision; and
+  clarified build-time `NEXT_PUBLIC_COMFYUI_*` handling plus canonical env-gate
+  naming. The DeepAgents UI tab can use direct/proxy/auto
+  connection modes with browser-local URL overrides, live WebSocket+polling
+  progress, and prompt-history output registration into the Media Gallery. Plan
+  details live in `.hermes/plans/comfyui-swarm-tab-integration.md` and
+  `.hermes/plans/2026-05-28_140851-comfyui-proxy-submit-hardening.md`.
 - Decide later whether to tackle AionUi Tier 3 items: i18n, inline tool-result
   streaming, and conversation tabs.
 - ~~Remaining work is runtime/browser smoke plus deeper preview/download/watch-session

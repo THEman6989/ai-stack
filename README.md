@@ -149,6 +149,7 @@ make tailscale-disable             # local LAN HTTP access
 make bridge-smoke                  # test bridge connectivity
 make hermes-smoke                  # test Hermes connectivity
 make media-smoke                   # test media gallery
+make comfyui-smoke                 # test ComfyUI host/proxy/socket integration
 ```
 
 ## Documentation

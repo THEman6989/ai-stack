@@ -141,6 +141,9 @@ These are shortcuts around `make install` or `make streaming`.
 | `make service-dashboard` | Start only the AlphaRavis Service Dashboard. |
 | `make dashboard` | Alias for `make service-dashboard`. |
 | `make test-ui` | Start or rebuild only the Bridge Test UI. |
+| `make comfyui-relay` | Run the foreground ComfyUI TCP-to-Unix relay (`runtime/comfyui.sock -> 127.0.0.1:8188`). |
+| `make comfyui-relay-status` | Check that the configured relay socket exists. |
+| `make comfyui-relay-smoke` | Alias for relay socket status; useful before proxy smokes. |
 
 ## Tailscale Targets
 
@@ -173,6 +176,7 @@ are debugging the Makefile flow itself.
 | `make hermes-smoke` | Send a small OpenAI-compatible request to Hermes. |
 | `make media-smoke` | Check the media gallery health endpoint. |
 | `make openwebui-smoke` | Check the OpenWebUI HTTP endpoint. |
+| `make comfyui-smoke` | Check ComfyUI host `/system_stats`, optional Unix relay socket, media-gallery `/comfyui/status` and `/comfyui/queue`, fail-closed `/comfyui/prompt`, and optional `/comfyui/view`. |
 
 ## Variables
 
@@ -268,6 +272,28 @@ Example:
 
 ```bash
 CONFIG_HOST=127.0.0.1 CONFIG_PORT=8765 make config
+```
+
+### ComfyUI Smoke And Relay
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `COMFYUI_RELAY_SOCKET` | `runtime/comfyui.sock` | Host-side Unix socket path for `make comfyui-relay` and smoke checks. |
+| `COMFYUI_RELAY_TARGET_HOST` | `127.0.0.1` | TCP host that the relay forwards to. |
+| `COMFYUI_RELAY_TARGET_PORT` | `8188` | TCP port that the relay forwards to. |
+| `COMFYUI_SMOKE_DIRECT_BASE` | from `.env` or `http://127.0.0.1:8188` | Host/browser ComfyUI base for `/system_stats`. |
+| `COMFYUI_SMOKE_PROXY_BASE` | from `.env` or `http://127.0.0.1:8130/comfyui` | Media-gallery proxy base. |
+| `COMFYUI_SMOKE_REQUIRE_SOCKET` | `auto` | `auto`, `true`, or `false` for relay socket validation. |
+| `COMFYUI_SMOKE_VIEW_FILENAME` | empty | Optional output filename to include `/comfyui/view` in the smoke. |
+| `COMFYUI_SMOKE_TIMEOUT_SECONDS` | `5` | HTTP timeout per smoke step. |
+
+Examples:
+
+```bash
+make comfyui-relay
+make comfyui-smoke
+make comfyui-smoke COMFYUI_SMOKE_REQUIRE_SOCKET=true
+make comfyui-smoke COMFYUI_SMOKE_VIEW_FILENAME=ComfyUI_00001_.png
 ```
 
 ### Media And Vision

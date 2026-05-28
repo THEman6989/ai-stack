@@ -186,6 +186,13 @@ class _FakeComfyClient:
     async def submit_workflow(self, workflow: dict, *, client_id: str = "alpharavis") -> dict:
         return {"prompt_id": "submitted-123", "client_id": client_id, "node_count": len(workflow)}
 
+    async def view_bytes(self, filename: str, *, subfolder: str = "", file_type: str = "output") -> dict:
+        return {
+            "content": f"view:{filename}:{subfolder}:{file_type}".encode(),
+            "content_type": "image/png",
+            "headers": {"x-comfyui-test": "1"},
+        }
+
 async def _call_comfy_queue() -> dict:
 
     return await media_server.comfyui_queue_endpoint()
@@ -237,6 +244,23 @@ def test_comfyui_workflow_prompt_endpoint_uses_submit_gate(monkeypatch) -> None:
 
     assert result["ok"] is True
     assert result["result"] == {"prompt_id": "submitted-123", "client_id": "ui-test", "node_count": 1}
+
+
+def test_comfyui_view_endpoint_uses_configured_client_transport(monkeypatch) -> None:
+    class FakeResponse:
+        def __init__(self, *, content: bytes, media_type: str, headers: dict | None = None) -> None:
+            self.body = content
+            self.media_type = media_type
+            self.headers = headers or {}
+
+    monkeypatch.setattr(media_server, "Response", FakeResponse)
+    monkeypatch.setattr(media_server, "ComfyUIClient", _FakeComfyClient)
+    monkeypatch.setattr(media_server, "resolve_comfyui_base_url", lambda remote_pcs: "unix:///workspace/runtime/comfyui.sock")
+
+    result = asyncio.run(media_server.comfyui_view_endpoint("ComfyUI_00001_.png", subfolder="smoke", type="output"))
+
+    assert result.body == b"view:ComfyUI_00001_.png:smoke:output"
+    assert result.media_type == "image/png"
 
 
 def test_comfyui_register_outputs_endpoint_writes_media_records(monkeypatch) -> None:

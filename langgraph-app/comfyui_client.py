@@ -16,9 +16,12 @@ ALLOWED_MODEL_FOLDERS = {
     "loras",
     "controlnet",
     "clip",
+    "clip_vision",
     "unet",
     "embeddings",
     "diffusion_models",
+    "style_models",
+    "upscale_models",
 }
 MODEL_INPUT_FOLDERS = {
     "ckpt_name": "checkpoints",
@@ -32,9 +35,24 @@ MODEL_INPUT_FOLDERS = {
     "controlnet_name": "controlnet",
     "control_net": "controlnet",
     "clip_name": "clip",
+    "clip_name1": "clip",
+    "clip_name2": "clip",
+    "clip_name3": "clip",
+    "clip_vision_name": "clip_vision",
     "clip": "clip",
     "unet_name": "unet",
     "unet": "unet",
+    "diffusion_model": "diffusion_models",
+    "diffusion_model_name": "diffusion_models",
+    "style_model_name": "style_models",
+    "upscale_model_name": "upscale_models",
+}
+NODE_CLASS_MODEL_INPUT_FOLDERS = {
+    ("CLIPVisionLoader", "clip_name"): "clip_vision",
+    ("CLIPVisionLoader", "clip_vision_name"): "clip_vision",
+    ("UpscaleModelLoader", "model_name"): "upscale_models",
+    ("StyleModelLoader", "model_name"): "style_models",
+    ("StyleModelLoader", "style_model_name"): "style_models",
 }
 
 
@@ -88,21 +106,23 @@ def _workflow_node_classes(workflow: dict[str, Any]) -> list[str]:
     return classes
 
 
-def _iter_node_inputs(workflow: dict[str, Any]) -> list[tuple[str, Any]]:
-    pairs: list[tuple[str, Any]] = []
+def _iter_node_inputs(workflow: dict[str, Any]) -> list[tuple[str, str, Any]]:
+    pairs: list[tuple[str, str, Any]] = []
     for node in workflow.values():
         if not isinstance(node, dict):
             continue
+        class_type = str(node.get("class_type") or "")
         inputs = node.get("inputs")
         if isinstance(inputs, dict):
-            pairs.extend(inputs.items())
+            pairs.extend((class_type, key, value) for key, value in inputs.items())
     return pairs
 
 
 def _extract_model_requirements(workflow: dict[str, Any]) -> dict[str, list[str]]:
     required: dict[str, set[str]] = {folder: set() for folder in ALLOWED_MODEL_FOLDERS}
-    for key, value in _iter_node_inputs(workflow):
-        folder = MODEL_INPUT_FOLDERS.get(str(key))
+    for class_type, key, value in _iter_node_inputs(workflow):
+        input_key = str(key)
+        folder = NODE_CLASS_MODEL_INPUT_FOLDERS.get((class_type, input_key)) or MODEL_INPUT_FOLDERS.get(input_key)
         if folder and isinstance(value, str) and value.strip() and value.lower() not in {"none", "default"}:
             required[folder].add(value.strip())
         if isinstance(value, str):
@@ -214,7 +234,16 @@ def resolve_comfyui_base_url(remote_pcs: dict[str, Any] | None = None) -> str:
 
 
 def comfyui_workflow_submit_enabled() -> bool:
-    return env_bool("ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT", "false")
+    """Return the canonical ComfyUI submit gate, with a legacy alias for operators.
+
+    `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT` remains canonical. The older
+    `ALPHARAVIS_COMFYUI_WORKFLOW_SUBMIT` alias is accepted fail-closed/backwards
+    compatible when the canonical variable is unset.
+    """
+
+    if "ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT" in os.environ:
+        return env_bool("ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT", "false")
+    return env_bool("ALPHARAVIS_COMFYUI_WORKFLOW_SUBMIT", "false")
 
 
 class ComfyUIClient:
@@ -295,12 +324,27 @@ class ComfyUIClient:
     async def free_memory(self, *, unload_models: bool = True, free_memory: bool = True) -> dict[str, Any]:
         return await self.post_json("/free", {"unload_models": unload_models, "free_memory": free_memory})
 
-    def view_url(self, filename: str, *, subfolder: str = "", file_type: str = "output") -> str:
+    def _view_query_path(self, filename: str, *, subfolder: str = "", file_type: str = "output") -> str:
         filename = (filename or "").strip()
         if not filename or "/" in filename or "\\" in filename or filename in {".", ".."}:
             raise ValueError("filename must be a plain ComfyUI output filename")
         query = urlencode({"filename": filename, "subfolder": subfolder or "", "type": file_type or "output"})
-        return f"{self.public_base_url}/view?{query}"
+        return f"/view?{query}"
+
+    def view_url(self, filename: str, *, subfolder: str = "", file_type: str = "output") -> str:
+        return f"{self.public_base_url}{self._view_query_path(filename, subfolder=subfolder, file_type=file_type)}"
+
+    async def view_bytes(self, filename: str, *, subfolder: str = "", file_type: str = "output") -> dict[str, Any]:
+        """Fetch a ComfyUI /view output through the configured internal transport."""
+
+        async with self._async_client() as client:
+            response = await client.get(self._url(self._view_query_path(filename, subfolder=subfolder, file_type=file_type)))
+            response.raise_for_status()
+        return {
+            "content": response.content,
+            "content_type": response.headers.get("content-type") or "application/octet-stream",
+            "headers": dict(response.headers),
+        }
 
     async def upload_image_bytes(
         self,
