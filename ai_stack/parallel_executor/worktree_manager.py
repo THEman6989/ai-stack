@@ -45,7 +45,7 @@ class WorktreeManager:
 
     @staticmethod
     def _detect_repo_root() -> str:
-        """Find the git repo root from cwd."""
+        """Find the git repo root from cwd, avoiding os.getcwd() for blockbuster."""
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
@@ -55,7 +55,11 @@ class WorktreeManager:
                 return result.stdout.strip()
         except Exception:
             pass
-        return os.getcwd()
+        # Avoid os.getcwd() — blockbuster catches it in async handlers.
+        # Default to the standard container workspace path.
+        if Path("/workspace").exists():
+            return "/workspace"
+        return str(Path(__file__).resolve().parents[3])
 
     @property
     def is_git_repo(self) -> bool:

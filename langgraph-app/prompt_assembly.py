@@ -87,7 +87,9 @@ def _looks_like_docker_runtime(cwd: str | Path | None) -> bool:
 
 def build_environment_hints(*, cwd: str | Path | None = None) -> str:
     hints: list[str] = []
-    cwd_text = str(cwd or os.getcwd())
+    # Use the passed cwd, or default to /workspace (standard container path)
+    # — avoiding os.getcwd() to prevent blockbuster BlockingError in async handlers.
+    cwd_text = str(cwd or "/workspace")
     if _is_wsl_runtime() or _looks_like_wsl_path(cwd_text):
         hints.append(WSL_ENVIRONMENT_HINT)
     elif _looks_like_windows_path(cwd_text) or os.name == "nt":

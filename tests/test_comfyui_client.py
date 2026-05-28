@@ -16,6 +16,21 @@ def test_resolve_comfyui_base_url_prefers_explicit_env(monkeypatch):
     assert comfyui_client.resolve_comfyui_base_url({}) == "http://comfypc.local:8188"
 
 
+def test_resolve_comfyui_base_url_preserves_unix_socket_env(monkeypatch):
+    monkeypatch.setenv("ALPHARAVIS_COMFYUI_API_BASE", "unix:///workspace/runtime/comfyui.sock")
+
+    assert comfyui_client.resolve_comfyui_base_url({}) == "unix:///workspace/runtime/comfyui.sock"
+
+
+def test_unix_socket_client_uses_public_view_urls(monkeypatch):
+    monkeypatch.setenv("ALPHARAVIS_COMFYUI_PUBLIC_BASE_URL", "http://localhost:8188")
+    client = comfyui_client.ComfyUIClient(base_url="unix:///workspace/runtime/comfyui.sock")
+
+    assert client.base_url == "unix:///workspace/runtime/comfyui.sock"
+    assert client.public_base_url == "http://localhost:8188"
+    assert client.view_url("ComfyUI_00001_.png") == "http://localhost:8188/view?filename=ComfyUI_00001_.png&subfolder=&type=output"
+
+
 def test_resolve_comfyui_base_url_uses_remote_pc_and_port(monkeypatch):
     monkeypatch.delenv("ALPHARAVIS_COMFYUI_API_BASE", raising=False)
     monkeypatch.delenv("ALPHARAVIS_COMFY_API_BASE", raising=False)

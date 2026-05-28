@@ -46,6 +46,12 @@ def _normalize_base_url(value: str) -> str:
     value = (value or "").strip()
     if not value:
         return ""
+    if value.startswith("unix://"):
+        parsed = urlparse(value)
+        socket_path = parsed.path or parsed.netloc
+        if not socket_path.startswith("/"):
+            socket_path = f"/{socket_path}"
+        return f"unix://{socket_path}"
     if "://" not in value:
         value = f"http://{value}"
     parsed = urlparse(value)
@@ -215,19 +221,37 @@ class ComfyUIClient:
     def __init__(self, base_url: str | None = None, *, timeout: float | None = None):
         self.base_url = _normalize_base_url(base_url or resolve_comfyui_base_url())
         self.timeout = timeout or float(os.getenv("ALPHARAVIS_COMFYUI_TIMEOUT_SECONDS", "30"))
+        parsed = urlparse(self.base_url)
+        self._uds_path = parsed.path if parsed.scheme == "unix" else ""
+        self._http_base_url = "http://comfyui" if self._uds_path else self.base_url
+        public_base = _normalize_base_url(os.getenv("ALPHARAVIS_COMFYUI_PUBLIC_BASE_URL", ""))
+        self.public_base_url = public_base or ("http://localhost:8188" if self._uds_path else self.base_url)
+
+    def _async_client(self) -> httpx.AsyncClient:
+        if self._uds_path:
+            return httpx.AsyncClient(
+                timeout=self.timeout,
+                transport=httpx.AsyncHTTPTransport(uds=self._uds_path),
+                base_url=self._http_base_url,
+            )
+        return httpx.AsyncClient(timeout=self.timeout)
+
+    def _url(self, path: str) -> str:
+        path = "/" + path.lstrip("/")
+        if self._uds_path:
+            return path
+        return f"{self._http_base_url}{path}"
 
     async def get_json(self, path: str) -> dict[str, Any]:
-        path = "/" + path.lstrip("/")
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.get(f"{self.base_url}{path}")
+        async with self._async_client() as client:
+            response = await client.get(self._url(path))
             response.raise_for_status()
             data = response.json()
         return data if isinstance(data, dict) else {"data": data}
 
     async def post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        path = "/" + path.lstrip("/")
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(f"{self.base_url}{path}", json=payload)
+        async with self._async_client() as client:
+            response = await client.post(self._url(path), json=payload)
             response.raise_for_status()
             data = response.json() if response.content else {}
         return data if isinstance(data, dict) else {"data": data}
@@ -259,7 +283,7 @@ class ComfyUIClient:
         return {
             "prompt_id": prompt_id,
             "history": history,
-            "outputs": extract_history_outputs(history, prompt_id, base_url=self.base_url),
+            "outputs": extract_history_outputs(history, prompt_id, base_url=self.public_base_url),
         }
 
     async def clear_queue(self) -> dict[str, Any]:
@@ -276,7 +300,7 @@ class ComfyUIClient:
         if not filename or "/" in filename or "\\" in filename or filename in {".", ".."}:
             raise ValueError("filename must be a plain ComfyUI output filename")
         query = urlencode({"filename": filename, "subfolder": subfolder or "", "type": file_type or "output"})
-        return f"{self.base_url}/view?{query}"
+        return f"{self.public_base_url}/view?{query}"
 
     async def upload_image_bytes(
         self,
@@ -290,9 +314,9 @@ class ComfyUIClient:
         filename = (filename or "").strip()
         if not filename or "/" in filename or "\\" in filename:
             return {"ok": False, "error": "filename must be a plain filename"}
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with self._async_client() as client:
             response = await client.post(
-                f"{self.base_url}/upload/image",
+                self._url("/upload/image"),
                 data={"type": image_type, "overwrite": str(bool(overwrite)).lower()},
                 files={"image": (filename, content, content_type)},
             )

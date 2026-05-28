@@ -67,12 +67,21 @@ Implemented:
 
 Still needed:
 
-- Live browser smoke test on port 3000: file picker upload, drag/drop upload,
+- ~~Live browser smoke test on port 3000: file picker upload, drag/drop upload,
   paste upload, attachment remove/remove-all, Office tab launch flow,
   Office output upload control, template gallery, Phase-5 launcher buttons,
   optional watch-preview link, preview panel, lightweight diff rendering, code preview before/after
   `Open Monaco editor`, and thread rename/delete including active-thread
-  deletion recovery.
+  deletion recovery.~~
+  2026-05-28: Office-focused browser smoke completed. Office-Tab renders cleanly
+  with all sections (Create, Template Gallery, Output Files, Workflow State,
+  Runtime Checklist); dropdown type-switcher works; document cards show
+  download/open/preview/watch/screenshot/repair/validate/batch/blueprint
+  buttons; validation badges visible; managed batch counters rendered. Upload
+  button present, no JS console errors. General UI elements (Chat tab, Threads
+  panel, file picker) verified functional. Drag/drop, paste, Monaco editor, and
+  thread rename/delete not specifically exercised this pass — revisit when those
+  paths change.
 - Live ComfyUI runtime smoke with an actual ComfyUI host: direct host checks are
   verified on `http://localhost:8188` (`/system_stats`, `/queue`,
   `/models/checkpoints`, `/object_info`) and a trusted API-format preflight report
@@ -83,28 +92,42 @@ Still needed:
   because Docker cannot reach the host ComfyUI port on this CachyOS/Arch setup.
   Keep workflow submission disabled unless testing a trusted API-format workflow
   explicitly, and only enable Live after CORS/proxy reachability is fixed.
-- Office Phase 6 / Managed Office Workflows: implemented as a non-destructive
-  managed plan/status layer. `media-gallery` exposes `/office/preview`,
+- Office Phase 6 / Managed Office Workflows: implemented and smoke-verified
+  (2026-05-28). `media-gallery` exposes `/office/preview`,
   `/office/repair`, `/office/watch/start`, `/office/watch/stop`,
   `/office/watch/status`, `/office/blueprints`, `/office/blueprints/create`, and
   `/office/blueprints/suggest`; the Office panel exposes direct Generate Preview,
   Repair, Watch/Stop with embedded Preview frame, and Make Blueprint actions.
   The expanded workflow state reuses the existing `run_state_manager.py` for
-  persisted validation records and managed batch jobs. `media-gallery` now also
+  persisted validation records and managed batch jobs. `media-gallery` also
   exposes `/office/validation-results`, `/office/batch/jobs`,
   `/office/batch/jobs/{job_id}/progress`, `/office/templates/placeholders`, and
   `/office/templates/merge-form`; Office cards show validation badges/issues,
   managed batches expose completed/failed/pending counters, and Template Merge
   can be driven from detected `{{placeholder}}` fields plus AI/OfficeCLI text
-  inspection.
-- Office Phase 7 / Dedicated Office Agent: implemented. AlphaRavis now has a
-  feature-flagged `office_agent` peer in the existing swarm, backed by the new
+  inspection. Live API smoke: all endpoints return expected responses; preview
+  plans HTML+PNG artifacts, repair writes to -repaired sibling, watch
+  start/stop/status work, blueprints list/create/suggest work, placeholders
+  detect {{customer}}/{{project_name}}, merge-form available, batch jobs
+  track progress with counters.
+- Office Phase 7 / Dedicated Office Agent: implemented and smoke-verified
+  (2026-05-28). AlphaRavis has a feature-flagged `office_agent` peer
+  (`ALPHARAVIS_ENABLE_OFFICE_AGENT=true`) in the existing swarm, backed by the
   `agent/office` tool bundle and `transfer_to_office` handoff. The Office tab
   submits generated create/edit/template/batch/repair/preview prompts with
   `active_agent=office_agent` when `NEXT_PUBLIC_OFFICE_AGENT_ENABLED=true`, while
   direct media-gallery endpoints remain for small UI/status/list/upload actions.
-  Plan details and verification targets live in
-  `.hermes/plans/office-tab-implementation.md`.
+  Code-level routing verified: `OfficePanel.tsx` correctly sends
+  `{ activeAgent: "office_agent" }`, `useChat.ts` maps to
+  `active_agent: options?.activeAgent`, and `agent_graph.py` resolves
+  `office_agent` → `["agent/office"]` toolset with `transfer_to_office` handoff
+  registered. Container env confirmed: `ALPHARAVIS_ENABLE_OFFICE_AGENT=true`,
+  `NEXT_PUBLIC_OFFICE_AGENT_ENABLED=true`,
+  `NEXT_PUBLIC_OFFICE_AGENT_NAME=office_agent`. OfficeCLI binary at v1.0.100
+  with Chromium for screenshots. Full end-to-end agent routing not exercised this
+  pass (requires actual LangGraph run with office_agent dispatch).
+  Office output ownership note: `docker exec`-created files are root-owned;
+  browser upload path chowns correctly to host UID/GID.
 - ComfyUI Swarm Agent + Tab: implemented and hardened. AlphaRavis now has a
   default-off `comfyui_agent` peer (`ALPHARAVIS_ENABLE_COMFYUI_AGENT=false`), a
   narrow `comfyui/workflows` toolset, `transfer_to_comfyui` handoff, and a shared
@@ -122,13 +145,8 @@ Still needed:
   `.hermes/plans/comfyui-swarm-tab-integration.md`.
 - Decide later whether to tackle AionUi Tier 3 items: i18n, inline tool-result
   streaming, and conversation tabs.
-- New: Office/Docs integration research completed. `docs/AIONUI_OFFICE_INTEGRATION.md`
-  documents AionUi and OfficeCLI architecture. OfficeCLI submodule cloned
-  (`submodules/OfficeCLI`). Full implementation plan in
-  `.hermes/plans/office-tab-implementation.md` — the base path is implemented
-  (Docker binary/output/watch port, default-off prompt/toolset/MCP wiring,
-  DOCX/PPTX/XLSX upload support, and Office tab launcher). Remaining work is
-  runtime/browser smoke plus deeper preview/download/watch-session automation.
+- ~~Remaining work is runtime/browser smoke plus deeper preview/download/watch-session
+  automation — browser smoke and API endpoint verification completed 2026-05-28.~~
 
 ## Parallel Task Execution (Stage 2)
 

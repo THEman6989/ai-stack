@@ -405,10 +405,14 @@ PIXELLE_URL = os.getenv("PIXELLE_URL", "http://localhost:9004")
 
 
 def _workspace_root() -> str:
-    return os.getenv(
-        "ALPHARAVIS_WORKSPACE_ROOT",
-        os.getenv("LANGGRAPH_WORKSPACE_ROOT", os.getcwd()),
-    )
+    """Resolve workspace root without os.getcwd() to avoid blockbuster BlockingError."""
+    configured = os.getenv("ALPHARAVIS_WORKSPACE_ROOT") or os.getenv("LANGGRAPH_WORKSPACE_ROOT")
+    if configured:
+        return configured
+    # Fall back to /workspace (standard container path), avoiding os.getcwd()
+    if Path("/workspace").exists():
+        return "/workspace"
+    return str(Path(__file__).resolve().parents[1])
 
 
 def _resolve_mcp_path(value: str) -> Path:

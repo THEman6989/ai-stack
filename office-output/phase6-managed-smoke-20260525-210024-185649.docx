@@ -1,0 +1,1 @@
+Hello {{client_name}}, invoice {{invoice_number}} total {{total}}

@@ -340,6 +340,7 @@ services:
     volumes:
       - ./langgraph-app:/app
       - ./media-data:/media-data
+      - ./runtime:/workspace/runtime
       - ./office-output:/workspace/office-output
     env_file:
       - .env
@@ -484,6 +485,12 @@ services:
     build:
       context: ./submodules/deep-agents-ui
       dockerfile: ../../docker/deep-agents-ui/Dockerfile
+      args:
+        NEXT_PUBLIC_COMFYUI_PANEL_API_BASE: ${NEXT_PUBLIC_COMFYUI_PANEL_API_BASE:-http://localhost:8188}
+        NEXT_PUBLIC_COMFYUI_PROXY_API_BASE: ${NEXT_PUBLIC_COMFYUI_PROXY_API_BASE:-http://localhost:8130/comfyui}
+        NEXT_PUBLIC_COMFYUI_WORKFLOW_SUBMIT_ENABLED: ${ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT:-false}
+        NEXT_PUBLIC_COMFYUI_AGENT_ENABLED: ${NEXT_PUBLIC_COMFYUI_AGENT_ENABLED:-false}
+        NEXT_PUBLIC_COMFYUI_AGENT_NAME: ${NEXT_PUBLIC_COMFYUI_AGENT_NAME:-comfyui_agent}
     container_name: deep-agents-ui
     ports:
       - "${ALPHARAVIS_DOCKER_HOST_BIND:-0.0.0.0}:3000:3000"

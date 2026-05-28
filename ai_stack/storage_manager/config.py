@@ -103,7 +103,7 @@ def get_storage_config() -> StorageConfig:
         scale = 100.0 / total_pct
         percentages = {k: round(v * scale, 2) for k, v in percentages.items()}
 
-    data_root = os.getenv("ALPHARAVIS_STORAGE_DATA_ROOT", os.getcwd())
+    data_root = os.getenv("ALPHARAVIS_STORAGE_DATA_ROOT", "/workspace")
     if not os.path.isabs(data_root):
         data_root = os.path.abspath(data_root)
 
