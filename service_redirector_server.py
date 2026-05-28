@@ -358,6 +358,18 @@ SERVICES: list[dict[str, Any]] = [
         "accent": "#a2b2ff",
     },
     {
+        "name": "DeepAgent Gateway",
+        "service": "deepagent-gateway",
+        "kind": "Gateway",
+        "category": "web",
+        "icon": "GW",
+        "description": "ARM SBC Always-On Gateway — offline queue + reverse proxy.",
+        "host_url": "http://deepagent-gw.local:3000",
+        "docker_url": "",
+        "port": 3000,
+        "accent": "#47d7ac",
+    },
+    {
         "name": "MongoDB",
         "service": "mongodb",
         "kind": "Database",
@@ -1712,6 +1724,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/register-gateway":
+            self._handle_gateway_registration()
+            return
         if parsed.path not in {"/api/settings/runtime", "/api/settings/permanent"}:
             self.send_error(HTTPStatus.NOT_FOUND, "Not found")
             return
@@ -1731,6 +1746,48 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         updated = save_permanent_settings(values)
         self.send_json({"ok": True, "mode": "permanent", "updated": updated, "envPath": str(ENV_PATH)})
+
+    def _handle_gateway_registration(self) -> None:
+        """Accept URL registration from the DeepAgent ARM Gateway."""
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            length = 0
+        try:
+            payload = json.loads(self.rfile.read(max(0, min(length, 100_000))).decode("utf-8") or "{}")
+        except Exception:
+            self.send_error(HTTPStatus.BAD_REQUEST, "invalid JSON")
+            return
+
+        http_url = str(payload.get("http_url") or "").strip()
+        tailscale_url = str(payload.get("tailscale_url") or "").strip()
+
+        if not http_url and not tailscale_url:
+            self.send_error(HTTPStatus.BAD_REQUEST, "http_url or tailscale_url required")
+            return
+
+        # Update tailscale_service_urls.json with gateway URLs
+        data: dict[str, Any] = {}
+        if TAILSCALE_URLS_PATH.exists() and not TAILSCALE_URLS_PATH.is_dir():
+            try:
+                data = json.loads(TAILSCALE_URLS_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        data.setdefault("redirector_overrides", {})
+        if tailscale_url:
+            data["redirector_overrides"]["deepagent-gateway"] = tailscale_url
+        if http_url:
+            data.setdefault("host_url_overrides", {})
+            default_gw_url = "http://deepagent-gw.local:3000"
+            data["host_url_overrides"][default_gw_url] = http_url
+            # Also register under the actual host_url used in SERVICES
+            data["host_url_overrides"]["http://localhost:3000"] = http_url
+
+        TAILSCALE_URLS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        TAILSCALE_URLS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        print(f"Gateway registered: http={http_url} tailscale={tailscale_url}", flush=True)
+        self.send_json({"ok": True, "http_url": http_url, "tailscale_url": tailscale_url})
 
     def send_json(self, payload: dict[str, Any]) -> None:
         self.send_bytes(json.dumps(payload, indent=2, ensure_ascii=True).encode("utf-8"), "application/json")

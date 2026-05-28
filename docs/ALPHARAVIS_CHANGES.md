@@ -57,6 +57,25 @@ can tell which patches are intentional and which ones can be removed.
   worked, `active_agent=comfyui_agent` ran status/queue/model tools, and a trusted
   tiny SD1.5 Live Submit produced and URL-registered one output.
 
+## 2026-05-28 — DeepAgent ARM Gateway: Offline Queue + Bridge Ingest
+
+- New standalone project `deepagent-arm-gateway/` (gitignored, own Git repo) for
+  ARM64 SBCs like Radxa ROCK 2A. Acts as always-on reverse proxy to
+  DeepAgentUI with offline message queue and auto-update.
+- New `langgraph-app/queue_ingest.py`: FastAPI router mounted in bridge at
+  `POST /api/queue/ingest`. Accepts queued messages from the gateway,
+  checks idempotency (in-memory per bridge run), submits new messages as
+  user prompts to LangGraph via `queue-{session_id}` threads.
+- `bridge_server.py`: added `from queue_ingest import router as
+  queue_ingest_router` and `app.include_router(queue_ingest_router)`.
+- Gateway components: Python FastAPI app with SQLite queue, WoL/HTTP wake,
+  reverse proxy pass-through, fallback offline chat UI (vanilla HTML/JS),
+  systemd service + auto-update timer (git pull every 30 min).
+- New docs: `docs/deepagent_gateway_plan.md` (architecture decisions),
+  `docs/deepagent_gateway_ai_stack_integration.md` (API contract).
+- New test: `langgraph-app/tests/test_queue_ingest.py`.
+- Updated `docs/ALPHARAVIS_OPEN_TASKS.md` with gateway section.
+
 ## 2026-05-27 — Alpha-Hermes-Kontrollstrategie: Node-Verdrahtung
 
 - Rewired `_parallel_executor_node` in `agent_graph.py` to support:

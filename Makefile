@@ -39,7 +39,7 @@ VISION_CONFIG_SET := $(strip $(VISION_ENABLED)$(VISION_URL)$(VISION_BASE_URL)$(V
 TAILSCALE_DASHBOARD_ARG := $(if $(filter false no 0,$(TAILSCALE_DASHBOARD)),--exclude-dashboard,)
 TAILSCALE_SUDO_ARG := $(if $(filter true yes 1 always,$(TAILSCALE_SUDO)),--sudo,$(if $(filter false no 0 never off,$(TAILSCALE_SUDO)),--sudo-mode never,--sudo-mode auto))
 
-.PHONY: help install install-fullstreaming install-hybrid install-nonstreaming install-chat install-chat-fullstreaming install-chat-nonstreaming config configure profiles streaming fullstreaming full-streaming hybrid-streaming nonstreaming chat-completions chat-fullstreaming chat-nonstreaming model-management owner-model-management media-vision vision-embedding video-analysis openwebui update update-no-start status up up-fullstreaming up-chat-fullstreaming service-dashboard dashboard test-ui comfyui-relay comfyui-relay-status comfyui-relay-smoke comfyui-smoke tailscale-prep tailscale-auto tailscale-plan tailscale-overrides tailscale-routes-apply tailscale-routes-disable tailscale-apply tailscale-disable disable-tailscale tailscale-status down logs submodules build bridge-smoke hermes-smoke media-smoke openwebui-smoke
+.PHONY: help install install-fullstreaming install-hybrid install-nonstreaming install-chat install-chat-fullstreaming install-chat-nonstreaming config configure profiles streaming fullstreaming full-streaming hybrid-streaming nonstreaming chat-completions chat-fullstreaming chat-nonstreaming model-management owner-model-management media-vision vision-embedding video-analysis openwebui update update-no-start status up up-fullstreaming up-chat-fullstreaming service-dashboard dashboard test-ui comfyui-relay comfyui-relay-status comfyui-relay-smoke comfyui-smoke tailscale-prep tailscale-auto tailscale-plan tailscale-overrides tailscale-routes-apply tailscale-routes-disable tailscale-apply tailscale-disable disable-tailscale tailscale-status down logs submodules build bridge-smoke hermes-smoke media-smoke openwebui-smoke gateway-install gateway-update gateway-status gateway-tailscale
 
 help:
 	@printf '%s\n' \
@@ -81,7 +81,13 @@ help:
 		'  make tailscale-status' \
 		'' \
 		'Smoke checks:' \
-		'  make bridge-smoke | make hermes-smoke | make media-smoke | make openwebui-smoke | make comfyui-smoke'
+		'  make bridge-smoke | make hermes-smoke | make media-smoke | make openwebui-smoke | make comfyui-smoke' \
+		'' \
+		'ARM Gateway (deepagent-arm-gateway):' \
+		'  make gateway-install          # venv + pip install + .env from .env.example' \
+		'  make gateway-update           # git pull + pip install' \
+		'  make gateway-status           # git status + health check via curl' \
+		'  make gateway-tailscale        # Tailscale-URL registrieren beim Redirector'
 
 install:
 	$(MAKE) tailscale-prep
@@ -303,3 +309,52 @@ media-smoke:
 
 openwebui-smoke:
 	$(PYTHON) scripts/alpharavis_setup.py openwebui-smoke
+
+# --- DeepAgent ARM Gateway ---
+GATEWAY_DIR := deepagent-arm-gateway
+GATEWAY_VENV := $(GATEWAY_DIR)/venv/bin/python
+GATEWAY_PIP := $(GATEWAY_DIR)/venv/bin/pip
+GATEWAY_PORT ?= 3000
+GATEWAY_HOST ?= 127.0.0.1
+REDIRECTOR_URL ?= http://127.0.0.1:8090
+
+gateway-install:
+	@echo "=== Gateway: venv + deps ==="
+	cd $(GATEWAY_DIR) && python3 -m venv venv
+	$(GATEWAY_PIP) install -q -r $(GATEWAY_DIR)/requirements.txt
+	@if [ ! -f $(GATEWAY_DIR)/.env ]; then \
+		echo "=== Gateway: .env.example -> .env (bitte IPs anpassen) ==="; \
+		cp $(GATEWAY_DIR)/.env.example $(GATEWAY_DIR)/.env; \
+		echo ">>> $(GATEWAY_DIR)/.env erstellt. IPs anpassen!"; \
+	fi
+	@echo "=== Gateway: fertig. Start: cd $(GATEWAY_DIR) && $(GATEWAY_VENV) -m deepagent_gateway.main ==="
+
+gateway-update:
+	@echo "=== Gateway: git pull ==="
+	cd $(GATEWAY_DIR) && git pull origin master 2>/dev/null || echo "(kein Remote oder offline)"
+	$(GATEWAY_PIP) install -q -r $(GATEWAY_DIR)/requirements.txt
+	@echo "=== Gateway: updated ==="
+
+gateway-status:
+	@echo "=== Gateway: git status ==="
+	cd $(GATEWAY_DIR) && git status --short 2>/dev/null || echo "(kein Git)"
+	@echo ""
+	@echo "=== Gateway: health check (http://$(GATEWAY_HOST):$(GATEWAY_PORT)/health) ==="
+	@curl -s http://$(GATEWAY_HOST):$(GATEWAY_PORT)/health 2>/dev/null || echo "Gateway nicht erreichbar"
+
+gateway-tailscale:
+	@echo "=== Gateway: Tailscale-URL + Redirector-Registrierung ==="
+	@GATEWAY_IP=$(GATEWAY_HOST); \
+	TAILSCALE_HOST=$$(curl -s http://$(GATEWAY_HOST):$(GATEWAY_PORT)/health 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('tailscale',''))" 2>/dev/null || echo ""); \
+	if [ -n "$$TAILSCALE_HOST" ]; then \
+		echo "Tailscale: https://$$TAILSCALE_HOST:$(GATEWAY_PORT)"; \
+	else \
+		echo "Tailscale nicht erkannt. Auf ROCK 2A: tailscale up"; \
+	fi; \
+	echo "HTTP:     http://$(GATEWAY_HOST):$(GATEWAY_PORT)"; \
+	echo ""; \
+	echo "Registriere beim Redirector ($(REDIRECTOR_URL))..."; \
+	curl -s -X POST "$(REDIRECTOR_URL)/api/register-gateway" \
+		-H "Content-Type: application/json" \
+		-d "{\"http_url\":\"http://$(GATEWAY_HOST):$(GATEWAY_PORT)\"}" \
+		|| echo "(Redirector nicht erreichbar — Gateway registriert sich selbst via Timer)"

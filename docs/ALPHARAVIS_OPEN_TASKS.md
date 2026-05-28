@@ -3459,3 +3459,27 @@ Implementieren trotzdem weiter fokussierte Unit-/Smoke-Tests laufen lassen.
    klassifiziert werden, sofern der User nicht explizit alten Archivkontext
    verlangt. `archive_rag_mode=manual` bleibt der Opt-out. Noch offen: grosse
    LibreChat-/Browser-/Live-Beispiele auf False-Positive-Verhalten messen.
+
+## DeepAgent ARM Gateway (Offline Queue)
+
+Status: Implemented. Bridge endpoint + standalone gateway app ready.
+Live smoke test with actual ROCK 2A hardware still needed.
+
+- Standalone repo `deepagent-arm-gateway/` (gitignored in ai-stack, eigenes Git)
+  für ARM64 SBCs wie Radxa ROCK 2A.
+- `langgraph-app/queue_ingest.py`: FastAPI router mounted in bridge at
+  `POST /api/queue/ingest`. Nimmt queued Messages vom Gateway an, checkt
+  Idempotenz (in-memory, pro bridge-Lauf), submittet neue Messages als
+  User-Prompts an LangGraph (`queue-{session_id}` threads).
+- Gateway-Seite: Python FastAPI reverse proxy + fallback offline chat UI +
+  SQLite message queue + WoL/HTTP wake + auto-update timer (git pull alle
+  30 Min + systemd restart bei Änderungen).
+- Dokumentation: `docs/deepagent_gateway_plan.md`,
+  `docs/deepagent_gateway_ai_stack_integration.md`.
+- Tests: `langgraph-app/tests/test_queue_ingest.py` (Idempotenz, Auth, Duplikate),
+  `deepagent-arm-gateway/tests/test_queue.py` (SQLite queue, Media, Sessions).
+
+Noch offen:
+- Live-Test mit Radxa ROCK 2A Hardware und dem echten DeepAgentUI-Server.
+- Media-Fetch vom Gateway im Queue-Ingest (aktuell nur Text, Media-URLs
+  müssten vom Bridge-Container aus erreichbar sein).

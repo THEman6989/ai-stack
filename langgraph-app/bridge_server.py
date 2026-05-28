@@ -20,6 +20,7 @@ from langgraph_sdk import get_client
 from context_references import preprocess_context_references
 from error_classifier import classify_api_error, format_user_error
 from internal_context import StreamingInternalContextScrubber, sanitize_internal_context
+from queue_ingest import router as queue_ingest_router
 
 
 def _env_bool(name: str, default: str = "false") -> bool:
@@ -163,6 +164,7 @@ BRIDGE_CONTEXT_REFERENCE_CWD = Path(
 ).expanduser().resolve()
 
 app = FastAPI(title="AlphaRavis OpenAI Bridge", openapi_version="3.1.0")
+app.include_router(queue_ingest_router)
 _RESPONSES_STORE: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _RESPONSES_INPUT_ITEMS: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
 _APPROVAL_MEMORY: OrderedDict[str, float] = OrderedDict()
