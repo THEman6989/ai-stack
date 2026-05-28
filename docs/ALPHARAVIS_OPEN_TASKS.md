@@ -73,14 +73,16 @@ Still needed:
   optional watch-preview link, preview panel, lightweight diff rendering, code preview before/after
   `Open Monaco editor`, and thread rename/delete including active-thread
   deletion recovery.
-- Live ComfyUI runtime smoke with an actual ComfyPC: build/recreate
-  `langgraph-api`, `media-gallery`, and `deep-agents-ui`; verify
-  direct ComfyUI mode (`/system_stats`, `/queue`, `/models/checkpoints`), optional
-  proxy mode (`/comfyui/status`, `/comfyui/queue`, `/comfyui/models/checkpoints`),
-  ComfyUI tab rendering on port 3000, one preflight report for a trusted API-format
-  workflow, and one safe agent-launcher prompt routed to `comfyui_agent` when
-  `ALPHARAVIS_ENABLE_COMFYUI_AGENT=true`. Keep workflow submission disabled unless
-  testing a trusted API-format workflow explicitly.
+- Live ComfyUI runtime smoke with an actual ComfyUI host: direct host checks are
+  verified on `http://localhost:8188` (`/system_stats`, `/queue`,
+  `/models/checkpoints`, `/object_info`) and a trusted API-format preflight report
+  returns `ready=true` without submitting. The rebuilt ComfyUI tab renders on
+  port 3000 and shows Draft/Live workflow controls with Live disabled by default.
+  Current local blockers are explicit: browser direct API reads fail unless
+  ComfyUI is started with permissive CORS, and media-gallery proxy calls time out
+  because Docker cannot reach the host ComfyUI port on this CachyOS/Arch setup.
+  Keep workflow submission disabled unless testing a trusted API-format workflow
+  explicitly, and only enable Live after CORS/proxy reachability is fixed.
 - Office Phase 6 / Managed Office Workflows: implemented as a non-destructive
   managed plan/status layer. `media-gallery` exposes `/office/preview`,
   `/office/repair`, `/office/watch/start`, `/office/watch/stop`,

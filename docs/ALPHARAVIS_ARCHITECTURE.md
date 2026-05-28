@@ -372,13 +372,20 @@ by `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=false` by default because arbitrar
 ComfyUI workflows/custom nodes have Python-code trust level.
 
 `media-gallery` exposes `/comfyui/status`, `/comfyui/queue`,
-`/comfyui/models/{folder}`, `/comfyui/history/{prompt_id}`, `/comfyui/view`,
-and `/comfyui/outputs/register` as lightweight browser-safe ComfyUI endpoints.
+`/comfyui/models/{folder}`, `/comfyui/history/{prompt_id}`,
+`/comfyui/preflight`, `/comfyui/prompt`, `/comfyui/view`, and
+`/comfyui/outputs/register` as lightweight browser-safe ComfyUI endpoints.
 The ComfyUI tab can use direct native ComfyUI paths (`/system_stats`, `/queue`,
-`/models/{folder}`, `/history/{prompt_id}`, `/view`) or those proxy paths, with
-an `auto` mode that tries direct first and falls back to proxy. Runtime overrides
-are stored in browser `localStorage`; Compose only provides defaults through
-`NEXT_PUBLIC_COMFYUI_PANEL_API_BASE` and `NEXT_PUBLIC_COMFYUI_PROXY_API_BASE`.
+`/models/{folder}`, `/history/{prompt_id}`, `/object_info`, `/view`) or those
+proxy paths, with an `auto` mode that tries direct first and falls back to proxy.
+Draft mode performs preflight without queue submission. Live Submit is disabled
+by default and posts through `media-gallery` `/comfyui/prompt` only, so native
+browser direct mode cannot bypass `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT`.
+Runtime overrides are stored in browser `localStorage`; Compose provides defaults
+through `NEXT_PUBLIC_COMFYUI_PANEL_API_BASE` and
+`NEXT_PUBLIC_COMFYUI_PROXY_API_BASE` and mirrors
+`ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT` into
+`NEXT_PUBLIC_COMFYUI_WORKFLOW_SUBMIT_ENABLED`.
 
 For generated outputs, the tab accepts a ComfyUI `prompt_id`, fetches history,
 extracts image/video/audio output records, and can register them in the Media

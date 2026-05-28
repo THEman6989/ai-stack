@@ -1727,6 +1727,9 @@ NEXT_PUBLIC_OFFICE_AGENT_NAME=office_agent
 # The tab can switch direct/proxy/auto at runtime and stores operator overrides in browser localStorage.
 NEXT_PUBLIC_COMFYUI_PANEL_API_BASE=http://localhost:8188
 NEXT_PUBLIC_COMFYUI_PROXY_API_BASE=http://localhost:8130/comfyui
+# UI-side switch for the Live Submit button. Backend submit still requires
+# ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=true.
+NEXT_PUBLIC_COMFYUI_WORKFLOW_SUBMIT_ENABLED=false
 NEXT_PUBLIC_COMFYUI_AGENT_ENABLED=false
 NEXT_PUBLIC_COMFYUI_AGENT_NAME=comfyui_agent
 

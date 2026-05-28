@@ -100,6 +100,19 @@ async def _comfyui_proxy_call(operation: str, *args: Any) -> dict[str, Any]:
         if operation == "history":
             prompt_id = str(args[0] if args else "")
             return {"ok": True, "base_url": client.base_url, **await client.history_outputs(prompt_id)}
+        if operation == "preflight":
+            workflow = args[0] if args else {}
+            check_server = bool(args[1]) if len(args) > 1 else True
+            return {
+                "ok": True,
+                "base_url": client.base_url,
+                "preflight": await client.preflight_workflow(workflow, check_server=check_server),
+            }
+        if operation == "submit_workflow":
+            workflow = args[0] if args else {}
+            client_id = str(args[1] if len(args) > 1 else "alpharavis-media-gallery")
+            result = await client.submit_workflow(workflow, client_id=client_id)
+            return {"ok": not bool(result.get("blocked") or result.get("error")), "base_url": client.base_url, "result": result}
         if operation == "clear_queue":
             return {"ok": True, "base_url": client.base_url, "result": await client.clear_queue()}
         if operation == "interrupt":
@@ -192,6 +205,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+class ComfyUIWorkflowRequest(BaseModel):
+    workflow: dict[str, Any] = Field(default_factory=dict)
+    client_id: str = "alpharavis-ui"
+    check_server: bool = True
+
+
 @app.get("/", include_in_schema=False)
 async def root_redirect():
     return RedirectResponse(url="/gallery")
@@ -214,6 +234,17 @@ async def comfyui_models_endpoint(folder: str = "checkpoints"):
 @app.get("/comfyui/history/{prompt_id}")
 async def comfyui_history_endpoint(prompt_id: str):
     return await _comfyui_proxy_call("history", prompt_id)
+
+
+@app.post("/comfyui/preflight")
+async def comfyui_preflight_endpoint(request: ComfyUIWorkflowRequest):
+    return await _comfyui_proxy_call("preflight", request.workflow, request.check_server)
+
+
+@app.post("/comfyui/prompt")
+async def comfyui_prompt_endpoint(request: ComfyUIWorkflowRequest):
+    return await _comfyui_proxy_call("submit_workflow", request.workflow, request.client_id)
+
 
 @app.get("/comfyui/view")
 async def comfyui_view_endpoint(filename: str, subfolder: str = "", type: str = "output"):

@@ -123,8 +123,28 @@ Not implemented yet (separate plan):
   access to `localhost:8188` works even when Docker cannot reach that host port.
 - Added ComfyUI tab live progress: direct-mode WebSocket to ComfyUI `/ws` when
   available plus queue/history polling fallback for direct/proxy/auto modes.
+- Added UI Draft/Live workflow controls. Draft runs preflight only; Live Submit is
+  still default-off and routes through media-gallery `/comfyui/prompt` instead of
+  native browser `/prompt`, so `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT` remains
+  the authoritative backend gate. Compose mirrors that gate into
+  `NEXT_PUBLIC_COMFYUI_WORKFLOW_SUBMIT_ENABLED` for the UI.
+- Added media-gallery `/comfyui/preflight` and `/comfyui/prompt` endpoints, backed
+  by `ComfyUIClient.preflight_workflow()` and the existing gated
+  `submit_workflow()` path.
+- Added 5 s UI request timeouts and explicit CORS/timeout diagnostics so an
+  unreachable direct/proxy ComfyUI path no longer leaves the tab controls in a
+  permanent loading state.
+- Runtime smoke on this host after rebuilding/recreating media-gallery and the UI:
+  host-direct ComfyUI `/system_stats`, `/queue`, `/models/checkpoints`,
+  `/object_info`, and trusted API-format preflight passed (`ready=true`; 8
+  checkpoints; 1238 object-info node classes; ComfyUI 0.18.0 on RTX 5090). Media
+  Gallery health passed and DeepAgents UI returned HTTP 200. Browser ComfyUI tab
+  rendered Draft/Live controls with Live disabled. Remaining local blockers:
+  browser direct API fetch is CORS-blocked by ComfyUI, and media-gallery proxy
+  calls time out because Docker cannot reach the host `8188` port on this
+  CachyOS/Arch firewall setup.
 - Verification so far:
-  - `pytest -q tests/test_comfyui_client.py tests/test_alpharavis_toolsets.py tests/test_media_server.py` → 62 passed.
+  - `pytest -q tests/test_comfyui_client.py tests/test_alpharavis_toolsets.py tests/test_media_server.py` → 64 passed.
   - Python AST parse passed for `comfyui_client.py`, `agent_graph.py`,
     `alpharavis_toolsets.py`, and `media_server.py`; direct `py_compile` is still
     blocked by local `__pycache__` permissions.

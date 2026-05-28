@@ -103,6 +103,8 @@ GET  http://localhost:8130/comfyui/status
 GET  http://localhost:8130/comfyui/queue
 GET  http://localhost:8130/comfyui/models/{folder}
 GET  http://localhost:8130/comfyui/history/{prompt_id}
+POST http://localhost:8130/comfyui/preflight
+POST http://localhost:8130/comfyui/prompt
 GET  http://localhost:8130/comfyui/view?filename=...&subfolder=&type=output
 POST http://localhost:8130/comfyui/outputs/register
 ```
@@ -137,19 +139,26 @@ ALPHARAVIS_ENABLE_COMFYUI_AGENT=true
 ```
 
 Workflow submission remains separately disabled by default because arbitrary
-ComfyUI workflows/custom nodes can execute Python. The ComfyUI Agent can still
-run a preflight while submit is disabled: it validates API-format JSON, detects
+ComfyUI workflows/custom nodes can execute Python. The ComfyUI Agent and UI can
+still run a Draft preflight while submit is disabled: it validates API-format JSON, detects
 editor-format workflows, checks known node classes via `/object_info`, extracts
 checkpoint/LoRA/VAE/ControlNet/embedding references, and reports missing models
-before any `/prompt` call is attempted.
+before any `/prompt` call is attempted. In the UI, Live Submit is a separate mode
+and is wired through `media-gallery` `/comfyui/prompt` only, so it still honors
+the backend gate instead of posting directly to native ComfyUI from the browser.
 
 ```bash
 ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=false
+# Compose mirrors the backend gate into the UI build/runtime env.
+NEXT_PUBLIC_COMFYUI_WORKFLOW_SUBMIT_ENABLED=false
 ```
 
 The ComfyUI tab itself reads health/queue/model state and provides launcher
 prompts for the agent; it does not submit unknown workflows unless that explicit
-workflow-submit flag is enabled on the backend.
+workflow-submit flag is enabled on the backend. Browser-native direct mode also
+requires the ComfyUI server to permit cross-origin API reads; otherwise the tab
+shows a CORS diagnostic and falls back to the media-gallery proxy, with 5 s
+request timeouts so an unreachable proxy does not leave the controls spinning.
 
 The Phase-5 Office buttons are intentionally thin Agent launchers, not a separate
 managed job engine. Before sending the agent prompt, the Office tab fetches safe

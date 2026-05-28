@@ -180,6 +180,12 @@ class _FakeComfyClient:
             ],
         }
 
+    async def preflight_workflow(self, workflow: dict, *, check_server: bool = True) -> dict:
+        return {"ready": bool(workflow), "format": "api", "server_checked": check_server}
+
+    async def submit_workflow(self, workflow: dict, *, client_id: str = "alpharavis") -> dict:
+        return {"prompt_id": "submitted-123", "client_id": client_id, "node_count": len(workflow)}
+
 async def _call_comfy_queue() -> dict:
 
     return await media_server.comfyui_queue_endpoint()
@@ -208,6 +214,29 @@ def test_comfyui_proxy_endpoints_use_configured_client(monkeypatch) -> None:
     assert history["ok"] is True
     assert history["prompt_id"] == "abc"
     assert history["outputs"][0]["filename"] == "ComfyUI_00001_.png"
+
+
+def test_comfyui_workflow_preflight_endpoint_uses_client(monkeypatch) -> None:
+    monkeypatch.setattr(media_server, "ComfyUIClient", _FakeComfyClient)
+    monkeypatch.setattr(media_server, "resolve_comfyui_base_url", lambda remote_pcs: "http://comfypc:8188")
+
+    request = media_server.ComfyUIWorkflowRequest(workflow={"1": {"class_type": "CheckpointLoaderSimple"}}, check_server=False)
+    result = asyncio.run(media_server.comfyui_preflight_endpoint(request))
+
+    assert result["ok"] is True
+    assert result["base_url"] == "http://comfypc:8188"
+    assert result["preflight"] == {"ready": True, "format": "api", "server_checked": False}
+
+
+def test_comfyui_workflow_prompt_endpoint_uses_submit_gate(monkeypatch) -> None:
+    monkeypatch.setattr(media_server, "ComfyUIClient", _FakeComfyClient)
+    monkeypatch.setattr(media_server, "resolve_comfyui_base_url", lambda remote_pcs: "http://comfypc:8188")
+
+    request = media_server.ComfyUIWorkflowRequest(workflow={"1": {"class_type": "CheckpointLoaderSimple"}}, client_id="ui-test")
+    result = asyncio.run(media_server.comfyui_prompt_endpoint(request))
+
+    assert result["ok"] is True
+    assert result["result"] == {"prompt_id": "submitted-123", "client_id": "ui-test", "node_count": 1}
 
 
 def test_comfyui_register_outputs_endpoint_writes_media_records(monkeypatch) -> None:
