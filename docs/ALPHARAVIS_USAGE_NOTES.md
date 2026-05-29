@@ -35,6 +35,17 @@ skills indicator. Code files use a lightweight preview by default; Monaco loads
 only after pressing `Open Monaco editor`, while DiffViewer stays lightweight for
 patch previews and agent-change review. The UI integration contract for future
 ports is documented in [`ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md`](ALPHARAVIS_UI_INTEGRATION_TEMPLATE.md).
+The four primary tabs use a shared chat-first visual pattern: centered
+icon/title empty states, shared opener cards, and a rounded bottom composer.
+Coding keeps its Direct/+AlphaRavis selector, ComfyUI keeps tools under the
+hamburger button, and Office includes an upload button in the composer while
+retaining its detailed tools below the first viewport. The non-Chat tabs keep
+their special controls above/outside the composer so the composer itself matches
+the Chat tab: transparent textarea, paperclip on the lower-left, and the normal
+arrow + `Send` button on the lower-right.
+On narrow/mobile widths the global header is allowed to scroll horizontally
+inside the header itself instead of widening the whole page; the chat viewport
+and composer remain constrained to the screen width.
 
 The Office tab is a thin launcher for OfficeCLI work. It accepts DOCX/PPTX/XLSX
 uploads as file blocks, can upload existing Office files directly into the shared
@@ -205,16 +216,34 @@ Substantial ComfyUI work can be routed to the dedicated swarm peer when enabled:
 
 ```bash
 ALPHARAVIS_ENABLE_COMFYUI_AGENT=true
+# Optional named workflow catalog for save/list/get/submit by alias.
+ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_LIBRARY=true
 # Agent workflow submit normally uses media-gallery /comfyui/prompt as the
 # central policy/gating route. Set false only for explicit legacy direct-submit testing.
 ALPHARAVIS_COMFYUI_AGENT_SUBMIT_VIA_MEDIA_GALLERY=true
 ```
 
-Workflow submission remains separately disabled by default because arbitrary
-ComfyUI workflows/custom nodes can execute Python. The ComfyUI Agent and UI can
+When the named workflow library is enabled, the ComfyUI Agent gets these extra
+workflow-catalog tools:
+
+```text
+save_comfyui_workflow(workflow_name, workflow_json, aliases_json, parameter_map_json, ...)
+list_saved_comfyui_workflows()
+get_saved_comfyui_workflow(workflow_name)
+submit_saved_comfyui_workflow(workflow_name, parameters_json)
+```
+
+Save only trusted ComfyUI API-format JSON. A useful saved record should include a
+stable tool-style name such as `wan_animate`, aliases such as `["wan animate"]`,
+and a `parameter_map` for ambiguous inputs, for example
+`{"prompt":"1.inputs.text","seed":"12.inputs.seed"}`. Submitting a saved
+workflow applies `parameters_json` through that map, then uses the same gated
+submit path as raw workflow JSON. Workflow submission remains separately disabled
+by default because arbitrary ComfyUI workflows/custom nodes can execute Python.
+The ComfyUI Agent and UI can
 still run a Draft preflight while submit is disabled: it validates API-format JSON, detects
 editor-format workflows, checks known node classes via `/object_info`, extracts
-checkpoint/LoRA/VAE/ControlNet/embedding references, and reports missing models
+checkpoint/LoRA/VAE/ControlNet/text-encoder/diffusion-model/embedding references, and reports missing models
 before any `/prompt` call is attempted. In the UI, Live Submit is a separate mode
 and always uses the media-gallery proxy path for both `/comfyui/preflight` and
 `/comfyui/prompt`; browser-direct mode is only for status/draft inspection and

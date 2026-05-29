@@ -17,6 +17,7 @@ ALLOWED_MODEL_FOLDERS = {
     "controlnet",
     "clip",
     "clip_vision",
+    "text_encoders",
     "unet",
     "embeddings",
     "diffusion_models",
@@ -48,6 +49,10 @@ MODEL_INPUT_FOLDERS = {
     "upscale_model_name": "upscale_models",
 }
 NODE_CLASS_MODEL_INPUT_FOLDERS = {
+    ("UNETLoader", "unet_name"): "diffusion_models",
+    ("UNETLoader", "unet"): "diffusion_models",
+    ("CLIPLoader", "clip_name"): "text_encoders",
+    ("CLIPLoader", "clip"): "text_encoders",
     ("CLIPVisionLoader", "clip_name"): "clip_vision",
     ("CLIPVisionLoader", "clip_vision_name"): "clip_vision",
     ("UpscaleModelLoader", "model_name"): "upscale_models",

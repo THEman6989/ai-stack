@@ -151,7 +151,14 @@ Still needed:
   model inputs; added `make comfyui-smoke`, `make comfyui-relay-status`, and
   `make comfyui-relay-smoke`; documented systemd-user/PM2 relay supervision; and
   clarified build-time `NEXT_PUBLIC_COMFYUI_*` handling plus canonical env-gate
-  naming. The DeepAgents UI tab can use direct/proxy/auto
+  naming. Follow-up on 2026-05-29 added a default-off named workflow catalog
+  (`ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_LIBRARY=false`) with
+  `save_comfyui_workflow`, `list_saved_comfyui_workflows`,
+  `get_saved_comfyui_workflow`, and `submit_saved_comfyui_workflow` so trusted
+  API-format workflows can be saved as aliases like `wan_animate`; runtime smoke
+  verified the saved `z_image_turbo` workflow against live ComfyUI and registered
+  generated output `z-image-turbo_00005_.png` as media asset
+  `2a9186bb08347462ed4f0b78`. The DeepAgents UI tab can use direct/proxy/auto
   connection modes with browser-local URL overrides, live WebSocket+polling
   progress, and prompt-history output registration into the Media Gallery. Plan
   details live in `.hermes/plans/comfyui-swarm-tab-integration.md` and

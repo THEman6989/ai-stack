@@ -170,6 +170,22 @@ else:
     COMFYUI_CLIENT_IMPORT_ERROR = None
 
 try:
+    from comfyui_workflow_library import (
+        get_comfyui_workflow_record as _get_comfyui_workflow_record,
+        list_comfyui_workflow_records as _list_comfyui_workflow_records,
+        save_comfyui_workflow_record as _save_comfyui_workflow_record,
+        submit_saved_comfyui_workflow_record as _submit_saved_comfyui_workflow_record,
+    )
+except Exception as exc:  # pragma: no cover - optional local helper/deps
+    _get_comfyui_workflow_record = None
+    _list_comfyui_workflow_records = None
+    _save_comfyui_workflow_record = None
+    _submit_saved_comfyui_workflow_record = None
+    COMFYUI_WORKFLOW_LIBRARY_IMPORT_ERROR: Exception | None = exc
+else:
+    COMFYUI_WORKFLOW_LIBRARY_IMPORT_ERROR = None
+
+try:
     from model_management import (
         apply_model_context_policy as _model_mgmt_apply_context_policy,
         check_ollama_models as _model_mgmt_check_ollama_models,
@@ -259,6 +275,7 @@ try:
         FAST_PATH_FORCE_PATTERNS as _FAST_PATH_FORCE_PATTERNS,
         HANDOFF_POLICY_PROMPT as _HANDOFF_POLICY_PROMPT,
         SPECIALIST_LOCAL_PLAN_PROMPT as _SPECIALIST_LOCAL_PLAN_PROMPT,
+        TOOL_MEMORY_POLICY_PROMPT as _TOOL_MEMORY_POLICY_PROMPT,
         build_stable_prompt_context as _build_stable_prompt_context,
     )
 except Exception as exc:  # pragma: no cover - helper must not block graph import
@@ -268,6 +285,7 @@ except Exception as exc:  # pragma: no cover - helper must not block graph impor
     _FAST_PATH_FORCE_PATTERNS = []
     _HANDOFF_POLICY_PROMPT = ""
     _SPECIALIST_LOCAL_PLAN_PROMPT = ""
+    _TOOL_MEMORY_POLICY_PROMPT = ""
     _build_stable_prompt_context = None
     PROMPT_ASSEMBLY_IMPORT_ERROR: Exception | None = exc
 else:
@@ -707,6 +725,7 @@ COMPRESSION_PAUSE_PATTERNS = [
 HANDOFF_POLICY_PROMPT = _HANDOFF_POLICY_PROMPT or ""
 ARCHIVE_RETRIEVAL_POLICY_PROMPT = _ARCHIVE_RETRIEVAL_POLICY_PROMPT or ""
 CODE_WINDOW_POLICY_PROMPT = _CODE_WINDOW_POLICY_PROMPT or ""
+TOOL_MEMORY_POLICY_PROMPT = _TOOL_MEMORY_POLICY_PROMPT or ""
 SPECIALIST_LOCAL_PLAN_PROMPT = _SPECIALIST_LOCAL_PLAN_PROMPT or ""
 AGENT_POLICY_PROMPT = (
     SPECIALIST_LOCAL_PLAN_PROMPT
@@ -716,6 +735,8 @@ AGENT_POLICY_PROMPT = (
     + ARCHIVE_RETRIEVAL_POLICY_PROMPT
     + " "
     + CODE_WINDOW_POLICY_PROMPT
+    + " "
+    + TOOL_MEMORY_POLICY_PROMPT
 )
 FAST_PATH_DENY_PATTERNS = _FAST_PATH_DENY_PATTERNS or []
 FAST_PATH_FORCE_PATTERNS = _FAST_PATH_FORCE_PATTERNS or []
@@ -3065,6 +3086,12 @@ def _comfyui_client_unavailable() -> str:
     return "ComfyUI client unavailable."
 
 
+def _comfyui_workflow_library_unavailable() -> str:
+    if COMFYUI_WORKFLOW_LIBRARY_IMPORT_ERROR:
+        return f"ComfyUI workflow library unavailable: {COMFYUI_WORKFLOW_LIBRARY_IMPORT_ERROR}"
+    return "ComfyUI workflow library unavailable."
+
+
 def _comfyui_client() -> Any | None:
     if _ComfyUIClient is None:
         return None
@@ -3251,6 +3278,102 @@ async def submit_comfyui_workflow(workflow_json: str, client_id: str = "alpharav
         return _json_tool_result({"ok": not bool(result.get("blocked")) and not bool(result.get("error")), "base_url": client.base_url, "result": result})
     except Exception as exc:
         return _json_tool_result({"ok": False, "base_url": getattr(client, "base_url", ""), "error": str(exc)})
+
+
+@tool
+async def save_comfyui_workflow(
+    workflow_name: str,
+    workflow_json: str,
+    description: str = "",
+    aliases_json: str = "[]",
+    parameter_map_json: str = "{}",
+    tags_json: str = "[]",
+    workflow_type: str = "",
+    source: str = "",
+    overwrite: bool = False,
+) -> str:
+    """Save a trusted ComfyUI API-format workflow under a reusable name/alias for later submits."""
+
+    if _save_comfyui_workflow_record is None:
+        return _json_tool_result({"ok": False, "error": _comfyui_workflow_library_unavailable()})
+    try:
+        workflow = json.loads(workflow_json)
+        aliases = json.loads(aliases_json or "[]")
+        parameter_map = json.loads(parameter_map_json or "{}")
+        tags = json.loads(tags_json or "[]")
+    except Exception as exc:
+        return _json_tool_result({"ok": False, "error": f"Invalid JSON argument: {exc}"})
+    if not isinstance(workflow, dict):
+        return _json_tool_result({"ok": False, "error": "workflow_json must decode to a JSON object."})
+    if not isinstance(aliases, list):
+        return _json_tool_result({"ok": False, "error": "aliases_json must decode to a JSON array."})
+    if not isinstance(parameter_map, dict):
+        return _json_tool_result({"ok": False, "error": "parameter_map_json must decode to a JSON object."})
+    if not isinstance(tags, list):
+        return _json_tool_result({"ok": False, "error": "tags_json must decode to a JSON array."})
+    result = _save_comfyui_workflow_record(
+        workflow_name=workflow_name,
+        workflow=workflow,
+        description=description,
+        aliases=aliases,
+        parameter_map=parameter_map,
+        tags=tags,
+        workflow_type=workflow_type,
+        source=source,
+        overwrite=overwrite,
+    )
+    return _json_tool_result(result)
+
+
+@tool
+async def list_saved_comfyui_workflows(limit: int = 50) -> str:
+    """List saved named ComfyUI workflows and aliases without dumping workflow JSON into context."""
+
+    if _list_comfyui_workflow_records is None:
+        return _json_tool_result({"ok": False, "error": _comfyui_workflow_library_unavailable()})
+    return _json_tool_result(_list_comfyui_workflow_records(limit=limit, include_workflow=False))
+
+
+@tool
+async def get_saved_comfyui_workflow(workflow_name: str, include_workflow: bool = False) -> str:
+    """Fetch metadata for a saved ComfyUI workflow by name or alias; include JSON only when needed."""
+
+    if _get_comfyui_workflow_record is None:
+        return _json_tool_result({"ok": False, "error": _comfyui_workflow_library_unavailable()})
+    return _json_tool_result(_get_comfyui_workflow_record(workflow_name, include_workflow=include_workflow))
+
+
+@tool
+async def submit_saved_comfyui_workflow(
+    workflow_name: str,
+    parameters_json: str = "{}",
+    client_id: str = "alpharavis",
+    allow_unresolved_parameters: bool = False,
+) -> str:
+    """Submit a saved named ComfyUI workflow after applying JSON parameters through its parameter_map or unique input names."""
+
+    if _submit_saved_comfyui_workflow_record is None:
+        return _json_tool_result({"ok": False, "error": _comfyui_workflow_library_unavailable()})
+    client = _comfyui_client()
+    if client is None:
+        return _json_tool_result({"ok": False, "error": _comfyui_client_unavailable()})
+    try:
+        parameters = json.loads(parameters_json or "{}")
+    except Exception as exc:
+        return _json_tool_result({"ok": False, "error": f"Invalid parameters_json: {exc}"})
+    if not isinstance(parameters, dict):
+        return _json_tool_result({"ok": False, "error": "parameters_json must decode to a JSON object."})
+    try:
+        result = await _submit_saved_comfyui_workflow_record(
+            workflow_name,
+            parameters,
+            client=client,
+            client_id=client_id,
+            allow_unresolved_parameters=allow_unresolved_parameters,
+        )
+        return _json_tool_result(result)
+    except Exception as exc:
+        return _json_tool_result({"ok": False, "workflow_name": workflow_name, "error": str(exc)})
 
 
 @tool
@@ -3963,6 +4086,15 @@ def wake_on_lan(pc_name: str):
         return f"Error: PC '{pc_name}' not found. Available: {list(REMOTE_PCS.keys())}"
 
     send_magic_packet(pc_info["mac"])
+
+    # Auto-save tool memory for future reuse
+    mac = pc_info.get("mac", "")
+    _try_auto_save_tool_memory(
+        "wake_on_lan",
+        f"PC '{pc_name}' has MAC {mac}",
+        evidence=f"Successfully woke {pc_name} via WOL",
+    )
+
     return f"System: Magic Packet sent to {pc_name}."
 
 
@@ -3992,6 +4124,17 @@ def execute_ssh_command(pc_name: str, command: str):
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+
+        # Auto-save tool memory on successful SSH connection
+        if result.returncode == 0:
+            ip = pc_info.get("ip", "")
+            user = SSH_USER
+            _try_auto_save_tool_memory(
+                "execute_ssh_command",
+                f"PC '{pc_name}' reachable at {ip} as {user}",
+                evidence=f"SSH to {pc_name} succeeded",
+            )
+
         return f"Exit Code {result.returncode}\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
     except subprocess.TimeoutExpired:
         return f"Error: SSH command timed out after 45s on '{pc_name}'."
@@ -6903,6 +7046,152 @@ async def search_agent_memory(agent_id: str, query: str, limit: int = 5, include
     if not lines:
         return f"No agent memories matched `{query}` for `{agent_id}`."
     return "\n\n".join(lines[:limit])
+
+
+@tool
+async def search_tool_memory(tool_name: str, query: str, limit: int = 5):
+    """Search tool-specific memories for a named tool (e.g. wake_on_lan, execute_ssh_command).
+
+    Use this before calling a tool to recall saved facts like IPs, MACs, hostnames,
+    or preferred parameters that were recorded in prior sessions for that tool.
+    """
+
+    if get_store is None:
+        return "LangGraph store access is unavailable in this runtime."
+
+    try:
+        store = get_store()
+    except Exception as exc:
+        return f"No LangGraph store is attached to this run: {exc}"
+
+    tool_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", tool_name.strip().lower())[:80]
+    if not tool_name:
+        return "Tool name is required."
+    limit = max(1, min(int(limit), 10))
+
+    namespace = ("alpharavis", "tool_memories", tool_name)
+    label = f"Tool memory `{tool_name}`"
+
+    try:
+        results = await _maybe_search(store, namespace, query=query, limit=limit)
+    except Exception as exc:
+        return f"{label} search failed: {exc}"
+
+    lines = []
+    for item in results or []:
+        key = _store_item_key(item)
+        value = _store_item_value(item)
+        if isinstance(value, dict):
+            lines.append(
+                "\n".join(
+                    [
+                        f"{label} `{key}`:",
+                        f"Type: {value.get('memory_type', 'fact')}",
+                        f"Memory: {value.get('memory', '')}",
+                        f"Evidence: {value.get('evidence', '')}",
+                    ]
+                )
+            )
+        elif value:
+            lines.append(f"{label} `{key}`:\n{value}")
+
+    if not lines:
+        return f"No tool memories matched `{query}` for `{tool_name}`."
+    return "\n\n".join(lines[:limit])
+
+
+@tool
+async def record_tool_memory(
+    tool_name: str,
+    memory: str,
+    memory_type: str = "fact",
+    evidence: str = "",
+):
+    """Store a durable tool-specific memory for later reuse with that tool.
+
+    Examples:
+      - wake_on_lan: "PC gaming-rig has MAC aa:bb:cc:dd:ee:ff"
+      - execute_ssh_command: "PC dev-server reachable at 192.168.1.100 as user root"
+      - execute_local_command: "docker logs command needs container name from docker ps"
+
+    These memories are scoped to the tool and auto-injected when the tool is available.
+    """
+
+    if get_store is None:
+        return "LangGraph store access is unavailable in this runtime."
+
+    try:
+        store = get_store()
+    except Exception as exc:
+        return f"No LangGraph store is attached to this run: {exc}"
+
+    tool_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", tool_name.strip().lower())[:80]
+    if not tool_name:
+        return "Tool name is required."
+
+    record = {
+        "tool_name": tool_name,
+        "memory": memory.strip()[:2500],
+        "memory_type": memory_type.strip()[:80] or "fact",
+        "evidence": evidence.strip()[:1500],
+        "scope": "tool",
+        "created_at": int(time.time()),
+    }
+    key = hashlib.sha256(json.dumps(record, sort_keys=True).encode("utf-8")).hexdigest()[:24]
+    await _maybe_put(store, ("alpharavis", "tool_memories", tool_name), key, record)
+    await _maybe_index_vector_memory(
+        source_type="tool_memory",
+        source_key=key,
+        title=f"Tool memory for {tool_name}: {record['memory_type']}",
+        content=f"{record['memory']}\n\nEvidence: {record['evidence']}".strip(),
+        thread_id="",
+        thread_key="global",
+        scope=f"tool:{tool_name}",
+        metadata={**record, "origin_thread_id": _state_thread_id(), "origin_thread_key": _state_thread_key()},
+    )
+    return f"Stored tool memory `{key}` for `{tool_name}`."
+
+
+def _try_auto_save_tool_memory(tool_name: str, memory: str, evidence: str = "") -> None:
+    """Best-effort auto-save of tool memory from sync context (fire-and-forget).
+
+    Called from sync tool functions after successful execution. Schedules an
+    async task to record the memory without blocking the tool's return.
+    Silently skips if no event loop is running or the store is unavailable.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return  # No running event loop, skip
+
+    async def _save():
+        try:
+            if get_store is None:
+                return
+            store = get_store()
+        except Exception:
+            return
+
+        name = re.sub(r"[^a-zA-Z0-9_-]+", "_", tool_name.strip().lower())[:80]
+        if not name:
+            return
+
+        record = {
+            "tool_name": name,
+            "memory": memory.strip()[:2500],
+            "memory_type": "auto",
+            "evidence": evidence.strip()[:1500],
+            "scope": "tool",
+            "created_at": int(time.time()),
+        }
+        key = hashlib.sha256(json.dumps(record, sort_keys=True).encode("utf-8")).hexdigest()[:24]
+
+        try:
+            await _maybe_put(store, ("alpharavis", "tool_memories", name), key, record)
+        except Exception:
+            pass  # Best-effort — never break the tool
+
+    loop.create_task(_save())
 
 
 @tool
@@ -13562,6 +13851,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             list_comfyui_models,
             get_comfyui_history,
             preflight_comfyui_workflow,
+            save_comfyui_workflow,
+            list_saved_comfyui_workflows,
+            get_saved_comfyui_workflow,
+            submit_saved_comfyui_workflow,
             manage_comfyui_queue,
             submit_comfyui_workflow,
             register_media_asset,
@@ -13626,6 +13919,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             describe_optional_tool_registry,
             search_agent_memory,
             record_agent_memory,
+            search_tool_memory,
+            record_tool_memory,
             search_skill_library,
             record_skill_candidate,
             list_skill_candidates,
@@ -13689,6 +13984,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             describe_optional_tool_registry,
             search_agent_memory,
             record_agent_memory,
+            search_tool_memory,
+            record_tool_memory,
             search_curated_memory,
             record_curated_memory,
             search_session_history,
@@ -13777,6 +14074,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             list_comfyui_models,
             get_comfyui_history,
             preflight_comfyui_workflow,
+            save_comfyui_workflow,
+            list_saved_comfyui_workflows,
+            get_saved_comfyui_workflow,
+            submit_saved_comfyui_workflow,
             manage_comfyui_queue,
             submit_comfyui_workflow,
             register_media_asset,
@@ -13807,6 +14108,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             inspect_context_budget,
             search_agent_memory,
             record_agent_memory,
+            search_tool_memory,
+            record_tool_memory,
             search_curated_memory,
             record_curated_memory,
             search_session_history,
@@ -13920,6 +14223,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             describe_optional_tool_registry,
             search_agent_memory,
             record_agent_memory,
+            search_tool_memory,
+            record_tool_memory,
             search_curated_memory,
             record_curated_memory,
             search_session_history,
@@ -14207,6 +14512,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 list_comfyui_models,
                 get_comfyui_history,
                 preflight_comfyui_workflow,
+                save_comfyui_workflow,
+                list_saved_comfyui_workflows,
+                get_saved_comfyui_workflow,
+                submit_saved_comfyui_workflow,
                 manage_comfyui_queue,
                 submit_comfyui_workflow,
                 prepare_comfy_for_pixelle,
@@ -14216,6 +14525,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 build_specialist_report,
                 search_agent_memory,
                 record_agent_memory,
+                search_tool_memory,
+                record_tool_memory,
                 search_curated_memory,
                 record_curated_memory,
                 search_session_history,
@@ -14246,8 +14557,12 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 "Start with check_comfyui_status when reachability is unknown, "
                 "then inspect queue/models/history as needed. Pixelle is the "
                 "simple text-to-image path; use direct ComfyUI tools when the "
-                "user asks for workflows, models, queues, prompt_id history, or "
-                "ComfyPC status. Always preflight workflow JSON before submit: "
+                "user asks for workflows, saved workflow names/aliases, models, "
+                "queues, prompt_id history, or ComfyPC status. Save trusted "
+                "API-format workflows with stable tool-style names such as "
+                "wan_animate, include aliases and parameter_map when known, then "
+                "use submit_saved_comfyui_workflow for later named runs. Always "
+                "preflight workflow JSON before submit: "
                 "verify API format, node classes, and model dependencies. Direct "
                 "workflow submission is intentionally "
                 "blocked unless ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=true; "
@@ -14297,6 +14612,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             build_specialist_report,
             search_agent_memory,
             record_agent_memory,
+            search_tool_memory,
+            record_tool_memory,
             search_curated_memory,
             record_curated_memory,
             semantic_memory_search,
@@ -14317,6 +14634,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             build_specialist_report,
             search_agent_memory,
             record_agent_memory,
+            search_tool_memory,
+            record_tool_memory,
         ]
         _power_tools = _power_full_tools if big_boss_up else _power_recovery_tools
         _power_handoff = [

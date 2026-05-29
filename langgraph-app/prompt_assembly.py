@@ -184,6 +184,17 @@ CODE_WINDOW_POLICY_PROMPT = (
     "the user explicitly asks for an artifact file."
 )
 
+TOOL_MEMORY_POLICY_PROMPT = (
+    "Tool-memory policy: many tools (e.g. wake_on_lan, execute_ssh_command, "
+    "execute_local_command) support tool-scoped durable memories. "
+    "Before calling a tool that may have saved parameters (IPs, MACs, hostnames, "
+    "preferred flags), call search_tool_memory with the tool name to recall "
+    "facts from prior sessions. After successfully using a tool with new "
+    "parameters the user may want to reuse, call record_tool_memory to store "
+    "them. This avoids the user having to repeat IPs, MACs, and configuration "
+    "details across sessions."
+)
+
 SPECIALIST_LOCAL_PLAN_PROMPT = (
     "Specialist planning policy: when you receive an execution plan or current "
     "task brief, first adapt it into your own short specialist plan before "

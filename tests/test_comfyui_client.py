@@ -129,6 +129,8 @@ def test_preflight_extracts_extended_comfyui_model_inputs_without_server():
         "4": {"class_type": "UpscaleModelLoader", "inputs": {"model_name": "4x-ultrasharp.pth"}},
         "5": {"class_type": "StyleModelLoader", "inputs": {"style_model_name": "style.safetensors"}},
         "6": {"class_type": "FluxGuidance", "inputs": {"diffusion_model": "flux1-dev-fp8.safetensors"}},
+        "7": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen_3_4b.safetensors"}},
+        "8": {"class_type": "UNETLoader", "inputs": {"unet_name": "z_image_turbo_bf16.safetensors"}},
     }
 
     result = asyncio.run(client.preflight_workflow(workflow, check_server=False))
@@ -136,7 +138,8 @@ def test_preflight_extracts_extended_comfyui_model_inputs_without_server():
     assert result["model_requirements"] == {
         "clip": ["clip_g.safetensors", "clip_l.safetensors", "t5xxl_fp8.safetensors"],
         "clip_vision": ["clip_vision_h.safetensors"],
-        "diffusion_models": ["flux1-dev-fp8.safetensors"],
+        "diffusion_models": ["flux1-dev-fp8.safetensors", "z_image_turbo_bf16.safetensors"],
+        "text_encoders": ["qwen_3_4b.safetensors"],
         "style_models": ["style.safetensors"],
         "upscale_models": ["4x-ultrasharp.pth"],
     }

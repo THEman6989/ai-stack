@@ -373,11 +373,21 @@ ComfyUI base is `unix://...` instead of container-reachable TCP.
 
 The narrow `comfyui/workflows` toolset exposes status, queue, model listing,
 history lookup with output URL extraction, queue/memory management, explicit
-workflow preflight, and gated workflow submission. Preflight validates API-format
+workflow preflight, a named workflow library, and gated workflow submission.
+Preflight validates API-format
 JSON, rejects editor-format workflows, checks node classes through `/object_info`,
 and extracts checkpoint/LoRA/VAE/ControlNet/CLIP/DualCLIP/TripleCLIP,
-CLIP-vision, diffusion-model, style-model, upscale-model, and embedding
-references for dependency reports. The dedicated `comfyui_agent` peer is only registered when
+CLIP-vision, text-encoder, diffusion-model, style-model, upscale-model, and embedding
+references for dependency reports. The named library is gated separately by
+`ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_LIBRARY=false` and persists records in
+`run_state_manager` under the `comfyui_workflows` namespace. It adds
+`save_comfyui_workflow`, `list_saved_comfyui_workflows`,
+`get_saved_comfyui_workflow`, and `submit_saved_comfyui_workflow`, so trusted
+API-format workflows can be saved with stable names/aliases such as
+`wan_animate` plus an optional `parameter_map` (`prompt -> 1.inputs.text`, etc.).
+Saved-workflow submit still calls the normal submit path and therefore remains
+blocked unless `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=true`.
+The dedicated `comfyui_agent` peer is only registered when
 `ALPHARAVIS_ENABLE_COMFYUI_AGENT=true`; other swarm workers then get
 `transfer_to_comfyui` handoff tools. Workflow submission remains separately gated
 by `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=false` by default because arbitrary

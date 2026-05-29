@@ -4,6 +4,72 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-29 — ComfyUI Agent: Named Workflow Library
+
+- Added `langgraph-app/comfyui_workflow_library.py`, a default-off named workflow
+  catalog for trusted ComfyUI API-format workflows. Records persist through the
+  existing `run_state_manager` workflow collection under namespace
+  `comfyui_workflows`.
+- Added ComfyUI Agent tools: `save_comfyui_workflow`,
+  `list_saved_comfyui_workflows`, `get_saved_comfyui_workflow`, and
+  `submit_saved_comfyui_workflow`. Workflows can be saved with stable names such
+  as `wan_animate`, aliases, tags, workflow type, source text, and an optional
+  `parameter_map` for applying user parameters before submit.
+- During live Z-Image smoke, aligned preflight model-folder detection with current
+  ComfyUI native folders: `UNETLoader.unet_name` resolves to `diffusion_models`
+  and `CLIPLoader.clip_name` resolves to `text_encoders` (older `/models/unet`
+  and `/models/clip` returned 404 on the local ComfyUI build).
+- Added feature flag `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_LIBRARY=false` and wired
+  it into Compose for `langgraph-api`. Saved-workflow execution still goes
+  through the normal `submit_comfyui_workflow` path, so
+  `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=false` continues to block actual
+  `/prompt` submission by default.
+- Updated the `comfyui/workflows` toolset and dedicated `comfyui_agent` prompt so
+  workflow-name requests can route to the catalog before queue/history/status
+  handling.
+- Verification: `pytest -q tests/test_comfyui_workflow_library.py
+  tests/test_comfyui_client.py tests/test_alpharavis_toolsets.py
+  tests/test_comfyui_agent_submit_source.py` passed (`38 passed`), and AST parse
+  of `comfyui_client.py`, `comfyui_workflow_library.py`, `agent_graph.py`, and
+  `alpharavis_toolsets.py` passed. Runtime smoke also passed after enabling
+  `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=true`: the saved `z_image_turbo`
+  workflow submitted prompt_id `aa94307b-5bb7-4056-b504-8777b77dc091`, produced
+  `z-image-turbo_00005_.png`, and registered media asset
+  `2a9186bb08347462ed4f0b78` URL-only in the Media Gallery.
+
+## 2026-05-29 — DeepAgents UI: Unified Chat-First Tab Styling
+
+- Unified the empty-state first viewport across Chat, Coding, ComfyUI, and
+  Office: each tab now presents a centered icon/title hero plus the same modern
+  opener-card style where applicable.
+- Chat keeps the existing 8-question carousel with 4 visible cards, but now also
+  shows the centered `AlphaRavis Chat` icon/title treatment used by the other
+  agent tabs.
+- Coding, ComfyUI, and Office now reuse the same `ChatOpeners` card/carousel
+  component instead of their older compact outline-button grids.
+- Coding, ComfyUI, and Office chat inputs now sit in the same rounded,
+  max-width bottom composer shell as the Chat tab. Coding keeps the
+  Direct/+AlphaRavis mode switch, ComfyUI keeps the hamburger tools button, and
+  Office keeps Output/Preview links.
+- Follow-up refinement: the Coding, ComfyUI, and Office composer internals now
+  match the Chat composer more closely: transparent textarea, paperclip upload
+  on the lower-left, and the normal muted `Send` button with arrow/text on the
+  lower-right instead of green icon-only submit buttons. Tab-specific controls
+  live directly above/outside the composer shell.
+- Added an Office chat-composer upload button that reuses the existing Office
+  upload pipeline; the below-fold upload control remains available.
+- Verification: `npm run build` in `submodules/deep-agents-ui` passed,
+  `docker compose build deep-agents-ui` passed, the rebuilt service returned
+  HTTP 200, and browser checks for Coding/ComfyUI/Office showed the Chat-style
+  composer with no console errors.
+- Mobile check/fix: the top header now uses constrained horizontal scrolling
+  (`overflow-x-auto`) with shrink-safe groups so the tab bar no longer expands
+  the whole page width on a 390x844 viewport. CDP mobile-width check showed
+  `scrollWidth=390` and `horizontalOverflow=false` on Chat, Coding, ComfyUI,
+  and Office. Office tools start below the first viewport (`Create Office
+  document` top around 890px for an 844px viewport), so the first mobile view is
+  still chat-only.
+
 ## 2026-05-28 — ComfyUI Docker Host-Proxy Hardening
 
 - Added a supported Unix-domain-socket path for local ComfyUI deployments where

@@ -97,7 +97,7 @@ TOOLSETS: dict[str, Toolset] = {
     ),
     "comfyui/workflows": Toolset(
         "comfyui/workflows",
-        "Inspect and control a configured ComfyUI server over LAN: status, queue, models, prompt history, and gated workflow submit.",
+        "Inspect and control a configured ComfyUI server over LAN: status, queue, models, prompt history, named workflow library, and gated workflow submit.",
         tools=(
             "check_comfyui_status",
             "list_comfyui_queue",
@@ -105,6 +105,10 @@ TOOLSETS: dict[str, Toolset] = {
             "get_comfyui_history",
             "register_comfyui_outputs",
             "preflight_comfyui_workflow",
+            "save_comfyui_workflow",
+            "list_saved_comfyui_workflows",
+            "get_saved_comfyui_workflow",
+            "submit_saved_comfyui_workflow",
             "manage_comfyui_queue",
             "submit_comfyui_workflow",
             "prepare_comfy_for_pixelle",
@@ -160,6 +164,8 @@ TOOLSETS: dict[str, Toolset] = {
             "search_debugging_lessons",
             "search_agent_memory",
             "record_agent_memory",
+            "search_tool_memory",
+            "record_tool_memory",
             "search_curated_memory",
             "record_curated_memory",
             "search_skill_library",

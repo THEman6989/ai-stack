@@ -594,6 +594,9 @@ ALPHARAVIS_COMFYUI_API_BASE=
 ALPHARAVIS_COMFYUI_PUBLIC_BASE_URL=http://localhost:8188
 # Dedicated ComfyUI swarm agent is opt-in; Pixelle image generation still works separately.
 ALPHARAVIS_ENABLE_COMFYUI_AGENT=false
+# Named workflow catalog for the ComfyUI Agent (save/list/get/submit by alias).
+# Saving is separate from executing; execution still requires ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT=true.
+ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_LIBRARY=false
 # Submitting arbitrary ComfyUI workflow JSON can execute custom-node Python.
 # Keep false unless you trust the workflow source. This is the canonical backend gate;
 # an older non-canonical alias is accepted only when this is unset.
