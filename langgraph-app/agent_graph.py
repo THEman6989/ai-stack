@@ -5018,13 +5018,11 @@ def build_specialist_report(
 
 @tool
 async def search_curated_memory(query: str, agent_id: str = "", scope: str = "auto", limit: int = 5):
-    """Search durable curated memories (facts, preferences, conventions) by keyword.
+    """Search curated memories by exact keyword in MongoDB.
 
-Use this FIRST when looking for stored facts. It searches MongoDB directly — fast,
-exact keyword matching. If it returns nothing but you suspect relevant memories
-exist, follow up with semantic_memory_search for meaning-based (pgvector) search.
-search_curated_memory and record_curated_memory are the primary durable-fact tools;
-prefer them over record_agent_memory for facts that should survive across sessions."""
+Use this for: finding a memory_id (for update/delete), exact term matches,
+or when semantic_memory_search returns too broad results. For general recall,
+prefer semantic_memory_search (pgvector) — it finds concepts, not just keywords."""
 
 
     if get_store is None:
@@ -5879,12 +5877,16 @@ async def semantic_memory_search(
 ):
     """Semantic (meaning-based) search over ALL indexed AlphaRavis content via pgvector.
 
-Searches curated memories, archives, artifacts, session turns, and skills by meaning
-(embedding similarity), not keywords. Use this as FALLBACK when search_curated_memory
-returns nothing, or when you need to find things by concept rather than exact words.
-Example: "what does the user prefer for their dev setup" → finds "Ryzen 9, 64GB RAM"
-even without the words "prefer" or "setup" in the memory text.
-Also searches federated document RAG when ALPHARAVIS_ENABLE_FEDERATED_RAG=true."""
+This is the PRIMARY memory search tool. Use it by default to recall facts,
+preferences, and past context. It searches by meaning (embedding similarity),
+finding concepts even when the exact words don't match.
+Example: "what does the user prefer for their dev setup" → finds "Ryzen 9, 64GB RAM".
+
+Searches curated memories, archives, artifacts, session turns, and skills.
+Also searches federated document RAG when ALPHARAVIS_ENABLE_FEDERATED_RAG=true.
+
+Use search_curated_memory only when you need an exact memory_id for update/delete,
+or a precise keyword match."""
 
     started = time.perf_counter()
     limit = max(1, min(int(limit), int(os.getenv("ALPHARAVIS_PGVECTOR_SEARCH_LIMIT", "5"))))
@@ -14058,10 +14060,12 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "Use reload_repo_ai_skills for an explicit disk rescan. Export "
             "skill candidates only to disabled-by-default draft files, never "
             "directly to active reviewed skills. "
-            "Use agent_id=`general_assistant` for your own memories. Search "
-            "your agent memory before recording a new repeated lesson. "
-            "Use semantic_memory_search when keyword search misses a likely "
-            "older memory, artifact, archive, skill, or session turn. "
+            "Use agent_id=`general_assistant` for your own memories. "
+            "Use semantic_memory_search (pgvector) as your primary memory "
+            "lookup — it finds concepts, not just keywords. "
+            "Use search_curated_memory for exact memory_id lookups "
+            "(update/delete) or precise keyword matches. "
+            "Search your agent memory before recording a new repeated lesson. "
             "If semantic_memory_search returns source_type=archive_collection, "
             "inspect child_archive_keys and load only relevant raw archives with "
             "read_archive_record through the context agent; do not guess old details. "
