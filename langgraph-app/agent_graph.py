@@ -13450,7 +13450,22 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     )
     mcp_tools = mcp_tools or []
     MCP_SCHEMA_CACHE = _build_mcp_schema_cache(MCP_SERVER_INFOS) if _build_mcp_schema_cache is not None else {}
-    memory_manage_tool = create_manage_memory_tool(namespace=("memories",))
+    memory_manage_tool = create_manage_memory_tool(
+        namespace=("memories",),
+        instructions=(
+            "Proactively call this tool when you:\n\n"
+            "1. The user corrects you or says 'remember this' / 'don't do that again'.\n"
+            "2. The user shares a preference, habit, or personal detail.\n"
+            "3. You discover something about the environment (OS, installed tools, project structure).\n"
+            "4. You learn a convention, API quirk, or workflow specific to this user's setup.\n"
+            "5. You identify a stable fact that will be useful again in future sessions.\n"
+            "6. An existing memory is incorrect or outdated.\n\n"
+            "PRIORITY: User preferences and corrections > environment facts > procedural knowledge.\n"
+            "Do NOT use this for task progress, session outcomes, completed-work logs, or temporary TODO state.\n"
+            "If you discovered a new reusable procedure, save it as a skill candidate instead.\n"
+            "Write memories as declarative facts, not instructions to yourself.\n"
+        ),
+    )
     memory_search_tool = create_search_memory_tool(namespace=("memories",))
     handoff_requirement = (
         "Before calling this transfer tool, create a handoff packet with "

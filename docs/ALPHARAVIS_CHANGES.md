@@ -23,6 +23,32 @@ can tell which patches are intentional and which ones can be removed.
   procedural skill instructions.
 - Files changed: `langgraph-app/prompt_assembly.py`, `langgraph-app/agent_graph.py`.
 
+## 2026-05-29 — Memory Tool Docstring Alignment (Second Pass)
+
+- Fixed contradictory Generalist system prompt: removed "Use approved
+  skill-library entries only as hints" language (which directly contradicted the
+  new `SKILL_POLICY_PROMPT` that says "MUST load"). Now says "Load approved
+  skill-library entries with `read_repo_ai_skill` when they match the task".
+- Expanded 6 memory-tool docstrings with cross-references so agents know which
+  tool to use for which purpose:
+  - `search_curated_memory`: durable facts, NOT task progress; prefer over
+    `record_agent_memory` for cross-session facts.
+  - `search_session_history`: transient task context; use
+    `search_curated_memory` for durable facts.
+  - `search_agent_memory`: agent-scoped lessons; use
+    `search_curated_memory(scope='global')` for cross-agent facts.
+  - `record_agent_memory`: scope routing explained; prefer
+    `record_curated_memory` for cross-session stable facts.
+  - `search_tool_memory`: "Always search tool memory first when reusing a tool"
+    rule added — prevents user from repeating IPs/MACs/hostnames.
+  - `record_tool_memory`: "Use this after successfully using a tool with new
+    parameters" rule added with concrete examples.
+- The `create_manage_memory_tool` from langmem remains uneditable; the
+  `MEMORY_CREATION_POLICY_PROMPT` already covers its usage rules.
+- Files changed: `langgraph-app/agent_graph.py` (tool docstrings + Generalist
+  prompt only).
+- Verification: 684 pytest tests pass.
+
 ## 2026-05-29 — ComfyUI Agent: Named Workflow Library
 
 - Added `langgraph-app/comfyui_workflow_library.py`, a default-off named workflow
