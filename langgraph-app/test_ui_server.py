@@ -1790,15 +1790,15 @@ async def _run_latency_bench(request: LatencyBenchRequest) -> dict[str, Any]:
     embed_result: dict[str, Any] = {"component": "embedding", "model": embed_model}
     if request.skip_embedding:
         embed_result.update({"ok": None, "skipped": True, "elapsed_seconds": 0})
-        print("[LATENCY-BENCH] embedding skipped", flush=True)
     else:
         try:
-            emb_url = f"{request.embedding_base_url.rstrip('/')}/api/embeddings"
+            emb_url = f"{request.embedding_base_url.rstrip('/')}/api/embed"
             emb_payload = {"model": embed_model, "input": bench_text}
             emb = await _http_post(emb_url, emb_payload, timeout_sec=step_timeout)
             emb_body = emb.get("body", {}) if isinstance(emb, dict) else {}
-            emb_data = emb_body.get("data") if isinstance(emb_body, dict) else None
-            dim = len(emb_data[0].get("embedding", [])) if isinstance(emb_data, list) and emb_data else 0
+            # Ollama /api/embed: {"embeddings": [[...]]}
+            emb_list = emb_body.get("embeddings") if isinstance(emb_body, dict) else None
+            dim = len(emb_list[0]) if isinstance(emb_list, list) and emb_list and isinstance(emb_list[0], list) else 0
             embed_result.update({
                 "ok": emb.get("status", 0) < 400 and dim > 0,
                 "status_code": emb.get("status"),
@@ -1822,7 +1822,7 @@ async def _run_latency_bench(request: LatencyBenchRequest) -> dict[str, Any]:
         try:
             search_results = await asyncio.wait_for(
                 pgvector_semantic_search(query=bench_query, limit=5, source_keys=None),
-                timeout=step_timeout,
+                timeout=max(8.0, step_timeout),
             )
             hit_count = len(search_results) if isinstance(search_results, list) else 0
             pgv_result.update({
