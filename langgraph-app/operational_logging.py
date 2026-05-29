@@ -7,7 +7,9 @@ import re
 import sys
 import time
 
-from env_utils import env_boolimport traceback
+import traceback
+
+from env_utils import env_bool
 from datetime import datetime, timezone
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path

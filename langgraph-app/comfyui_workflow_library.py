@@ -542,6 +542,13 @@ def get_comfyui_workflow_record(workflow_name: str, *, include_workflow: bool = 
             *aliases,
         }
         if query.lower() in names:
+            # Reload full record if caller needs the workflow body.
+            # list_comfyui_workflow_records strips it when include_workflow=False.
+            if include_workflow:
+                canonical = record.get("name") or record.get("workflow_id")
+                full = run_state_manager.load_workflow_record(WORKFLOW_LIBRARY_NAMESPACE, canonical)
+                if isinstance(full, dict):
+                    record = full
             return {
                 "ok": True,
                 "found": True,
