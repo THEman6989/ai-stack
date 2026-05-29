@@ -254,11 +254,16 @@ async def lifespan(app: FastAPI):
 # 3. Create Specialized Workers (Phase 2 & 3: Supervisor + Deep Research)
     
     # Worker 1: The Research Expert (Uses Tavily for IP protection and local documents)
+    try:
+        from agent_graph import record_curated_memory, search_curated_memory
+        _research_memory_tools = [record_curated_memory, search_curated_memory]
+    except Exception:
+        _research_memory_tools = []
     research_worker = create_deep_agent(
         model=llm,
-        tools=[deep_web_research, ask_documents,],
+        tools=[deep_web_research, ask_documents, *_research_memory_tools],
         name="research_expert",
-        system_prompt="You are the Research Expert. Use 'deep_web_research' (Tavily) for deep web research and ask_documents for local data. You search thoroughly and comprehensively."
+        system_prompt="You are the Research Expert. Use 'deep_web_research' (Tavily) for deep web research and ask_documents for local data. You search thoroughly and comprehensively. Use record_curated_memory for durable facts and search_curated_memory to recall them."
     )
     research_worker = watch(research_worker, host='0.0.0.0', port=8760, ws_port=8761, open_browser=False)
 

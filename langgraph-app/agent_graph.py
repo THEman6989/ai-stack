@@ -5018,11 +5018,11 @@ def build_specialist_report(
 
 @tool
 async def search_curated_memory(query: str, agent_id: str = "", scope: str = "auto", limit: int = 5):
-    """Search durable curated memories (facts, preferences, conventions) across sessions.
+    """Search durable curated memories (facts, preferences, conventions) by keyword.
 
-Use this to recall stable facts stored with record_curated_memory — user preferences,
-environment details, conventions, and lessons. NOT for task progress or session outcomes
-(use search_session_history for those).
+Use this FIRST when looking for stored facts. It searches MongoDB directly — fast,
+exact keyword matching. If it returns nothing but you suspect relevant memories
+exist, follow up with semantic_memory_search for meaning-based (pgvector) search.
 search_curated_memory and record_curated_memory are the primary durable-fact tools;
 prefer them over record_agent_memory for facts that should survive across sessions."""
 
@@ -5877,7 +5877,14 @@ async def semantic_memory_search(
     limit: int = 5,
     include_other_threads: bool = False,
 ):
-    """Semantic retrieval over AlphaRavis pgvector memory and federated document RAG."""
+    """Semantic (meaning-based) search over ALL indexed AlphaRavis content via pgvector.
+
+Searches curated memories, archives, artifacts, session turns, and skills by meaning
+(embedding similarity), not keywords. Use this as FALLBACK when search_curated_memory
+returns nothing, or when you need to find things by concept rather than exact words.
+Example: "what does the user prefer for their dev setup" → finds "Ryzen 9, 64GB RAM"
+even without the words "prefer" or "setup" in the memory text.
+Also searches federated document RAG when ALPHARAVIS_ENABLE_FEDERATED_RAG=true."""
 
     started = time.perf_counter()
     limit = max(1, min(int(limit), int(os.getenv("ALPHARAVIS_PGVECTOR_SEARCH_LIMIT", "5"))))
