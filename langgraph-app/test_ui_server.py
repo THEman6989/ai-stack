@@ -1822,7 +1822,7 @@ async def _run_latency_bench(request: LatencyBenchRequest) -> dict[str, Any]:
         try:
             search_results = await asyncio.wait_for(
                 pgvector_semantic_search(query=bench_query, limit=5, source_keys=None),
-                timeout=max(8.0, step_timeout),
+                timeout=max(15.0, step_timeout),
             )
             hit_count = len(search_results) if isinstance(search_results, list) else 0
             pgv_result.update({

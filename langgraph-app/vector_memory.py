@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
-import httpx
+import aiohttp
 
 try:
     from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -797,6 +798,21 @@ def chunk_text(
     return chunks
 
 
+async def _aiohttp_embed_post(url: str, headers: dict[str, str], json_data: dict, timeout_sec: float) -> dict:
+    """POST with real cancelable timeout via aiohttp (httpx hangs in Docker)."""
+    timeout = aiohttp.ClientTimeout(total=timeout_sec, connect=min(5.0, timeout_sec))
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, headers=headers, json=json_data) as resp:
+            text = await resp.text()
+            try:
+                body = json.loads(text)
+            except json.JSONDecodeError:
+                body = {"_raw": text}
+            if resp.status >= 400:
+                raise VectorMemoryError(f"HTTP {resp.status}: {text[:500]}")
+            return body
+
+
 async def _embed_text_with_model(text: str, model: str) -> EmbeddingResult:
     base_url = os.getenv(
         "ALPHARAVIS_PGVECTOR_EMBEDDING_BASE_URL",
@@ -812,12 +828,9 @@ async def _embed_text_with_model(text: str, model: str) -> EmbeddingResult:
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(f"{base_url}/embeddings", headers=headers, json=payload)
-    if response.status_code >= 400:
-        raise VectorMemoryError(f"{model} returned HTTP {response.status_code}: {response.text[:500]}")
-
-    data = response.json()
+    data = await _aiohttp_embed_post(
+        f"{base_url}/embeddings", headers=headers, json_data=payload, timeout_sec=timeout,
+    )
     try:
         embedding = data["data"][0]["embedding"]
     except Exception as exc:
@@ -872,12 +885,9 @@ async def _embed_media_with_model(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(f"{base_url}/embeddings", headers=headers, json=payload)
-    if response.status_code >= 400:
-        raise VectorMemoryError(f"{model} returned HTTP {response.status_code}: {response.text[:500]}")
-
-    data = response.json()
+    data = await _aiohttp_embed_post(
+        f"{base_url}/embeddings", headers=headers, json_data=payload, timeout_sec=timeout,
+    )
     try:
         embedding = data["data"][0]["embedding"]
     except Exception as exc:
