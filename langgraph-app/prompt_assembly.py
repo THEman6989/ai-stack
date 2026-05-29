@@ -202,6 +202,62 @@ SPECIALIST_LOCAL_PLAN_PROMPT = (
     "part your specialist role owns."
 )
 
+SKILL_POLICY_PROMPT = (
+    "Skill policy (mandatory): skills are your procedural memory — reusable "
+    "approaches for recurring task types. Before replying, scan the skill "
+    "library. If a skill matches or is even partially relevant to your task, "
+    "you MUST load it with read_repo_ai_skill and follow its instructions. "
+    "Err on the side of loading — it is always better to have context you "
+    "don't need than to miss critical steps, pitfalls, or established "
+    "workflows. Skills contain specialized knowledge — API endpoints, "
+    "tool-specific commands, and proven workflows that outperform "
+    "general-purpose approaches. Load the skill even if you think you could "
+    "handle the task with basic tools like web_search or terminal. "
+    "Skills also encode the user's preferred approach, conventions, and "
+    "quality standards for tasks like code review, planning, and testing — "
+    "load them even for tasks you already know how to do, because the skill "
+    "defines how it should be done here. "
+    "If a skill has issues, fix it: note what needs updating and create a "
+    "review candidate with create_curated_memory_review_candidates. "
+    "After difficult/iterative tasks, offer to save as a skill. "
+    "If a skill you loaded was missing steps, had wrong commands, or needed "
+    "pitfalls you discovered, flag it for update before finishing. "
+    "Only proceed without loading a skill if genuinely none are relevant "
+    "to the task."
+)
+
+MEMORY_CREATION_POLICY_PROMPT = (
+    "Memory policy: you have persistent memory across sessions. "
+    "Save durable facts using record_curated_memory. Memory is injected into "
+    "every turn, so keep it compact and focused on facts that will still "
+    "matter later. "
+    "Prioritize what reduces future user steering — the most valuable memory "
+    "is one that prevents the user from having to correct or remind you again. "
+    "User preferences and recurring corrections matter more than procedural "
+    "task details. "
+    "WHEN TO SAVE (do this proactively, don't wait to be asked): "
+    "- User corrects you or says 'remember this' / 'don't do that again' "
+    "- User shares a preference, habit, or personal detail (name, role, "
+    "timezone, coding style) "
+    "- You discover something about the environment (OS, installed tools, "
+    "project structure) "
+    "- You learn a convention, API quirk, or workflow specific to this "
+    "user's setup "
+    "- You identify a stable fact that will be useful again in future sessions "
+    "PRIORITY: User preferences and corrections > environment facts > "
+    "procedural knowledge. The most valuable memory prevents the user from "
+    "having to repeat themselves. "
+    "Do NOT save task progress, session outcomes, completed-work logs, or "
+    "temporary TODO state to memory; use search_session_history to recall "
+    "those from past transcripts. "
+    "If you've discovered a new way to do something, solved a problem that "
+    "could be necessary later, save it as a skill candidate via "
+    "create_curated_memory_review_candidates, not as a regular memory. "
+    "Write memories as declarative facts, not instructions to yourself. "
+    "'User prefers concise responses' yes — 'Always respond concisely' no. "
+    "Procedures and workflows belong in skills, not memory."
+)
+
 # ---------- fast path routing patterns ----------
 
 FAST_PATH_DENY_PATTERNS: list[str] = [

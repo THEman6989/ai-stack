@@ -284,6 +284,8 @@ try:
         FAST_PATH_DENY_PATTERNS as _FAST_PATH_DENY_PATTERNS,
         FAST_PATH_FORCE_PATTERNS as _FAST_PATH_FORCE_PATTERNS,
         HANDOFF_POLICY_PROMPT as _HANDOFF_POLICY_PROMPT,
+        MEMORY_CREATION_POLICY_PROMPT as _MEMORY_CREATION_POLICY_PROMPT,
+        SKILL_POLICY_PROMPT as _SKILL_POLICY_PROMPT,
         SPECIALIST_LOCAL_PLAN_PROMPT as _SPECIALIST_LOCAL_PLAN_PROMPT,
         TOOL_MEMORY_POLICY_PROMPT as _TOOL_MEMORY_POLICY_PROMPT,
         build_stable_prompt_context as _build_stable_prompt_context,
@@ -294,6 +296,8 @@ except Exception as exc:  # pragma: no cover - helper must not block graph impor
     _FAST_PATH_DENY_PATTERNS = []
     _FAST_PATH_FORCE_PATTERNS = []
     _HANDOFF_POLICY_PROMPT = ""
+    _MEMORY_CREATION_POLICY_PROMPT = ""
+    _SKILL_POLICY_PROMPT = ""
     _SPECIALIST_LOCAL_PLAN_PROMPT = ""
     _TOOL_MEMORY_POLICY_PROMPT = ""
     _build_stable_prompt_context = None
@@ -739,15 +743,19 @@ CODE_WINDOW_POLICY_PROMPT = _CODE_WINDOW_POLICY_PROMPT or ""
 TOOL_MEMORY_POLICY_PROMPT = _TOOL_MEMORY_POLICY_PROMPT or ""
 SPECIALIST_LOCAL_PLAN_PROMPT = _SPECIALIST_LOCAL_PLAN_PROMPT or ""
 AGENT_POLICY_PROMPT = (
-    SPECIALIST_LOCAL_PLAN_PROMPT
+    _SKILL_POLICY_PROMPT
     + " "
-    + HANDOFF_POLICY_PROMPT
+    + _MEMORY_CREATION_POLICY_PROMPT
     + " "
-    + ARCHIVE_RETRIEVAL_POLICY_PROMPT
+    + _SPECIALIST_LOCAL_PLAN_PROMPT
     + " "
-    + CODE_WINDOW_POLICY_PROMPT
+    + _HANDOFF_POLICY_PROMPT
     + " "
-    + TOOL_MEMORY_POLICY_PROMPT
+    + _ARCHIVE_RETRIEVAL_POLICY_PROMPT
+    + " "
+    + _CODE_WINDOW_POLICY_PROMPT
+    + " "
+    + _TOOL_MEMORY_POLICY_PROMPT
 )
 FAST_PATH_DENY_PATTERNS = _FAST_PATH_DENY_PATTERNS or []
 FAST_PATH_FORCE_PATTERNS = _FAST_PATH_FORCE_PATTERNS or []
@@ -5971,7 +5979,31 @@ async def record_curated_memory(
     scope: str = "global",
     agent_id: str = "",
 ):
-    """Store a small curated memory for always-available recall."""
+    """Save durable information to persistent memory that survives across sessions.
+
+Memory is injected into future turns, so keep it compact and focused on facts
+that will still matter later.
+
+WHEN TO SAVE (do this proactively, don't wait to be asked):
+- User corrects you or says 'remember this' / 'don't do that again'
+- User shares a preference, habit, or personal detail (name, role, timezone, coding style)
+- You discover something about the environment (OS, installed tools, project structure)
+- You learn a convention, API quirk, or workflow specific to this user's setup
+- You identify a stable fact that will be useful again in future sessions
+
+PRIORITY: User preferences and corrections > environment facts > procedural knowledge.
+The most valuable memory prevents the user from having to repeat themselves.
+
+Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO
+state to memory; use search_session_history to recall those from past transcripts.
+If you've discovered a new way to do something, solved a problem that could be
+necessary later, save it as a skill candidate with create_curated_memory_review_candidates,
+not as a regular memory.
+
+Write memories as declarative facts, not instructions to yourself.
+'User prefers concise responses' yes — 'Always respond concisely' no.
+Procedures and workflows belong in skills, not memory."""
+
 
     if get_store is None:
         return "LangGraph store access is unavailable in this runtime."
@@ -12905,10 +12937,22 @@ async def skill_library_node(state: AlphaRavisState, runtime: Any | None = None)
         max_chars = int(os.getenv("ALPHARAVIS_SKILL_CONTEXT_MAX_CHARS", "2500"))
         body = "\n\n".join(_format_skill_record(key, value) for key, value in active_skills)
         sections.append(
-            "Approved AlphaRavis workflow skills matched this task. Treat them as "
-            "non-binding hints; keep normal reasoning, tool safety, and human "
-            "approval gates in force.\n\n"
-            f"{body[:max_chars]}"
+            "## Skills (mandatory)\n"
+            "Approved AlphaRavis workflow skills matched this task. "
+            "If a skill below matches or is even partially relevant to your task, "
+            "you MUST load it with read_repo_ai_skill and follow its instructions. "
+            "Err on the side of loading — it is always better to have context you "
+            "don't need than to miss critical steps, pitfalls, or established workflows. "
+            "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
+            "and proven workflows that outperform general-purpose approaches. Load the skill "
+            "even if you think you could handle the task with basic tools. "
+            "After difficult/iterative tasks, offer to save as a skill. "
+            "If a skill you loaded was missing steps, had wrong commands, or needed "
+            "pitfalls you discovered, flag it for update before finishing.\n\n"
+            "<available_skills>\n"
+            f"{body[:max_chars]}\n"
+            "</available_skills>\n\n"
+            "Only proceed without loading a skill if genuinely none are relevant to the task."
         )
     content = "\n\n".join(sections)
 

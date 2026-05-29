@@ -4,6 +4,25 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-29 — Hermes-Style Skill & Memory Policy
+
+- Added `SKILL_POLICY_PROMPT` and `MEMORY_CREATION_POLICY_PROMPT` to
+  `prompt_assembly.py`, copied from Hermes Agent's system prompt rules.
+- Added both policies to `AGENT_POLICY_PROMPT` in `agent_graph.py` so all
+  subagents (generalist, research, debugger, hermes, context, office, comfyui,
+  power) inherit mandatory skill-loading and proactive memory-creation rules.
+- Updated `record_curated_memory` docstring with Hermes-style WHEN TO SAVE
+  triggers, priority rules, and anti-pattern warnings.
+- Updated `skill_library_node` output from "Treat skills as non-binding hints"
+  to mandatory `<available_skills>` block with `## Skills (mandatory)` heading,
+  `read_repo_ai_skill` requirement, and `</available_skills>` wrapper, matching
+  Hermes Agent's prompt structure.
+- Rationale: AlphaRavis subagents were not proactively creating memories or
+  loading skills. Copying Hermes Agent's proven prompt patterns gives agents
+  the same clear triggers for when to save durable facts and when to load
+  procedural skill instructions.
+- Files changed: `langgraph-app/prompt_assembly.py`, `langgraph-app/agent_graph.py`.
+
 ## 2026-05-29 — ComfyUI Agent: Named Workflow Library
 
 - Added `langgraph-app/comfyui_workflow_library.py`, a default-off named workflow
