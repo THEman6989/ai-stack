@@ -57,9 +57,9 @@ if importlib.util.find_spec("fastapi") is None:
     responses_stub = types.ModuleType("fastapi.responses")
     responses_stub.__spec__ = ModuleSpec("fastapi.responses", loader=None)
 
-    class JSONResponse(dict):
+    class JSONResponse:
         def __init__(self, content=None, status_code: int = 200, *args, **kwargs) -> None:
-            super().__init__(content or {})
+            self.body = json.dumps(content or {}).encode("utf-8")
             self.status_code = status_code
 
     class RedirectResponse(str):
@@ -115,6 +115,16 @@ if importlib.util.find_spec("langgraph_sdk") is None:
     sys.modules["langgraph_sdk"] = sdk_stub
 
 import bridge_server  # noqa: E402
+
+
+def _json_body(response: object) -> dict[str, object]:
+    """Extract a dict from a JSONResponse (stub or real Starlette)."""
+    if hasattr(response, "body"):
+        return json.loads(getattr(response, "body"))
+    # Fallback: stub dict subclass (legacy)
+    if isinstance(response, dict):
+        return response  # type: ignore[return-value]
+    raise TypeError(f"Cannot extract body from {type(response).__name__}")
 
 
 class _StubRequest:
@@ -770,10 +780,10 @@ def test_responses_validation_rejects_unsupported_hosted_features() -> None:
     structured = bridge_server._validate_responses_request({"text": {"format": {"type": "json_schema"}}})
     missing_previous = bridge_server._validate_responses_request({"previous_response_id": "resp_missing"})
 
-    assert background and background["error"]["code"] == "background_not_supported"
-    assert tools and tools["error"]["code"] == "client_tools_not_supported"
-    assert structured and structured["error"]["code"] == "text_format_not_supported"
-    assert missing_previous and missing_previous["error"]["code"] == "previous_response_not_found"
+    assert background and _json_body(background)["error"]["code"] == "background_not_supported"
+    assert tools and _json_body(tools)["error"]["code"] == "client_tools_not_supported"
+    assert structured and _json_body(structured)["error"]["code"] == "text_format_not_supported"
+    assert missing_previous and _json_body(missing_previous)["error"]["code"] == "previous_response_not_found"
 
 
 def test_approval_resume_supports_thread_command_memory() -> None:
@@ -837,9 +847,9 @@ def test_input_tokens_endpoint_returns_count_object() -> None:
         )
     )
 
-    assert result["object"] == "response.input_tokens"
-    assert result["input_tokens"] > 0
-    assert "input_tokens_details" not in result
+    assert _json_body(result)["object"] == "response.input_tokens"
+    assert _json_body(result)["input_tokens"] > 0
+    assert "input_tokens_details" not in _json_body(result)
 
 
 def test_bridge_observer_records_raw_and_model_context() -> None:
@@ -1173,11 +1183,11 @@ def test_input_items_and_delete_routes_use_stored_response() -> None:
     bridge_server._store_response_object(response, {"store": True, "input": "Hallo"})
 
     items = asyncio.run(bridge_server.list_response_input_items("resp_items", limit=10, order="asc"))
-    assert items["object"] == "list"
-    assert items["data"][0]["content"][0]["text"] == "Hallo"
+    assert _json_body(items)["object"] == "list"
+    assert _json_body(items)["data"][0]["content"][0]["text"] == "Hallo"
 
     deleted = asyncio.run(bridge_server.delete_response("resp_items"))
-    assert deleted == {"id": "resp_items", "object": "response", "deleted": True}
+    assert _json_body(deleted) == {"id": "resp_items", "object": "response", "deleted": True}
     assert "resp_items" not in bridge_server._RESPONSES_STORE
 
 
@@ -1185,7 +1195,7 @@ def test_retrieve_stream_query_returns_explicit_unsupported_error() -> None:
     result = asyncio.run(bridge_server.retrieve_response("resp_any", stream=True))
 
     assert result.status_code == 501
-    assert result["error"]["code"] == "retrieve_stream_not_supported"
+    assert _json_body(result)["error"]["code"] == "retrieve_stream_not_supported"
 
 
 def test_responses_event_is_sse_with_semantic_type() -> None:
