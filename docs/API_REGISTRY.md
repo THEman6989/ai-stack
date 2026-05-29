@@ -212,6 +212,31 @@ Streaming-Relay: Pre-loaded AlphaRavis Context → Hermes Agent SSE.
 
 ---
 
+### ACP Adapter (AionUi, stdio)
+
+Quelle: `langgraph-app/alpharavis_acp_adapter.py` (1806 Zeilen)
+
+JSON-RPC 2.0 über stdio. Kein HTTP-Port — wird als Subprozess gestartet.
+Verbindet AionUi → LangGraph API.
+
+```
+AionUi → alpharavis_acp_adapter.py → langgraph-api:2024 → alpha_ravis
+```
+
+Mapping von LangGraph-Events zu AionUi-UI-Updates:
+- `message_delta` → `agent_message_chunk`
+- `node_summary` → `agent_thought_chunk`
+- `planner_state` → `plan`
+- `tool_call/result` → `tool_call` / `tool_call_update`
+- `command_approval` → `session/request_permission`
+
+Start:
+```bash
+python /workspace/langgraph-app/alpharavis_acp_adapter.py
+```
+
+---
+
 ### Service Dashboard (`service-dashboard:8090`)
 
 Quelle: `service_redirector_server.py` (stdlib http.server, keine FastAPI-Routen)
