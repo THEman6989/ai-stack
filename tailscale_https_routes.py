@@ -116,7 +116,7 @@ class TailscaleRunner:
 
 
 def env_bool(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+    return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def load_redirector_services() -> list[dict[str, Any]]:

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 
 def _env_bool(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+    return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _env_float(name: str, default: float) -> float:

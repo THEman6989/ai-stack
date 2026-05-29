@@ -18,10 +18,10 @@ OUTPUT = REPO_ROOT / "docker-compose.plugins.yml"
 
 
 def _env_bool(key: str, default: bool = False) -> bool:
-    val = os.getenv(key, "").strip().lower()
+    val = str(os.getenv(key, "")).strip().lower()
     if not val:
         return default
-    return val in ("1", "true", "yes", "on")
+    return val in {"1", "true", "yes", "y", "on"}
 
 
 def main() -> None:

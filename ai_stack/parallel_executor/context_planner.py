@@ -438,6 +438,5 @@ def _env_int(name: str, default: str) -> int:
         return int(default)
 
 
-def _env_bool(name: str, default: str) -> bool:
-    value = os.getenv(name, default).strip().lower()
-    return value in {"1", "true", "yes", "on", "enabled"}
+def _env_bool(name: str, default: str = "false") -> bool:
+    return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "y", "on"}

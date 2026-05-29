@@ -217,7 +217,7 @@ def _completed_task(result: BackgroundTaskResult) -> asyncio.Task[BackgroundTask
 
 
 def _env_bool(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+    return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 GLOBAL_BACKGROUND_TASK_RUNNER: BackgroundTaskRunner | None = None
