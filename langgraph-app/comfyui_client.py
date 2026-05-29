@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import quote, urlencode, urlparse, urlunparse
 
 import httpx
+from env_utils import env_bool
 
 
 TRUE_VALUES = {"1", "true", "yes", "on"}
@@ -59,10 +60,6 @@ NODE_CLASS_MODEL_INPUT_FOLDERS = {
     ("StyleModelLoader", "model_name"): "style_models",
     ("StyleModelLoader", "style_model_name"): "style_models",
 }
-
-
-def env_bool(name: str, default: str = "false") -> bool:
-    return str(os.getenv(name, default)).strip().lower() in TRUE_VALUES
 
 
 def _normalize_base_url(value: str) -> str:

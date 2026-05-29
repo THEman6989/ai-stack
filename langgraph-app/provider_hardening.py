@@ -44,10 +44,7 @@ class ProviderProfile:
     chat_fallback_allowed: bool = True
     direct_non_openai_adapter: str = "disabled"
 
-
-def env_bool(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
-
+from env_utils import env_bool
 
 def _bare_model(model: str | None) -> str:
     return str(model or "").strip().lower().rsplit("/", 1)[-1]

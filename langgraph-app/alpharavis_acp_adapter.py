@@ -79,9 +79,7 @@ class JsonRpcError(Exception):
         self.message = message
         super().__init__(message)
 
-
-def env_bool(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+from env_utils import env_bool
 
 
 def env_int(name: str, default: int, *, minimum: int = 0, maximum: int = 1_000_000) -> int:

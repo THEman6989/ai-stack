@@ -48,9 +48,7 @@ STABLE_CONTEXT_POLICY = (
     "ephemeral blocks as current-run evidence, not durable global rules."
 )
 
-
-def env_bool(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+from env_utils import env_bool
 
 
 def officecli_prompt_enabled() -> bool:

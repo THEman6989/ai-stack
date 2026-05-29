@@ -171,6 +171,7 @@ else:
 
 try:
     from comfyui_workflow_library import (
+        describe_comfyui_workflow_record as _describe_comfyui_workflow_record,
         get_comfyui_workflow_record as _get_comfyui_workflow_record,
         infer_workflow_outputs as _infer_workflow_outputs,
         infer_workflow_parameters as _infer_workflow_parameters,
@@ -179,6 +180,7 @@ try:
         submit_saved_comfyui_workflow_record as _submit_saved_comfyui_workflow_record,
     )
 except Exception as exc:  # pragma: no cover - optional local helper/deps
+    _describe_comfyui_workflow_record = None
     _get_comfyui_workflow_record = None
     _infer_workflow_outputs = None
     _infer_workflow_parameters = None
@@ -3355,6 +3357,22 @@ async def list_saved_comfyui_workflows(limit: int = 50) -> str:
     if _list_comfyui_workflow_records is None:
         return _json_tool_result({"ok": False, "error": _comfyui_workflow_library_unavailable()})
     return _json_tool_result(_list_comfyui_workflow_records(limit=limit, include_workflow=False))
+
+
+@tool
+async def describe_comfyui_workflow(workflow_name: str) -> str:
+    """Show the AI-relevant schema of a saved ComfyUI workflow — no raw JSON.
+
+    Returns only what the agent needs to control the workflow:
+    parameter names, types, defaults, whether required, output types.
+    Use this FIRST before calling submit_saved_comfyui_workflow so you know
+    which parameters to pass and which are required vs optional.
+    This is always lightweight; never includes the full workflow JSON.
+    """
+
+    if _describe_comfyui_workflow_record is None:
+        return _json_tool_result({"ok": False, "error": _comfyui_workflow_library_unavailable()})
+    return _json_tool_result(_describe_comfyui_workflow_record(workflow_name))
 
 
 @tool
@@ -7151,6 +7169,28 @@ async def search_tool_memory(tool_name: str, query: str, limit: int = 5):
     return "\n\n".join(lines[:limit])
 
 
+def _build_tool_memory_record(
+    tool_name: str, memory: str, memory_type: str = "fact", evidence: str = ""
+) -> tuple[str, dict[str, Any]]:
+    """Build a tool-memory record dict and deterministic key.
+
+    Used by both record_tool_memory (manual, with vector indexing) and
+    _try_auto_save_tool_memory (auto, fire-and-forget). Keeps the record
+    schema in one place.
+    """
+    name = re.sub(r"[^a-zA-Z0-9_-]+", "_", tool_name.strip().lower())[:80]
+    record: dict[str, Any] = {
+        "tool_name": name,
+        "memory": memory.strip()[:2500],
+        "memory_type": str(memory_type or "fact").strip()[:80] or "fact",
+        "evidence": evidence.strip()[:1500],
+        "scope": "tool",
+        "created_at": int(time.time()),
+    }
+    key = hashlib.sha256(json.dumps(record, sort_keys=True).encode("utf-8")).hexdigest()[:24]
+    return key, record
+
+
 @tool
 async def record_tool_memory(
     tool_name: str,
@@ -7180,15 +7220,7 @@ async def record_tool_memory(
     if not tool_name:
         return "Tool name is required."
 
-    record = {
-        "tool_name": tool_name,
-        "memory": memory.strip()[:2500],
-        "memory_type": memory_type.strip()[:80] or "fact",
-        "evidence": evidence.strip()[:1500],
-        "scope": "tool",
-        "created_at": int(time.time()),
-    }
-    key = hashlib.sha256(json.dumps(record, sort_keys=True).encode("utf-8")).hexdigest()[:24]
+    key, record = _build_tool_memory_record(tool_name, memory, memory_type, evidence)
     await _maybe_put(store, ("alpharavis", "tool_memories", tool_name), key, record)
     await _maybe_index_vector_memory(
         source_type="tool_memory",
@@ -7227,18 +7259,21 @@ def _try_auto_save_tool_memory(tool_name: str, memory: str, evidence: str = "") 
         if not name:
             return
 
-        record = {
-            "tool_name": name,
-            "memory": memory.strip()[:2500],
-            "memory_type": "auto",
-            "evidence": evidence.strip()[:1500],
-            "scope": "tool",
-            "created_at": int(time.time()),
-        }
-        key = hashlib.sha256(json.dumps(record, sort_keys=True).encode("utf-8")).hexdigest()[:24]
+        key, record = _build_tool_memory_record(tool_name, memory, "auto", evidence)
 
         try:
             await _maybe_put(store, ("alpharavis", "tool_memories", name), key, record)
+            # Also index for vector search; fire-and-forget best-effort
+            await _maybe_index_vector_memory(
+                source_type="tool_memory",
+                source_key=key,
+                title=f"Tool memory for {name}: auto",
+                content=f"{record['memory']}\n\nEvidence: {record['evidence']}".strip(),
+                thread_id="",
+                thread_key="global",
+                scope=f"tool:{name}",
+                metadata={**record, "origin_thread_id": _state_thread_id(), "origin_thread_key": _state_thread_key()},
+            )
         except Exception:
             pass  # Best-effort — never break the tool
 
@@ -13904,6 +13939,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             preflight_comfyui_workflow,
             save_comfyui_workflow,
             list_saved_comfyui_workflows,
+            describe_comfyui_workflow,
             get_saved_comfyui_workflow,
             submit_saved_comfyui_workflow,
             infer_comfyui_workflow_params,
@@ -14128,6 +14164,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             preflight_comfyui_workflow,
             save_comfyui_workflow,
             list_saved_comfyui_workflows,
+            describe_comfyui_workflow,
             get_saved_comfyui_workflow,
             submit_saved_comfyui_workflow,
             infer_comfyui_workflow_params,
@@ -14567,6 +14604,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 preflight_comfyui_workflow,
                 save_comfyui_workflow,
                 list_saved_comfyui_workflows,
+                describe_comfyui_workflow,
                 get_saved_comfyui_workflow,
                 submit_saved_comfyui_workflow,
                 infer_comfyui_workflow_params,
@@ -14612,7 +14650,10 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 "then inspect queue/models/history as needed. Pixelle is the "
                 "simple text-to-image path; use direct ComfyUI tools when the "
                 "user asks for workflows, saved workflow names/aliases, models, "
-                "queues, prompt_id history, or ComfyPC status. Save trusted "
+                "queues, prompt_id history, or ComfyPC status. "
+                "Use describe_comfyui_workflow FIRST to see available parameters "
+                "and required fields before calling submit_saved_comfyui_workflow. "
+                "Save trusted "
                 "API-format workflows with stable tool-style names such as "
                 "wan_animate, include aliases and parameter_map when known, then "
                 "use submit_saved_comfyui_workflow for later named runs. Always "

@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from dataclasses import asdict, dataclass
+
+from env_utils import env_boolfrom dataclasses import asdict, dataclass
 from typing import Any
 from urllib.parse import quote
 
@@ -20,11 +21,6 @@ else:
     VECTOR_QUEUE_IMPORT_ERROR = None
 
 
-TRUTHY = {"1", "true", "yes", "on"}
-
-
-def env_bool(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).strip().lower() in TRUTHY
 
 
 def _clean_base_url(value: str) -> str:

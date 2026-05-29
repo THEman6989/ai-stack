@@ -6,7 +6,8 @@ import os
 import re
 import sys
 import time
-import traceback
+
+from env_utils import env_boolimport traceback
 from datetime import datetime, timezone
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
@@ -30,8 +31,6 @@ BEARER_RE = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]+")
 _SETUP_DONE = False
 
 
-def env_bool(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def setup_logging(component: str = "alpharavis") -> dict[str, Any]:

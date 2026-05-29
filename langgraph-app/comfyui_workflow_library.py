@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import copy
-import os
+import json
 import re
 import time
 from typing import Any
+from env_utils import env_bool
 
 try:  # Optional in unit tests and lightweight containers.
     import run_state_manager  # type: ignore[import-not-found]
@@ -160,10 +161,6 @@ def parse_pixelle_style_annotations(workflow: dict[str, Any]) -> tuple[list[dict
                         break
 
     return parameters, outputs, tool_description
-
-
-def env_bool(name: str, default: str = "false") -> bool:
-    return str(os.getenv(name, default)).strip().lower() in TRUE_VALUES
 
 
 def comfyui_workflow_library_enabled() -> bool:
@@ -560,6 +557,70 @@ def get_comfyui_workflow_record(workflow_name: str, *, include_workflow: bool = 
     }
 
 
+def describe_comfyui_workflow_record(workflow_name: str) -> dict[str, Any]:
+    """Return an AI-optimized schema view of a saved workflow — no raw JSON.
+
+    Extracts only what the agent needs to understand and control the workflow:
+    parameter names, types, defaults, descriptions, whether required,
+    output node types, and a short human-readable description.
+    The full workflow JSON is deliberately excluded to keep context lean.
+    """
+    loaded = get_comfyui_workflow_record(workflow_name, include_workflow=False)
+    if not loaded.get("ok") or not loaded.get("found"):
+        return loaded
+
+    record: dict[str, Any] = loaded.get("record") or {}
+
+    # Build clean parameter schema with required/optional markers
+    parameters: list[dict[str, Any]] = []
+    for p in record.get("parameters") or []:
+        entry: dict[str, Any] = {
+            "name": str(p.get("name", "")),
+            "type": str(p.get("type", "str")),
+            "required": bool(p.get("required", False)),
+        }
+        if p.get("default") is not None:
+            entry["default"] = p["default"]
+        desc = str(p.get("description", "")).strip()
+        if desc:
+            entry["description"] = desc
+        fp = str(p.get("field_path", "")).strip()
+        if fp:
+            entry["field_path"] = fp
+        parameters.append(entry)
+
+    # Build clean output schema
+    outputs: list[dict[str, Any]] = []
+    for o in record.get("outputs") or []:
+        outputs.append({
+            "output_type": str(o.get("output_type", "unknown")),
+            "class_type": str(o.get("class_type", "")),
+            "description": str(o.get("description", "")),
+        })
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "found": True,
+        "workflow_name": str(record.get("name") or workflow_name),
+        "description": str(record.get("description", "")),
+        "workflow_type": str(record.get("workflow_type", "")),
+        "node_count": record.get("node_count", 0),
+        "parameters": parameters,
+        "outputs": outputs,
+    }
+
+    # Include parameter_map so the agent knows which params map where
+    pm = record.get("parameter_map")
+    if isinstance(pm, dict) and pm:
+        result["parameter_map"] = {str(k): str(v) for k, v in pm.items()}
+
+    aliases = record.get("aliases")
+    if isinstance(aliases, list) and aliases:
+        result["aliases"] = [str(a) for a in aliases]
+
+    return result
+
+
 def _set_path(workflow: dict[str, Any], path: str, value: Any) -> str | None:
     parts = [part for part in str(path or "").split(".") if part]
     if len(parts) == 2:
@@ -692,6 +753,7 @@ __all__ = [
     "WORKFLOW_LIBRARY_NAMESPACE",
     "apply_workflow_parameters",
     "comfyui_workflow_library_enabled",
+    "describe_comfyui_workflow_record",
     "get_comfyui_workflow_record",
     "infer_workflow_outputs",
     "infer_workflow_parameters",

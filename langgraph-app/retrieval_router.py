@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from env_utils import env_bool
 from rag_api_client import RagApiClientError
 from rag_api_client import mirror_text as _rag_mirror_text
 from rag_api_client import query_sources as _rag_query_sources
@@ -23,8 +24,6 @@ class AlphaRavisDocument:
     metadata: dict[str, Any]
 
 
-def env_bool(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def archive_rag_file_id(archive_key: str) -> str:

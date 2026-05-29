@@ -106,6 +106,7 @@ TOOLSETS: dict[str, Toolset] = {
             "register_comfyui_outputs",
             "preflight_comfyui_workflow",
             "infer_comfyui_workflow_params",
+            "describe_comfyui_workflow",
             "save_comfyui_workflow",
             "list_saved_comfyui_workflows",
             "get_saved_comfyui_workflow",

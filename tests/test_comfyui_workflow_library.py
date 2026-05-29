@@ -430,3 +430,57 @@ def test_infer_outputs_prefers_pixelle_markings():
 
     assert len(outputs) == 1
     assert outputs[0]["var_name"] == "my_custom_output"
+
+
+def test_describe_saved_workflow_returns_clean_schema(monkeypatch):
+    fake = FakeState()
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_LIBRARY", "true")
+    monkeypatch.setattr(library, "run_state_manager", fake)
+    library.save_comfyui_workflow_record(
+        workflow_name="describe_test",
+        workflow=_workflow(),
+        description="Test workflow for describe",
+        parameters=[
+            {"name": "prompt", "type": "str", "required": True, "description": "Text prompt"},
+            {"name": "seed", "type": "int", "required": False, "default": 42},
+        ],
+        outputs=[{"node_id": "99", "output_type": "images", "class_type": "SaveImage", "description": "Output image"}],
+        parameter_map={"prompt": "1.inputs.text"},
+        aliases=["desc_test"],
+        auto_infer_parameters=False,
+    )
+
+    result = library.describe_comfyui_workflow_record("describe_test")
+
+    assert result["ok"] is True
+    assert result["found"] is True
+    assert result["workflow_name"] == "describe_test"
+    assert result["description"] == "Test workflow for describe"
+    # No raw workflow JSON
+    assert "workflow" not in result
+    # Parameters should be clean and structured
+    params = {p["name"]: p for p in result["parameters"]}
+    assert params["prompt"]["type"] == "str"
+    assert params["prompt"]["required"] is True
+    assert params["prompt"]["description"] == "Text prompt"
+    assert params["seed"]["type"] == "int"
+    assert params["seed"]["required"] is False
+    assert params["seed"]["default"] == 42
+    # Outputs
+    assert len(result["outputs"]) == 1
+    assert result["outputs"][0]["output_type"] == "images"
+    # Parameter map
+    assert result["parameter_map"] == {"prompt": "1.inputs.text"}
+    # Aliases
+    assert result["aliases"] == ["desc_test"]
+
+
+def test_describe_saved_workflow_not_found(monkeypatch):
+    fake = FakeState()
+    monkeypatch.setenv("ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_LIBRARY", "true")
+    monkeypatch.setattr(library, "run_state_manager", fake)
+
+    result = library.describe_comfyui_workflow_record("nonexistent")
+
+    assert result["ok"] is True
+    assert result["found"] is False
