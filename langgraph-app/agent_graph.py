@@ -67,6 +67,7 @@ except Exception:  # pragma: no cover - older local CLI imports
 try:
     from vector_memory import (
         VectorMemoryError,
+        delete_memory_record as _pgvector_delete_memory_record,
         enqueue_media_analysis_record as _pgvector_enqueue_media_analysis_record,
         enqueue_memory_record as _pgvector_enqueue_memory_record,
         is_enabled as _pgvector_memory_enabled,
@@ -83,6 +84,7 @@ try:
     )
 except Exception as exc:  # pragma: no cover - optional local module/deps
     VectorMemoryError = RuntimeError  # type: ignore[misc,assignment]
+    _pgvector_delete_memory_record = None
     _pgvector_enqueue_media_analysis_record = None
     _pgvector_enqueue_memory_record = None
     _pgvector_media_index_status = None
@@ -6059,18 +6061,27 @@ Procedures and workflows belong in skills, not memory."""
         if stored is None:
             return f"Memory `{memory_id}` not found."
         stored_scope = stored.get("scope", "global") if isinstance(stored, dict) else "global"
-        # NOTE: pgvector index entries are NOT deleted here — no _pgvector_delete API exists.
-        # Deleted memories may still appear in semantic_memory_search results until the
-        # pgvector TTL or a future cleanup job removes them. This is a known limitation.
+        # Delete from MongoDB store
         deleted_scope = await _maybe_delete(store, _curated_memory_ns(stored_scope), memory_id)
         deleted_index = await _maybe_delete(store, CURATED_MEMORY_INDEX_NS, memory_id)
+        # Delete from pgvector index so semantic search stays clean
+        deleted_pgvector = False
+        if _pgvector_delete_memory_record is not None:
+            try:
+                deleted_pgvector = await _pgvector_delete_memory_record(
+                    source_key=memory_id,
+                )
+            except Exception:
+                pass
         if not deleted_scope and not deleted_index:
             return f"Failed to delete memory `{memory_id}` — store operation failed (check logs)."
         parts = []
         if not deleted_scope:
-            parts.append("scope namespace delete failed")
+            parts.append("MongoDB scope delete failed")
         if not deleted_index:
-            parts.append("index delete failed")
+            parts.append("MongoDB index delete failed")
+        if not deleted_pgvector:
+            parts.append("pgvector cleanup skipped/failed")
         warning = f" (⚠ {', '.join(parts)})" if parts else ""
         return f"Deleted memory `{memory_id}` from scope `{stored_scope}`.{warning}"
 

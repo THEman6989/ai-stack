@@ -1127,6 +1127,50 @@ def _delete_source_sync(
         conn.commit()
 
 
+def _delete_memory_record_sync(
+    *,
+    namespace: str,
+    source_type: str,
+    source_key: str,
+) -> bool:
+    """Delete a single memory record from pgvector by source_key. Returns True if deleted."""
+    _require_psycopg()
+    table = _table_identifier()
+    with psycopg.connect(_database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    DELETE FROM {table}
+                    WHERE namespace = %s
+                      AND source_type = %s
+                      AND source_key = %s
+                    """
+                ).format(table=table),
+                (namespace, source_type, source_key),
+            )
+            deleted = cur.rowcount
+        conn.commit()
+    return deleted > 0
+
+
+async def delete_memory_record(
+    *,
+    namespace: str = "alpharavis",
+    source_type: str = "curated_memory",
+    source_key: str,
+) -> bool:
+    """Async wrapper: delete a curated memory record from pgvector."""
+    if not is_enabled():
+        return False
+    return await asyncio.to_thread(
+        _delete_memory_record_sync,
+        namespace=namespace,
+        source_type=source_type,
+        source_key=source_key,
+    )
+
+
 def _source_digest_match_sync(
     *,
     namespace: str,
