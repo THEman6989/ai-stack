@@ -263,16 +263,22 @@ async def lifespan(app: FastAPI):
     research_worker = watch(research_worker, host='0.0.0.0', port=8760, ws_port=8761, open_browser=False)
 
     # Worker 2: The Generalist (Fast searches, PC control, Pixelle, Code)
+    try:
+        from agent_graph import record_curated_memory, search_curated_memory
+        _memory_tools = [record_curated_memory, search_curated_memory]
+    except Exception:
+        _memory_tools = []
     general_worker = create_deep_agent(
         model=llm,
         tools=[
             start_pixelle_remote,
             wake_on_lan,
             fast_web_search,
+            *_memory_tools,
         ] + mcp_tools,
         backend=sandbox,
         name="general_assistant",
-        system_prompt="You are the Generalist. Responsible for quick facts (fast_web_search), Pixelle control, code execution in the sandbox, and memory management."
+        system_prompt="You are the Generalist. Responsible for quick facts (fast_web_search), Pixelle control, code execution in the sandbox, and memory management. Use record_curated_memory for durable facts and search_curated_memory to recall them."
     )
     general_worker = watch(general_worker, host='0.0.0.0', port=8762, ws_port=8763, open_browser=False)
 
@@ -293,6 +299,7 @@ async def lifespan(app: FastAPI):
         tools=[
             execute_ssh_command,
             fast_web_search,   # To look up error messages online
+            *_memory_tools,
         ],
         name="debugger_agent",
         system_prompt=f"""You are the Debugger Agent. Your ONLY job is to investigate and fix infrastructure problems.

@@ -30,3 +30,4 @@ langgraph-app/.langgraph_api/
 openwebui-data/
 was noch offen.txt
 deepagent-arm-gateway/
+*.kate-swp

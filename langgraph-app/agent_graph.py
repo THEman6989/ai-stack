@@ -6050,9 +6050,20 @@ Procedures and workflows belong in skills, not memory."""
         if stored is None:
             return f"Memory `{memory_id}` not found."
         stored_scope = stored.get("scope", "global") if isinstance(stored, dict) else "global"
-        await _maybe_delete(store, _curated_memory_ns(stored_scope), memory_id)
-        await _maybe_delete(store, CURATED_MEMORY_INDEX_NS, memory_id)
-        return f"Deleted memory `{memory_id}` from scope `{stored_scope}`."
+        # NOTE: pgvector index entries are NOT deleted here — no _pgvector_delete API exists.
+        # Deleted memories may still appear in semantic_memory_search results until the
+        # pgvector TTL or a future cleanup job removes them. This is a known limitation.
+        deleted_scope = await _maybe_delete(store, _curated_memory_ns(stored_scope), memory_id)
+        deleted_index = await _maybe_delete(store, CURATED_MEMORY_INDEX_NS, memory_id)
+        if not deleted_scope and not deleted_index:
+            return f"Failed to delete memory `{memory_id}` — store operation failed (check logs)."
+        parts = []
+        if not deleted_scope:
+            parts.append("scope namespace delete failed")
+        if not deleted_index:
+            parts.append("index delete failed")
+        warning = f" (⚠ {', '.join(parts)})" if parts else ""
+        return f"Deleted memory `{memory_id}` from scope `{stored_scope}`.{warning}"
 
     memory = memory.strip()
     if not memory:
@@ -7946,13 +7957,23 @@ async def _maybe_search(store: Any, namespace: tuple[str, ...], *, query: str, l
     return result
 
 
-async def _maybe_delete(store: Any, namespace: tuple[str, ...], key: str) -> None:
-    if hasattr(store, "adelete"):
-        result = store.adelete(namespace, key)
-    else:
-        result = store.delete(namespace, key)
-    if inspect.isawaitable(result):
-        await result
+async def _maybe_delete(store: Any, namespace: tuple[str, ...], key: str) -> bool:
+    """Delete a key from a store namespace. Returns True on success, False on failure.
+    Never raises — errors are logged, not propagated."""
+    try:
+        if hasattr(store, "adelete"):
+            result = store.adelete(namespace, key)
+        elif hasattr(store, "delete"):
+            result = store.delete(namespace, key)
+        else:
+            logging.warning("Store has no delete/adelete method, cannot delete %s from %s", key, namespace)
+            return False
+        if inspect.isawaitable(result):
+            await result
+        return True
+    except Exception as exc:
+        logging.warning("Failed to delete %s from %s: %s", key, namespace, exc)
+        return False
 
 
 def _store_item_value(item: Any) -> Any:
