@@ -10,7 +10,6 @@ import httpx
 from env_utils import env_bool
 
 
-TRUE_VALUES = {"1", "true", "yes", "on"}
 ALLOWED_MODEL_FOLDERS = {
     "checkpoints",
     "vae",

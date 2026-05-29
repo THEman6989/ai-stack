@@ -47,7 +47,7 @@ class EmbeddingResult:
 
 
 def _env_bool(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).lower() in {"1", "true", "yes"}
+    return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _media_index_version() -> str:

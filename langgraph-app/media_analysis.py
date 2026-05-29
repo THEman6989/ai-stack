@@ -22,7 +22,7 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".
 
 
 def _env_bool(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).lower() in {"1", "true", "yes", "on"}
+    return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _safe_segment(value: str, default: str = "asset") -> str:
