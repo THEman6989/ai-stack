@@ -67,6 +67,105 @@ _PARAM_DESCRIPTIONS: dict[str, str] = {
     "shift": "Model shift parameter",
 }
 
+# Regex for Pixelle-style title DSL: $param[.~]field[!][:description]
+# $param.field        → plain field access
+# $param.~field       → URL upload (tilde replaces the dot before field)
+# $param.field!       → required
+# $param.field:desc   → with description
+_PIXELLE_DSL_RE = re.compile(
+    r"\$"
+    r"(?P<param>[A-Za-z_][A-Za-z0-9_]*)"     # param_name
+    r"\.(?P<tilde>~)?"                         # . or .~ (tilde replaces field dot)
+    r"(?P<field>[A-Za-z_][A-Za-z0-9_]*)"      # field_name
+    r"(?P<required>!)?"                        # required marker
+    r"(?::(?P<desc>.*))?"                      # description
+)
+_PIXELLE_OUTPUT_RE = re.compile(r"^\$output\.(?P<var>[A-Za-z_][A-Za-z0-9_]*)$")
+
+
+def parse_pixelle_style_annotations(workflow: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    """Parse Pixelle-style DSL from ComfyUI API workflow node titles.
+
+    Reads `_meta.title` from every node, looking for:
+    - $param.field![:description]  → parameter definition
+    - $output.var_name             → manual output marking
+    - Node titled \"MCP\" with text/value/string field → tool description
+
+    Returns (parameters, outputs, tool_description).
+    This is the AlphaRavis equivalent of Pixelle's zero-code workflow→tool conversion.
+    """
+    parameters: list[dict[str, Any]] = []
+    outputs: list[dict[str, Any]] = []
+    tool_description = ""
+    seen_params: set[str] = set()
+
+    for node_id, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
+        meta = node.get("_meta")
+        if not isinstance(meta, dict):
+            continue
+        title = str(meta.get("title", "")).strip()
+
+        # Check for Pixelle output marking FIRST (before param DSL, since
+        # $output.result would otherwise be swallowed as param=output field=result)
+        output_match = _PIXELLE_OUTPUT_RE.match(title)
+        if output_match:
+            var_name = output_match.group("var")
+            class_type = str(node.get("class_type", ""))
+            output_type = _OUTPUT_NODE_TYPES.get(class_type, "unknown")
+            outputs.append({
+                "node_id": node_id,
+                "output_type": output_type,
+                "class_type": class_type,
+                "var_name": var_name,
+                "description": f"Marked output: {var_name}",
+            })
+            continue
+
+        # Check for Pixelle DSL parameter annotation: $param.field!
+        match = _PIXELLE_DSL_RE.search(title)
+        if match:
+            param_name = match.group("param")
+            field_name = match.group("field")
+            is_required = match.group("required") == "!"
+            description = (match.group("desc") or "").strip()
+            has_tilde = match.group("tilde") == "~"
+
+            if param_name in seen_params:
+                continue
+            seen_params.add(param_name)
+
+            # Infer type from current field value
+            inputs = node.get("inputs")
+            default_value = None
+            if isinstance(inputs, dict):
+                default_value = inputs.get(field_name)
+            param_type = _infer_parameter_type(default_value)
+
+            parameters.append({
+                "name": param_name,
+                "field_path": f"{node_id}.inputs.{field_name}",
+                "type": param_type,
+                "required": is_required,
+                "default": default_value,
+                "description": description,
+                **({"url_upload": True} if has_tilde else {}),
+            })
+            continue
+
+        # Tool description: node titled "MCP" with a text/value/string field
+        if title.upper() == "MCP" and not tool_description:
+            inputs = node.get("inputs")
+            if isinstance(inputs, dict):
+                for key in ("value", "text", "string"):
+                    val = inputs.get(key)
+                    if isinstance(val, str) and val.strip():
+                        tool_description = val.strip()
+                        break
+
+    return parameters, outputs, tool_description
+
 
 def env_bool(name: str, default: str = "false") -> bool:
     return str(os.getenv(name, default)).strip().lower() in TRUE_VALUES
@@ -139,12 +238,17 @@ def _clean_parameter_name(key: str) -> str:
 def infer_workflow_parameters(workflow: dict[str, Any]) -> list[dict[str, Any]]:
     """Auto-detect structured parameters from a ComfyUI API workflow.
 
-    Scans all leaf inputs, skips node references (connections), infers types
+    First checks for Pixelle-style $param.field![:desc] annotations in node _meta.title.
+    When annotations are found, they take priority over auto-inference.
+    Otherwise scans all leaf inputs, skips node references (connections), infers types
     from default values, and generates human-readable descriptions.
-    This is the AlphaRavis equivalent of Pixelle's title DSL — the schema
-    is derived automatically from the workflow JSON without needing to
-    annotate node titles in the ComfyUI editor.
     """
+
+    # Prefer Pixelle-style annotations if present
+    pixelle_params, _, _ = parse_pixelle_style_annotations(workflow)
+    if pixelle_params:
+        return pixelle_params
+
     result: list[dict[str, Any]] = []
     seen_names: set[str] = set()
 
@@ -198,7 +302,17 @@ def infer_workflow_parameters(workflow: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def infer_workflow_outputs(workflow: dict[str, Any]) -> list[dict[str, Any]]:
-    """Auto-detect output nodes (like Pixelle does for SaveImage, SaveVideo, etc.)."""
+    """Auto-detect output nodes (like Pixelle does for SaveImage, SaveVideo, etc.).
+
+    First checks for Pixelle-style $output.var_name annotations in node titles.
+    When manual output markings are found, they take priority. Otherwise auto-detects
+    known output node classes.
+    """
+    # Prefer Pixelle-style output annotations if present
+    _, pixelle_outputs, _ = parse_pixelle_style_annotations(workflow)
+    if pixelle_outputs:
+        return pixelle_outputs
+
     outputs: list[dict[str, Any]] = []
     for node_id, node in workflow.items():
         if not isinstance(node, dict):
@@ -616,6 +730,7 @@ __all__ = [
     "infer_workflow_parameters",
     "list_comfyui_workflow_records",
     "normalize_workflow_name",
+    "parse_pixelle_style_annotations",
     "save_comfyui_workflow_record",
     "submit_saved_comfyui_workflow_record",
     "validate_parameter_schema",

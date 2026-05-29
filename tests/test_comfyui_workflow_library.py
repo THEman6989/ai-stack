@@ -300,3 +300,133 @@ def test_apply_workflow_parameters_with_type_coercion():
     assert "seed" in report["coerced"]
     assert "steps" in report["coerced"]
     assert "cfg" in report["coerced"]
+
+
+# ---- Pixelle-style DSL parsing tests ----
+
+
+def test_parse_pixelle_style_annotations_params():
+    workflow = {
+        "1": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": "default cat"},
+            "_meta": {"title": "$prompt.text!:Text prompt for generation"},
+        },
+        "2": {
+            "class_type": "KSampler",
+            "inputs": {"seed": 42, "steps": 20, "cfg": 7.5},
+        },
+    }
+
+    params, outputs, desc = library.parse_pixelle_style_annotations(workflow)
+
+    assert len(params) == 1
+    assert params[0]["name"] == "prompt"
+    assert params[0]["field_path"] == "1.inputs.text"
+    assert params[0]["type"] == "str"
+    assert params[0]["required"] is True
+    assert params[0]["description"] == "Text prompt for generation"
+    assert params[0]["default"] == "default cat"
+    assert outputs == []
+    assert desc == ""
+
+
+def test_parse_pixelle_style_annotations_outputs_and_mcp():
+    workflow = {
+        "1": {
+            "class_type": "SaveImage",
+            "inputs": {"images": ["2", 0]},
+            "_meta": {"title": "$output.result"},
+        },
+        "2": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["3", 0]},
+        },
+        "3": {
+            "class_type": "String (Multiline)",
+            "inputs": {"value": "Generate a cat image"},
+            "_meta": {"title": "MCP"},
+        },
+    }
+
+    params, outputs, desc = library.parse_pixelle_style_annotations(workflow)
+
+    assert params == []
+    assert len(outputs) == 1
+    assert outputs[0]["node_id"] == "1"
+    assert outputs[0]["output_type"] == "images"
+    assert outputs[0]["var_name"] == "result"
+    assert desc == "Generate a cat image"
+
+
+def test_parse_pixelle_with_tilde_url_upload():
+    workflow = {
+        "1": {
+            "class_type": "LoadImage",
+            "inputs": {"image": "default.png"},
+            "_meta": {"title": "$image.~image!:Input image URL"},
+        },
+    }
+
+    params, _, _ = library.parse_pixelle_style_annotations(workflow)
+
+    assert len(params) == 1
+    assert params[0]["name"] == "image"
+    assert params[0]["required"] is True
+    assert params[0]["url_upload"] is True
+
+
+def test_parse_pixelle_optional_param_no_exclamation():
+    workflow = {
+        "1": {
+            "class_type": "KSampler",
+            "inputs": {"steps": 20, "cfg": 7.5},
+            "_meta": {"title": "$steps.steps:Number of steps"},
+        },
+    }
+
+    params, _, _ = library.parse_pixelle_style_annotations(workflow)
+
+    assert len(params) == 1
+    assert params[0]["required"] is False
+    assert params[0]["type"] == "int"
+
+
+def test_infer_parameters_prefers_pixelle_annotations():
+    """When Pixelle annotations exist, infer_workflow_parameters returns them, not auto-inferred."""
+    workflow = {
+        "1": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": "cat"},
+            "_meta": {"title": "$prompt.text!:"},
+        },
+        "2": {
+            "class_type": "KSampler",
+            "inputs": {"seed": 42, "steps": 20, "cfg": 7.5, "model": ["3", 0]},
+        },
+    }
+
+    params = library.infer_workflow_parameters(workflow)
+
+    # Should return only Pixelle-annotated params, not auto-inferred ones
+    assert len(params) == 1
+    assert params[0]["name"] == "prompt"
+
+
+def test_infer_outputs_prefers_pixelle_markings():
+    workflow = {
+        "1": {
+            "class_type": "SaveImage",
+            "inputs": {"images": ["2", 0]},
+            "_meta": {"title": "$output.my_custom_output"},
+        },
+        "2": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["3", 0]},
+        },
+    }
+
+    outputs = library.infer_workflow_outputs(workflow)
+
+    assert len(outputs) == 1
+    assert outputs[0]["var_name"] == "my_custom_output"

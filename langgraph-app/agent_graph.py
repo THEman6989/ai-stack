@@ -3291,12 +3291,22 @@ async def save_comfyui_workflow(
     description: str = "",
     aliases_json: str = "[]",
     parameter_map_json: str = "{}",
+    parameters_json: str = "",
+    outputs_json: str = "",
+    auto_infer_parameters: bool = True,
     tags_json: str = "[]",
     workflow_type: str = "",
     source: str = "",
     overwrite: bool = False,
 ) -> str:
-    """Save a trusted ComfyUI API-format workflow under a reusable name/alias for later submits."""
+    """Save a trusted ComfyUI API-format workflow under a reusable name/alias for later submits.
+
+    Use parameters_json to manually define structured parameters (overrides auto-inference).
+    Each parameter: {"name":"...", "type":"str|int|float|bool", "required":bool, "description":"...",
+    "field_path":"node_id.inputs.field"}.
+    Set auto_infer_parameters=false when providing explicit parameters_json.
+    Pixelle-style $param.field![:desc] annotations in node _meta.title are parsed automatically.
+    """
 
     if _save_comfyui_workflow_record is None:
         return _json_tool_result({"ok": False, "error": _comfyui_workflow_library_unavailable()})
@@ -3304,6 +3314,8 @@ async def save_comfyui_workflow(
         workflow = json.loads(workflow_json)
         aliases = json.loads(aliases_json or "[]")
         parameter_map = json.loads(parameter_map_json or "{}")
+        parameters = json.loads(parameters_json) if (parameters_json or "").strip() else None
+        outputs = json.loads(outputs_json) if (outputs_json or "").strip() else None
         tags = json.loads(tags_json or "[]")
     except Exception as exc:
         return _json_tool_result({"ok": False, "error": f"Invalid JSON argument: {exc}"})
@@ -3313,6 +3325,10 @@ async def save_comfyui_workflow(
         return _json_tool_result({"ok": False, "error": "aliases_json must decode to a JSON array."})
     if not isinstance(parameter_map, dict):
         return _json_tool_result({"ok": False, "error": "parameter_map_json must decode to a JSON object."})
+    if parameters is not None and not isinstance(parameters, list):
+        return _json_tool_result({"ok": False, "error": "parameters_json must decode to a JSON array or be empty."})
+    if outputs is not None and not isinstance(outputs, list):
+        return _json_tool_result({"ok": False, "error": "outputs_json must decode to a JSON array or be empty."})
     if not isinstance(tags, list):
         return _json_tool_result({"ok": False, "error": "tags_json must decode to a JSON array."})
     result = _save_comfyui_workflow_record(
@@ -3321,6 +3337,9 @@ async def save_comfyui_workflow(
         description=description,
         aliases=aliases,
         parameter_map=parameter_map,
+        parameters=parameters,
+        outputs=outputs,
+        auto_infer_parameters=auto_infer_parameters,
         tags=tags,
         workflow_type=workflow_type,
         source=source,
