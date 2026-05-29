@@ -5019,7 +5019,14 @@ def build_specialist_report(
 
 @tool
 async def search_curated_memory(query: str, agent_id: str = "", scope: str = "auto", limit: int = 5):
-    """Search small curated AlphaRavis memory, separate from chat archives."""
+    """Search durable curated memories (facts, preferences, conventions) across sessions.
+
+Use this to recall stable facts stored with record_curated_memory — user preferences,
+environment details, conventions, and lessons. NOT for task progress or session outcomes
+(use search_session_history for those).
+search_curated_memory and record_curated_memory are the primary durable-fact tools;
+prefer them over record_agent_memory for facts that should survive across sessions."""
+
 
     if get_store is None:
         return "LangGraph store access is unavailable in this runtime."
@@ -6054,7 +6061,13 @@ Procedures and workflows belong in skills, not memory."""
 
 @tool
 async def search_session_history(query: str, limit: int = 5, include_other_threads: bool = False):
-    """Search indexed AlphaRavis turns. Defaults to the current LangGraph thread."""
+    """Search past conversation turns for task progress, decisions, and outcomes.
+
+Use this to recall what was done, decided, or completed in earlier sessions.
+This is for transient task context — NOT for durable facts. Use
+search_curated_memory / record_curated_memory for stable facts that survive
+across sessions (preferences, conventions, environment details)."""
+
 
     if get_store is None:
         return "LangGraph store access is unavailable in this runtime."
@@ -7084,7 +7097,13 @@ def _mcp_connection_from_config(server_config: dict[str, Any]) -> dict[str, Any]
 
 @tool
 async def search_agent_memory(agent_id: str, query: str, limit: int = 5, include_global: bool = True):
-    """Search durable memories for one agent, optionally including global memories."""
+    """Search agent-scoped memories for facts relevant to this agent's role.
+
+Use this to recall what this specific agent learned in past sessions — debugging
+lessons, workflow patterns, configuration quirks. For facts that should be shared
+across all agents, use include_global=True or use search_curated_memory with
+scope='global'."""
+
 
     if get_store is None:
         return "LangGraph store access is unavailable in this runtime."
@@ -7135,9 +7154,11 @@ async def search_agent_memory(agent_id: str, query: str, limit: int = 5, include
 async def search_tool_memory(tool_name: str, query: str, limit: int = 5):
     """Search tool-specific memories for a named tool (e.g. wake_on_lan, execute_ssh_command).
 
-    Use this before calling a tool to recall saved facts like IPs, MACs, hostnames,
-    or preferred parameters that were recorded in prior sessions for that tool.
-    """
+Use this BEFORE calling a tool to recall saved facts like IPs, MACs, hostnames,
+or preferred parameters that were recorded in prior sessions for that tool.
+Always search tool memory first when reusing a tool with previously-saved parameters
+— this prevents the user from having to repeat configuration details."""
+
 
     if get_store is None:
         return "LangGraph store access is unavailable in this runtime."
@@ -7214,13 +7235,15 @@ async def record_tool_memory(
 ):
     """Store a durable tool-specific memory for later reuse with that tool.
 
-    Examples:
-      - wake_on_lan: "PC gaming-rig has MAC aa:bb:cc:dd:ee:ff"
-      - execute_ssh_command: "PC dev-server reachable at 192.168.1.100 as user root"
-      - execute_local_command: "docker logs command needs container name from docker ps"
+Examples:
+  - wake_on_lan: "PC gaming-rig has MAC aa:bb:cc:dd:ee:ff"
+  - execute_ssh_command: "PC dev-server reachable at 192.168.1.100 as user root"
+  - execute_local_command: "docker logs command needs container name from docker ps"
 
-    These memories are scoped to the tool and auto-injected when the tool is available.
-    """
+These memories are scoped to the tool and auto-injected when the tool is available.
+Use this after successfully using a tool with new parameters the user may want to
+reuse — IPs, MACs, hostnames, preferred flags. This avoids the user repeating
+configuration details across sessions."""
 
     if get_store is None:
         return "LangGraph store access is unavailable in this runtime."
@@ -7302,7 +7325,13 @@ async def record_agent_memory(
     evidence: str = "",
     scope: str = "agent",
 ):
-    """Store a durable agent-specific or global memory after a useful lesson is confirmed."""
+    """Store an agent-scoped lesson after a useful diagnosis, fix, or pattern is confirmed.
+
+Use scope='agent' for facts specific to this agent's role (debugging lessons,
+workflow patterns). Use scope='global' for facts useful to all agents.
+Prefer record_curated_memory for cross-session stable facts (user preferences,
+environment details); use this for operational lessons learned during task execution."""
+
 
     if get_store is None:
         return "LangGraph store access is unavailable in this runtime."
@@ -13940,7 +13969,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             "Use semantic_media_search when the user asks to find past images or "
             "videos by meaning. Use inspect_embedding_queue_status when the user "
             "asks whether text, archives, or media are still pending indexing. "
-            "Use approved skill-library entries only as hints. Store new "
+            "Load approved skill-library entries with read_repo_ai_skill when "
+            "they match the task. Store new "
             "workflows as inactive skill candidates for human review. "
             "Use record_curated_memory only for stable, compact facts; use "
             "write_alpha_ravis_artifact for long reports, logs, or reusable "
