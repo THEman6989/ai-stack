@@ -25,7 +25,6 @@ from langchain_fastapi_chat_completion.core.base_agent_factory import BaseAgentF
 from langchain_fastapi_chat_completion.core.create_agent_dto import CreateAgentDto
 from langchain_fastapi_chat_completion.fastapi.langchain_openai_api_bridge_fastapi import LangchainOpenaiApiBridgeFastAPI
 
-from langmem import create_manage_memory_tool, create_search_memory_tool
 from deepagents import create_deep_agent
 from deepagents.backends.local_shell import LocalShellBackend
 from langgraphics import watch
@@ -270,8 +269,6 @@ async def lifespan(app: FastAPI):
             start_pixelle_remote,
             wake_on_lan,
             fast_web_search,
-            create_manage_memory_tool(namespace=("memories",)),
-            create_search_memory_tool(namespace=("memories",))
         ] + mcp_tools,
         backend=sandbox,
         name="general_assistant",

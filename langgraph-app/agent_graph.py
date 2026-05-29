@@ -35,7 +35,6 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import interrupt
 from langgraph_swarm import create_handoff_tool, create_swarm
-from langmem import create_manage_memory_tool, create_search_memory_tool
 from typing_extensions import NotRequired
 
 try:
@@ -5980,16 +5979,22 @@ async def semantic_memory_search(
 
 @tool
 async def record_curated_memory(
-    memory: str,
+    memory: str = "",
     memory_type: str = "fact",
     evidence: str = "",
     scope: str = "global",
     agent_id: str = "",
+    action: str = "create",
+    memory_id: str = "",
 ):
-    """Save durable information to persistent memory that survives across sessions.
+    """Manage durable memories across sessions. One store, one tool.
 
-Memory is injected into future turns, so keep it compact and focused on facts
-that will still matter later.
+ACTIONS:
+  create (default) — Save a new memory. The key is derived from the content,
+    so re-recording the same fact overwrites it (no duplicates).
+  update — Replace an existing memory. Requires memory_id (the key returned
+    when the memory was created, or found via search_curated_memory).
+  delete — Remove a memory. Requires memory_id.
 
 WHEN TO SAVE (do this proactively, don't wait to be asked):
 - User corrects you or says 'remember this' / 'don't do that again'
@@ -6012,6 +6017,7 @@ Write memories as declarative facts, not instructions to yourself.
 Procedures and workflows belong in skills, not memory."""
 
 
+
     if get_store is None:
         return "LangGraph store access is unavailable in this runtime."
 
@@ -6019,6 +6025,34 @@ Procedures and workflows belong in skills, not memory."""
         store = get_store()
     except Exception as exc:
         return f"No LangGraph store is attached to this run: {exc}"
+
+    action = (action or "create").strip().lower()
+
+    # ── DELETE ──
+    if action == "delete":
+        memory_id = (memory_id or "").strip()
+        if not memory_id:
+            return "memory_id is required for delete action. Find it via search_curated_memory."
+        # Determine scope from the stored record
+        try:
+            stored = await _maybe_get(store, CURATED_MEMORY_INDEX_NS, memory_id)
+        except Exception:
+            stored = None
+        if stored is None:
+            # Try each known scope
+            for test_scope in ["global", "user"]:
+                try:
+                    stored = await _maybe_get(store, _curated_memory_ns(test_scope), memory_id)
+                    if stored is not None:
+                        break
+                except Exception:
+                    continue
+        if stored is None:
+            return f"Memory `{memory_id}` not found."
+        stored_scope = stored.get("scope", "global") if isinstance(stored, dict) else "global"
+        await _maybe_delete(store, _curated_memory_ns(stored_scope), memory_id)
+        await _maybe_delete(store, CURATED_MEMORY_INDEX_NS, memory_id)
+        return f"Deleted memory `{memory_id}` from scope `{stored_scope}`."
 
     memory = memory.strip()
     if not memory:
@@ -6033,15 +6067,55 @@ Procedures and workflows belong in skills, not memory."""
         return f"Curated memory is {len(memory)} chars; limit is {max_chars}. Summarize it first."
 
     memory_scope = _curated_memory_scope(agent_id=agent_id, scope=scope)
-    record = {
+    sanitized_agent = _sanitize_store_scope(agent_id, "") if agent_id else ""
+    now_ts = int(time.time())
+
+    # ── UPDATE ──
+    if action == "update":
+        memory_id = (memory_id or "").strip()
+        if not memory_id:
+            return "memory_id is required for update action. Find it via search_curated_memory."
+        # Load existing record
+        try:
+            existing = await _maybe_get(store, _curated_memory_ns(memory_scope), memory_id)
+        except Exception:
+            existing = None
+        if existing is None:
+            try:
+                existing = await _maybe_get(store, CURATED_MEMORY_INDEX_NS, memory_id)
+            except Exception:
+                existing = None
+        if existing is None:
+            return f"Memory `{memory_id}` not found in scope `{memory_scope}`. Try search_curated_memory first."
+        if not isinstance(existing, dict):
+            return f"Memory `{memory_id}` is not a valid record."
+        record = {
+            "memory": memory,
+            "memory_type": memory_type.strip()[:80] or existing.get("memory_type", "fact"),
+            "evidence": evidence.strip()[:1200] or existing.get("evidence", ""),
+            "scope": memory_scope,
+            "agent_id": sanitized_agent or existing.get("agent_id", ""),
+            "created_at": existing.get("created_at", now_ts),
+            "updated_at": now_ts,
+        }
+        await _maybe_put(store, _curated_memory_ns(memory_scope), memory_id, record)
+        await _maybe_put(store, CURATED_MEMORY_INDEX_NS, memory_id, record)
+        return f"Updated memory `{memory_id}` in scope `{memory_scope}`."
+
+    # ── CREATE (default) ──
+    # Key from content only (no timestamp) — identical content = same key = overwrite
+    key_base = {
         "memory": memory,
         "memory_type": memory_type.strip()[:80] or "fact",
-        "evidence": evidence.strip()[:1200],
         "scope": memory_scope,
-        "agent_id": _sanitize_store_scope(agent_id, "") if agent_id else "",
-        "created_at": int(time.time()),
+        "agent_id": sanitized_agent,
     }
-    key = hashlib.sha256(json.dumps(record, sort_keys=True).encode("utf-8")).hexdigest()[:24]
+    key = hashlib.sha256(json.dumps(key_base, sort_keys=True).encode("utf-8")).hexdigest()[:24]
+    record = {
+        **key_base,
+        "evidence": evidence.strip()[:1200],
+        "created_at": now_ts,
+    }
     await _maybe_put(store, _curated_memory_ns(memory_scope), key, record)
     await _maybe_put(store, CURATED_MEMORY_INDEX_NS, key, record)
     vector_result = await _maybe_index_vector_memory(
@@ -7870,6 +7944,15 @@ async def _maybe_search(store: Any, namespace: tuple[str, ...], *, query: str, l
     if inspect.isawaitable(result):
         result = await result
     return result
+
+
+async def _maybe_delete(store: Any, namespace: tuple[str, ...], key: str) -> None:
+    if hasattr(store, "adelete"):
+        result = store.adelete(namespace, key)
+    else:
+        result = store.delete(namespace, key)
+    if inspect.isawaitable(result):
+        await result
 
 
 def _store_item_value(item: Any) -> Any:
@@ -13450,23 +13533,6 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     )
     mcp_tools = mcp_tools or []
     MCP_SCHEMA_CACHE = _build_mcp_schema_cache(MCP_SERVER_INFOS) if _build_mcp_schema_cache is not None else {}
-    memory_manage_tool = create_manage_memory_tool(
-        namespace=("memories",),
-        instructions=(
-            "Proactively call this tool when you:\n\n"
-            "1. The user corrects you or says 'remember this' / 'don't do that again'.\n"
-            "2. The user shares a preference, habit, or personal detail.\n"
-            "3. You discover something about the environment (OS, installed tools, project structure).\n"
-            "4. You learn a convention, API quirk, or workflow specific to this user's setup.\n"
-            "5. You identify a stable fact that will be useful again in future sessions.\n"
-            "6. An existing memory is incorrect or outdated.\n\n"
-            "PRIORITY: User preferences and corrections > environment facts > procedural knowledge.\n"
-            "Do NOT use this for task progress, session outcomes, completed-work logs, or temporary TODO state.\n"
-            "If you discovered a new reusable procedure, save it as a skill candidate instead.\n"
-            "Write memories as declarative facts, not instructions to yourself.\n"
-        ),
-    )
-    memory_search_tool = create_search_memory_tool(namespace=("memories",))
     handoff_requirement = (
         "Before calling this transfer tool, create a handoff packet with "
         "build_specialist_report. Include completed work, evidence, commands/files, "
@@ -13725,8 +13791,6 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             list_skill_candidates,
             activate_skill_candidate,
             deactivate_skill,
-            memory_manage_tool,
-            memory_search_tool,
         ]
     )
     mcp_tool_names = {_tool_name_for_profile(tool_obj) for tool_obj in mcp_tools if _tool_name_for_profile(tool_obj)}
@@ -13923,8 +13987,6 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             write_alpha_ravis_artifact,
             read_alpha_ravis_artifact,
             list_alpha_ravis_artifacts,
-            memory_manage_tool,
-            memory_search_tool,
             search_skill_library,
             list_skill_candidates,
             record_skill_candidate,
@@ -13932,8 +13994,6 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             activate_skill_candidate,
             deactivate_skill,
         ], [
-            memory_manage_tool,
-            memory_search_tool,
             transfer_to_research,
             transfer_to_ui,
             transfer_to_debugger,

@@ -280,7 +280,7 @@ TOOLSETS: dict[str, Toolset] = {
             "system/power",
             "web/research",
         ),
-        tools=("describe_optional_tool_registry", "create_manage_memory_tool", "create_search_memory_tool"),
+        tools=("describe_optional_tool_registry", "record_curated_memory", "search_curated_memory"),
     ),
     "agent/hermes": Toolset(
         "agent/hermes",
