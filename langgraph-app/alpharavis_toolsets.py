@@ -97,7 +97,7 @@ TOOLSETS: dict[str, Toolset] = {
     ),
     "comfyui/workflows": Toolset(
         "comfyui/workflows",
-        "Inspect and control a configured ComfyUI server over LAN: status, queue, models, prompt history, named workflow library, and gated workflow submit.",
+        "Inspect and control a configured ComfyUI server over LAN: status, queue, models, prompt history, named workflow library (with auto-inferred structured parameter schemas), and gated workflow submit.",
         tools=(
             "check_comfyui_status",
             "list_comfyui_queue",
@@ -105,6 +105,7 @@ TOOLSETS: dict[str, Toolset] = {
             "get_comfyui_history",
             "register_comfyui_outputs",
             "preflight_comfyui_workflow",
+            "infer_comfyui_workflow_params",
             "save_comfyui_workflow",
             "list_saved_comfyui_workflows",
             "get_saved_comfyui_workflow",

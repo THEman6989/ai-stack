@@ -231,13 +231,22 @@ save_comfyui_workflow(workflow_name, workflow_json, aliases_json, parameter_map_
 list_saved_comfyui_workflows()
 get_saved_comfyui_workflow(workflow_name)
 submit_saved_comfyui_workflow(workflow_name, parameters_json)
+infer_comfyui_workflow_params(workflow_json)
 ```
 
 Save only trusted ComfyUI API-format JSON. A useful saved record should include a
 stable tool-style name such as `wan_animate`, aliases such as `["wan animate"]`,
 and a `parameter_map` for ambiguous inputs, for example
-`{"prompt":"1.inputs.text","seed":"12.inputs.seed"}`. Submitting a saved
-workflow applies `parameters_json` through that map, then uses the same gated
+`{"prompt":"1.inputs.text","seed":"12.inputs.seed"}`. The Agent can also call
+`infer_comfyui_workflow_params` to auto-detect parameter types, descriptions,
+and output nodes from the workflow JSON itself -- similar to Pixelle's title-DSL
+but without needing to annotate node titles in ComfyUI. The output includes
+structured `parameters` (name, type=str|int|float|bool, field_path, description,
+required, default) and `outputs` (node_id, output_type=images|videos|audios|gifs).
+
+Submitting a saved workflow applies `parameters_json` through the stored
+`parameter_map` or `parameters` schema, with automatic type coercion (e.g.
+string "999" -> int 999 for type=int params), then uses the same gated
 submit path as raw workflow JSON. Workflow submission remains separately disabled
 by default because arbitrary ComfyUI workflows/custom nodes can execute Python.
 The ComfyUI Agent and UI can

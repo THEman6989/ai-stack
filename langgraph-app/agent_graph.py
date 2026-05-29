@@ -172,12 +172,16 @@ else:
 try:
     from comfyui_workflow_library import (
         get_comfyui_workflow_record as _get_comfyui_workflow_record,
+        infer_workflow_outputs as _infer_workflow_outputs,
+        infer_workflow_parameters as _infer_workflow_parameters,
         list_comfyui_workflow_records as _list_comfyui_workflow_records,
         save_comfyui_workflow_record as _save_comfyui_workflow_record,
         submit_saved_comfyui_workflow_record as _submit_saved_comfyui_workflow_record,
     )
 except Exception as exc:  # pragma: no cover - optional local helper/deps
     _get_comfyui_workflow_record = None
+    _infer_workflow_outputs = None
+    _infer_workflow_parameters = None
     _list_comfyui_workflow_records = None
     _save_comfyui_workflow_record = None
     _submit_saved_comfyui_workflow_record = None
@@ -3374,6 +3378,34 @@ async def submit_saved_comfyui_workflow(
         return _json_tool_result(result)
     except Exception as exc:
         return _json_tool_result({"ok": False, "workflow_name": workflow_name, "error": str(exc)})
+
+
+@tool
+async def infer_comfyui_workflow_params(workflow_json: str) -> str:
+    """Auto-detect structured parameters, types, descriptions and output nodes from a ComfyUI API-format workflow JSON.
+
+    Like Pixelle's title-DSL but zero-annotation: scans all leaf inputs, skips node
+    references (connections), infers types (str/int/float/bool) from default values,
+    generates human-readable descriptions, and detects output nodes (SaveImage,
+    SaveVideo, VHS_VideoCombine etc.). Use this before save_comfyui_workflow to
+    understand and optionally edit the auto-inferred parameter schema.
+    """
+
+    if _infer_workflow_parameters is None or _infer_workflow_outputs is None:
+        return _json_tool_result({"ok": False, "error": _comfyui_workflow_library_unavailable()})
+    try:
+        workflow = json.loads(workflow_json)
+    except Exception as exc:
+        return _json_tool_result({"ok": False, "error": f"Invalid workflow_json: {exc}"})
+    if not isinstance(workflow, dict):
+        return _json_tool_result({"ok": False, "error": "workflow_json must decode to a JSON object."})
+    params = _infer_workflow_parameters(workflow)
+    outputs = _infer_workflow_outputs(workflow)
+    return _json_tool_result({
+        "ok": True,
+        "parameters": params,
+        "outputs": outputs,
+    })
 
 
 @tool
@@ -13855,6 +13887,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             list_saved_comfyui_workflows,
             get_saved_comfyui_workflow,
             submit_saved_comfyui_workflow,
+            infer_comfyui_workflow_params,
             manage_comfyui_queue,
             submit_comfyui_workflow,
             register_media_asset,
@@ -14078,6 +14111,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             list_saved_comfyui_workflows,
             get_saved_comfyui_workflow,
             submit_saved_comfyui_workflow,
+            infer_comfyui_workflow_params,
             manage_comfyui_queue,
             submit_comfyui_workflow,
             register_media_asset,
@@ -14516,6 +14550,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
                 list_saved_comfyui_workflows,
                 get_saved_comfyui_workflow,
                 submit_saved_comfyui_workflow,
+                infer_comfyui_workflow_params,
                 manage_comfyui_queue,
                 submit_comfyui_workflow,
                 prepare_comfy_for_pixelle,

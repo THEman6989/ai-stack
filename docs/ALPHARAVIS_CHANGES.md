@@ -36,6 +36,14 @@ can tell which patches are intentional and which ones can be removed.
   workflow submitted prompt_id `aa94307b-5bb7-4056-b504-8777b77dc091`, produced
   `z-image-turbo_00005_.png`, and registered media asset
   `2a9186bb08347462ed4f0b78` URL-only in the Media Gallery.
+- Added structured parameter schema to the workflow library: `infer_workflow_parameters()`
+  auto-detects types (str/int/float/bool), descriptions, and field paths by scanning
+  leaf inputs and skipping node references (connections). `infer_workflow_outputs()`
+  detects SaveImage/SaveVideo/VHS_VideoCombine etc. output nodes. `save_comfyui_workflow_record`
+  accepts explicit `parameters`/`outputs` lists or auto-infers via `auto_infer_parameters=true`.
+  `apply_workflow_parameters` supports type coercion from the schema (string \"999\" -> int 999).
+  New Agent tool `infer_comfyui_workflow_params` exposes inference to the ComfyUI agent.
+  Tests expanded from 5 to 11 (44 total suite with related files).
 
 ## 2026-05-29 — DeepAgents UI: Unified Chat-First Tab Styling
 
