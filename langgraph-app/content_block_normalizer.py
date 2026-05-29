@@ -10,21 +10,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-# Extensions reused from agent_graph for media type detection
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif"}
-VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"}
-AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac"}
+from media_types import (
+    AUDIO_EXTENSIONS,
+    IMAGE_EXTENSIONS,
+    VIDEO_EXTENSIONS,
+    media_type_from_suffix,
+)
 
 
 def _media_type_from_suffix(value: str) -> str:
-    cleaned = (value or "").split("?", 1)[0].split("#", 1)[0].lower()
-    suffix = Path(cleaned).suffix
-    if suffix in IMAGE_EXTENSIONS:
-        return "image"
-    if suffix in VIDEO_EXTENSIONS:
-        return "video"
-    if suffix in AUDIO_EXTENSIONS:
-        return "audio"
+    base = media_type_from_suffix(value)
+    if base != "unknown":
+        return base
+    suffix = Path((value or "").split("?", 1)[0].split("#", 1)[0].lower()).suffix
     if suffix in {".pdf", ".doc", ".docx", ".txt", ".md", ".csv", ".json"}:
         return "document"
     return "other"

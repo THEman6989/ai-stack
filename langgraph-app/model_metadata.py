@@ -39,27 +39,13 @@ _ENDPOINT_MODEL_METADATA_CACHE_TIME: dict[str, float] = {}
 _ENDPOINT_MODEL_CACHE_TTL = 300
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
+from env_utils import env_int as _env_int
 
 
 from env_utils import env_bool as _env_bool
 
 
-def _env_float(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
+from env_utils import env_float as _env_float
 
 
 def _content_to_text(content: Any) -> str:

@@ -20,8 +20,7 @@ from langgraph_sdk import get_client
 logger = logging.getLogger(__name__)
 
 # --- Configuration ---
-LANGGRAPH_API_URL = os.getenv("LANGGRAPH_API_URL", "http://langgraph-api:2024")
-LANGGRAPH_ASSISTANT_ID = os.getenv("LANGGRAPH_ASSISTANT_ID", "alpha_ravis")
+from env_utils import LANGGRAPH_API_URL, LANGGRAPH_ASSISTANT_ID
 QUEUE_INGEST_TOKEN = os.getenv("AI_STACK_QUEUE_INGEST_TOKEN", "") or os.getenv(
     "GATEWAY_ADMIN_TOKEN", ""
 )

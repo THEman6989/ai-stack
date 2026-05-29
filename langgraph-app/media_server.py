@@ -376,9 +376,7 @@ def _references_collection():
     return client[MONGO_DB][MONGO_REFERENCES_COLLECTION]
 
 
-def _safe_segment(value: str, default: str = "asset") -> str:
-    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "-", (value or "").strip().lower()).strip("-._")
-    return cleaned[:96] or default
+from slug_utils import safe_segment as _safe_segment
 
 
 def _asset_id(request: MediaRegisterRequest) -> str:

@@ -21,7 +21,7 @@ from comfyui_client import (
     _workflow_node_classes,
 )
 
-TRUE_VALUES = {"1", "true", "yes", "on"}
+from env_utils import _ENV_TRUTHY as TRUE_VALUES
 WORKFLOW_LIBRARY_NAMESPACE = "comfyui_workflows"
 NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 

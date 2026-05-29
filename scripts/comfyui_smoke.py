@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
 def _load_env_file(path: Path) -> dict[str, str]:

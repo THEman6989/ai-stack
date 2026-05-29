@@ -49,8 +49,7 @@ if _setup_operational_logging is not None:
         pass
 
 
-LANGGRAPH_API_URL = os.getenv("LANGGRAPH_API_URL", "http://langgraph-api:2024")
-LANGGRAPH_ASSISTANT_ID = os.getenv("LANGGRAPH_ASSISTANT_ID", "alpha_ravis")
+from env_utils import LANGGRAPH_API_URL, LANGGRAPH_ASSISTANT_ID
 OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "my-agent")
 SERVER_MODEL_MANAGER_MODEL_NAME = os.getenv("SERVER_MODEL_MANAGER_MODEL_NAME", "server-model-manager")
 BRIDGE_RUN_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_RUN_TIMEOUT_SECONDS", "180"))
@@ -1276,43 +1275,10 @@ def _is_tool_message(message: Any) -> bool:
     return message_type == "tool" or "toolmessage" in message_type
 
 
-def _get_value(obj: Any, key: str, default: Any = None) -> Any:
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
+from stream_utils import get_value as _get_value
 
 
-def _extract_tool_calls_from_message(message: Any) -> list[dict[str, Any]]:
-    raw = _get_value(message, "tool_calls", None)
-    if raw is None:
-        additional = _get_value(message, "additional_kwargs", {})
-        if isinstance(additional, dict):
-            raw = additional.get("tool_calls")
-    if not isinstance(raw, list):
-        return []
-
-    calls: list[dict[str, Any]] = []
-    for idx, item in enumerate(raw):
-        if not isinstance(item, dict):
-            continue
-        function = item.get("function") if isinstance(item.get("function"), dict) else {}
-        name = item.get("name") or function.get("name") or item.get("title") or f"tool_{idx + 1}"
-        args = item.get("args")
-        if args is None:
-            args = function.get("arguments")
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except Exception:
-                args = {"arguments": args}
-        calls.append(
-            {
-                "id": str(item.get("id") or item.get("tool_call_id") or f"call_{uuid.uuid4().hex[:12]}"),
-                "name": str(name),
-                "args": args if isinstance(args, dict) else {"value": args},
-            }
-        )
-    return calls
+from stream_utils import extract_tool_calls_from_message as _extract_tool_calls_from_message
 
 
 def _extract_tool_result(message: Any) -> tuple[str, str, str] | None:
@@ -1928,16 +1894,10 @@ def _stream_part_is_delta(part: Any) -> bool:
     return False
 
 
-def _stream_event_name(part: Any) -> str:
-    if isinstance(part, dict):
-        return str(part.get("event") or "")
-    return str(getattr(part, "event", ""))
+from stream_utils import stream_event_name as _stream_event_name
 
 
-def _stream_event_data(part: Any) -> Any:
-    if isinstance(part, dict):
-        return part.get("data")
-    return getattr(part, "data", None)
+from stream_utils import stream_event_data as _stream_event_data
 
 
 def _find_langgraph_node_value(value: Any, *, depth: int = 0) -> str:
@@ -2248,12 +2208,7 @@ def _extract_compression_progress_activity(profile: dict[str, Any]) -> str:
     return ""
 
 
-def _delta_text(text: str, emitted: str) -> str:
-    if not text:
-        return ""
-    if emitted and text.startswith(emitted):
-        return text[len(emitted) :]
-    return text
+from stream_utils import delta_text as _delta_text
 
 
 async def _stream_chat_final(

@@ -621,11 +621,7 @@ def _validate_parallel_slots(config: ModelManagementConfig, parallel_slots: int 
     return value
 
 
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except ValueError:
-        return default
+from env_utils import env_int as _env_int
 
 
 def model_context_policy_plan(

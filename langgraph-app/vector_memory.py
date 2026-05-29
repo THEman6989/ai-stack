@@ -157,68 +157,42 @@ def _legacy_chunk_overlap_chars(max_chars: int) -> int | None:
     return min(max(0, int(raw)), max_chars // 2) if raw else None
 
 
+from source_content import detect_source_content_type
+
+
 def _chunk_profile(source_type: str = "", title: str = "", metadata: dict[str, Any] | None = None, text: str = "") -> str:
     metadata = metadata or {}
     explicit = str(metadata.get("chunk_profile") or os.getenv("ALPHARAVIS_PGVECTOR_CHUNK_PROFILE", "")).strip().lower()
     if explicit in {"default", "chat", "archive", "log", "code"}:
         return explicit
-    content_type = str(metadata.get("content_type") or metadata.get("source_content_type") or "").strip().lower()
-    if content_type == "log":
-        return "log"
-    if content_type in {"code", "config"}:
-        return "code"
-    if content_type == "prose":
-        return "default"
 
+    # Use shared content-type detection instead of duplicating heuristics
+    detected = detect_source_content_type(text, title=title, metadata=metadata)
     source = str(source_type or "").lower()
-    sample = text[:6000]
-    looks_like_code = bool(
-        "```" in sample
-        or re.search(
-            r"^\s*(?:async\s+def|def|class|function|import|from|const|let|var|SELECT|CREATE TABLE)\b",
-            sample,
-            re.MULTILINE,
-        )
-    )
-    looks_like_log = bool(
-        re.search(r"^\s*(?:\d{4}-\d{2}-\d{2}|INFO|WARN|WARNING|ERROR|DEBUG|Traceback|Exception:)", sample, re.MULTILINE)
-    )
-    pathish = " ".join(
-        str(value or "")
-        for value in [
-            title,
-            metadata.get("path"),
-            metadata.get("file_path"),
-            metadata.get("filename"),
-            metadata.get("source_path"),
-            metadata.get("source_key"),
-        ]
-    ).lower()
-    code_ext = (
-        ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java", ".kt",
-        ".c", ".h", ".cpp", ".hpp", ".cs", ".php", ".rb", ".swift", ".scala",
-        ".sh", ".bash", ".zsh", ".ps1", ".sql", ".html", ".css", ".scss",
-        ".json", ".yaml", ".yml", ".toml", ".xml",
-    )
-    log_ext = (".log", ".out", ".err", ".trace")
 
-    if source in {"code", "source_code", "repo_file"} or any(pathish.endswith(ext) or ext in pathish for ext in code_ext):
+    if source in {"code", "source_code", "repo_file"}:
         return "code"
-    if source in {"log", "logs", "terminal", "command_output"} or any(pathish.endswith(ext) for ext in log_ext):
+    if source in {"log", "logs", "terminal", "command_output"}:
         return "log"
     if source in {"archive", "archive_collection"}:
-        if looks_like_code:
-            return "code"
-        if looks_like_log:
+        # Quick binary check for archives — detect_source_content_type needs
+        # statistical significance which short snippets often don't reach.
+        sample = text[:6000]
+        if re.search(r"^\s*(?:\d{4}-\d{2}-\d{2}|INFO|WARN|WARNING|ERROR|DEBUG|Traceback|Exception:)", sample, re.MULTILINE):
             return "log"
+        if "```" in sample or re.search(r"^\s*(?:async\s+def|def|class|function|import|from)\b", sample, re.MULTILINE):
+            return "code"
         return "chat"
-    if source in {"archive", "archive_collection", "session_turn", "chat", "conversation"}:
+    if source in {"session_turn", "chat", "conversation"}:
         return "chat"
 
-    if looks_like_code:
+    # Map source_content categories to chunk profiles
+    if detected in {"code", "config"}:
         return "code"
-    if looks_like_log:
+    if detected == "log":
         return "log"
+    if detected == "table":
+        return "default"
     return "default"
 
 

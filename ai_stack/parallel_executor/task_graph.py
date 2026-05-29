@@ -589,8 +589,7 @@ def _assess_risk(title: str, task_type: TaskType, write_enabled: bool) -> RiskLe
 # ---------------------------------------------------------------------------
 
 
-def _has_glob_chars(value: str) -> bool:
-    return any(ch in value for ch in "*?[")
+from ai_stack.parallel_executor.utils import has_glob_chars as _has_glob_chars
 
 
 def _globs_overlap(globs_a: list[str], globs_b: list[str]) -> bool:

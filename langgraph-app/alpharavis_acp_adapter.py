@@ -26,7 +26,7 @@ except Exception:  # pragma: no cover - adapter can still run in stripped envs
         return text
 
 try:
-    from operational_logging import log_event, log_exception, redact_for_logs
+    from operational_logging import BEARER_RE, SECRET_ASSIGNMENT_RE, log_event, log_exception, redact_for_logs
 except Exception:  # pragma: no cover - keep ACP stdout pure even if logging import fails
 
     def log_event(*_args: Any, **_kwargs: Any) -> None:
@@ -40,6 +40,11 @@ except Exception:  # pragma: no cover - keep ACP stdout pure even if logging imp
             return value[:max_field_chars] + f"... [truncated {len(value) - max_field_chars} chars]"
         return value
 
+    BEARER_RE = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]+")
+    SECRET_ASSIGNMENT_RE = re.compile(
+        r"(?i)\b(api[_-]?key|token|password|passwd|secret|authorization|cookie|credential)\s*[:=]\s*([^\s,;]+)"
+    )
+
 
 JSONRPC_VERSION = "2.0"
 ADAPTER_VERSION = "0.1.0"
@@ -47,15 +52,11 @@ DEFAULT_LANGGRAPH_API_URL = "http://langgraph-api:2024"
 DEFAULT_ASSISTANT_ID = "alpha_ravis"
 DEFAULT_WORKSPACE = "/workspace"
 
-SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(api[_-]?key|token|password|passwd|secret|authorization|cookie|credential)\s*[:=]\s*([^\s,;]+)"
-)
-BEARER_RE = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]+")
-OPENAI_KEY_RE = re.compile(r"\bsk-[a-zA-Z0-9][a-zA-Z0-9._-]{12,}\b")
 PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
     re.DOTALL,
 )
+OPENAI_KEY_RE = re.compile(r"\bsk-[a-zA-Z0-9][a-zA-Z0-9._-]{12,}\b")
 
 
 JsonWriter = Callable[[dict[str, Any]], Awaitable[None] | None]
@@ -191,10 +192,7 @@ def _is_tool_message(message: Any) -> bool:
     return message_type in {"tool", "toolmessage"} or "toolmessage" in message_type
 
 
-def _get_value(obj: Any, key: str, default: Any = None) -> Any:
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
+from stream_utils import get_value as _get_value
 
 
 def _message_content(message: Any, *, include_reasoning: bool = False) -> str:
@@ -241,16 +239,10 @@ def _message_reasoning_content(message: Any) -> str:
     return _message_content(message, include_reasoning=True) if _message_content(message, include_reasoning=True) else ""
 
 
-def _stream_event_name(part: Any) -> str:
-    if isinstance(part, dict):
-        return str(part.get("event") or "")
-    return str(getattr(part, "event", ""))
+from stream_utils import stream_event_name as _stream_event_name
 
 
-def _stream_event_data(part: Any) -> Any:
-    if isinstance(part, dict):
-        return part.get("data")
-    return getattr(part, "data", None)
+from stream_utils import stream_event_data as _stream_event_data
 
 
 def _extract_run_id(part: Any) -> str:
@@ -310,44 +302,10 @@ def _extract_stream_reasoning(part: Any) -> str:
     return ""
 
 
-def _delta_text(text: str, emitted: str) -> str:
-    if not text:
-        return ""
-    if emitted and text.startswith(emitted):
-        return text[len(emitted) :]
-    return text
+from stream_utils import delta_text as _delta_text
 
 
-def _extract_tool_calls_from_message(message: Any) -> list[dict[str, Any]]:
-    raw = _get_value(message, "tool_calls", None)
-    if raw is None:
-        additional = _get_value(message, "additional_kwargs", {})
-        if isinstance(additional, dict):
-            raw = additional.get("tool_calls")
-    if not isinstance(raw, list):
-        return []
-    calls: list[dict[str, Any]] = []
-    for idx, item in enumerate(raw):
-        if not isinstance(item, dict):
-            continue
-        function = item.get("function") if isinstance(item.get("function"), dict) else {}
-        name = item.get("name") or function.get("name") or item.get("title") or f"tool_{idx + 1}"
-        args = item.get("args")
-        if args is None:
-            args = function.get("arguments")
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except Exception:
-                args = {"arguments": args}
-        calls.append(
-            {
-                "id": str(item.get("id") or item.get("tool_call_id") or f"call_{uuid.uuid4().hex[:12]}"),
-                "name": str(name),
-                "args": args if isinstance(args, dict) else {"value": args},
-            }
-        )
-    return calls
+from stream_utils import extract_tool_calls_from_message as _extract_tool_calls_from_message
 
 
 def _extract_tool_result(data: Any) -> tuple[str, str, str] | None:

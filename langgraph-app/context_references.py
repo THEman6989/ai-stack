@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from env_utils import env_int as _env_int
+
 from file_safety import ensure_list_allowed, ensure_read_allowed, is_path_allowed
 
 try:
@@ -66,11 +68,7 @@ def estimate_tokens_rough(text: object) -> int:
     return max(1, len(str(text or "")) // 4)
 
 
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except ValueError:
-        return default
+_CONTEXT_REFERENCES_CACHE: dict[str, str] = {}
 
 
 def _head_tail_truncate(content: str, label: str, *, max_chars: int) -> str:

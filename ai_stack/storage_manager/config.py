@@ -22,7 +22,7 @@ def _env_bool(name: str, default: str = "false") -> bool:
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.getenv(name, str(default)))
-    except (ValueError, TypeError):
+    except (TypeError, ValueError):
         return default
 
 

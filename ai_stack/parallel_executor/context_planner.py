@@ -304,8 +304,8 @@ class ParallelContextPlanner:
             )
         )
         self.slot_budget = SlotBudget(
-            pool_total=pool_total or _env_int("ALPHARAVIS_CONTEXT_POOL_TOTAL", "320000"),
-            parallel_slots=parallel_slots or _env_int("ALPHARAVIS_CONTEXT_PARALLEL_SLOTS", "4"),
+            pool_total=pool_total or _env_int("ALPHARAVIS_CONTEXT_POOL_TOTAL", 320000),
+            parallel_slots=parallel_slots or _env_int("ALPHARAVIS_CONTEXT_PARALLEL_SLOTS", 4),
             kv_unified=kv_unified,
             safety_reserve_pct=self.safety_reserve_pct,
         )
@@ -431,11 +431,11 @@ def parallel_hermes_worker_enabled() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _env_int(name: str, default: str) -> int:
+def _env_int(name: str, default: int) -> int:
     try:
-        return int(os.getenv(name, default))
-    except ValueError:
-        return int(default)
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
 
 
 def _env_bool(name: str, default: str = "false") -> bool:

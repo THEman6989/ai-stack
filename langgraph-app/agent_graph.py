@@ -107,20 +107,24 @@ try:
         archive_rag_file_id as _archive_rag_file_id,
         ingest_source as _router_ingest_source,
         mirror_archive_text as _rag_mirror_archive_text,
+        normalize_source_keys as _normalize_source_keys,
         prefer_rag_mirrors as _prefer_rag_mirrors,
         query_rag_sources as _router_query_rag_sources,
         query_sources_with_backends as _router_query_sources_with_backends,
         rag_archive_mirror_enabled as _rag_archive_mirror_enabled,
+        vector_result_to_tool_hit as _vector_result_to_tool_hit,
     )
 except Exception as exc:  # pragma: no cover - optional local module/deps
     _router_agentic_rag_retrieve = None
     _archive_rag_file_id = None
     _router_ingest_source = None
     _rag_mirror_archive_text = None
+    _normalize_source_keys = None
     _prefer_rag_mirrors = None
     _router_query_rag_sources = None
     _router_query_sources_with_backends = None
     _rag_archive_mirror_enabled = None
+    _vector_result_to_tool_hit = None
     RETRIEVAL_ROUTER_IMPORT_ERROR: Exception | None = exc
 else:
     RETRIEVAL_ROUTER_IMPORT_ERROR = None
@@ -505,6 +509,7 @@ from context_compressor import (
     ratio_token_limit_for_context as _ratio_token_limit_for_context,
     redacted_message_to_json,
     summary_budget_snapshot as _summary_budget_snapshot,
+    message_id as _message_id,
 )
 
 if _setup_operational_logging is not None:
@@ -852,14 +857,7 @@ def _env_disable_streaming(name: str, default: str = "false") -> bool | str:
     return value in {"1", "true", "yes", "on", "always"}
 
 
-def _env_float(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
+from env_utils import env_float as _env_float
 
 
 def _model_management_enabled() -> bool:
@@ -2661,10 +2659,8 @@ def _schedule_comfy_shutdown_if_woke(job_id: str, preflight: dict[str, Any], *, 
         return False
 
 
-MEDIA_URL_RE = re.compile(r"https?://[^\s)>\]\"']+", re.IGNORECASE)
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif"}
-VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"}
-AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac"}
+MEDIA_URL_RE = re.compile(r"https?://[^\s)>\}\]\"']+", re.IGNORECASE)
+from media_types import AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".md", ".csv", ".json", ".yaml", ".yml"}
 
 
@@ -5129,22 +5125,6 @@ async def _rag_federated_search(query: str, limit: int) -> tuple[list[dict[str, 
     return hits, ""
 
 
-def _normalize_source_keys(source_keys: Any, *, source_key: str = "") -> list[str]:
-    raw_items: list[Any]
-    if isinstance(source_keys, str):
-        raw_items = [part.strip() for part in source_keys.split(",")]
-    elif isinstance(source_keys, (list, tuple, set)):
-        raw_items = list(source_keys)
-    elif source_keys:
-        raw_items = [source_keys]
-    else:
-        raw_items = []
-    if source_key:
-        raw_items.insert(0, source_key)
-    normalized = [str(item).strip() for item in raw_items if str(item).strip()]
-    return list(dict.fromkeys(normalized))[:50]
-
-
 async def _rag_query_sources(query: str, source_keys: list[str], limit: int) -> tuple[list[dict[str, Any]], str]:
     if _router_query_rag_sources is not None:
         return await _router_query_rag_sources(query=query, file_ids=source_keys, limit=limit)
@@ -6091,9 +6071,12 @@ def _artifact_root() -> Path:
     return Path(_workspace_root()) / "artifacts" / "alpharavis"
 
 
+from slug_utils import safe_segment as _safe_segment
+
+
 def _safe_artifact_segment(value: str, default: str = "artifact") -> str:
-    segment = re.sub(r"[^a-zA-Z0-9._-]+", "-", value.strip().lower()).strip("-._")
-    return segment[:80] or default
+    """Backwards-compatible wrapper — delegates to slug_utils.safe_segment."""
+    return _safe_segment(value, default=default, max_len=80)
 
 
 def _resolve_artifact_path(thread_id: str, filename: str) -> Path | str:
@@ -7595,35 +7578,6 @@ def _estimate_tokens(messages: list[Any]) -> int:
     return _compressor_estimate_tokens([_message_for_context_estimate(message) for message in messages])
 
 
-def _context_discovery_model() -> str:
-    return (
-        os.getenv("ALPHARAVIS_CONTEXT_DISCOVERY_MODEL")
-        or os.getenv("ALPHARAVIS_RESPONSES_MODEL")
-        or os.getenv("ALPHARAVIS_MODEL")
-        or "big-boss"
-    )
-
-
-def _context_discovery_base_url() -> str:
-    return (
-        os.getenv("ALPHARAVIS_CONTEXT_DISCOVERY_API_BASE")
-        or os.getenv("BIG_BOSS_API_BASE")
-        or os.getenv("ALPHARAVIS_RESPONSES_API_BASE")
-        or os.getenv("OPENAI_API_BASE")
-        or ""
-    ).rstrip("/")
-
-
-def _context_discovery_api_key() -> str:
-    return (
-        os.getenv("ALPHARAVIS_CONTEXT_DISCOVERY_API_KEY")
-        or os.getenv("LOCAL_LLM_API_KEY")
-        or os.getenv("ALPHARAVIS_RESPONSES_API_KEY")
-        or os.getenv("OPENAI_API_KEY")
-        or ""
-    )
-
-
 def _detected_context_length() -> int:
     fallback = int(os.getenv("ALPHARAVIS_MODEL_CONTEXT_LENGTH", os.getenv("ALPHARAVIS_DEFAULT_CONTEXT_LENGTH", "128000")))
     if _get_model_context_length is None:
@@ -7639,19 +7593,6 @@ def _detected_context_length() -> int:
     except Exception as exc:
         print(f"WARNING: context length discovery failed, using fallback {fallback}: {exc}")
         return max(4096, fallback)
-
-
-def _provider_context_length_override(state: dict[str, Any] | None, detected_context_length: int) -> int | None:
-    if not _env_bool("ALPHARAVIS_ENABLE_PROVIDER_CONTEXT_LIMIT_RETRY", "true"):
-        return None
-    raw = (state or {}).get("provider_reported_context_limit")
-    try:
-        value = int(raw) if raw is not None else 0
-    except (TypeError, ValueError):
-        return None
-    if value < 4096:
-        return None
-    return max(4096, min(value, detected_context_length))
 
 
 def _context_budget_snapshot(state: dict[str, Any] | None = None, *, messages: list[Any] | None = None) -> dict[str, Any]:
@@ -7762,12 +7703,6 @@ def _hard_context_token_limit_for_context(context_length: int) -> int:
     if _context_limit_from_ratio is not None:
         return _context_limit_from_ratio(context_length, ratio, minimum=minimum)
     return max(minimum, int(context_length * ratio))
-
-
-def _message_id(message: Any) -> str:
-    if isinstance(message, dict):
-        return str(message.get("id") or "")
-    return str(getattr(message, "id", "") or "")
 
 
 def _message_content_text(message: Any) -> str:
@@ -7983,37 +7918,6 @@ def _format_vector_result(record: dict[str, Any]) -> str:
         f"Title: {title}\n"
         f"Chunk:\n{content}"
     ).strip()
-
-
-def _vector_result_to_tool_hit(record: dict[str, Any]) -> dict[str, Any]:
-    metadata = record.get("metadata") or {}
-    if not isinstance(metadata, dict):
-        metadata = {"raw_metadata": metadata}
-    preview = str(record.get("preview_text") or record.get("chunk_text") or record.get("content") or "")
-    preview_chars = int(os.getenv("ALPHARAVIS_PGVECTOR_RESULT_PREVIEW_CHARS", "900"))
-    if len(preview) > preview_chars:
-        preview = preview[:preview_chars].rstrip() + "\n[Vector result preview truncated.]"
-    similarity = record.get("similarity")
-    distance = record.get("distance")
-    child_archive_keys = metadata.get("child_archive_keys") or record.get("child_archive_keys") or []
-    return {
-        "source_type": record.get("source_type", "memory"),
-        "source_key": record.get("source_key", "unknown"),
-        "title": record.get("title") or record.get("source_key") or "untitled",
-        "score": similarity,
-        "similarity": similarity,
-        "distance": distance,
-        "preview_text": preview,
-        "chunk_text": str(record.get("chunk_text") or record.get("content") or ""),
-        "thread_id": record.get("thread_id") or "",
-        "thread_key": record.get("thread_key") or record.get("thread_id") or "",
-        "chunk_index": record.get("chunk_index"),
-        "chunk_count": record.get("chunk_count"),
-        "is_catalog": bool(record.get("is_catalog")),
-        "embedding_model": record.get("embedding_model") or "",
-        "metadata": metadata,
-        "child_archive_keys": child_archive_keys,
-    }
 
 
 def _format_skill_record(key: str, value: dict[str, Any]) -> str:
@@ -8606,150 +8510,6 @@ def _small_classifier_timeout() -> float:
     return max(1.0, float(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_TIMEOUT_SECONDS", "12")))
 
 
-def _line_ranges_from_text(text: str) -> tuple[list[str], list[tuple[int, str]]]:
-    lines = str(text or "").splitlines()
-    numbered = [(index + 1, line) for index, line in enumerate(lines)]
-    return lines, numbered
-
-
-def _classifier_window_text(text: str) -> str:
-    lines, numbered = _line_ranges_from_text(text)
-    if len(text) <= int(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_FULL_TEXT_MAX_CHARS", "12000")):
-        return "\n".join(f"{index}: {line}" for index, line in numbered)
-
-    marker_re = re.compile(
-        r"(?i)(^|\b)(/rag|/rake|/index|/ingest|/big-context|/big_context|<big-context|<big_context|task|instructions?|rules?|document|source|context|question|frage|aufgabe|anweisung|quelle)\b"
-    )
-    selected: dict[int, str] = {}
-    head_lines = int(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_HEAD_LINES", "80"))
-    tail_lines = int(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_TAIL_LINES", "100"))
-    radius = int(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_MARKER_RADIUS_LINES", "8"))
-    for index, line in numbered[:head_lines]:
-        selected[index] = line
-    for index, line in numbered[-tail_lines:]:
-        selected[index] = line
-    for index, line in numbered:
-        if marker_re.search(line):
-            start = max(1, index - radius)
-            end = min(len(lines), index + radius)
-            for nearby in range(start, end + 1):
-                selected[nearby] = lines[nearby - 1]
-    rendered = "\n".join(f"{index}: {selected[index]}" for index in sorted(selected))
-    max_chars = int(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_WINDOW_MAX_CHARS", "24000"))
-    if len(rendered) > max_chars:
-        rendered = rendered[:max_chars].rstrip() + "\n[Classifier window truncated.]"
-    return rendered
-
-
-def _local_retrieval_query(text: str) -> str:
-    raw = str(text or "").strip()
-    max_chars = _retrieval_query_max_chars()
-    if len(raw) <= _retrieval_query_direct_max_chars():
-        return raw[:max_chars].strip()
-
-    lines = [line.strip() for line in raw.splitlines() if line.strip()]
-    question_re = re.compile(
-        r"(?i)(\?|^(was|wie|warum|wann|wo|wer|welche|welcher|welches|wieso|how|what|why|when|where|who|which)\b|"
-        r"\b(find|search|suche|such|erklär|erklaer|zeige|tell me|look up|nachschauen|nachschau)\b)"
-    )
-    selected: list[str] = []
-    for line in reversed(lines[-120:]):
-        if question_re.search(line):
-            selected.insert(0, line)
-        if sum(len(item) + 1 for item in selected) >= max_chars:
-            break
-    if not selected:
-        selected = lines[-20:]
-    query = "\n".join(selected).strip()
-    if len(query) > max_chars:
-        query = query[-max_chars:].strip()
-    return query or raw[:max_chars].strip()
-
-
-def _parse_classifier_json(content: str) -> dict[str, Any]:
-    text = str(content or "").strip()
-    if not text:
-        raise ValueError("empty classifier response")
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
-    if fenced:
-        text = fenced.group(1)
-    elif "{" in text and "}" in text:
-        text = text[text.find("{") : text.rfind("}") + 1]
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        recovered: dict[str, Any] = {}
-        decoder = json.JSONDecoder()
-        for key in ("intent", "retrieval_query", "instruction_lines", "document_lines", "question_lines", "confidence", "reason"):
-            match = re.search(rf'"{re.escape(key)}"\s*:\s*', text)
-            if not match:
-                continue
-            try:
-                value, _ = decoder.raw_decode(text[match.end() :].lstrip())
-            except json.JSONDecodeError:
-                continue
-            recovered[key] = value
-        if recovered:
-            payload = recovered
-        else:
-            raise
-    if not isinstance(payload, dict):
-        raise ValueError("classifier JSON was not an object")
-    return payload
-
-
-def _normalize_line_ranges(value: Any) -> list[list[int]]:
-    ranges: list[list[int]] = []
-    if not isinstance(value, list):
-        return ranges
-    for item in value:
-        if isinstance(item, list) and len(item) >= 2:
-            start, end = item[0], item[1]
-        elif isinstance(item, dict):
-            start, end = item.get("start"), item.get("end")
-        else:
-            continue
-        try:
-            start_i = max(1, int(start))
-            end_i = max(start_i, int(end))
-        except (TypeError, ValueError):
-            continue
-        ranges.append([start_i, end_i])
-    return ranges[:40]
-
-
-def _line_range_indexes(line_count: int, ranges: Any) -> set[int]:
-    indexes: set[int] = set()
-    if line_count <= 0:
-        return indexes
-    for start, end in _normalize_line_ranges(ranges):
-        start_i = max(1, min(line_count, start))
-        end_i = max(start_i, min(line_count, end))
-        indexes.update(range(start_i, end_i + 1))
-    return indexes
-
-
-def _text_from_line_ranges(text: str, ranges: Any, *, max_chars: int | None = None) -> str:
-    lines = str(text or "").splitlines()
-    indexes = _line_range_indexes(len(lines), ranges)
-    if not indexes:
-        return ""
-    selected = [line for index, line in enumerate(lines, start=1) if index in indexes]
-    rendered = "\n".join(selected).strip()
-    if max_chars is not None and len(rendered) > max_chars:
-        rendered = rendered[:max_chars].rstrip() + "\n[Line range text truncated.]"
-    return rendered
-
-
-def _strip_line_ranges_from_text(text: str, ranges: Any) -> str:
-    lines = str(text or "").splitlines()
-    indexes = _line_range_indexes(len(lines), ranges)
-    if not indexes:
-        return str(text or "")
-    kept = [line for index, line in enumerate(lines, start=1) if index not in indexes]
-    return "\n".join(kept).strip()
-
-
 _SOURCE_STOPWORDS = {
     "about",
     "after",
@@ -8780,142 +8540,6 @@ _SOURCE_STOPWORDS = {
     "wenn",
     "with",
 }
-
-
-def _detect_source_content_type(text: str, *, title: str = "", metadata: dict[str, Any] | None = None) -> str:
-    metadata = metadata if isinstance(metadata, dict) else {}
-    explicit = str(metadata.get("content_type") or metadata.get("source_content_type") or "").strip().lower()
-    if explicit in {"code", "log", "config", "prose", "table", "mixed"}:
-        return explicit
-
-    pathish = " ".join(
-        str(value or "")
-        for value in (
-            title,
-            metadata.get("filename"),
-            metadata.get("file_name"),
-            metadata.get("path"),
-            metadata.get("file_path"),
-            metadata.get("source_path"),
-            metadata.get("source_key"),
-        )
-    ).strip().lower()
-    if any(pathish.endswith(ext) or ext in pathish for ext in (".json", ".yaml", ".yml", ".toml", ".ini", ".env", ".cfg", ".conf")):
-        return "config"
-    if any(pathish.endswith(ext) or ext in pathish for ext in (".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".sh", ".sql", ".html", ".css")):
-        return "code"
-    if any(pathish.endswith(ext) for ext in (".log", ".trace", ".out", ".err")):
-        return "log"
-    if any(pathish.endswith(ext) or ext in pathish for ext in (".csv", ".tsv")):
-        return "table"
-
-    sample = str(text or "")[:12000]
-    lines = [line for line in sample.splitlines() if line.strip()]
-    if not lines:
-        return "prose"
-    code_lines = sum(
-        1
-        for line in lines
-        if re.search(r"^\s*(async\s+def|def|class|function|import|from|const|let|var|SELECT|CREATE TABLE|if\s+.+:|for\s+.+:)\b", line)
-        or re.search(r"[{};]\s*$", line)
-    )
-    log_lines = sum(
-        1
-        for line in lines
-        if re.search(r"^\s*(\d{4}-\d{2}-\d{2}[T\s]|\[[^\]]+\]\s*)?(INFO|WARN|WARNING|ERROR|DEBUG|TRACE|Traceback|Exception)\b", line)
-    )
-    config_lines = sum(1 for line in lines if re.search(r"^\s*[\w.-]+\s*[:=]\s*[^=].*$", line))
-    table_lines = sum(
-        1
-        for line in lines
-        if ("\t" in line and len(line.split("\t")) >= 3)
-        or (line.count("|") >= 2)
-        or (line.count(",") >= 3 and len(line) < 500)
-    )
-    total = max(1, len(lines))
-    strong = [
-        name
-        for name, count, threshold in (
-            ("code", code_lines, 0.12),
-            ("log", log_lines, 0.12),
-            ("config", config_lines, 0.25),
-            ("table", table_lines, 0.25),
-        )
-        if count / total >= threshold and count >= 3
-    ]
-    if len(strong) > 1:
-        return "mixed"
-    if strong:
-        return strong[0]
-    if "```" in sample:
-        return "code"
-    return "prose"
-
-
-def _extract_source_keywords(text: str, *, limit: int = 12) -> list[str]:
-    words = re.findall(r"(?u)\b[\w][\w.-]{3,}\b", str(text or "")[:20000])
-    counts: dict[str, int] = {}
-    display: dict[str, str] = {}
-    for word in words:
-        lowered = word.strip("._-").lower()
-        if len(lowered) < 4 or lowered in _SOURCE_STOPWORDS or lowered.isdigit():
-            continue
-        counts[lowered] = counts.get(lowered, 0) + 1
-        display.setdefault(lowered, word.strip("._-"))
-    ranked = sorted(counts, key=lambda item: (-counts[item], item))
-    return [display[item] for item in ranked[:limit]]
-
-
-def _extract_source_entities(text: str, *, limit: int = 12) -> list[str]:
-    sample = str(text or "")[:20000]
-    candidates = re.findall(r"\b(?:[A-ZÄÖÜ][\wÄÖÜäöüß.-]{2,}|[A-Z0-9_]{3,})(?:[/.-][A-Z0-9_][\w.-]*)*\b", sample)
-    seen: set[str] = set()
-    entities: list[str] = []
-    for candidate in candidates:
-        cleaned = candidate.strip(".,:;()[]{}")
-        lowered = cleaned.lower()
-        if lowered in seen or lowered in _SOURCE_STOPWORDS or cleaned.isdigit():
-            continue
-        seen.add(lowered)
-        entities.append(cleaned)
-        if len(entities) >= limit:
-            break
-    return entities
-
-
-def _extract_source_symbols(text: str, *, limit: int = 20) -> list[str]:
-    sample = str(text or "")[:30000]
-    patterns = [
-        r"(?m)^\s*(?:async\s+def|def|class)\s+([A-Za-z_][\w]*)",
-        r"(?m)^\s*(?:function|const|let|var)\s+([A-Za-z_$][\w$]*)",
-        r"(?m)^\s*(?:export\s+)?(?:class|interface|type)\s+([A-Za-z_$][\w$]*)",
-        r"(?m)^\s*([A-Z][A-Z0-9_]{2,})\s*=",
-        r"\b([\w.-]+\.(?:py|js|ts|tsx|jsx|json|ya?ml|toml|log|md|txt|csv|sql))\b",
-    ]
-    seen: set[str] = set()
-    symbols: list[str] = []
-    for pattern in patterns:
-        for match in re.finditer(pattern, sample):
-            symbol = str(match.group(1)).strip()
-            key = symbol.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            symbols.append(symbol)
-            if len(symbols) >= limit:
-                return symbols
-    return symbols
-
-
-def _source_title_from_text(text: str, *, fallback: str) -> str:
-    for line in str(text or "").splitlines()[:80]:
-        stripped = line.strip().strip("#").strip()
-        if not stripped or len(stripped) > 140:
-            continue
-        if re.match(r"(?i)^(document|source|context|data|instructions?|rules?|logs?)\s*[:#-]?$", stripped):
-            continue
-        return stripped[:120]
-    return fallback[:120]
 
 
 def _source_metadata_summary(

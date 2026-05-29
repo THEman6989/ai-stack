@@ -17,16 +17,13 @@ from urllib.parse import urlparse
 import httpx
 
 
-VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"}
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif"}
+from media_types import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 
 
 from env_utils import env_bool as _env_bool
 
 
-def _safe_segment(value: str, default: str = "asset") -> str:
-    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "-", (value or "").strip().lower()).strip("-._")
-    return cleaned[:96] or default
+from slug_utils import safe_segment as _safe_segment
 
 
 def _default_model_cards() -> dict[str, dict[str, Any]]:
