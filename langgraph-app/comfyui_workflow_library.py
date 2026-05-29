@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import os
 import re
 import time
@@ -24,10 +23,6 @@ from comfyui_client import (
 TRUE_VALUES = {"1", "true", "yes", "on"}
 WORKFLOW_LIBRARY_NAMESPACE = "comfyui_workflows"
 NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
-
-# Max description lengths (matching Pixelle approach: descriptions in the schema)
-MAX_PARAM_DESCRIPTION_CHARS = 500
-MAX_OUTPUT_DESCRIPTION_CHARS = 500
 
 # Output node classes that produce media (auto-detected like Pixelle does)
 _OUTPUT_NODE_TYPES: dict[str, str] = {
@@ -353,34 +348,6 @@ def validate_parameter_schema(parameters: list[dict[str, Any]]) -> tuple[bool, s
     return True, ""
 
 
-def _parse_json_object(value: str | dict[str, Any] | None, *, field_name: str) -> dict[str, Any]:
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        return value
-    text = str(value or "").strip()
-    if not text:
-        return {}
-    parsed = json.loads(text)
-    if not isinstance(parsed, dict):
-        raise ValueError(f"{field_name} must be a JSON object")
-    return parsed
-
-
-def _parse_json_list(value: str | list[Any] | None, *, field_name: str) -> list[Any]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return value
-    text = str(value or "").strip()
-    if not text:
-        return []
-    parsed = json.loads(text)
-    if not isinstance(parsed, list):
-        raise ValueError(f"{field_name} must be a JSON array")
-    return parsed
-
-
 def _normalize_string_list(values: list[Any] | tuple[Any, ...] | None) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
@@ -565,7 +532,7 @@ def get_comfyui_workflow_record(workflow_name: str, *, include_workflow: bool = 
                 "record": _public_record(record, include_workflow=include_workflow),
             }
 
-    listed = list_comfyui_workflow_records(limit=200, include_workflow=True)
+    listed = list_comfyui_workflow_records(limit=200, include_workflow=False)
     for record in listed.get("workflows", []) if isinstance(listed, dict) else []:
         aliases = [
             str(alias).strip().lower()
