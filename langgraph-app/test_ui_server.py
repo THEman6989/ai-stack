@@ -1816,7 +1816,9 @@ async def _run_latency_bench(request: LatencyBenchRequest) -> dict[str, Any]:
     # ── 2. Pgvector search timing ──
     pgv_started = time.perf_counter()
     pgv_result: dict[str, Any] = {"component": "pgvector_search", "query_chars": len(bench_query)}
-    if pgvector_semantic_search is None:
+    if request.skip_embedding:
+        pgv_result.update({"ok": None, "skipped": True, "elapsed_seconds": 0})
+    elif pgvector_semantic_search is None:
         pgv_result.update({"ok": False, "error": "pgvector unavailable", "elapsed_seconds": 0})
     else:
         try:
