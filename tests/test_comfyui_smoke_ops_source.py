@@ -54,5 +54,5 @@ def test_build_time_comfyui_flags_are_documented_and_env_template_is_unambiguous
     assert "docker compose build deep-agents-ui" in usage
     assert "Container recreate reicht" in usage or "container recreate" in usage.lower()
     assert "Compose mirrors ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT" in env_example
-    assert "NEXT_PUBLIC_COMFYUI_WORKFLOW_SUBMIT_ENABLED: ${ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT:-false}" in compose
+    assert "NEXT_PUBLIC_COMFYUI_WORKFLOW_SUBMIT_ENABLED: ${ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT:-true}" in compose
     assert "ALPHARAVIS_COMFYUI_WORKFLOW_SUBMIT" not in env_example

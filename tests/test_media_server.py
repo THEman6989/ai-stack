@@ -578,7 +578,7 @@ def test_media_gallery_cors_allows_browser_ui_origins() -> None:
     middleware = [item for item in media_server.app.user_middleware if item.cls.__name__ == "CORSMiddleware"]
 
     assert middleware
-    allow_origins = middleware[0].options["allow_origins"]
+    allow_origins = middleware[0].kwargs["allow_origins"]
     assert "http://localhost:3000" in allow_origins
     assert "http://127.0.0.1:3000" in allow_origins
 

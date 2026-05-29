@@ -1168,12 +1168,12 @@ class TestParallelExecutorNodeIntegration:
     def test_slot_budget_refuses_when_pool_full_with_320k_4_slots(self):
         """At 320k pool with 4 slots, workers must fit within budget."""
         budget = SlotBudget(pool_total=320000, parallel_slots=4, kv_unified=True)
-        # Admit 4 workers each with 75k = 300k total (fits in 294.4k usable)
-        assert budget.admit("w1", 75000) is True
-        assert budget.admit("w2", 75000) is True
-        assert budget.admit("w3", 75000) is True
-        # 225k allocated, 69.4k available — should fit 75k
-        assert budget.admit("w4", 75000) is True
+        # Admit 4 workers each with 73k = 292k total (fits in 294.4k usable)
+        assert budget.admit("w1", 73000) is True
+        assert budget.admit("w2", 73000) is True
+        assert budget.admit("w3", 73000) is True
+        # 219k allocated, 75.4k available — 73k fits
+        assert budget.admit("w4", 73000) is True
         # All 4 slots used
         assert budget.active_count == 4
         assert budget.can_admit(1000) is False  # No more slots
