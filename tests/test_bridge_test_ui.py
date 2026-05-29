@@ -69,9 +69,9 @@ if importlib.util.find_spec("fastapi") is None:
             obj.status_code = kwargs.get("status_code", 307)
             return obj
 
-    class JSONResponse(dict):
+    class JSONResponse:
         def __init__(self, content=None, status_code: int = 200, *args, **kwargs) -> None:
-            super().__init__(content or {})
+            self.body = json.dumps(content or {}).encode("utf-8")
             self.status_code = status_code
 
     class StreamingResponse:
