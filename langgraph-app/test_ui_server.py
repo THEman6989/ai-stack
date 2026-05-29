@@ -1736,9 +1736,10 @@ async def rag_classifier_probe(request: RagClassifierProbeRequest) -> JSONRespon
 
 class LatencyBenchRequest(BaseModel):
     embedding_base_url: str = "http://192.168.178.140:11434"
-    embedding_model: str = ""  # default from ALPHARAVIS_OLLAMA_EMBED_MODEL→qwen3-embedding:0.6b
+    embedding_model: str = ""  # default from env→memory-embed via LiteLLM
     embedding_api_key: str = ""
     embedding_backend: str = "ollama_embed"
+    skip_embedding: bool = False  # skip if host unreachable (Docker network)
     reranker_url: str = "http://192.168.178.140:8000"
     reranker_endpoint: str = "/reranking"
     reranker_model: str = "qwen3-reranker-0.6b"
@@ -1763,129 +1764,143 @@ async def _run_latency_bench(request: LatencyBenchRequest) -> dict[str, Any]:
     bench_text = str(request.bench_text or "").strip() or "AlphaRavis latency bench probe text."
     bench_query = str(request.bench_query or "").strip() or "How does AlphaRavis handle retrieval?"
     embed_model = (request.embedding_model or os.getenv("ALPHARAVIS_OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b")).strip()
+    cls_sizes = [int(s.strip()) for s in request.classifier_text_sizes.split(",") if s.strip().isdigit()]
+    if not cls_sizes:
+        cls_sizes = [500, 5000, 50000]
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    step_timeout = max(3.0, timeout / max(1, len(cls_sizes) + 3))
 
-        # ── 1. Embedding timing ──
-        embed_started = time.perf_counter()
-        embed_result: dict[str, Any] = {"component": "embedding", "model": embed_model}
+    # ── aiohttp-based HTTP client (httpx pool hangs in Docker) ──
+    import aiohttp
+
+    async def _http_post(url: str, json_data: dict, headers: dict | None = None, timeout_sec: float = 10.0) -> dict:
+        """POST with real timeout via aiohttp."""
+        timeout = aiohttp.ClientTimeout(total=timeout_sec, connect=min(5.0, timeout_sec))
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=json_data, headers=headers or {}) as resp:
+                text = await resp.text()
+                try:
+                    body = json.loads(text)
+                except json.JSONDecodeError:
+                    body = {"_raw": text}
+                return {"status": resp.status, "body": body}
+
+    # ── 1. Embedding timing ──
+    embed_started = time.perf_counter()
+    embed_result: dict[str, Any] = {"component": "embedding", "model": embed_model}
+    if request.skip_embedding:
+        embed_result.update({"ok": None, "skipped": True, "elapsed_seconds": 0})
+        print("[LATENCY-BENCH] embedding skipped", flush=True)
+    else:
         try:
             emb_url = f"{request.embedding_base_url.rstrip('/')}/api/embeddings"
             emb_payload = {"model": embed_model, "input": bench_text}
-            emb_resp = await client.post(emb_url, json=emb_payload)
-            emb_body = emb_resp.json() if emb_resp.status_code < 400 else {}
+            emb = await _http_post(emb_url, emb_payload, timeout_sec=step_timeout)
+            emb_body = emb.get("body", {}) if isinstance(emb, dict) else {}
             emb_data = emb_body.get("data") if isinstance(emb_body, dict) else None
             dim = len(emb_data[0].get("embedding", [])) if isinstance(emb_data, list) and emb_data else 0
             embed_result.update({
-                "ok": emb_resp.status_code < 400 and dim > 0,
-                "status_code": emb_resp.status_code,
+                "ok": emb.get("status", 0) < 400 and dim > 0,
+                "status_code": emb.get("status"),
                 "embedding_dim": dim,
                 "input_chars": len(bench_text),
                 "elapsed_seconds": round(time.perf_counter() - embed_started, 3),
             })
         except Exception as exc:
             embed_result.update({
-                "ok": False, "error": f"{type(exc).__name__}: {exc}",
+                "ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}",
                 "elapsed_seconds": round(time.perf_counter() - embed_started, 3),
             })
-        steps.append(embed_result)
+    steps.append(embed_result)
 
-        # ── 2. Pgvector search timing ──
-        pgv_started = time.perf_counter()
-        pgv_result: dict[str, Any] = {"component": "pgvector_search", "query_chars": len(bench_query)}
-        if pgvector_semantic_search is None:
-            pgv_result.update({"ok": False, "error": "pgvector unavailable", "elapsed_seconds": 0})
-        else:
-            try:
-                search_results = await pgvector_semantic_search(
-                    query=bench_query, limit=5, source_keys=None,
-                )
-                hit_count = len(search_results) if isinstance(search_results, list) else 0
-                pgv_result.update({
-                    "ok": True,
-                    "hit_count": hit_count,
-                    "elapsed_seconds": round(time.perf_counter() - pgv_started, 3),
-                })
-            except Exception as exc:
-                pgv_result.update({
-                    "ok": False, "error": f"{type(exc).__name__}: {exc}",
-                    "elapsed_seconds": round(time.perf_counter() - pgv_started, 3),
-                })
-        steps.append(pgv_result)
-
-        # ── 3. Classifier timing (multiple text sizes) ──
-        cls_sizes = [int(s.strip()) for s in request.classifier_text_sizes.split(",") if s.strip().isdigit()]
-        if not cls_sizes:
-            cls_sizes = [500, 5000, 50000]
-        cls_base = (request.classifier_base_url or os.getenv("ALPHARAVIS_RAG_CLASSIFIER_API_BASE", "")).strip().rstrip("/")
-        if not cls_base:
-            cls_base = "http://192.168.178.153:8001/v1"
-        cls_model = (request.classifier_model or os.getenv("ALPHARAVIS_RAG_CLASSIFIER_MODEL", "unsloth/Qwen3.5-2B-GGUF:Q4_1")).strip()
-        cls_url = f"{cls_base}/chat/completions"
-        cls_api_key = os.getenv("LOCAL_LLM_API_KEY", "sk-local-dev")
-
-        for size in cls_sizes:
-            cls_started = time.perf_counter()
-            cls_result: dict[str, Any] = {"component": "classifier", "model": cls_model, "input_chars": size}
-            try:
-                text = (bench_text * ((size // max(1, len(bench_text))) + 1))[:size]
-                cls_payload = {
-                    "model": cls_model,
-                    "messages": [
-                        {"role": "system", "content": "Classify this text into: question, document, instruction, or mixed. Return JSON with keys: intent, confidence."},
-                        {"role": "user", "content": text},
-                    ],
-                    "temperature": 0,
-                    "max_tokens": 128,
-                    "stream": False,
-                }
-                cls_resp = await client.post(cls_url, json=cls_payload, headers={"Authorization": f"Bearer {cls_api_key}"})
-                cls_resp.raise_for_status()
-                cls_result.update({
-                    "ok": True,
-                    "status_code": cls_resp.status_code,
-                    "elapsed_seconds": round(time.perf_counter() - cls_started, 3),
-                })
-            except Exception as exc:
-                cls_result.update({
-                    "ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}",
-                    "elapsed_seconds": round(time.perf_counter() - cls_started, 3),
-                })
-            steps.append(cls_result)
-
-        # ── 4. Reranker timing ──
-        rerank_started = time.perf_counter()
-        rerank_result: dict[str, Any] = {"component": "reranker", "model": request.reranker_model}
+    # ── 2. Pgvector search timing ──
+    pgv_started = time.perf_counter()
+    pgv_result: dict[str, Any] = {"component": "pgvector_search", "query_chars": len(bench_query)}
+    if pgvector_semantic_search is None:
+        pgv_result.update({"ok": False, "error": "pgvector unavailable", "elapsed_seconds": 0})
+    else:
         try:
-            rerank_url = f"{request.reranker_url.rstrip('/')}{request.reranker_endpoint}"
-            rerank_payload = {
-                "model": request.reranker_model,
-                "query": bench_query,
-                "documents": [bench_text, "AlphaRavis uses pgvector for semantic search with HNSW indexing.", "Reranker improves precision by scoring relevance."],
-            }
-            rerank_resp = await client.post(rerank_url, json=rerank_payload)
-            rerank_body = rerank_resp.json() if rerank_resp.status_code < 400 else {}
-            items = rerank_body.get("results") if isinstance(rerank_body, dict) else []
-            rerank_result.update({
-                "ok": isinstance(items, list) and len(items) > 0,
-                "status_code": rerank_resp.status_code,
-                "result_count": len(items) if isinstance(items, list) else 0,
-                "elapsed_seconds": round(time.perf_counter() - rerank_started, 3),
+            search_results = await asyncio.wait_for(
+                pgvector_semantic_search(query=bench_query, limit=5, source_keys=None),
+                timeout=step_timeout,
+            )
+            hit_count = len(search_results) if isinstance(search_results, list) else 0
+            pgv_result.update({
+                "ok": True, "hit_count": hit_count,
+                "elapsed_seconds": round(time.perf_counter() - pgv_started, 3),
             })
         except Exception as exc:
-            rerank_result.update({
+            pgv_result.update({
                 "ok": False, "error": f"{type(exc).__name__}: {exc}",
-                "elapsed_seconds": round(time.perf_counter() - rerank_started, 3),
+                "elapsed_seconds": round(time.perf_counter() - pgv_started, 3),
             })
-        steps.append(rerank_result)
+    steps.append(pgv_result)
+
+    # ── 3. Classifier timing (multiple text sizes) ──
+    cls_base = (request.classifier_base_url or os.getenv("ALPHARAVIS_RAG_CLASSIFIER_API_BASE", "")).strip().rstrip("/")
+    if not cls_base:
+        cls_base = "http://192.168.178.153:8001/v1"
+    cls_model = (request.classifier_model or os.getenv("ALPHARAVIS_RAG_CLASSIFIER_MODEL", "unsloth/Qwen3.5-2B-GGUF:Q4_1")).strip()
+    cls_url = f"{cls_base}/chat/completions"
+    cls_api_key = os.getenv("LOCAL_LLM_API_KEY", "sk-local-dev")
+    cls_headers = {"Authorization": f"Bearer {cls_api_key}"}
+
+    for size in cls_sizes:
+        cls_started = time.perf_counter()
+        cls_result: dict[str, Any] = {"component": "classifier", "model": cls_model, "input_chars": size}
+        try:
+            text = (bench_text * ((size // max(1, len(bench_text))) + 1))[:size]
+            cls_payload = {
+                "model": cls_model,
+                "messages": [
+                    {"role": "system", "content": "Classify: question, document, instruction, or mixed. Return JSON: intent, confidence."},
+                    {"role": "user", "content": text},
+                ],
+                "temperature": 0, "max_tokens": 128, "stream": False,
+            }
+            cls = await _http_post(cls_url, cls_payload, headers=cls_headers, timeout_sec=step_timeout)
+            cls_result.update({
+                "ok": cls.get("status", 0) < 400,
+                "status_code": cls.get("status"),
+                "elapsed_seconds": round(time.perf_counter() - cls_started, 3),
+            })
+        except Exception as exc:
+            cls_result.update({
+                "ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}",
+                "elapsed_seconds": round(time.perf_counter() - cls_started, 3),
+            })
+        steps.append(cls_result)
+
+    # ── 4. Reranker timing ──
+    rerank_started = time.perf_counter()
+    rerank_result: dict[str, Any] = {"component": "reranker", "model": request.reranker_model}
+    try:
+        rerank_url = f"{request.reranker_url.rstrip('/')}{request.reranker_endpoint}"
+        rerank_payload = {
+            "model": request.reranker_model, "query": bench_query,
+            "documents": [bench_text, "AlphaRavis uses pgvector for HNSW search.", "Reranker improves precision."],
+        }
+        rr = await _http_post(rerank_url, rerank_payload, timeout_sec=step_timeout)
+        rr_body = rr.get("body", {}) if isinstance(rr, dict) else {}
+        items = rr_body.get("results") if isinstance(rr_body, dict) else []
+        rerank_result.update({
+            "ok": isinstance(items, list) and len(items) > 0,
+            "status_code": rr.get("status"),
+            "result_count": len(items) if isinstance(items, list) else 0,
+            "elapsed_seconds": round(time.perf_counter() - rerank_started, 3),
+        })
+    except Exception as exc:
+        rerank_result.update({
+            "ok": False, "error": f"{type(exc).__name__}: {exc}",
+            "elapsed_seconds": round(time.perf_counter() - rerank_started, 3),
+        })
+    steps.append(rerank_result)
 
     ok_count = sum(1 for s in steps if s.get("ok"))
     return {
         "status": "passed" if ok_count == len(steps) else ("partial" if ok_count else "failed"),
-        "ok_step_count": ok_count,
-        "total_steps": len(steps),
-        "steps": steps,
-        "elapsed_seconds": round(time.perf_counter() - started, 3),
+        "ok_step_count": ok_count, "total_steps": len(steps),
+        "steps": steps, "elapsed_seconds": round(time.perf_counter() - started, 3),
         "summary": {
             "embedding": steps[0] if len(steps) > 0 else None,
             "pgvector_search": steps[1] if len(steps) > 1 else None,
