@@ -116,8 +116,7 @@ SUMMARY_PREFIX = (
 )
 
 
-def _env_bool(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+from env_utils import env_bool as _env_bool
 
 
 def _env_int(name: str, default: int) -> int:

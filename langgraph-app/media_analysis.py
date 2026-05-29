@@ -21,8 +21,7 @@ VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif"}
 
 
-def _env_bool(name: str, default: str = "false") -> bool:
-    return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "y", "on"}
+from env_utils import env_bool as _env_bool
 
 
 def _safe_segment(value: str, default: str = "asset") -> str:

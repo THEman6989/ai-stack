@@ -32,11 +32,7 @@ class PluginManifest:
     env_defaults: dict[str, str] = field(default_factory=dict)
 
 
-def _env_bool(key: str, default: bool = False) -> bool:
-    val = os.getenv(key, "").strip().lower()
-    if not val:
-        return default
-    return val in ("1", "true", "yes", "on")
+from env_utils import env_bool as _env_bool
 
 
 def _load_manifest(plugin_dir: Path) -> PluginManifest | None:
@@ -103,7 +99,7 @@ def load_plugins(plugins_dir: str | None = None) -> list[PluginManifest]:
     """Scan plugins/ and return list of enabled, validated manifests."""
     directory = Path(plugins_dir or PLUGINS_DIR)
 
-    if not _env_bool("ALPHARAVIS_ENABLE_PLUGIN_SYSTEM", False):
+    if not _env_bool("ALPHARAVIS_ENABLE_PLUGIN_SYSTEM", "false"):
         return []
 
     if not directory.exists():

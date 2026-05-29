@@ -842,8 +842,7 @@ if not COMFY_IP:
     print("WARNING: 'comfy_server' IP not found in REMOTE_PCS env variable.")
 
 
-def _env_bool(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).lower() in {"1", "true", "yes"}
+from env_utils import env_bool as _env_bool
 
 
 def _env_disable_streaming(name: str, default: str = "false") -> bool | str:

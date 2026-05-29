@@ -482,8 +482,7 @@ def resolve_multiple_toolsets(names: list[str] | tuple[str, ...] | set[str]) -> 
     )
 
 
-def _env_bool(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+from env_utils import env_bool as _env_bool
 
 
 def _officecli_enabled() -> bool:

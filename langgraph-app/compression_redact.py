@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -54,8 +53,7 @@ CONNECTION_STRING_PASSWORD = re.compile(
 URL_WITH_SECRET_QUERY = re.compile(r"https?://[^\s'\"<>]+")
 
 
-def _env_bool(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+from env_utils import env_bool as _env_bool
 
 
 def mask_secret(value: str) -> str:
