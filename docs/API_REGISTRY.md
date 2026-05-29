@@ -56,6 +56,174 @@ docker compose --profile odf up -d onlyoffice
 
 ---
 
+## REST API Routes — LangGraph Container
+
+Alle folgenden APIs leben im `langgraph-app/` Codebase und bauen aus
+demselben Docker-Image (`langgraph-app/Dockerfile`), laufen aber als
+separate Container.
+
+Route-Suche im Code:
+```bash
+grep -n '@app\.\(get\|post\|delete\|put\)' langgraph-app/bridge_server.py
+grep -n '@app\.\(get\|post\|delete\|put\)' langgraph-app/media_server.py
+grep -n '@app\.\(get\|post\|delete\|put\)' langgraph-app/hermes_orch_server.py
+grep -n '@router\.\(get\|post\)' langgraph-app/queue_ingest.py
+```
+
+---
+
+### API Bridge (`api-bridge:8123`)
+
+Quelle: `langgraph-app/bridge_server.py` (4312 Zeilen)
+
+OpenAI-kompatibler Bridge. Verbindet LibreChat/OpenWebUI → LangGraph Agent.
+
+#### Health & Observability
+
+| Methode | Pfad | Zeile | Beschreibung |
+|---------|------|-------|-------------|
+| `GET` | `/health` | L3911 | Health Check: Bridge + LangGraph Erreichbarkeit |
+| `GET` | `/health/llm-generation` | L3924 | LLM-Generation Health (echter Modell-Call) |
+| `GET` | `/_alpharavis/bridge-observer` | L3955 | Stream Observer für Debug/Diagnose |
+| `DELETE` | `/_alpharavis/bridge-observer` | L3967 | Observer zurücksetzen |
+
+#### LangGraph Tool (Hermes→AlphaRavis)
+
+| Methode | Pfad | Zeile | Beschreibung |
+|---------|------|-------|-------------|
+| `POST` | `/tools/langgraph/run` | L3973 | LangGraph Run via Hermes. Erfordert `explicit_user_request=true` |
+
+#### OpenAI Chat Completions API
+
+| Methode | Pfad | Zeile | Beschreibung |
+|---------|------|-------|-------------|
+| `GET` | `/v1/models` | L4037 | Verfügbare Modelle (`my-agent`, `server-model-manager`) |
+| `POST` | `/v1/chat/completions` | L4238 | Chat Completions (stream/non-stream). Parameter: `model`, `messages`, `stream`, `user`, `x-user-id` |
+| `POST` | `/v1/responses` | L4053 | Responses API (stateful, `previous_response_id`). Stream via `stream=true` |
+| `POST` | `/v1/responses/compact` | L4139 | Response komprimieren (Token-Spar-Modus) |
+| `POST` | `/v1/responses/input_tokens` | L4150 | Input-Token-Zählung für Response |
+| `GET` | `/v1/responses/{response_id}` | L4171 | Gespeicherte Response abrufen |
+| `GET` | `/v1/responses/{response_id}/input_items` | L4186 | Input-Items einer Response |
+| `POST` | `/v1/responses/{response_id}/cancel` | L4211 | Laufende Response abbrechen |
+| `DELETE` | `/v1/responses/{response_id}` | L4228 | Response löschen |
+
+#### Queue Ingest (ARM Gateway)
+
+Quelle: `langgraph-app/queue_ingest.py` (230 Zeilen)
+
+Im Bridge eingebunden via `app.include_router(queue_ingest_router)`.
+
+| Methode | Pfad | Zeile | Beschreibung |
+|---------|------|-------|-------------|
+| `POST` | `/api/queue/ingest` | L61 | Offline-Queue vom ARM Gateway flushen. Idempotent (message_id). Leitet an LangGraph weiter. Auth: `AI_STACK_QUEUE_INGEST_TOKEN` |
+
+---
+
+### Media Gallery (`media-gallery:8130`)
+
+Quelle: `langgraph-app/media_server.py` (1918 Zeilen)
+
+Medien-Assets, ComfyUI-Proxy, Office-Dokumente, Asset-Registry.
+
+#### ComfyUI Proxy
+
+| Methode | Pfad | Zeile | Beschreibung |
+|---------|------|-------|-------------|
+| `GET` | `/comfyui/status` | L220 | ComfyUI System-Status |
+| `GET` | `/comfyui/queue` | L225 | ComfyUI Job-Queue |
+| `GET` | `/comfyui/models/{folder}` | L230 | Modelle in Ordner (checkpoints, loras, vae, ...) |
+| `GET` | `/comfyui/history/{prompt_id}` | L234 | Prompt-History (Output-URLs, Metadata) |
+| `POST` | `/comfyui/preflight` | L239 | Workflow-Validierung (Preflight) |
+| `POST` | `/comfyui/prompt` | L244 | Workflow ausführen (gated: `ALPHARAVIS_ENABLE_COMFYUI_WORKFLOW_SUBMIT`) |
+| `GET` | `/comfyui/view` | L249 | Output-Bild/Video/Asset über internen Transport |
+| `POST` | `/comfyui/queue/clear` | L266 | Queue leeren |
+| `POST` | `/comfyui/interrupt` | L270 | Aktuelle Ausführung abbrechen |
+| `POST` | `/comfyui/free` | L274 | Speicher freigeben |
+| `POST` | `/comfyui/outputs/register` | L1538 | Generierte Outputs in Media Gallery registrieren |
+| `POST` | `/comfyui/history/{prompt_id}/register` | L1549 | History-Prompt-Outputs registrieren |
+
+#### Office (via OfficeCLI)
+
+| Methode | Pfad | Zeile | Beschreibung |
+|---------|------|-------|-------------|
+| `GET` | `/office/files` | L1281 | Office-Output-Dateien auflisten |
+| `GET` | `/office/templates` | L1286 | Office-Vorlagen auflisten |
+| `POST` | `/office/upload` | L1292 | Dokument hochladen |
+| `POST` | `/office/template-merge` | L1305 | Template-Merge-Plan |
+| `POST` | `/office/validate` | L1310 | Dokument validieren |
+| `POST` | `/office/batch` | L1315 | Batch-Job erstellen |
+| `POST` | `/office/roundtrip` | L1320 | Roundtrip (ODF↔DOCX) |
+| `POST` | `/office/preview` | L1325 | Dokument-Vorschau |
+| `POST` | `/office/repair` | L1330 | Dokument reparieren |
+| `POST` | `/office/watch/start` | L1335 | File-Watcher starten |
+| `POST` | `/office/watch/stop` | L1340 | File-Watcher stoppen |
+| `GET` | `/office/watch/status` | L1345 | Watcher-Status |
+| `GET` | `/office/blueprints` | L1350 | Office-Blueprints auflisten |
+| `GET` | `/office/blueprints/suggest` | L1355 | Blueprint-Vorschläge |
+| `POST` | `/office/blueprints/create` | L1360 | Blueprint erstellen |
+| `GET` | `/office/validation-results` | L1365 | Validierungsergebnisse abrufen |
+| `POST` | `/office/validation-results` | L1375 | Ergebnis speichern |
+| `GET` | `/office/batch/jobs` | L1380 | Batch-Jobs auflisten |
+| `POST` | `/office/batch/jobs` | L1391 | Batch-Job erstellen |
+| `GET` | `/office/batch/jobs/{job_id}` | L1396 | Einzelnen Job abrufen |
+| `POST` | `/office/batch/jobs/{job_id}/progress` | L1401 | Job-Fortschritt updaten |
+| `POST` | `/office/batch/jobs/update` | L1412 | Job aktualisieren |
+| `GET` | `/office/templates/placeholders` | L1423 | Template-Platzhalter |
+| `POST` | `/office/templates/merge-form` | L1428 | Merge-Formular |
+
+#### Asset Registry
+
+| Methode | Pfad | Zeile | Beschreibung |
+|---------|------|-------|-------------|
+| `POST` | `/assets/register` | L1585 | Asset registrieren (ID, URL, Metadata) |
+| `POST` | `/assets/upload` | L1672 | Asset hochladen (Multipart) |
+| `POST` | `/api/assets/upload` | L1687 | JSON-API-Upload (Agenten, Frontends). Returns `{asset_id, url, ...}` |
+| `GET` | `/assets` | L1727 | Alle Assets auflisten |
+| `GET` | `/assets/resolve` | L1752 | Asset via query auflösen |
+
+#### Sonstiges
+
+| Methode | Pfad | Zeile | Beschreibung |
+|---------|------|-------|-------------|
+| `GET` | `/` | L215 | Redirect zu `/gallery` |
+| `GET` | `/gallery` | L1774 | Media Gallery HTML-Ansicht |
+| `GET` | `/health` | L1567 | Health Check |
+| `GET` | `/favicon.svg` | L279 | Favicon |
+
+#### Static Mounts
+
+| Mount | Pfad | Verzeichnis |
+|-------|------|-------------|
+| `/media` | Statische Dateien | `MEDIA_ROOT` (default: `/media-data`) |
+| `/office-output` | Office-Dateien | `OFFICE_OUTPUT_ROOT` (default: `/workspace/office-output`) |
+
+---
+
+### Hermes Orchestrator (`hermes-orch:8650`)
+
+Quelle: `langgraph-app/hermes_orch_server.py` (91 Zeilen)
+
+Streaming-Relay: Pre-loaded AlphaRavis Context → Hermes Agent SSE.
+
+| Methode | Pfad | Zeile | Beschreibung |
+|---------|------|-------|-------------|
+| `GET` | `/health` | L44 | Health Check |
+| `POST` | `/hermes/stream` | L50 | SSE-Stream. Body: `{message, system_prompt?, max_output_chars?}`. Pre-loaded Memory/RAG/Skills/Sessions → Hermes :8642 → SSE-Stream zurück. Speichert Output als AlphaRavis-Artefakt. |
+
+---
+
+### Service Dashboard (`service-dashboard:8090`)
+
+Quelle: `service_redirector_server.py` (stdlib http.server, keine FastAPI-Routen)
+
+| Methode | Pfad | Beschreibung |
+|---------|------|-------------|
+| `GET` | `/` | Landing Page: Service-Karten, Links, Status |
+| `GET` | `/settings` | Settings-UI (mobile-first, PWA). Runtime/Permanent-Override. |
+| `POST` | `/api/register-gateway` | ARM Gateway Auto-Registrierung (alle 5 Min) |
+
+---
+
 ## Externe Dienste — Llama-PC (192.168.178.153)
 
 Der Llama-PC hostet die LLM-Inferenz (llama.cpp) und den Ubuntu Llama Manager.
@@ -86,16 +254,81 @@ Total: ~51s bis Power-Knopf-Release, dann + Boot-Zeit (~60-90s).
 
 ### Ubuntu Llama Manager API (Auswahl)
 
+Quelle: `helper-repos/ubuntu-llama-manager/docs/api.md`
+
+Öffentliche Endpunkte (kein Auth):
 ```
 GET  /health                          Health-Check
 GET  /status                          Service-Status (GPU, llama, power)
+GET  /models                          Modell-Scan
+GET  /models/{id}                     Einzelnes Modell
+GET  /llama/status                    Llama-Service-Status
+GET  /llama/config                    Llama-Konfiguration
+GET  /llama-secondary/status          Secondary-Status
+GET  /llama-secondary/config          Secondary-Konfiguration
 GET  /llama/instances                 Alle llama.cpp-Instanzen
+GET  /llama/instances/{id}            Einzelne Instanz
+GET  /reboot/status                   Auto-Reboot-Status
+GET  /esp/status                      ESP-Status
+GET  /esp/control                     ESP-Web-Control (HTML)
+GET  /diagnostics/gpu                 GPU-Diagnose
+POST /esp/heartbeat                   ESP-Heartbeat
+```
+
+Geschützte Endpunkte (`Authorization: Bearer <API_TOKEN>`):
+
+```
 POST /llama/start                     llama.cpp starten
 POST /llama/stop                      llama.cpp stoppen
-POST /esp/action                      ESP-Power-Action (via Manager)
-POST /llama/instances/primary/config  Konfiguration patchen (Modell, ctx, np)
-POST /ai-stack/llama-no-response      Recovery bei hängendem llama-Server
+POST /llama/restart                   llama.cpp neustarten
+POST /llama/config                    Config patchen
+POST /llama/force-kill                Hartes kill -9
+POST /llama/switch-model              Modell wechseln (preserved flags)
+POST /llama-secondary/start           Secondary starten
+POST /llama-secondary/stop            Secondary stoppen
+POST /llama-secondary/restart         Secondary neustarten
+POST /llama-secondary/config          Secondary Config
+POST /llama/instances/{id}/config     Instanz-Konfiguration patchen
+POST /reboot/enable                   Auto-Reboot aktivieren
+POST /reboot/disable                  Auto-Reboot deaktivieren
+POST /reboot/now                      Jetzt rebooten
+POST /power/shutdown                  systemctl poweroff (kein ESP-Cycle)
+POST /diagnostics/handle-gpu-fault    GPU-Fehler behandeln
+POST /ai-stack/diagnose-llama         Nur Diagnose (kein Kill/Restart)
+POST /ai-stack/llama-no-response      Recovery bei hängendem Llama
+POST /recovery/llama-no-response      Alias für Rückwärtskompatibilität
+POST /esp/action                      ESP-Aktion ausführen
+POST /esp/cancel                      ESP-Aktion abbrechen
+POST /esp/request-power-cycle         Power-Cycle via ESP
+POST /esp/request-power-on            Power-On via ESP
+POST /esp/request-power-off           Power-Off via ESP
 ```
+
+---
+
+## Hermes Agent API (`hermes-agent:8642`)
+
+Quelle: `hermes-agent/gateway/platforms/api_server.py` (3524 Zeilen)
+
+OpenAI-kompatibler API-Server. Beliebiges Frontend kann verbinden.
+
+| Methode | Pfad | Beschreibung |
+|---------|------|-------------|
+| `POST` | `/v1/chat/completions` | Chat Completions (stateless). Header: `X-Hermes-Session-Id`, `X-Hermes-Session-Key` |
+| `POST` | `/v1/responses` | Responses API (stateful via `previous_response_id`) |
+| `GET` | `/v1/responses/{response_id}` | Response abrufen |
+| `DELETE` | `/v1/responses/{response_id}` | Response löschen |
+| `GET` | `/v1/models` | Verfügbare Modelle (`hermes-agent`) |
+| `GET` | `/v1/capabilities` | Machine-readable Capabilities für UIs |
+| `POST` | `/v1/runs` | Run starten → `run_id` (202) |
+| `GET` | `/v1/runs/{run_id}` | Run-Status |
+| `GET` | `/v1/runs/{run_id}/events` | SSE-Stream: Lifecycle-Events |
+| `POST` | `/v1/runs/{run_id}/approval` | Pending Approval auflösen |
+| `POST` | `/v1/runs/{run_id}/stop` | Laufenden Run abbrechen |
+| `GET` | `/health` | Health Check |
+| `GET` | `/health/detailed` | Rich Status (Cross-Container Dashboard) |
+
+Hermes API Base: `http://host.docker.internal:8642/v1` (aus Docker-Containern)
 
 ---
 
