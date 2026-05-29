@@ -329,7 +329,7 @@ def bounded_text_window(text: str, *, start: int = 0, max_chars: int = 12000, se
 
 def classifier_window_text(text: str) -> str:
     lines, numbered = line_ranges_from_text(text)
-    if len(text) <= int(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_FULL_TEXT_MAX_CHARS", "12000")):
+    if len(text) <= int(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_FULL_TEXT_MAX_CHARS", "50000")):
         return "\n".join(f"{index}: {line}" for index, line in numbered)
 
     marker_re = re.compile(
@@ -350,7 +350,7 @@ def classifier_window_text(text: str) -> str:
             for nearby in range(start_idx, end_idx + 1):
                 selected[nearby] = lines[nearby - 1]
     rendered = "\n".join(f"{index}: {selected[index]}" for index in sorted(selected))
-    max_chars = int(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_WINDOW_MAX_CHARS", "24000"))
+    max_chars = int(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_WINDOW_MAX_CHARS", "55000"))
     if len(rendered) > max_chars:
         rendered = rendered[:max_chars].rstrip() + "\n[Classifier window truncated.]"
     return rendered

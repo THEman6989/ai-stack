@@ -1299,6 +1299,13 @@ ALPHARAVIS_RAG_CLASSIFIER_MIN_CONFIDENCE=0.5
 # Default false: classifier only runs on prompts >= MIN_CHARS (6000).
 # Set true to always optimize the RAG query — adds ~1-3s latency per prompt.
 ALPHARAVIS_RAG_CLASSIFIER_ALWAYS=false
+# Max chars sent as-is to the small classifier before windowing kicks in.
+# Qwen2B has 60k context — increase for better large-paste classification.
+# Default 12000 → now 50000 (large pastes get much more context to classify).
+ALPHARAVIS_RAG_CLASSIFIER_FULL_TEXT_MAX_CHARS=50000
+# When the full text exceeds FULL_TEXT_MAX_CHARS, a window (head/tail + marker
+# context) is built from the text. Default 24000 → now 55000 (max 55k chars).
+ALPHARAVIS_RAG_CLASSIFIER_WINDOW_MAX_CHARS=55000
 ALPHARAVIS_AGENTIC_RAG_LLM_GRADING=false
 ALPHARAVIS_AGENTIC_RAG_GRADER_MODEL=openai/big-boss
 ALPHARAVIS_AGENTIC_RAG_GRADER_TIMEOUT_SECONDS=25
