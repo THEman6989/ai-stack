@@ -506,6 +506,18 @@ except Exception as exc:  # pragma: no cover - optional local helper
 else:
     REPO_SKILLS_IMPORT_ERROR = None
 
+try:
+    from event_indexing import (
+        build_tool_run_surrogate as _build_tool_run_surrogate,
+        maybe_index_tool_run as _maybe_index_tool_run,
+    )
+except Exception as exc:  # pragma: no cover - optional local helper
+    _build_tool_run_surrogate = None
+    _maybe_index_tool_run = None
+    EVENT_INDEXING_IMPORT_ERROR: Exception | None = exc
+else:
+    EVENT_INDEXING_IMPORT_ERROR = None
+
 from context_compressor import (
     CompressionResult,
     build_archive_policy_message,
@@ -4237,7 +4249,37 @@ def execute_local_command(command: str):
             text=True,
             timeout=int(os.getenv("ALPHARAVIS_LOCAL_COMMAND_TIMEOUT_SECONDS", "45")),
         )
-        return f"Exit Code {result.returncode}\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+        output = f"Exit Code {result.returncode}\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+        # Optional tool-run PGVector indexing (feature-flagged, default OFF)
+        if _maybe_index_tool_run is not None:
+            try:
+                indexing = _maybe_index_tool_run(
+                    "execute_local_command",
+                    output,
+                    exit_code=result.returncode,
+                    thread_id=_state_thread_id(),
+                    thread_key=_state_thread_key(),
+                )
+                if indexing and indexing.get("scheduled"):
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(
+                            _maybe_index_vector_memory(
+                                source_type=indexing["source_type"],
+                                source_key=indexing["source_key"],
+                                title=indexing["title"],
+                                content=indexing["content"],
+                                thread_id=indexing["thread_id"],
+                                thread_key=indexing["thread_key"],
+                                scope=indexing["scope"],
+                                metadata=indexing["metadata"],
+                            )
+                        )
+                    except RuntimeError:
+                        pass
+            except Exception:
+                pass
+        return output
     except subprocess.TimeoutExpired:
         return "Error: local command timed out."
     except Exception as exc:

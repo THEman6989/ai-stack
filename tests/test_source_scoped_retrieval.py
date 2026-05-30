@@ -427,3 +427,18 @@ def test_reload_repo_ai_skills_has_vector_index_feature_flag() -> None:
     )
 
 
+def test_execute_local_command_has_tool_run_indexing_flag() -> None:
+    source = (ROOT / "langgraph-app" / "agent_graph.py").read_text(encoding="utf-8")
+    _cmd_fn = source[
+        source.index("def execute_local_command") : source.index("def storage_manager_status")
+    ]
+    assert "ALPHARAVIS_ENABLE_TOOL_EVENT_VECTOR_INDEX" not in _cmd_fn, (
+        "execute_local_command delegates to event_indexing module — "
+        "flag is checked in maybe_index_tool_run, not duplicated here"
+    )
+    assert "_maybe_index_tool_run" in _cmd_fn, (
+        "execute_local_command must call _maybe_index_tool_run "
+        "to schedule optional tool-run PGVector indexing"
+    )
+
+
