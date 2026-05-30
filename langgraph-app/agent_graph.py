@@ -4865,7 +4865,7 @@ def _repo_skill_hint_context(query: str, limit: int) -> str:
 
 
 @tool
-def reload_repo_ai_skills(max_chars: int = 6000):
+async def reload_repo_ai_skills(max_chars: int = 6000):
     """Rescan ai-skills/ and report added/removed/changed reviewed skill cards.
 
     When ALPHARAVIS_ENABLE_REPO_SKILL_VECTOR_INDEX=true, each reviewed skill is
@@ -4882,7 +4882,8 @@ def reload_repo_ai_skills(max_chars: int = 6000):
         safety_error = _check_list_path(resolved, allowed_root=workspace)
         if safety_error:
             return f"AI skills reload refused: {safety_error}"
-        result = _reload_repo_skill_manifest(
+        result = await asyncio.to_thread(
+            _reload_repo_skill_manifest,
             skills_dir,
             workspace_root=workspace,
             cache_path=cache_path,
@@ -4898,38 +4899,43 @@ def reload_repo_ai_skills(max_chars: int = 6000):
         if _repo_skill_to_index_document is not None and _maybe_index_vector_memory is not None:
             skills_raw = result.get("skills") if isinstance(result, dict) else None
             skills = list(skills_raw) if isinstance(skills_raw, list) else []
-            indexed = 0
+            tasks: list[asyncio.Task[Any]] = []
             errors = 0
             for skill_entry in skills:
                 if not isinstance(skill_entry, dict):
                     continue
                 try:
-                    payload = _repo_skill_to_index_document(skill_entry)
+                    payload = _repo_skill_to_index_document(skill_entry, workspace_root=str(workspace))
                     if payload is None:
                         continue
-                    # Schedule async indexing via running event loop
-                    try:
-                        loop = asyncio.get_running_loop()
-                    except RuntimeError:
-                        break  # No running event loop — skip indexing
-                    loop.create_task(
-                        _maybe_index_vector_memory(
-                            source_type=payload["source_type"],
-                            source_key=payload["source_key"],
-                            title=payload["title"],
-                            content=payload["content"],
-                            thread_id="",
-                            thread_key="skill_library",
-                            scope=payload["scope"],
-                            metadata=payload["metadata"],
+                    tasks.append(
+                        asyncio.create_task(
+                            _maybe_index_vector_memory(
+                                source_type=payload["source_type"],
+                                source_key=payload["source_key"],
+                                title=payload["title"],
+                                content=payload["content"],
+                                thread_id="",
+                                thread_key="skill_library",
+                                scope=payload["scope"],
+                                metadata=payload["metadata"],
+                            )
                         )
                     )
-                    indexed += 1
                 except Exception:
                     errors += 1
+            # Await all indexing tasks and count actual successes
+            indexed = 0
+            if tasks:
+                gathered = await asyncio.gather(*tasks, return_exceptions=True)
+                for outcome in gathered:
+                    if outcome is not None and not isinstance(outcome, BaseException):
+                        indexed += 1
+                    elif isinstance(outcome, BaseException):
+                        errors += 1
             vector_count = indexed
             if errors:
-                result["repo_skill_vector_warnings"] = f"{errors} skill(s) failed to schedule for PGVector indexing"
+                result["repo_skill_vector_warnings"] = f"{errors} skill(s) failed PGVector indexing"
             result["repo_skill_vector_indexed"] = indexed
 
     text = _json_tool_result(result)

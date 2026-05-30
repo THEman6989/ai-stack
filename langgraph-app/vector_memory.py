@@ -1558,7 +1558,7 @@ async def upsert_memory_record(
         metadata.get("version")
         or metadata.get("source_version")
         or metadata.get("source_digest")
-        or source_digest[:16]
+        or source_digest
         or "v1"
     ).strip() or "v1"
     metadata = {
@@ -1731,6 +1731,8 @@ def _insert_vision_sync(
     embedding_model: str,
     metadata: dict[str, Any],
     embedding: list[float],
+    version: str = "v1",
+    raw_ref: dict[str, Any] | None = None,
 ) -> None:
     table = _vision_table_identifier()
     vector = _vector_literal(embedding)
@@ -1742,9 +1744,10 @@ def _insert_vision_sync(
                     INSERT INTO {table} (
                         id, namespace, scope, thread_id, thread_key, source_type,
                         source_key, file_id, media_type, media_url, title, caption,
-                        frame_index, frame_timecode, embedding_model, metadata, embedding
+                        frame_index, frame_timecode, embedding_model, metadata,
+                        version, raw_ref, embedding
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
                     ON CONFLICT (id) DO UPDATE SET
                         namespace = EXCLUDED.namespace,
                         scope = EXCLUDED.scope,
@@ -1761,6 +1764,8 @@ def _insert_vision_sync(
                         frame_timecode = EXCLUDED.frame_timecode,
                         embedding_model = EXCLUDED.embedding_model,
                         metadata = EXCLUDED.metadata,
+                        version = EXCLUDED.version,
+                        raw_ref = EXCLUDED.raw_ref,
                         embedding = EXCLUDED.embedding,
                         updated_at = now()
                     """
@@ -1782,6 +1787,8 @@ def _insert_vision_sync(
                     frame_timecode or "",
                     embedding_model,
                     Jsonb(metadata or {}),
+                    version or "v1",
+                    Jsonb(raw_ref or {}),
                     vector,
                 ),
             )
@@ -1816,6 +1823,15 @@ async def upsert_media_record(
 
     title = title or source_key
     caption = (caption or title or source_key).strip()
+    metadata = metadata or {}
+    raw_ref_value = metadata.get("raw_ref")
+    media_raw_ref: dict[str, Any] = raw_ref_value if isinstance(raw_ref_value, dict) else {}
+    media_version = str(
+        metadata.get("version")
+        or metadata.get("source_digest")
+        or _content_digest(caption)
+        or "v1"
+    ).strip() or "v1"
     embedding = await embed_media(media_url=media_url, caption=caption, media_type=media_type)
     await asyncio.to_thread(_ensure_vision_schema_sync, len(embedding.vector))
     raw_id = f"{source_type}:{source_key}:{file_id}:{thread_id}:{scope}:{media_type}:{frame_index}:{frame_timecode}"
@@ -1837,8 +1853,10 @@ async def upsert_media_record(
         frame_index=int(frame_index),
         frame_timecode=frame_timecode or "",
         embedding_model=embedding.model,
-        metadata=metadata or {},
+        metadata=metadata,
         embedding=embedding.vector,
+        version=media_version,
+        raw_ref=media_raw_ref,
     )
     return f"{source_type}:{source_key}:{media_type}:{frame_index}"
 
@@ -2414,7 +2432,7 @@ def _search_vision_sync(
         SELECT
             id, scope, thread_id, thread_key, source_type, source_key, file_id,
             media_type, media_url, title, caption, frame_index, frame_timecode,
-            embedding_model, metadata, created_at, updated_at,
+            embedding_model, metadata, version, raw_ref, created_at, updated_at,
             1 - (embedding <=> %s::vector) AS similarity
         FROM {table}
         WHERE {where_clause}

@@ -660,11 +660,16 @@ def skill_entry_to_index_document(
     entry: dict[str, Any],
     *,
     max_body_chars: int = 2000,
+    workspace_root: str = "",
 ) -> dict[str, Any] | None:
     """Convert a scanned repo skill entry to a PGVector index payload.
 
     Returns None if the entry is missing required fields.
     The payload is designed as metadata for ``_maybe_index_vector_memory``.
+
+    When *workspace_root* and the entry's *path* are both set, reads the SKILL.md
+    body (truncated to *max_body_chars*) and includes it in the searchable content
+    so semantic search can match against the actual workflow text.
     """
     slug = str(entry.get("slug") or "").strip()
     if not slug:
@@ -682,7 +687,7 @@ def skill_entry_to_index_document(
         else []
     )
 
-    # Build searchable text: name + description + trigger conditions + truncated body
+    # Build searchable text: name + description + trigger conditions
     body_parts = [name, description]
     trigger_hints = conditions.get("trigger_hints", []) if isinstance(conditions, dict) else []
     if trigger_hints:
@@ -693,22 +698,35 @@ def skill_entry_to_index_document(
     if supporting_files:
         body_parts.append("Supporting files: " + ", ".join(supporting_files[:8]))
 
+    # Read SKILL.md body from disk when workspace and path are available
+    skill_body = ""
+    if workspace_root and path:
+        try:
+            from pathlib import Path as _Path
+
+            skill_md_path = _Path(workspace_root) / path
+            if skill_md_path.is_file():
+                raw = skill_md_path.read_text(encoding="utf-8")
+                # Strip YAML frontmatter (--- ... ---) to get the markdown body
+                if raw.startswith("---"):
+                    parts = raw.split("---", 2)
+                    if len(parts) >= 3:
+                        raw = parts[2]
+                skill_body = raw.strip()[:max_body_chars]
+        except Exception:
+            skill_body = ""
+
     body_text = "; ".join(body_parts)
+    if skill_body:
+        body_text += f"\n\n{skill_body}"
+
     content = f"{name}: {body_text}"
-
-    # Read first part of SKILL.md body if entry has path
-    try:
-        from pathlib import Path as _Path
-
-        skill_md_path = _Path(path) if path and not path.startswith("/") else None
-    except Exception:
-        skill_md_path = None
 
     return {
         "source_type": "repo_skill",
         "source_key": slug,
         "title": name,
-        "content": content[:3000],
+        "content": content[: max_body_chars + 3000],
         "scope": "skill_library",
         "metadata": {
             "slug": slug,
