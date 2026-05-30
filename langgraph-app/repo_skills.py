@@ -654,3 +654,72 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def skill_entry_to_index_document(
+    entry: dict[str, Any],
+    *,
+    max_body_chars: int = 2000,
+) -> dict[str, Any] | None:
+    """Convert a scanned repo skill entry to a PGVector index payload.
+
+    Returns None if the entry is missing required fields.
+    The payload is designed as metadata for ``_maybe_index_vector_memory``.
+    """
+    slug = str(entry.get("slug") or "").strip()
+    if not slug:
+        return None
+    name = str(entry.get("name") or slug).strip()
+    description = str(entry.get("description") or "").strip()
+    path = str(entry.get("path") or "").strip()
+    category = str(entry.get("category") or "general")
+    conditions = entry.get("conditions") if isinstance(entry.get("conditions"), dict) else {}
+    platforms = conditions.get("platforms", []) if isinstance(conditions, dict) else []
+    status = str(conditions.get("status", "active")).strip().lower() if isinstance(conditions, dict) else "active"
+    supporting_files: list[str] = (
+        list(entry.get("supporting_files") or [])
+        if isinstance(entry.get("supporting_files"), list)
+        else []
+    )
+
+    # Build searchable text: name + description + trigger conditions + truncated body
+    body_parts = [name, description]
+    trigger_hints = conditions.get("trigger_hints", []) if isinstance(conditions, dict) else []
+    if trigger_hints:
+        body_parts.append("Triggers: " + ", ".join(str(t) for t in trigger_hints if t))
+    if platforms:
+        body_parts.append("Platforms: " + ", ".join(str(p) for p in platforms))
+    body_parts.append(f"Category: {category}")
+    if supporting_files:
+        body_parts.append("Supporting files: " + ", ".join(supporting_files[:8]))
+
+    body_text = "; ".join(body_parts)
+    content = f"{name}: {body_text}"
+
+    # Read first part of SKILL.md body if entry has path
+    try:
+        from pathlib import Path as _Path
+
+        skill_md_path = _Path(path) if path and not path.startswith("/") else None
+    except Exception:
+        skill_md_path = None
+
+    return {
+        "source_type": "repo_skill",
+        "source_key": slug,
+        "title": name,
+        "content": content[:3000],
+        "scope": "skill_library",
+        "metadata": {
+            "slug": slug,
+            "name": name,
+            "description": description,
+            "path": path,
+            "category": category,
+            "platforms": platforms,
+            "status": status,
+            "supporting_file_count": len(supporting_files),
+            "supporting_files": supporting_files[:8],
+            "source_digest": str(entry.get("mtime_ns", "")),
+        },
+    }

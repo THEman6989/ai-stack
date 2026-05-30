@@ -106,10 +106,17 @@ def vector_result_to_tool_hit(record: dict[str, Any]) -> dict[str, Any]:
     similarity = record.get("similarity")
     distance = record.get("distance")
     child_archive_keys = metadata.get("child_archive_keys") or record.get("child_archive_keys") or []
+    source_key = record.get("source_key", "unknown")
+    source_id = record.get("source_id") or source_key
+    raw_ref = record.get("raw_ref")
+    if not isinstance(raw_ref, dict):
+        raw_ref = metadata.get("raw_ref") if isinstance(metadata.get("raw_ref"), dict) else {}
     return {
         "source_type": record.get("source_type", "memory"),
-        "source_key": record.get("source_key", "unknown"),
-        "title": record.get("title") or record.get("source_key") or "untitled",
+        "source_id": source_id,
+        "source_key": source_key,
+        "version": record.get("version") or metadata.get("version") or metadata.get("source_digest") or "v1",
+        "title": record.get("title") or source_key or "untitled",
         "score": similarity,
         "similarity": similarity,
         "distance": distance,
@@ -122,6 +129,9 @@ def vector_result_to_tool_hit(record: dict[str, Any]) -> dict[str, Any]:
         "is_catalog": bool(record.get("is_catalog")),
         "embedding_model": record.get("embedding_model") or "",
         "metadata": metadata,
+        "raw_ref": raw_ref,
+        "created_at": record.get("created_at") or "",
+        "updated_at": record.get("updated_at") or "",
         "child_archive_keys": child_archive_keys,
         "retrieval_backend": record.get("retrieval_backend") or "alpharavis_pgvector",
     }

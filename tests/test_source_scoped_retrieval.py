@@ -311,3 +311,119 @@ def test_vector_memory_distance_threshold_rejects_invalid_env(monkeypatch) -> No
         assert "ALPHARAVIS_PGVECTOR_DISTANCE_THRESHOLD" in str(exc)
     else:
         raise AssertionError("invalid distance threshold should raise VectorMemoryError")
+
+
+def test_vector_memory_source_declares_pgvector_search_head_contract() -> None:
+    source = (ROOT / "langgraph-app" / "vector_memory.py").read_text(encoding="utf-8")
+
+    assert "source_id TEXT NOT NULL DEFAULT ''" in source
+    assert "version TEXT NOT NULL DEFAULT 'v1'" in source
+    assert "raw_ref JSONB NOT NULL DEFAULT '{{}}'::jsonb" in source
+    assert '("raw_ref", "JSONB NOT NULL DEFAULT \'{}\'::jsonb")' in source
+    assert "source_id, version, raw_ref" in source
+    assert "SELECT\n            id, scope, thread_id, thread_key, source_type, source_key," in source
+    assert "source_id, version, raw_ref" in source[source.index("def _search_sync") : source.index("def _search_vision_sync")]
+
+
+def test_record_curated_memory_update_reindexes_pgvector() -> None:
+    source = (ROOT / "langgraph-app" / "agent_graph.py").read_text(encoding="utf-8")
+    _update_path = source[source.index('action == "update"') : source.index("CREATE (default)")]
+    assert "_maybe_index_vector_memory" in _update_path, (
+        "record_curated_memory UPDATE must re-index PGVector — "
+        "should call _maybe_index_vector_memory after updating Mongo"
+    )
+
+
+def test_activate_skill_candidate_reindexes_pgvector() -> None:
+    source = (ROOT / "langgraph-app" / "agent_graph.py").read_text(encoding="utf-8")
+    _activate_path = source[
+        source.index("def activate_skill_candidate") : source.index("def deactivate_skill")
+    ]
+    assert "_maybe_index_vector_memory" in _activate_path, (
+        "activate_skill_candidate must re-index PGVector — "
+        "should call _maybe_index_vector_memory after updating status to active"
+    )
+
+
+def test_deactivate_skill_reindexes_pgvector() -> None:
+    source = (ROOT / "langgraph-app" / "agent_graph.py").read_text(encoding="utf-8")
+    _deactivate_path = source[
+        source.index("def deactivate_skill") : source.index("async def _load_configured_mcp_tools")
+    ]
+    assert "_maybe_index_vector_memory" in _deactivate_path, (
+        "deactivate_skill must re-index PGVector — "
+        "should re-index or delete PGVector row after status change"
+    )
+
+
+def test_record_curated_memory_delete_syncs_pgvector() -> None:
+    source = (ROOT / "langgraph-app" / "agent_graph.py").read_text(encoding="utf-8")
+    _delete_path = source[
+        source.index('action == "delete"') : source.index('action == "update"')
+    ]
+    assert "_pgvector_delete_memory_record" in _delete_path, (
+        "record_curated_memory DELETE must sync PGVector — "
+        "should call _pgvector_delete_memory_record(source_key=memory_id) after Mongo delete"
+    )
+    assert "deleted_pgvector" in _delete_path, (
+        "record_curated_memory DELETE must track pgvector deletion outcome — "
+        "deleted_pgvector flag is missing"
+    )
+    assert "pgvector cleanup" in _delete_path, (
+        "record_curated_memory DELETE must report pgvector cleanup status in warning — "
+        "pgvector cleanup skipped/failed message is missing"
+    )
+
+
+def test_source_metadata_summary_includes_source_digest() -> None:
+    source = (ROOT / "langgraph-app" / "agent_graph.py").read_text(encoding="utf-8")
+    _summary_fn = source[
+        source.index("def _source_metadata_summary") : source.index("def _classify_prompt_for_retrieval")
+    ]
+    assert "source_digest" in _summary_fn, (
+        "_source_metadata_summary must include source_digest — "
+        "so PGVector version/source_digest metadata flows through all ingest paths"
+    )
+    assert 'hashlib.sha256' in _summary_fn, (
+        "_source_metadata_summary must compute source_digest via sha256 — "
+        "content hash is required for dedup and version tracking"
+    )
+
+
+def test_read_source_chunks_docstring_states_pgvector_chunks_contain_text() -> None:
+    source = (ROOT / "langgraph-app" / "agent_graph.py").read_text(encoding="utf-8")
+    _docstring = source[
+        source.index("Read bounded ordered chunks") : source.index("if _pgvector_read_source_chunks is None")
+    ]
+    assert "chunk_text" in _docstring, (
+        "read_source_chunks docstring must state PGVector chunks contain chunk_text — "
+        "agents should not fetch raw source for chunk body"
+    )
+    assert "raw source lookup" in _docstring.lower(), (
+        "read_source_chunks docstring must direct agents to raw source only when full context needed"
+    )
+
+
+def test_repo_skills_has_skill_entry_to_index_document() -> None:
+    source = (ROOT / "langgraph-app" / "repo_skills.py").read_text(encoding="utf-8")
+    assert "def skill_entry_to_index_document" in source, (
+        "repo_skills.py must have skill_entry_to_index_document — "
+        "converts scanned entries to PGVector index payloads"
+    )
+
+
+def test_reload_repo_ai_skills_has_vector_index_feature_flag() -> None:
+    source = (ROOT / "langgraph-app" / "agent_graph.py").read_text(encoding="utf-8")
+    _reload_fn = source[
+        source.index("def reload_repo_ai_skills") : source.index("def read_repo_ai_skill")
+    ]
+    assert "ALPHARAVIS_ENABLE_REPO_SKILL_VECTOR_INDEX" in _reload_fn, (
+        "reload_repo_ai_skills must gate PGVector indexing behind "
+        "ALPHARAVIS_ENABLE_REPO_SKILL_VECTOR_INDEX feature flag"
+    )
+    assert "_repo_skill_to_index_document" in _reload_fn, (
+        "reload_repo_ai_skills must call _repo_skill_to_index_document "
+        "to build PGVector payloads from scanned entries"
+    )
+
+

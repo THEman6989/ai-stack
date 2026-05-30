@@ -489,6 +489,7 @@ try:
         repo_skill_hint_context as _repo_skill_hint_from_manifest,
         resolve_skill_file_path as _resolve_repo_skill_file_path,
         scan_repo_skills as _scan_repo_skills,
+        skill_entry_to_index_document as _repo_skill_to_index_document,
         slugify_skill_name as _slugify_repo_skill_name,
     )
 except Exception as exc:  # pragma: no cover - optional local helper
@@ -499,6 +500,7 @@ except Exception as exc:  # pragma: no cover - optional local helper
     _repo_skill_hint_from_manifest = None
     _resolve_repo_skill_file_path = None
     _scan_repo_skills = None
+    _repo_skill_to_index_document = None
     _slugify_repo_skill_name = None
     REPO_SKILLS_IMPORT_ERROR: Exception | None = exc
 else:
@@ -4822,7 +4824,10 @@ def _repo_skill_hint_context(query: str, limit: int) -> str:
 
 @tool
 def reload_repo_ai_skills(max_chars: int = 6000):
-    """Rescan ai-skills/ and report added/removed/changed reviewed skill cards."""
+    """Rescan ai-skills/ and report added/removed/changed reviewed skill cards.
+
+    When ALPHARAVIS_ENABLE_REPO_SKILL_VECTOR_INDEX=true, each reviewed skill is
+    also indexed into PGVector as source_type=repo_skill for semantic search."""
 
     if _reload_repo_skill_manifest is None:
         return _repo_skills_unavailable()
@@ -4844,6 +4849,46 @@ def reload_repo_ai_skills(max_chars: int = 6000):
         )
     except Exception as exc:
         return f"Could not reload repo AI skills: {exc}"
+
+    # Optional PGVector indexing of repo skills (feature-flagged, default OFF)
+    vector_count = 0
+    if _env_bool("ALPHARAVIS_ENABLE_REPO_SKILL_VECTOR_INDEX", "false"):
+        if _repo_skill_to_index_document is not None and _maybe_index_vector_memory is not None:
+            skills_raw = result.get("skills") if isinstance(result, dict) else None
+            skills = list(skills_raw) if isinstance(skills_raw, list) else []
+            indexed = 0
+            errors = 0
+            for skill_entry in skills:
+                if not isinstance(skill_entry, dict):
+                    continue
+                try:
+                    payload = _repo_skill_to_index_document(skill_entry)
+                    if payload is None:
+                        continue
+                    # Schedule async indexing via running event loop
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        break  # No running event loop — skip indexing
+                    loop.create_task(
+                        _maybe_index_vector_memory(
+                            source_type=payload["source_type"],
+                            source_key=payload["source_key"],
+                            title=payload["title"],
+                            content=payload["content"],
+                            thread_id="",
+                            thread_key="skill_library",
+                            scope=payload["scope"],
+                            metadata=payload["metadata"],
+                        )
+                    )
+                    indexed += 1
+                except Exception:
+                    errors += 1
+            vector_count = indexed
+            if errors:
+                result["repo_skill_vector_warnings"] = f"{errors} skill(s) failed to schedule for PGVector indexing"
+            result["repo_skill_vector_indexed"] = indexed
 
     text = _json_tool_result(result)
     max_chars = max(1000, min(int(max_chars), 16000))
@@ -5812,7 +5857,11 @@ async def read_source_chunks(
     max_chars: int = 12000,
     include_other_threads: bool = False,
 ):
-    """Read bounded ordered chunks for a known AlphaRavis pgvector source key."""
+    """Read bounded ordered chunks for a known AlphaRavis pgvector source key.
+
+    PGVector chunks already contain full chunk_text — no raw source lookup is needed
+    for the chunk body. Use read_raw_source only when the full original document,
+    neighboring context, or complete record payload is required."""
 
     if _pgvector_read_source_chunks is None:
         return _json_tool_result(
@@ -6018,7 +6067,8 @@ or a precise keyword match."""
             "source_type_filter": source_type,
             "reranker": rerank_meta or None,
             "retrieval_policy": (
-                "AlphaRavis pgvector hits are searchable chunks/catalogs built from original Mongo/store/artifact data. "
+                "AlphaRavis pgvector hits contain usable chunk_text directly — no Mongo/store lookup needed. "
+                "Only fetch raw source when the full original document, neighboring context, or complete record payload is required. "
                 "If source_type=archive_collection, inspect child_archive_keys and call read_archive_record for only the relevant raw archives. "
                 "external_document hits come from federated RAG and should be treated as document chunks with source_key pointing to the document/file."
             ),
@@ -6171,6 +6221,18 @@ Procedures and workflows belong in skills, not memory."""
         }
         await _maybe_put(store, _curated_memory_ns(memory_scope), memory_id, record)
         await _maybe_put(store, CURATED_MEMORY_INDEX_NS, memory_id, record)
+        vector_result = await _maybe_index_vector_memory(
+            source_type="curated_memory",
+            source_key=memory_id,
+            title=f"Curated memory: {record['memory_type']}",
+            content=f"{memory}\n\nEvidence: {record['evidence']}".strip(),
+            thread_id="",
+            thread_key="global",
+            scope=memory_scope,
+            metadata={**record, "origin_thread_id": _state_thread_id(), "origin_thread_key": _state_thread_key()},
+        )
+        if isinstance(vector_result, str) and vector_result.startswith("pgvector indexing failed"):
+            return f"Updated memory `{memory_id}` in scope `{memory_scope}`. Vector indexing warning: {vector_result}"
         return f"Updated memory `{memory_id}` in scope `{memory_scope}`."
 
     # ── CREATE (default) ──
@@ -7676,6 +7738,20 @@ async def activate_skill_candidate(skill_id: str, approval_note: str = ""):
     value["approved_at"] = int(time.time())
     value["approval_note"] = approval_note.strip()[:1200]
     await _maybe_put(store, SKILL_LIBRARY_NS, skill_id, value)
+    await _maybe_index_vector_memory(
+        source_type="skill",
+        source_key=skill_id,
+        title=f"Skill (active): {value.get('name', skill_id)}",
+        content=(
+            f"Trigger: {value.get('trigger', '')}\nSteps: {value.get('steps', '')}\n"
+            f"Success signals: {value.get('success_signals', '')}\n"
+            f"Safety: {value.get('safety_notes', '')}"
+        ),
+        thread_id="",
+        thread_key="global",
+        scope="skill_library",
+        metadata={**value, "origin_thread_id": _state_thread_id(), "origin_thread_key": _state_thread_key()},
+    )
     return f"Activated skill `{skill_id}`."
 
 
@@ -7709,6 +7785,20 @@ async def deactivate_skill(skill_id: str, reason: str = ""):
     value["deactivated_at"] = int(time.time())
     value["deactivation_reason"] = reason.strip()[:1200]
     await _maybe_put(store, SKILL_LIBRARY_NS, skill_id, value)
+    await _maybe_index_vector_memory(
+        source_type="skill",
+        source_key=skill_id,
+        title=f"Skill (candidate): {value.get('name', skill_id)}",
+        content=(
+            f"Trigger: {value.get('trigger', '')}\nSteps: {value.get('steps', '')}\n"
+            f"Success signals: {value.get('success_signals', '')}\n"
+            f"Safety: {value.get('safety_notes', '')}"
+        ),
+        thread_id="",
+        thread_key="global",
+        scope="skill_library",
+        metadata={**value, "origin_thread_id": _state_thread_id(), "origin_thread_key": _state_thread_key()},
+    )
     return f"Deactivated skill `{skill_id}`."
 
 
@@ -8781,12 +8871,15 @@ def _source_metadata_summary(
             content,
             fallback=str(metadata.get("filename") or metadata.get("file_name") or title or "Untitled source"),
         )
+    normalized = (content or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    source_digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return {
         "content_type": content_type,
         "source_title": source_title,
         "source_keywords": _extract_source_keywords(content),
         "source_entities": _extract_source_entities(content),
         "source_symbols": _extract_source_symbols(content),
+        "source_digest": source_digest,
     }
 
 

@@ -4,6 +4,39 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-30 — PGVector Search-Head Contract Fields
+
+- Extended `langgraph-app/vector_memory.py`'s AlphaRavis pgvector text table
+  contract with compatibility fields: canonical `source_id`, top-level
+  `version`, and `raw_ref` JSONB, while preserving existing `source_key`,
+  `metadata`, `chunk_text`, and `content` behavior.
+- New inserts write the full chunk text into PGVector and populate
+  `source_id`/`version`/`raw_ref`; existing rows are backfilled lazily through
+  `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` plus `source_id = source_key` and
+  version-from-metadata updates when the schema is ensured.
+- `semantic_search()` ensures the schema before querying so older live tables
+  receive the compatibility columns before SELECTing them.
+- PGVector search results now expose `source_id`, `version`, `raw_ref`,
+  `created_at`, and `updated_at`; `retrieval_router.vector_result_to_tool_hit()`
+  forwards those fields to agents. This reinforces the intended architecture:
+  PGVector is the search head with usable chunks, Mongo/LangGraph Store remains
+  the raw/full-record authority.
+- Scope: this implements the first two storage-contract steps only. Memory
+  update re-indexing and skill activation/deactivation re-indexing remain as
+  follow-up work.
+- Now also includes memory update re-indexing and skill activation/deactivation
+  re-indexing. `record_curated_memory(action="update")` now calls
+  `_maybe_index_vector_memory` after writing to Mongo, keeping PGVector search
+  in sync. `activate_skill_candidate()` and `deactivate_skill()` also re-index
+  PGVector rows with updated status metadata.
+- Verification: `pytest -q tests/test_retrieval_router.py
+  tests/test_source_scoped_retrieval.py` passed with 27 tests;
+  `PYTHONPYCACHEPREFIX=/tmp/alpharavis-pycache python -m py_compile
+  langgraph-app/vector_memory.py langgraph-app/retrieval_router.py` passed.
+  After re-index work, whole suite `pytest -q tests/test_retrieval_router.py
+  tests/test_source_scoped_retrieval.py tests/test_repo_skills.py` passed
+  with 37 tests.
+
 ## 2026-05-30 — Reranker in ALL Memory Search Paths
 
 - Wired `rerank_retrieval_hits_with_fallback` into `semantic_memory_search` in

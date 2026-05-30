@@ -3,6 +3,35 @@
 This is the running backlog for features that are intentionally prepared but
 not fully wired yet.
 
+## Mongo Raw Store + PGVector Search Head
+
+Status: Phase 1 partially implemented. The PGVector text table has the explicit
+search-head contract fields (`source_id`, `version`, `raw_ref`) and retrieval
+hits return those fields beside existing chunk text. Remaining sync work is
+tracked below.
+
+Implemented:
+
+- `alpharavis_memory_vectors` keeps storing usable `chunk_text`/`content`, not
+  only embeddings and IDs.
+- Schema compatibility adds canonical `source_id`, top-level `version`, and
+  optional `raw_ref` JSONB via safe `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`.
+- `semantic_search()` ensures the schema before SELECTing the new fields.
+- `retrieval_router.vector_result_to_tool_hit()` forwards `source_id`,
+  `version`, `raw_ref`, `created_at`, and `updated_at` to tool consumers.
+
+Still needed:
+
+- Re-index PGVector after `record_curated_memory(action="update")` so memory
+  edits do not leave stale semantic chunks.
+- Add/verify tests that curated-memory delete cleans PGVector rows. ✅ done
+- Re-index skill-library rows when `activate_skill_candidate()` or
+  `deactivate_skill()` changes status metadata. ✅ done
+- Decide whether reviewed repo skills under `ai-skills/` should be indexed as
+  `source_type="repo_skill"` rows by default or only during explicit reload.
+- Optional later: feature-flagged textual surrogate indexing for tool-run/raw
+  event records and media metadata beyond the existing media-vector path.
+
 ## Deep Agents UI
 
 Status: Implemented and third hardening pass applied. Build/lint verification

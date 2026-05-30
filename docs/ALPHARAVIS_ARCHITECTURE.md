@@ -131,9 +131,18 @@ The current Docker architecture is split into these main roles:
   **Owner SSH Tools** (gated by `ALPHARAVIS_ENABLE_OWNER_POWER_TOOLS=true`):
   `owner_start_llama_server`, `owner_restart_llama_server`,
   `owner_shutdown_llama_server` (prefer Ubuntu Manager API for llama).
-- `mongodb`: LangGraph checkpointing and long-term store backing.
-- `vectordb`: Postgres with pgvector. It can act as an optional semantic
-  search sidecar for AlphaRavis memory; it does not replace MongoDB.
+- `mongodb`: LangGraph checkpointing and long-term/raw store backing. It is the
+  source of truth for full documents, complete chat/session records, tool-run
+  payloads, media metadata/manifests, and raw memory/skill records.
+- `vectordb`: Postgres with pgvector. It is the semantic search head for
+  AlphaRavis RAG/memory/skill chunks; it does not replace MongoDB. The
+  `alpharavis_memory_vectors` rows intentionally store retrievable text
+  (`chunk_text`/`content`) together with `source_key`, canonical `source_id`,
+  `version`, `metadata`, optional `raw_ref`, timestamps, and the embedding so
+  normal RAG/memory answers can use the returned chunks directly. Mongo/raw
+  reads are only needed when the agent needs a complete original document,
+  neighboring context around a chunk, complete chat history, or original
+  tool/media payloads.
 - `redis`: optional LLM cache and shared context-lease store for multi-worker
   deployments. When `ALPHARAVIS_CONTEXT_LEASE_BACKEND=redis`, the
   `ContextScheduler` uses Redis for atomic cross-worker context admission

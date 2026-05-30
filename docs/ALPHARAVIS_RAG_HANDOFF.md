@@ -36,6 +36,13 @@ Current completed slice:
   unless the user explicitly asks for older/archive context.
 - Explicit document/PDF-style uploads, artifacts, and large-paste sources now
   route through `retrieval_router.ingest_source(...)` where implemented.
+- PGVector is now treated as the RAG/memory/skill search head, not just an
+  embedding-to-ID lookup. `alpharavis_memory_vectors` schema compatibility adds
+  canonical `source_id`, top-level `version`, and optional `raw_ref` beside the
+  existing `source_key`, `metadata`, timestamps, and mandatory `chunk_text` /
+  `content`. Semantic retrieval should answer from returned chunks by default;
+  Mongo/raw-source reads are for full originals, neighboring context, complete
+  chats, or original media/tool payloads.
 - The Test UI/Observer includes the Small-Qwen classifier probe and queued
   embedding progress polling.
 - Workflow/tool-event compaction metadata is shown in Observer shrinking cards.

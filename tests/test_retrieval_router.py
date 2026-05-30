@@ -19,6 +19,32 @@ def test_normalize_source_keys_accepts_strings_lists_and_source_key() -> None:
     ]
 
 
+def test_vector_result_to_tool_hit_preserves_pgvector_contract_fields() -> None:
+    hit = retrieval_router.vector_result_to_tool_hit(
+        {
+            "source_type": "document",
+            "source_id": "doc-canonical-1",
+            "source_key": "doc-legacy-1",
+            "title": "Contract Doc",
+            "chunk_text": "Full retrievable chunk text from pgvector.",
+            "preview_text": "Preview text",
+            "version": "digest-v2",
+            "raw_ref": {"store": "mongodb", "collection": "documents", "id": "raw-1"},
+            "metadata": {"content_type": "prose"},
+            "created_at": "2026-05-30T00:00:00+00:00",
+            "updated_at": "2026-05-30T00:01:00+00:00",
+        }
+    )
+
+    assert hit["source_id"] == "doc-canonical-1"
+    assert hit["source_key"] == "doc-legacy-1"
+    assert hit["version"] == "digest-v2"
+    assert hit["raw_ref"] == {"store": "mongodb", "collection": "documents", "id": "raw-1"}
+    assert hit["chunk_text"] == "Full retrievable chunk text from pgvector."
+    assert hit["created_at"] == "2026-05-30T00:00:00+00:00"
+    assert hit["updated_at"] == "2026-05-30T00:01:00+00:00"
+
+
 def test_query_sources_with_backends_combines_pgvector_and_rag(monkeypatch) -> None:
     calls: dict[str, object] = {}
 

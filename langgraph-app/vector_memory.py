@@ -959,6 +959,8 @@ def _ensure_schema_sync(dimensions: int) -> None:
                         thread_key TEXT,
                         source_type TEXT NOT NULL,
                         source_key TEXT NOT NULL,
+                        source_id TEXT NOT NULL DEFAULT '',
+                        version TEXT NOT NULL DEFAULT 'v1',
                         title TEXT,
                         content TEXT NOT NULL,
                         chunk_text TEXT NOT NULL DEFAULT '',
@@ -969,6 +971,7 @@ def _ensure_schema_sync(dimensions: int) -> None:
                         is_catalog BOOLEAN NOT NULL DEFAULT false,
                         embedding_model TEXT NOT NULL DEFAULT '',
                         metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                        raw_ref JSONB NOT NULL DEFAULT '{{}}'::jsonb,
                         embedding vector({dimensions}) NOT NULL,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -978,17 +981,34 @@ def _ensure_schema_sync(dimensions: int) -> None:
             )
             for column, ddl in [
                 ("chunk_text", "TEXT NOT NULL DEFAULT ''"),
+                ("source_id", "TEXT NOT NULL DEFAULT ''"),
+                ("version", "TEXT NOT NULL DEFAULT 'v1'"),
                 ("catalog_text", "TEXT NOT NULL DEFAULT ''"),
                 ("preview_text", "TEXT NOT NULL DEFAULT ''"),
                 ("chunk_index", "INTEGER NOT NULL DEFAULT 0"),
                 ("chunk_count", "INTEGER NOT NULL DEFAULT 1"),
                 ("is_catalog", "BOOLEAN NOT NULL DEFAULT false"),
                 ("embedding_model", "TEXT NOT NULL DEFAULT ''"),
+                ("raw_ref", "JSONB NOT NULL DEFAULT '{}'::jsonb"),
             ]:
                 cur.execute(sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} " + ddl).format(
                     table=table,
                     column=sql.Identifier(column),
                 ))
+            cur.execute(
+                sql.SQL(
+                    "UPDATE {table} SET source_id = source_key WHERE source_id = ''"
+                ).format(table=table)
+            )
+            cur.execute(
+                sql.SQL(
+                    """
+                    UPDATE {table}
+                    SET version = COALESCE(NULLIF(metadata->>'version', ''), NULLIF(metadata->>'source_digest', ''), version, 'v1')
+                    WHERE version = '' OR version = 'v1'
+                    """
+                ).format(table=table)
+            )
             cur.execute(
                 sql.SQL(
                     "UPDATE {table} SET chunk_text = content WHERE chunk_text = ''"
@@ -1069,6 +1089,8 @@ def _ensure_vision_schema_sync(dimensions: int) -> None:
                 ("frame_index", "INTEGER NOT NULL DEFAULT 0"),
                 ("frame_timecode", "TEXT NOT NULL DEFAULT ''"),
                 ("embedding_model", "TEXT NOT NULL DEFAULT ''"),
+                ("version", "TEXT NOT NULL DEFAULT 'v1'"),
+                ("raw_ref", "JSONB NOT NULL DEFAULT '{}'::jsonb"),
             ]:
                 cur.execute(
                     sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} " + ddl).format(
@@ -1421,6 +1443,8 @@ def _insert_chunk_sync(
     thread_key: str,
     source_type: str,
     source_key: str,
+    source_id: str,
+    version: str,
     title: str,
     chunk: str,
     catalog_text: str,
@@ -1430,6 +1454,7 @@ def _insert_chunk_sync(
     is_catalog: bool,
     embedding_model: str,
     metadata: dict[str, Any],
+    raw_ref: dict[str, Any],
     embedding: list[float],
 ) -> None:
     table = _table_identifier()
@@ -1441,10 +1466,11 @@ def _insert_chunk_sync(
                     """
                     INSERT INTO {table} (
                         id, namespace, scope, thread_id, thread_key, source_type,
-                        source_key, title, content, chunk_text, catalog_text, preview_text,
-                        chunk_index, chunk_count, is_catalog, embedding_model, metadata, embedding
+                        source_key, source_id, version, title, content, chunk_text,
+                        catalog_text, preview_text, chunk_index, chunk_count,
+                        is_catalog, embedding_model, metadata, raw_ref, embedding
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
                     ON CONFLICT (id) DO UPDATE SET
                         namespace = EXCLUDED.namespace,
                         scope = EXCLUDED.scope,
@@ -1452,6 +1478,8 @@ def _insert_chunk_sync(
                         thread_key = EXCLUDED.thread_key,
                         source_type = EXCLUDED.source_type,
                         source_key = EXCLUDED.source_key,
+                        source_id = EXCLUDED.source_id,
+                        version = EXCLUDED.version,
                         title = EXCLUDED.title,
                         content = EXCLUDED.content,
                         chunk_text = EXCLUDED.chunk_text,
@@ -1462,6 +1490,7 @@ def _insert_chunk_sync(
                         is_catalog = EXCLUDED.is_catalog,
                         embedding_model = EXCLUDED.embedding_model,
                         metadata = EXCLUDED.metadata,
+                        raw_ref = EXCLUDED.raw_ref,
                         embedding = EXCLUDED.embedding,
                         updated_at = now()
                     """
@@ -1474,6 +1503,8 @@ def _insert_chunk_sync(
                     thread_key or "",
                     source_type,
                     source_key,
+                    source_id or source_key,
+                    version or "v1",
                     title[:500],
                     chunk,
                     chunk,
@@ -1484,6 +1515,7 @@ def _insert_chunk_sync(
                     is_catalog,
                     embedding_model,
                     Jsonb(metadata or {}),
+                    Jsonb(raw_ref or {}),
                     vector,
                 ),
             )
@@ -1519,6 +1551,22 @@ async def upsert_memory_record(
 
     metadata = metadata or {}
     source_digest = _content_digest(content)
+    raw_ref_value = metadata.get("raw_ref")
+    raw_ref: dict[str, Any] = raw_ref_value if isinstance(raw_ref_value, dict) else {}
+    source_id = str(metadata.get("source_id") or source_key).strip() or source_key
+    source_version = str(
+        metadata.get("version")
+        or metadata.get("source_version")
+        or metadata.get("source_digest")
+        or source_digest[:16]
+        or "v1"
+    ).strip() or "v1"
+    metadata = {
+        **metadata,
+        "source_id": source_id,
+        "version": source_version,
+        **({"raw_ref": raw_ref} if raw_ref else {}),
+    }
     if _env_bool("ALPHARAVIS_PGVECTOR_DEDUP_SOURCES", "true"):
         match = await asyncio.to_thread(
             _source_digest_match_sync,
@@ -1584,6 +1632,8 @@ async def upsert_memory_record(
             thread_key=thread_key or "",
             source_type=source_type,
             source_key=source_key,
+            source_id=source_id,
+            version=source_version,
             title=f"Catalog: {title or source_key}",
             chunk=catalog_text,
             catalog_text=catalog_text,
@@ -1600,6 +1650,7 @@ async def upsert_memory_record(
                 "source_digest": source_digest,
                 "source_digest_algorithm": "sha256-normalized-text",
             },
+            raw_ref=raw_ref,
             embedding=catalog_embedding.vector,
         )
 
@@ -1628,6 +1679,8 @@ async def upsert_memory_record(
             thread_key=thread_key or "",
             source_type=source_type,
             source_key=source_key,
+            source_id=source_id,
+            version=source_version,
             title=title or source_key,
             chunk=chunk,
             catalog_text="",
@@ -1637,6 +1690,7 @@ async def upsert_memory_record(
             is_catalog=False,
             embedding_model=embedding.model,
             metadata=chunk_metadata,
+            raw_ref=raw_ref,
             embedding=embedding.vector,
         )
         if progress_callback is not None:
@@ -2296,13 +2350,15 @@ def _search_sync(
         where.append("(embedding <=> %s::vector) <= %s")
         params.extend([vector, distance_threshold])
 
+    # PGVector search-head contract fields: source_id, version, raw_ref.
     params = [vector, vector, *params, vector, limit]
     query = sql.SQL(
         """
         SELECT
             id, scope, thread_id, thread_key, source_type, source_key,
-            title, content, chunk_text, catalog_text, preview_text, chunk_index,
-            chunk_count, is_catalog, embedding_model, metadata, created_at, updated_at,
+            source_id, version, title, content, chunk_text, catalog_text,
+            preview_text, chunk_index, chunk_count, is_catalog, embedding_model,
+            metadata, raw_ref, created_at, updated_at,
             1 - (embedding <=> %s::vector) AS similarity,
             embedding <=> %s::vector AS distance
         FROM {table}
@@ -2411,6 +2467,7 @@ async def semantic_search(
     ]
     normalized_source_keys = list(dict.fromkeys(normalized_source_keys))[:50]
     query_embedding = await embed_text(query)
+    await asyncio.to_thread(_ensure_schema_sync, len(query_embedding.vector))
     return await asyncio.to_thread(
         _search_sync,
         query_embedding=query_embedding.vector,
