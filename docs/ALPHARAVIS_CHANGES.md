@@ -4,6 +4,34 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-30 — Reranker in ALL Memory Search Paths
+
+- Wired `rerank_retrieval_hits_with_fallback` into `semantic_memory_search` in
+  `agent_graph.py`. After pgvector + federated RAG results are collected, they
+  now pass through the reranker pipeline before being returned to the agent.
+  The pipeline respects `ALPHARAVIS_RAG_RERANKER_MODE`:
+  - `model` → llama.cpp qwen3-reranker-0.6b at `ALPHARAVIS_RAG_RERANKER_URL`
+  - `deterministic` → local lexical+vector blend scorer
+  - Falls back to deterministic on model failure if
+    `ALPHARAVIS_RAG_RERANKER_FALLBACK_DETERMINISTIC=true` (default).
+  - Failures are logged at WARNING and reported in `reranker` metadata and
+    warnings array — search never breaks, just falls back to raw order.
+- Removed separate `ALPHARAVIS_ENABLE_RAG_RERANKING` gate in
+  `retrieval_router.py`'s `query_sources_with_backends`. Now always re-ranks
+  (was default-off). The existing `ALPHARAVIS_RAG_RERANKER_MODE` env var
+  already controls the reranker behaviour — model vs deterministic.
+- Import: added `rerank_retrieval_hits_with_fallback` to the safe import block
+  in `agent_graph.py` with `None` fallback and `RETRIEVAL_ROUTER_IMPORT_ERROR`
+  integration.
+- All memory search paths now rerank: `semantic_memory_search` (primary),
+  `search_source_memory` → `query_sources_with_backends` (source-scoped).
+- Test: `test_query_archive_prefers_existing_rag_mirror_and_keeps_pgvector_fallback`
+  assertion updated from order-dependent to order-independent (reranker changes
+  result order by design).
+- Files changed: `langgraph-app/agent_graph.py`, `langgraph-app/retrieval_router.py`,
+  `tests/test_source_scoped_retrieval.py`.
+- Verification: 684 pytest tests pass.
+
 ## 2026-05-29 — Hermes-Style Skill & Memory Policy
 
 - Added `SKILL_POLICY_PROMPT` and `MEMORY_CREATION_POLICY_PROMPT` to
@@ -48,6 +76,38 @@ can tell which patches are intentional and which ones can be removed.
 - Files changed: `langgraph-app/agent_graph.py` (tool docstrings + Generalist
   prompt only).
 - Verification: 684 pytest tests pass.
+
+## 2026-05-29 — Unify Memory on Single Store (Remove langmem)
+
+- Removed `langmem` dependency (`create_manage_memory_tool`,
+  `create_search_memory_tool`) entirely. Was causing split-brain: two
+  separate memory stores (`("memories",)` vs `("alpharavis", "curated_memory")`),
+  diverging keys (langmem used `created_at` in key → always duplicates),
+  and missing update/delete on the AlphaRavis side.
+- `record_curated_memory` now handles all three actions:
+  - `action='create'` (default) — key derived from content (SHA256 of
+    memory + type + scope + agent_id), no timestamp → identical content
+    overwrites instead of duplicating.
+  - `action='update'` — requires `memory_id`, loads existing record,
+    replaces memory/evidence, preserves `created_at`.
+  - `action='delete'` — requires `memory_id`, finds record via
+    `CURATED_MEMORY_INDEX_NS`, removes from both index and scope namespace.
+- `search_curated_memory` is the only search tool. Uses pgvector semantic
+  search first, falls back to keyword. No more `memory_search_tool`
+  searching a now-empty `("memories",)` namespace.
+- `_maybe_delete` helper added with full try/except + hasattr fallback
+  (adelete → delete → warning + return False). Never crashes.
+- pgvector index cleanup on delete: known limitation — `vector_memory.py`
+  has no delete API. Deleted memories may still appear in
+  `semantic_memory_search` until a future `_pgvector_delete_memory_record`
+  is built. Documented in code.
+- Server simple-agents (`langgraph-app/server.py`): Generalist and
+  Research workers now both import `record_curated_memory` +
+  `search_curated_memory` with guarded import (fallback to empty list).
+  System prompts updated to mention memory tools.
+- Files changed: `langgraph-app/agent_graph.py`, `langgraph-app/server.py`.
+- Verification: 684 pytest tests pass, AST parse clean, no langmem
+  references remain in codebase.
 
 ## 2026-05-29 — ComfyUI Agent: Named Workflow Library
 

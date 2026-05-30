@@ -1002,10 +1002,9 @@ async def query_sources_with_backends(
     memory_hits = [vector_result_to_tool_hit(record) for record in vector_results[:limit]]
     document_hits = rag_results[:limit]
     results = [*memory_hits, *document_hits]
-    reranking_enabled = env_bool("ALPHARAVIS_ENABLE_RAG_RERANKING", "false")
-    reranking_metadata = {"enabled": False, "strategy": ""}
+    reranking_metadata: dict[str, Any] = {"enabled": True, "strategy": ""}
     rerank_warning = ""
-    if reranking_enabled:
+    if results:
         results, reranking_metadata, rerank_warning = await rerank_retrieval_hits_with_fallback(
             query=query,
             hits=results,

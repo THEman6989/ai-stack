@@ -244,7 +244,10 @@ def test_query_archive_prefers_existing_rag_mirror_and_keeps_pgvector_fallback(m
 
     assert calls["pgvector"]["source_keys"] == ["archive-3"]
     assert calls["rag"]["source_keys"] == ["archive:archive-3"]
-    assert [item["source_key"] for item in payload["results"]] == ["archive-3", "archive:archive-3"]
+    result_keys = [item["source_key"] for item in payload["results"]]
+    assert "archive-3" in result_keys
+    assert "archive:archive-3" in result_keys
+    assert len(result_keys) == 2
 
 
 def test_agentic_rag_retrieve_tool_returns_bounded_context_packet(monkeypatch) -> None:

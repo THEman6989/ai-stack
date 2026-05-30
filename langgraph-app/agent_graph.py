@@ -113,6 +113,7 @@ try:
         query_rag_sources as _router_query_rag_sources,
         query_sources_with_backends as _router_query_sources_with_backends,
         rag_archive_mirror_enabled as _rag_archive_mirror_enabled,
+        rerank_retrieval_hits_with_fallback as _rerank_retrieval_hits_with_fallback,
         vector_result_to_tool_hit as _vector_result_to_tool_hit,
     )
 except Exception as exc:  # pragma: no cover - optional local module/deps
@@ -125,6 +126,7 @@ except Exception as exc:  # pragma: no cover - optional local module/deps
     _router_query_rag_sources = None
     _router_query_sources_with_backends = None
     _rag_archive_mirror_enabled = None
+    _rerank_retrieval_hits_with_fallback = None
     _vector_result_to_tool_hit = None
     RETRIEVAL_ROUTER_IMPORT_ERROR: Exception | None = exc
 else:
@@ -5960,6 +5962,27 @@ or a precise keyword match."""
 
     memory_hits = [_vector_result_to_tool_hit(record) for record in results[:limit]]
     document_hits = rag_results[:limit]
+
+    # ── Reranker: all memory/document hits pass through reranker for quality sort ──
+    combined_hits = [*memory_hits, *document_hits]
+    rerank_meta = {}
+    rerank_warning = ""
+    if combined_hits and _rerank_retrieval_hits_with_fallback is not None:
+        try:
+            reranked, rerank_meta, rerank_warning = await _rerank_retrieval_hits_with_fallback(
+                query=query,
+                hits=combined_hits,
+                limit=limit,
+            )
+            # Split reranked results back into memory/document buckets
+            memory_hits = [h for h in reranked if h.get("retrieval_backend") == "alpharavis_pgvector" or h.get("source_type") not in {"external_document", "document"}]
+            document_hits = [h for h in reranked if h not in memory_hits][:limit]
+        except Exception as exc:
+            rerank_warning = f"Reranker failed; using raw pgvector order: {exc}"
+            _log_exception("memory.semantic_search.reranker_failed", exc, level=logging.WARNING, dependency="reranker")
+    elif combined_hits and _rerank_retrieval_hits_with_fallback is None:
+        rerank_warning = "Reranker unavailable (retrieval_router not loaded); using raw pgvector order."
+
     _log_event(
         logging.INFO,
         "memory.semantic_search.completed",
@@ -5969,7 +5992,8 @@ or a precise keyword match."""
         limit=limit,
         memory_hits=len(memory_hits),
         document_hits=len(document_hits),
-        warnings=[warning for warning in [vector_warning, rag_warning] if warning],
+        reranker=rerank_meta,
+        warnings=[warning for warning in [vector_warning, rag_warning, rerank_warning] if warning],
         elapsed_seconds=round(time.perf_counter() - started, 3),
     )
     return _json_tool_result(
@@ -5977,6 +6001,7 @@ or a precise keyword match."""
             "query": query,
             "include_other_threads": include_other_threads,
             "source_type_filter": source_type,
+            "reranker": rerank_meta or None,
             "retrieval_policy": (
                 "AlphaRavis pgvector hits are searchable chunks/catalogs built from original Mongo/store/artifact data. "
                 "If source_type=archive_collection, inspect child_archive_keys and call read_archive_record for only the relevant raw archives. "
