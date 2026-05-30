@@ -5276,6 +5276,21 @@ async def _query_sources_impl(
 
     memory_hits = [_vector_result_to_tool_hit(record) for record in vector_results[:limit]]
     document_hits = rag_results[:limit]
+
+    # ── Reranker fallback path ──
+    combined_hits = [*memory_hits, *document_hits]
+    if combined_hits and _rerank_retrieval_hits_with_fallback is not None:
+        try:
+            reranked, _meta, _warn = await _rerank_retrieval_hits_with_fallback(
+                query=query,
+                hits=combined_hits,
+                limit=limit,
+            )
+            memory_hits = [h for h in reranked if h.get("retrieval_backend") == "alpharavis_pgvector" or h.get("source_type") not in {"external_document", "document"}]
+            document_hits = [h for h in reranked if h not in memory_hits][:limit]
+        except Exception:
+            pass  # Keep raw order
+
     warnings = [warning for warning in [vector_warning, rag_warning] if warning]
     _log_event(
         logging.INFO,
@@ -12570,7 +12585,27 @@ async def _collect_semantic_memory_context(state: AlphaRavisState, query: str) -
 
     if not results:
         return ""
-    content = "\n\n".join(_format_vector_result(record) for record in results[:limit])
+
+    # ── Reranker: prefetch context should be relevance-sorted too ──
+    hits = [_vector_result_to_tool_hit(record) for record in results[:limit]]
+    if hits and _rerank_retrieval_hits_with_fallback is not None:
+        try:
+            reranked, _meta, _warn = await _rerank_retrieval_hits_with_fallback(
+                query=query,
+                hits=hits,
+                limit=limit,
+            )
+            # Use chunk_text from reranked hits for formatting
+            content = "\n\n".join(
+                str(hit.get("chunk_text") or hit.get("preview_text") or "")
+                for hit in reranked[:limit]
+            )
+        except Exception:
+            # Fallback: use raw order
+            content = "\n\n".join(_format_vector_result(record) for record in results[:limit])
+    else:
+        content = "\n\n".join(_format_vector_result(record) for record in results[:limit])
+
     return content[:max_chars].rstrip()
 
 
