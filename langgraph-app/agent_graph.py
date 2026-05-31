@@ -810,7 +810,7 @@ TOOL_REGISTRY_CATEGORIES = [
     },
     {
         "category": "coding/write",
-        "description": "Write AlphaRavis artifacts or delegate repo/code tasks to Hermes when enabled and healthy.",
+        "description": "Write AlphaRavis artifacts or delegate tasks to sub-agents (native or Hermes).",
         "tools": ["write_alpha_ravis_artifact", "check_hermes_agent", "call_hermes_agent", "delegate_task"],
     },
     {
@@ -6715,43 +6715,57 @@ async def delegate_task(
     max_output_chars: int = 8000,
     tasks: list[dict[str, Any]] | None = None,
 ):
-    """Spawn one or more Hermes sub-agents to work on tasks in isolated contexts.
+    """Spawn AlphaRavis-native sub-agents in isolated contexts.
 
-    Hermes Agent handles multi-turn tool calling internally — each sub-agent gets
-    its own conversation, terminal session, and toolset. Only the final summary
-    is returned; intermediate tool results never enter AlphaRavis' context window.
+    Each sub-agent gets its own conversation, restricted toolset, and works
+    independently using AlphaRavis' own LLM (BigBoss via LiteLLM). Only the
+    final summary is returned — intermediate tool results never enter the
+    parent context window.
 
-    TWO MODES (one of 'goal' or 'tasks' is required):
+    TWO MODES:
     1. Single task: provide 'goal' (+ optional context, toolsets)
-    2. Batch (parallel): provide 'tasks' array with up to 5 items. All run in
-       parallel and results are returned together.
+    2. Batch (parallel): provide 'tasks' array. All run in parallel.
 
-    WHEN TO USE delegate_task:
-    - Reasoning-heavy subtasks (debugging, code review, research synthesis)
-    - Tasks that would flood AlphaRavis' context with intermediate data
-    - Parallel independent workstreams (research A and B simultaneously)
+    WHEN TO USE:
+    - Reasoning-heavy subtasks (debugging, code review, research)
+    - Tasks that would flood the parent context with intermediate data
+    - Parallel independent workstreams
 
-    WHEN NOT TO USE:
-    - Mechanical single-step work (use execute_local_command)
-    - Simple lookups (use web_search or search_files)
-    - Tasks needing user interaction (sub-agents cannot ask questions)
+    Available tool names: execute_local_command, read_source_chunks,
+    read_raw_source, write_alpha_ravis_artifact, fast_web_search,
+    deep_web_research, semantic_memory_search, search_curated_memory,
+    search_session_history, search_skill_library, read_repo_ai_skill,
+    agentic_rag_retrieve, search_archived_context, read_archive_record,
+    read_alpha_ravis_artifact, list_alpha_ravis_artifacts,
+    search_debugging_lessons, record_debugging_lesson, record_skill_candidate.
 
     IMPORTANT:
-    - Sub-agents have NO memory of the parent conversation. Pass all relevant
-      info (file paths, error messages, constraints) via 'context'.
-    - Each sub-agent gets its own isolated terminal session in /workspace.
-    - Results include: status, summary, api_calls, duration_seconds, model.
-    - Toolset names: 'terminal', 'file', 'web', 'search', 'browser', 'vision',
-      'coding' (default: all available).
+    - Sub-agents have NO memory of the parent conversation.
+    - Pass all relevant info via 'context': file paths, error messages, constraints.
+    - Each sub-agent gets up to max_iterations tool-calling turns.
     """
-    if not _env_bool("ALPHARAVIS_ENABLE_HERMES_AGENT", "false"):
-        return "Hermes Agent is disabled. Set ALPHARAVIS_ENABLE_HERMES_AGENT=true."
-
-    health = await _check_hermes_health_raw(
-        timeout_seconds=float(os.getenv("HERMES_HEALTHCHECK_TIMEOUT_SECONDS", "10"))
-    )
-    if health.get("status") != "ok":
-        return f"Hermes is not reachable: {json.dumps(health, ensure_ascii=False)[:500]}"
+    # Build available tool map
+    _delegate_tool_map = _tools_by_name([
+        execute_local_command,
+        read_source_chunks,
+        read_raw_source,
+        write_alpha_ravis_artifact,
+        fast_web_search,
+        deep_web_research,
+        semantic_memory_search,
+        search_curated_memory,
+        search_session_history,
+        search_skill_library,
+        record_skill_candidate,
+        read_repo_ai_skill,
+        agentic_rag_retrieve,
+        search_archived_context,
+        read_archive_record,
+        read_alpha_ravis_artifact,
+        list_alpha_ravis_artifacts,
+        search_debugging_lessons,
+        record_debugging_lesson,
+    ])
 
     # Normalize task list
     if tasks and isinstance(tasks, list):
@@ -6776,102 +6790,132 @@ async def delegate_task(
     if not task_list:
         return "No valid tasks to delegate."
 
-    max_chars = max(1000, min(int(max_output_chars), int(os.getenv("HERMES_MAX_OUTPUT_CHARS", "12000"))))
+    max_chars = max(1000, min(int(max_output_chars), 16000))
     timeout = max(30, min(int(timeout_seconds), 1800))
     iterations = max(3, min(int(max_iterations), 90))
+
+    # Resolve tool names → tool objects
+    _name_to_tool = {_tool_name_for_profile(t): t for t in _delegate_tool_map.values()}
 
     async def _run_one(task_def: dict[str, Any]) -> dict[str, Any]:
         t_goal = task_def["goal"]
         t_context = task_def.get("context", "")
-        t_toolsets = task_def.get("toolsets")
+        t_tool_names = task_def.get("toolsets")
 
-        # Build toolset hint
+        # Select tools
+        if t_tool_names:
+            selected_tools = []
+            for name in t_tool_names:
+                tool = _name_to_tool.get(name)
+                if tool is not None:
+                    selected_tools.append(tool)
+        else:
+            selected_tools = list(_delegate_tool_map.values())
+
+        # Build tool schemas (OpenAI format)
+        tool_schemas = []
+        for tool_obj in selected_tools:
+            if hasattr(tool_obj, "args_schema"):
+                schema = tool_obj.args_schema
+                if hasattr(schema, "model_json_schema"):
+                    js = schema.model_json_schema()
+                elif callable(getattr(schema, "schema", None)):
+                    js = schema.schema()
+                else:
+                    continue
+                tool_schemas.append({
+                    "type": "function",
+                    "function": {
+                        "name": _tool_name_for_profile(tool_obj),
+                        "description": getattr(tool_obj, "description", ""),
+                        "parameters": js,
+                    },
+                })
+
+        # Build system prompt
         toolset_hint = ""
-        if t_toolsets:
-            toolset_hint = (
-                f"\nYou have access to these toolsets ONLY: {', '.join(t_toolsets)}. "
-                f"Do not use tools outside this set."
-            )
-
+        if t_tool_names:
+            toolset_hint = f"\nAvailable tools: {', '.join(t_tool_names)}."
         system_prompt = (
-            "You are a Hermes sub-agent spawned by AlphaRavis. Work on the task below "
-            "with full autonomy — use your tools, read files, run commands, search the web. "
-            f"Your working directory is /workspace. You have up to {iterations} tool-calling "
-            f"iterations and {timeout}s wall-clock time. "
-            "Focus exclusively on the assigned goal. Do not deviate, do not ask questions, "
-            "do not wait for approval — the parent AlphaRavis agent will handle that. "
-            "When done, return a structured result with these sections:\n"
+            "You are an AlphaRavis sub-agent working on a delegated task. "
+            "Focus exclusively on the assigned goal. Do not ask questions, "
+            "do not wait for approval. Use your tools and return a concise "
+            f"result. You have up to {iterations} tool-calling turns.{toolset_hint}\n\n"
+            "When done, return a final answer with these sections:\n"
             "  ## Summary — what you accomplished\n"
-            "  ## Actions Taken — specific commands, files, searches\n"
-            "  ## Key Findings — discoveries, root causes, answers\n"
-            "  ## Recommendations — next steps or decisions for the parent agent\n"
-            "  ## Artifacts — paths to any created/modified files\n"
-            f"{toolset_hint}\n"
-            "Context isolation: you have NO access to the parent AlphaRavis conversation, "
-            "memory, or LangGraph tools. Work only with what's provided in the task."
+            "  ## Key Findings — discoveries, answers\n"
+            "  ## Actions — commands/files used\n"
+            "  ## Recommendation — for the parent agent"
         )
 
-        user_content = t_goal
-        if t_context:
-            user_content += f"\n\nContext from AlphaRavis:\n{t_context}"
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": t_goal + (f"\n\nContext:\n{t_context}" if t_context else "")},
+        ]
 
-        headers = {
-            "Content-Type": "application/json",
-            "X-AlphaRavis-Origin": "langgraph-delegate",
-            "X-AlphaRavis-Disable-LangGraph-Tool": "true",
+        # Get model with tools
+        model_kwargs: dict[str, Any] = {
+            "temperature": float(os.getenv("ALPHARAVIS_DELEGATE_TEMPERATURE", "0.1")),
+            "max_tokens": int(os.getenv("ALPHARAVIS_DELEGATE_MAX_TOKENS", "4096")),
         }
-        if HERMES_API_KEY:
-            headers["Authorization"] = f"Bearer {HERMES_API_KEY}"
-
-        payload = {
-            "model": HERMES_MODEL,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            "stream": False,
-            "temperature": float(os.getenv("HERMES_DELEGATE_TEMPERATURE", "0.1")),
-            "max_tokens": int(os.getenv("HERMES_DELEGATE_MAX_TOKENS", "4096")),
-        }
+        model = _model(model_kwargs={**model_kwargs, "tools": tool_schemas} if tool_schemas else model_kwargs)
+        if model is None:
+            return {"status": "failed", "goal": t_goal[:120], "error": "Model unavailable"}
 
         started = time.perf_counter()
+        api_calls = 0
         try:
-            async with httpx.AsyncClient(timeout=float(timeout)) as client:
-                response = await client.post(
-                    f"{HERMES_API_BASE}/chat/completions",
-                    headers=headers,
-                    json=payload,
+            for _ in range(iterations):
+                api_calls += 1
+                response = await asyncio.wait_for(
+                    model.ainvoke(messages),
+                    timeout=timeout,
                 )
-            if response.status_code >= 400:
-                return {
-                    "status": "error",
-                    "goal": t_goal[:120],
-                    "error": f"HTTP {response.status_code}: {response.text[:500]}",
-                    "duration_seconds": round(time.perf_counter() - started, 1),
-                }
-            data = response.json()
-            choice = data.get("choices", [{}])[0]
-            message = choice.get("message", {}) if isinstance(choice, dict) else {}
-            content = str(message.get("content") or "").strip()
-            if not content:
-                return {
-                    "status": "empty",
-                    "goal": t_goal[:120],
-                    "error": "Hermes returned empty response",
-                    "duration_seconds": round(time.perf_counter() - started, 1),
-                }
-            # Extract metadata from response
-            usage = data.get("usage", {}) if isinstance(data, dict) else {}
+                # Check for tool calls
+                tool_calls = getattr(response, "tool_calls", None) or []
+                if not tool_calls:
+                    content = str(getattr(response, "content", "") or "")
+                    return {
+                        "status": "completed",
+                        "goal": t_goal[:120],
+                        "summary": content[:max_chars],
+                        "api_calls": api_calls,
+                        "duration_seconds": round(time.perf_counter() - started, 1),
+                    }
+                # Execute tools
+                messages.append(response)
+                for tc in tool_calls:
+                    tc_name = tc.get("name", "")
+                    tc_args = tc.get("args", {})
+                    tc_id = tc.get("id", "")
+                    tool_obj = _name_to_tool.get(tc_name)
+                    if tool_obj is not None:
+                        try:
+                            result = await tool_obj.ainvoke(tc_args)
+                            result_str = str(result) if result is not None else ""
+                        except Exception as exc:
+                            result_str = f"Tool error: {exc}"
+                    else:
+                        result_str = f"Tool '{tc_name}' not available in this sub-agent."
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": result_str[:4000],
+                    })
+            # Max iterations reached
             return {
-                "status": "completed",
+                "status": "max_iterations",
                 "goal": t_goal[:120],
-                "summary": content[:max_chars],
-                "model": data.get("model", HERMES_MODEL) if isinstance(data, dict) else HERMES_MODEL,
-                "api_calls": int(usage.get("completion_tokens", 0) > 0),
-                "tokens": {
-                    "prompt": usage.get("prompt_tokens", 0),
-                    "completion": usage.get("completion_tokens", 0),
-                },
+                "summary": "Reached max tool-calling iterations without final answer.",
+                "api_calls": api_calls,
+                "duration_seconds": round(time.perf_counter() - started, 1),
+            }
+        except asyncio.TimeoutError:
+            return {
+                "status": "timeout",
+                "goal": t_goal[:120],
+                "error": f"Timed out after {timeout}s",
+                "api_calls": api_calls,
                 "duration_seconds": round(time.perf_counter() - started, 1),
             }
         except Exception as exc:
@@ -6879,10 +6923,11 @@ async def delegate_task(
                 "status": "failed",
                 "goal": t_goal[:120],
                 "error": str(exc)[:500],
+                "api_calls": api_calls,
                 "duration_seconds": round(time.perf_counter() - started, 1),
             }
 
-    # Execute — single or batch
+    # Execute
     if len(task_list) == 1:
         result = await _run_one(task_list[0])
         return _json_tool_result(result)
