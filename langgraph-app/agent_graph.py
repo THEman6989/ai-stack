@@ -518,6 +518,20 @@ except Exception as exc:  # pragma: no cover - optional local helper
 else:
     EVENT_INDEXING_IMPORT_ERROR = None
 
+try:
+    from background_review import (
+        review_conversation as _review_conversation,
+        build_curation_messages as _build_curation_messages,
+        parse_curation_response as _parse_curation_response,
+    )
+except Exception as exc:  # pragma: no cover - optional local helper
+    _review_conversation = None
+    _build_curation_messages = None
+    _parse_curation_response = None
+    BACKGROUND_REVIEW_IMPORT_ERROR: Exception | None = exc
+else:
+    BACKGROUND_REVIEW_IMPORT_ERROR = None
+
 from context_compressor import (
     CompressionResult,
     build_archive_policy_message,
@@ -13103,6 +13117,122 @@ async def memory_kernel_sync_node(state: AlphaRavisState, runtime: Any | None = 
     }
 
 
+async def background_review_node(state: AlphaRavisState, runtime: Any | None = None) -> dict[str, Any]:
+    """LLM-powered background review: extracts curated memories + skill candidates.
+
+    Runs after the agent finishes a turn. Feature-flagged behind
+    ALPHARAVIS_ENABLE_BACKGROUND_REVIEW (default OFF).
+
+    Uses the same LLM (BigBoss) with a dedicated curation prompt to analyze
+    the conversation and extract structured, curated knowledge — the LLM IS
+    the curator. No regex, no mechanical extraction.
+    """
+    if not _env_bool("ALPHARAVIS_ENABLE_BACKGROUND_REVIEW", "false"):
+        return {}
+
+    if _review_conversation is None:
+        return {}
+
+    if record_skill_candidate is None or record_curated_memory is None:
+        return {}
+
+    messages = state.get("messages", [])
+    if not messages:
+        return {}
+
+    # Build OpenAI-format messages for the curation LLM
+    openai_messages = []
+    for m in messages:
+        if hasattr(m, "type"):
+            role = m.type
+            content = getattr(m, "content", "")
+            if isinstance(content, list):
+                content = " ".join(
+                    str(c.get("text", "")) for c in content if isinstance(c, dict)
+                )
+        elif isinstance(m, dict):
+            role = m.get("role", m.get("type", "unknown"))
+            content = m.get("content", "")
+        else:
+            continue
+        if role in ("system", "human", "user", "ai", "assistant"):
+            role = "user" if role == "human" else "assistant" if role == "ai" else role
+            openai_messages.append({"role": role, "content": str(content)})
+
+    if len(openai_messages) < 2:
+        return {}
+
+    # Run the curation LLM pass
+    async def _curation_llm(msgs: list[dict[str, Any]]) -> str:
+        model_kwargs = {
+            "temperature": float(os.getenv("ALPHARAVIS_BACKGROUND_REVIEW_TEMPERATURE", "0")),
+            "max_tokens": int(os.getenv("ALPHARAVIS_BACKGROUND_REVIEW_MAX_TOKENS", "1024")),
+        }
+        timeout = float(os.getenv("ALPHARAVIS_BACKGROUND_REVIEW_TIMEOUT_SECONDS", "45"))
+        return await _ainvoke_direct_text(msgs, model_kwargs=model_kwargs, timeout_seconds=timeout)
+
+    result = await _review_conversation(openai_messages, llm_call=_curation_llm)
+
+    if result.get("nothing_to_save"):
+        return {
+            "run_profile": _profile_update(
+                state,
+                background_review=True,
+                background_review_nothing_to_save=True,
+                background_review_duration=result.get("_curation_duration_seconds", 0),
+            ),
+        }
+
+    # Save curated memories
+    memory_count = 0
+    for mem in result.get("memories", [])[:5]:
+        if not isinstance(mem, dict):
+            continue
+        memory_text = str(mem.get("memory", "")).strip()
+        if not memory_text:
+            continue
+        try:
+            await record_curated_memory.ainvoke({
+                "action": "create",
+                "memory": memory_text,
+                "memory_type": str(mem.get("memory_type", "fact"))[:80],
+                "evidence": str(mem.get("evidence", ""))[:1200],
+                "scope": str(mem.get("scope", "global"))[:40],
+            })
+            memory_count += 1
+        except Exception:
+            pass
+
+    # Save curated skill candidates
+    skill_count = 0
+    for skill in result.get("skills", [])[:3]:
+        if not isinstance(skill, dict):
+            continue
+        try:
+            await record_skill_candidate.ainvoke({
+                "name": str(skill.get("name", "curated-skill"))[:120],
+                "trigger": str(skill.get("trigger", ""))[:600],
+                "steps": str(skill.get("steps", ""))[:2000],
+                "success_signals": str(skill.get("success_signals", ""))[:600],
+                "safety_notes": str(skill.get("safety_notes", ""))[:600],
+                "evidence": str(skill.get("evidence", ""))[:1200],
+                "source_task": "background_review",
+            })
+            skill_count += 1
+        except Exception:
+            pass
+
+    return {
+        "run_profile": _profile_update(
+            state,
+            background_review=True,
+            background_review_memories=memory_count,
+            background_review_skills=skill_count,
+            background_review_duration=result.get("_curation_duration_seconds", 0),
+        ),
+    }
+
+
 def _active_rag_prefetch_enabled() -> bool:
     return _env_bool("ALPHARAVIS_ENABLE_ACTIVE_RAG_PREFETCH", "true")
 
@@ -15178,6 +15308,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     builder.add_node("alpha_ravis_swarm", run_swarm_with_context_retry)
     builder.add_node("swarm_trace_finish", swarm_trace_finish_node)
     builder.add_node("memory_kernel_after", memory_kernel_sync_node)
+    builder.add_node("background_review", background_review_node)
     builder.add_node("context_guard_after", context_guard_node)
     builder.add_node("memory_notice", memory_notice_node)
     builder.add_node("run_profile_finish", run_profile_finish_node)
@@ -15216,7 +15347,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
     builder.add_edge("swarm_trace_start", "alpha_ravis_swarm")
     builder.add_edge("alpha_ravis_swarm", "swarm_trace_finish")
     builder.add_edge("swarm_trace_finish", "memory_kernel_after")
-    builder.add_edge("memory_kernel_after", "context_guard_after")
+    builder.add_edge("memory_kernel_after", "background_review")
+    builder.add_edge("background_review", "context_guard_after")
     builder.add_edge("context_guard_after", "memory_notice")
     builder.add_edge("memory_notice", "run_profile_finish")
     builder.add_edge("run_profile_finish", END)
