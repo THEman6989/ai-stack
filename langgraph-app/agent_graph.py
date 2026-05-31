@@ -691,6 +691,7 @@ class AlphaRavisState(MessagesState):
     skill_candidate_keys: NotRequired[list[str]]
     run_resume_checkpoint: NotRequired[dict[str, Any]]
     run_resume_prompt_required: NotRequired[bool]
+    context_notices: NotRequired[list[dict[str, Any]]]  # visible context-load cards in UI
 
 
 class DebuggerState(MessagesState):
@@ -12957,9 +12958,21 @@ async def memory_kernel_prefetch_node(state: AlphaRavisState, runtime: Any | Non
         + "\n\n".join(sections)
         + "\n</memory-context>"
     )
+
+    # Build visible context notice for the UI
+    curated_count = sum(1 for name, _, _ in prefetch_results if name == "curated" and _)
+    semantic_count = sum(1 for name, _, _ in prefetch_results if name == "semantic" and _)
+    memory_notice: dict[str, Any] = {
+        "type": "memory",
+        "curated_count": curated_count,
+        "semantic_count": semantic_count,
+        "nudge": nudge_interval > 0 and turn_count > 0 and turn_count % nudge_interval == 0,
+    }
+
     return {
         "messages": [SystemMessage(content=content, id=MEMORY_KERNEL_CONTEXT_MESSAGE_ID)],
         "memory_kernel_context": content,
+        "context_notices": [memory_notice],
         **_trace_updates(
             state,
             *trace_steps,
@@ -13245,6 +13258,9 @@ async def skill_library_node(state: AlphaRavisState, runtime: Any | None = None)
     store = getattr(runtime, "store", None) if runtime else None
     if store is None:
         content = repo_skill_context or "Skill library unavailable for this run; continue without saved workflow hints."
+        notice = {"type": "skills", "source": "repo_only", "active_count": 0}
+        if repo_skill_context:
+            notice["repo_count"] = repo_skill_context.count("Skill `")
         return {
             "messages": [
                 SystemMessage(
@@ -13253,6 +13269,7 @@ async def skill_library_node(state: AlphaRavisState, runtime: Any | None = None)
                 )
             ],
             "active_skill_context": content,
+            "context_notices": [notice],
         }
 
     limit = int(os.getenv("ALPHARAVIS_SKILL_LIBRARY_SEARCH_LIMIT", "3"))
@@ -13267,6 +13284,7 @@ async def skill_library_node(state: AlphaRavisState, runtime: Any | None = None)
                 )
             ],
             "active_skill_context": "",
+            "context_notices": [{"type": "skills", "source": "error", "active_count": 0, "error": str(exc)[:120]}],
         }
 
     active_skills = []
@@ -13308,9 +13326,17 @@ async def skill_library_node(state: AlphaRavisState, runtime: Any | None = None)
         )
     content = "\n\n".join(sections)
 
+    # Build visible context notice for the UI
+    notice = {"type": "skills", "source": "store+repo", "active_count": len(active_skills)}
+    if active_skills:
+        notice["names"] = [str(v.get("name") or k)[:60] for k, v in active_skills[:6]]
+    if repo_skill_context:
+        notice["repo_count"] = repo_skill_context.count("Skill `")
+
     return {
         "messages": [SystemMessage(content=content, id=SKILL_CONTEXT_MESSAGE_ID)],
         "active_skill_context": content,
+        "context_notices": [notice],
     }
 
 
