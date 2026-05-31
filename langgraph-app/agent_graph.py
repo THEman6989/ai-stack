@@ -6904,6 +6904,9 @@ async def delegate_task(
             parent_id=child_parent,
             _model_fn=lambda kw: _model(model_kwargs=kw),
             _tool_name_fn=_tool_name_for_profile,
+            _thread_id=_state_thread_id(),
+            _thread_key=_state_thread_key(),
+            _router_ingest_source=_router_ingest_source,
         )
 
     # Execute

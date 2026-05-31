@@ -21,12 +21,23 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
 import logging
 import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from context_compressor import (
+    CompressionResult,
+    build_archive_policy_message,
+    build_summary_message_content,
+    compress_messages,
+    estimate_tokens_rough,
+    should_compress,
+)
+from env_utils import env_bool
 
 LOGGER = logging.getLogger("alpharavis.delegate_agent")
 
@@ -257,11 +268,15 @@ DELEGATE_TOOL_RESULT_MAX_CHARS = int(os.getenv(
     "ALPHARAVIS_DELEGATE_TOOL_RESULT_CHARS", "16000"
 ))
 
-# Context budget — if total message chars exceed this, oldest tool results are trimmed.
-# Protects the sub-agent's context window from silent overflow.
-DELEGATE_CONTEXT_BUDGET_CHARS = int(os.getenv(
-    "ALPHARAVIS_DELEGATE_CONTEXT_BUDGET_CHARS", "80000"
+# Context compression budget — sub-agent will autonomously compress via
+# context_compressor.compress_messages() (LLM summarization + archiving)
+# when estimated tokens exceed this percentage of the model's context window.
+DELEGATE_COMPRESSION_TRIGGER_RATIO = float(os.getenv(
+    "ALPHARAVIS_DELEGATE_COMPRESSION_TRIGGER_RATIO", "0.60"
 ))
+DELEGATE_CONTEXT_LENGTH = int(os.getenv(
+    "ALPHARAVIS_DELEGATE_CONTEXT_LENGTH", "0"
+))  # 0 = discover from model
 
 
 # ---------------------------------------------------------------------------
@@ -289,60 +304,118 @@ def _truncate_tool_result(content: str, max_chars: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Helper: context budget enforcement (Hermes layer 3: per-turn aggregate)
+# Helper: autonomous context compression via the existing compression pipeline
 # ---------------------------------------------------------------------------
 
-def _enforce_context_budget(
+async def _compress_sub_agent_context(
     messages: list[dict[str, Any]],
-    budget_chars: int,
-) -> None:
-    """Trim oldest tool results until total message chars are under budget.
+    *,
+    mode: str = "sub_agent",
+    thread_id: str = "",
+    thread_key: str = "",
+    token_limit: int,
+    previous_summary: str | None = None,
+    _model_fn: Any = None,
+    _store: Any = None,
+    _router_ingest_source: Any = None,
+) -> tuple[list[dict[str, Any]], str | None, int]:
+    """Autonomously compress sub-agent context when it exceeds the budget.
 
-    Preserves system + user messages and the most recent tool interactions.
-    Only removes tool results (role='tool') from the middle of the history.
-    Each removed message gets a brief tombstone so the agent knows data was dropped.
+    Uses the same context_compressor.compress_messages() pipeline as the
+    main agent — LLM summarization + optional archiving. Does NOT
+    destructively trim data.
+
+    Returns (rebuilt_messages, archive_key_or_none, tokens_after).
     """
-    total = sum(len(str(m.get("content", ""))) for m in messages)
-    if total <= budget_chars:
-        return
+    if _model_fn is None:
+        return messages, None, estimate_tokens_rough(messages)
 
-    # Find trimmable indices: tool messages after the first user turn,
-    # but before the last N messages (keep recent context).
-    keep_tail = max(4, len(messages) // 4)  # keep last 25% minimum
-    trim_candidates: list[int] = []
-    for i, m in enumerate(messages):
-        if i < 2:  # preserve system + first user
-            continue
-        if i >= len(messages) - keep_tail:  # preserve recent context
-            break
-        if m.get("role") == "tool":
-            trim_candidates.append(i)
+    token_estimate_before = estimate_tokens_rough(messages)
+    decision = should_compress(
+        token_estimate=token_estimate_before,
+        token_limit=token_limit,
+    )
+    if not decision.should_run:
+        return messages, None, token_estimate_before
 
-    removed = 0
-    for idx in reversed(trim_candidates):
-        if total <= budget_chars * 0.8:  # stop at 80% of budget (headroom)
-            break
-        msg = messages[idx]
-        content_len = len(str(msg.get("content", "")))
-        messages[idx] = {
-            "role": "tool",
-            "tool_call_id": msg.get("tool_call_id", ""),
-            "content": (
-                f"[Context trimmed: tool result ({content_len:,} chars) removed "
-                f"to stay within {budget_chars:,}-char budget. "
-                f"Re-run the tool if you need this data.]"
-            ),
-        }
-        total -= content_len
-        total += len(str(messages[idx]["content"]))
-        removed += 1
+    # Build summarize_fn from the sub-agent's model
+    async def _sub_summarize(prompt: str, max_tokens: int) -> str:
+        model = _model_fn({
+            "temperature": 0.1,
+            "max_tokens": max(256, min(max_tokens, 4096)),
+        })
+        if model is None:
+            return ""
+        try:
+            response = await model.ainvoke([{"role": "user", "content": prompt}])
+            return str(getattr(response, "content", "") or "")
+        except Exception:
+            return ""
 
-    if removed:
-        LOGGER.debug(
-            "Context budget enforced: removed %d tool results, "
-            "total now ~%d chars (budget %d)",
-            removed, total, budget_chars,
+    try:
+        result: CompressionResult = await compress_messages(
+            messages,
+            mode=mode,
+            thread_id=thread_id or "sub_agent",
+            thread_key=thread_key or "sub_agent",
+            token_limit=token_limit,
+            previous_summary=previous_summary,
+            summarize_fn=_sub_summarize,
         )
+    except Exception as exc:
+        LOGGER.warning("Sub-agent compression failed: %s", exc)
+        return messages, None, token_estimate_before
+
+    if result.skipped:
+        LOGGER.debug(
+            "Sub-agent compression skipped: %s (tokens=%d/%d)",
+            result.reason, token_estimate_before, token_limit,
+        )
+        return messages, None, token_estimate_before
+
+    # Archive if store is available
+    archive_key: str | None = None
+    if _store is not None and not result.summary_failed:
+        try:
+            archive_key = hashlib.sha256(
+                f"{mode}:{time.time()}:{result.summary}:{len(result.middle)}".encode("utf-8")
+            ).hexdigest()[:24]
+            if _router_ingest_source is not None:
+                await _router_ingest_source(
+                    source_type="archive",
+                    source_key=archive_key,
+                    title=f"Sub-agent compression ({mode})",
+                    content=result.archive_content,
+                    thread_id=thread_id,
+                    thread_key=thread_key,
+                    metadata={
+                        "archive_kind": "sub_agent_compression",
+                        "compression_mode": mode,
+                        "token_estimate_before": token_estimate_before,
+                        "token_estimate_after": result.token_estimate_after,
+                        "message_count": len(result.middle),
+                    },
+                )
+        except Exception as exc:
+            LOGGER.debug("Sub-agent archive ingest failed (non-fatal): %s", exc)
+
+    # Rebuild messages: head + summary + tail
+    summary_content = build_summary_message_content(result)
+    archive_policy = build_archive_policy_message(result, archive_key=archive_key or "")
+
+    rebuilt: list[dict[str, Any]] = []
+    rebuilt.extend(result.head)
+    rebuilt.append({"role": "system", "content": summary_content})
+    if archive_policy.strip():
+        rebuilt.append({"role": "system", "content": archive_policy})
+    rebuilt.extend(result.tail)
+
+    LOGGER.info(
+        "Sub-agent context compressed: %d→%d tokens (archive_key=%s)",
+        token_estimate_before, result.token_estimate_after,
+        archive_key or "none",
+    )
+    return rebuilt, archive_key, result.token_estimate_after
 
 
 async def run_sub_agent(
@@ -358,6 +431,10 @@ async def run_sub_agent(
     parent_id: str | None = None,
     _model_fn: Any = None,
     _tool_name_fn: Any = None,
+    _store: Any = None,
+    _thread_id: str = "",
+    _thread_key: str = "",
+    _router_ingest_source: Any = None,
 ) -> dict[str, Any]:
     """Run one sub-agent with tool-calling loop. Callable from any depth.
 
@@ -474,7 +551,17 @@ async def run_sub_agent(
 
     name_to_tool = selected_tools  # already normalized
     tool_result_limit = DELEGATE_TOOL_RESULT_MAX_CHARS
-    context_budget = DELEGATE_CONTEXT_BUDGET_CHARS
+
+    # Compute compression trigger from model's context window
+    context_length = DELEGATE_CONTEXT_LENGTH
+    if context_length <= 0:
+        try:
+            context_length = getattr(model, "context_length", 0) or 0
+        except Exception:
+            context_length = 0
+    if context_length <= 0:
+        context_length = 60000  # safe default
+    compression_token_limit = max(4096, int(context_length * DELEGATE_COMPRESSION_TRIGGER_RATIO))
 
     try:
         # Wall-clock timeout: wrap the ENTIRE task, not per-iteration.
@@ -571,8 +658,25 @@ async def run_sub_agent(
                         "content": result_str,
                     })
 
-                # Context budget guard: trim oldest tool results if total exceeds budget
-                _enforce_context_budget(messages, context_budget)
+                # Autonomous context compression: if context exceeds the trigger
+                # ratio of the model's window, run compress_messages() which
+                # LLM-summarizes old messages and archives the raw content.
+                # Sub-agent can later recall via search_archived_context.
+                est_tokens = estimate_tokens_rough(messages)
+                if est_tokens > compression_token_limit:
+                    rebuilt, archive_key, tokens_after = await _compress_sub_agent_context(
+                        messages,
+                        mode="sub_agent",
+                        thread_id=_thread_id,
+                        thread_key=_thread_key,
+                        token_limit=compression_token_limit,
+                        _model_fn=_model_fn,
+                        _store=_store,
+                        _router_ingest_source=_router_ingest_source,
+                    )
+                    if rebuilt is not messages:
+                        messages.clear()
+                        messages.extend(rebuilt)
 
             # Max iterations reached
             ctx.state = "completed"
