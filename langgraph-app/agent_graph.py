@@ -532,6 +532,26 @@ except Exception as exc:  # pragma: no cover - optional local helper
 else:
     BACKGROUND_REVIEW_IMPORT_ERROR = None
 
+try:
+    from delegate_agent import (
+        run_sub_agent as _run_sub_agent,
+        list_running_agents as _list_running_agents,
+        kill_agent as _kill_agent,
+        get_file_state as _get_file_state,
+        SubAgentRegistry as _SubAgentRegistry,
+        SUB_AGENT_REGISTRY as _SUB_AGENT_REGISTRY,
+    )
+except Exception as exc:  # pragma: no cover - optional local helper
+    _run_sub_agent = None
+    _list_running_agents = None
+    _kill_agent = None
+    _get_file_state = None
+    _SubAgentRegistry = None
+    _SUB_AGENT_REGISTRY = None
+    DELEGATE_AGENT_IMPORT_ERROR: Exception | None = exc
+else:
+    DELEGATE_AGENT_IMPORT_ERROR = None
+
 from context_compressor import (
     CompressionResult,
     build_archive_policy_message,
@@ -811,12 +831,12 @@ TOOL_REGISTRY_CATEGORIES = [
     {
         "category": "coding/write",
         "description": "Write AlphaRavis artifacts or delegate tasks to sub-agents (native or Hermes).",
-        "tools": ["write_alpha_ravis_artifact", "check_hermes_agent", "call_hermes_agent", "delegate_task"],
+        "tools": ["write_alpha_ravis_artifact", "check_hermes_agent", "call_hermes_agent", "delegate_task", "list_delegated_agents", "kill_delegated_agent", "check_file_state"],
     },
     {
         "category": "coding/execute",
         "description": "Run bounded diagnostics or terminal-oriented work through approved execution/debugging paths.",
-        "tools": ["execute_local_command", "check_external_service", "call_hermes_agent", "delegate_task"],
+        "tools": ["execute_local_command", "check_external_service", "call_hermes_agent", "delegate_task", "list_delegated_agents", "kill_delegated_agent", "check_file_state"],
     },
     {
         "category": "media/image",
@@ -6714,38 +6734,58 @@ async def delegate_task(
     timeout_seconds: int = 600,
     max_output_chars: int = 8000,
     tasks: list[dict[str, Any]] | None = None,
+    max_spawn_depth: int = 2,
 ):
-    """Spawn AlphaRavis-native sub-agents in isolated contexts.
+    """Spawn AlphaRavis-native sub-agents with isolated contexts, nested delegation, and full lifecycle.
 
-    Each sub-agent gets its own conversation, restricted toolset, and works
-    independently using AlphaRavis' own LLM (BigBoss via LiteLLM). Only the
-    final summary is returned — intermediate tool results never enter the
-    parent context window.
+    Each sub-agent gets its own conversation, restricted toolset, file-state tracking,
+    and cancellation support. Sub-agents can recursively spawn grandchildren up to
+    max_spawn_depth (default 2).
 
     TWO MODES:
     1. Single task: provide 'goal' (+ optional context, toolsets)
-    2. Batch (parallel): provide 'tasks' array. All run in parallel.
+    2. Batch (parallel): provide 'tasks' array (up to 5). All run in parallel via asyncio.gather.
 
     WHEN TO USE:
-    - Reasoning-heavy subtasks (debugging, code review, research)
+    - Reasoning-heavy subtasks (debugging, code review, research, implementation)
     - Tasks that would flood the parent context with intermediate data
     - Parallel independent workstreams
+    - Multi-agent workflows where workers need to sub-delegate
 
-    Available tool names: execute_local_command, read_source_chunks,
-    read_raw_source, write_alpha_ravis_artifact, fast_web_search,
-    deep_web_research, semantic_memory_search, search_curated_memory,
-    search_session_history, search_skill_library, read_repo_ai_skill,
-    agentic_rag_retrieve, search_archived_context, read_archive_record,
-    read_alpha_ravis_artifact, list_alpha_ravis_artifacts,
-    search_debugging_lessons, record_debugging_lesson, record_skill_candidate.
+    NESTED DELEGATION:
+    Sub-agents at depth < max_spawn_depth can call delegate_task to spawn their own
+    children. The default max_spawn_depth=2 allows: parent → child → grandchild.
+    Set max_spawn_depth=1 to disable nesting. Set max_spawn_depth=0 to...
+    (wait, 0 would break — minimum is 1).
+
+    CANCELLATION:
+    Use list_delegated_agents to see running sub-agents by ID, then
+    kill_delegated_agent(agent_id) to cancel one (and all its children recursively).
+
+    FILE-STATE TRACKING:
+    Sub-agents track file modifications. When one agent writes a file and another
+    tries to read it, a STALE FILE warning is injected into the reader's context.
+
+    Available tool names (22 tools):
+    execute_local_command, read_source_chunks, read_raw_source,
+    write_alpha_ravis_artifact, fast_web_search, deep_web_research,
+    semantic_memory_search, search_curated_memory, search_session_history,
+    search_skill_library, read_repo_ai_skill, agentic_rag_retrieve,
+    search_archived_context, read_archive_record, read_alpha_ravis_artifact,
+    list_alpha_ravis_artifacts, search_debugging_lessons, record_debugging_lesson,
+    record_skill_candidate, query_source, query_sources, search_agent_memory.
 
     IMPORTANT:
     - Sub-agents have NO memory of the parent conversation.
     - Pass all relevant info via 'context': file paths, error messages, constraints.
     - Each sub-agent gets up to max_iterations tool-calling turns.
+    - Nested agents report their agent_id in results for cancellation.
     """
-    # Build available tool map
-    _delegate_tool_map = _tools_by_name([
+    if _run_sub_agent is None:
+        return "Delegate agent module not available (import error). Check delegate_agent.py."
+
+    # Build available tool map (expanded from 19 to 22 tools)
+    _delegate_tool_list = [
         execute_local_command,
         read_source_chunks,
         read_raw_source,
@@ -6765,7 +6805,12 @@ async def delegate_task(
         list_alpha_ravis_artifacts,
         search_debugging_lessons,
         record_debugging_lesson,
-    ])
+        # --- New additions ---
+        query_source,
+        query_sources,
+        search_agent_memory,
+    ]
+    _delegate_tool_map = _tools_by_name(_delegate_tool_list)
 
     # Normalize task list
     if tasks and isinstance(tasks, list):
@@ -6790,154 +6835,79 @@ async def delegate_task(
     if not task_list:
         return "No valid tasks to delegate."
 
-    max_chars = max(1000, min(int(max_output_chars), 16000))
-    timeout = max(30, min(int(timeout_seconds), 1800))
-    iterations = max(3, min(int(max_iterations), 90))
+    depth = max(0, min(int(max_spawn_depth), 10))
 
     # Resolve tool names → tool objects
     _name_to_tool = {_tool_name_for_profile(t): t for t in _delegate_tool_map.values()}
 
-    async def _run_one(task_def: dict[str, Any]) -> dict[str, Any]:
+    # Update env for nested delegation depth
+    os.environ["ALPHARAVIS_DELEGATE_MAX_SPAWN_DEPTH"] = str(depth)
+
+    async def _run_one_via_module(task_def: dict[str, Any]) -> dict[str, Any]:
         t_goal = task_def["goal"]
         t_context = task_def.get("context", "")
         t_tool_names = task_def.get("toolsets")
 
-        # Select tools
-        if t_tool_names:
-            selected_tools = []
-            for name in t_tool_names:
-                tool = _name_to_tool.get(name)
-                if tool is not None:
-                    selected_tools.append(tool)
-        else:
-            selected_tools = list(_delegate_tool_map.values())
-
-        # Build tool schemas (OpenAI format)
-        tool_schemas = []
-        for tool_obj in selected_tools:
-            if hasattr(tool_obj, "args_schema"):
-                schema = tool_obj.args_schema
-                if hasattr(schema, "model_json_schema"):
-                    js = schema.model_json_schema()
-                elif callable(getattr(schema, "schema", None)):
-                    js = schema.schema()
-                else:
-                    continue
-                tool_schemas.append({
-                    "type": "function",
-                    "function": {
-                        "name": _tool_name_for_profile(tool_obj),
-                        "description": getattr(tool_obj, "description", ""),
-                        "parameters": js,
-                    },
-                })
-
-        # Build system prompt
-        toolset_hint = ""
-        if t_tool_names:
-            toolset_hint = f"\nAvailable tools: {', '.join(t_tool_names)}."
-        system_prompt = (
-            "You are an AlphaRavis sub-agent working on a delegated task. "
-            "Focus exclusively on the assigned goal. Do not ask questions, "
-            "do not wait for approval. Use your tools and return a concise "
-            f"result. You have up to {iterations} tool-calling turns.{toolset_hint}\n\n"
-            "When done, return a final answer with these sections:\n"
-            "  ## Summary — what you accomplished\n"
-            "  ## Key Findings — discoveries, answers\n"
-            "  ## Actions — commands/files used\n"
-            "  ## Recommendation — for the parent agent"
+        return await _run_sub_agent(
+            goal=t_goal,
+            context=t_context,
+            tools=_name_to_tool,
+            tool_names=list(t_tool_names) if t_tool_names else None,
+            max_iterations=max(3, min(int(max_iterations), 90)),
+            timeout_seconds=max(30, min(int(timeout_seconds), 1800)),
+            max_output_chars=max(1000, min(int(max_output_chars), 16000)),
+            depth=0,
+            parent_id=None,
+            _model_fn=lambda kw: _model(model_kwargs=kw),
+            _tool_name_fn=_tool_name_for_profile,
         )
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": t_goal + (f"\n\nContext:\n{t_context}" if t_context else "")},
-        ]
-
-        # Get model with tools
-        model_kwargs: dict[str, Any] = {
-            "temperature": float(os.getenv("ALPHARAVIS_DELEGATE_TEMPERATURE", "0.1")),
-            "max_tokens": int(os.getenv("ALPHARAVIS_DELEGATE_MAX_TOKENS", "4096")),
-        }
-        model = _model(model_kwargs={**model_kwargs, "tools": tool_schemas} if tool_schemas else model_kwargs)
-        if model is None:
-            return {"status": "failed", "goal": t_goal[:120], "error": "Model unavailable"}
-
-        started = time.perf_counter()
-        api_calls = 0
-        try:
-            for _ in range(iterations):
-                api_calls += 1
-                response = await asyncio.wait_for(
-                    model.ainvoke(messages),
-                    timeout=timeout,
-                )
-                # Check for tool calls
-                tool_calls = getattr(response, "tool_calls", None) or []
-                if not tool_calls:
-                    content = str(getattr(response, "content", "") or "")
-                    return {
-                        "status": "completed",
-                        "goal": t_goal[:120],
-                        "summary": content[:max_chars],
-                        "api_calls": api_calls,
-                        "duration_seconds": round(time.perf_counter() - started, 1),
-                    }
-                # Execute tools
-                messages.append(response)
-                for tc in tool_calls:
-                    tc_name = tc.get("name", "")
-                    tc_args = tc.get("args", {})
-                    tc_id = tc.get("id", "")
-                    tool_obj = _name_to_tool.get(tc_name)
-                    if tool_obj is not None:
-                        try:
-                            result = await tool_obj.ainvoke(tc_args)
-                            result_str = str(result) if result is not None else ""
-                        except Exception as exc:
-                            result_str = f"Tool error: {exc}"
-                    else:
-                        result_str = f"Tool '{tc_name}' not available in this sub-agent."
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc_id,
-                        "content": result_str[:4000],
-                    })
-            # Max iterations reached
-            return {
-                "status": "max_iterations",
-                "goal": t_goal[:120],
-                "summary": "Reached max tool-calling iterations without final answer.",
-                "api_calls": api_calls,
-                "duration_seconds": round(time.perf_counter() - started, 1),
-            }
-        except asyncio.TimeoutError:
-            return {
-                "status": "timeout",
-                "goal": t_goal[:120],
-                "error": f"Timed out after {timeout}s",
-                "api_calls": api_calls,
-                "duration_seconds": round(time.perf_counter() - started, 1),
-            }
-        except Exception as exc:
-            return {
-                "status": "failed",
-                "goal": t_goal[:120],
-                "error": str(exc)[:500],
-                "api_calls": api_calls,
-                "duration_seconds": round(time.perf_counter() - started, 1),
-            }
 
     # Execute
     if len(task_list) == 1:
-        result = await _run_one(task_list[0])
+        result = await _run_one_via_module(task_list[0])
         return _json_tool_result(result)
     else:
-        results = await asyncio.gather(*[_run_one(t) for t in task_list])
+        results = await asyncio.gather(*[_run_one_via_module(t) for t in task_list])
         return _json_tool_result({
             "batch": True,
             "task_count": len(results),
             "tasks": results,
         })
+
+
+@tool
+async def list_delegated_agents() -> str:
+    """List all currently running delegated sub-agents with their IDs, goals, and states.
+
+    Use this to monitor sub-agent progress and find agent IDs for kill_delegated_agent.
+    Returns JSON with 'count' and 'agents' array.
+    """
+    if _list_running_agents is None:
+        return json.dumps({"error": "Delegate agent module not available."})
+    return json.dumps(_list_running_agents(), indent=2)
+
+
+@tool
+async def kill_delegated_agent(agent_id: str) -> str:
+    """Kill a running delegated sub-agent by its ID (from list_delegated_agents).
+
+    When you kill an agent, all its children (sub-sub-agents it spawned) are also
+    killed recursively. Returns JSON with 'killed' status and 'children_killed' count.
+    """
+    if _kill_agent is None:
+        return json.dumps({"error": "Delegate agent module not available."})
+    result = await _kill_agent(agent_id)
+    return json.dumps(result, indent=2)
+
+
+@tool
+async def check_file_state(path: str) -> str:
+    """Check which sub-agent last modified a file. Useful for debugging cross-agent
+    file conflicts. Returns JSON with path and last_writer agent_id.
+    """
+    if _get_file_state is None:
+        return json.dumps({"error": "Delegate agent module not available."})
+    return json.dumps(_get_file_state(path), indent=2)
 
 
 @tool
@@ -14434,6 +14404,9 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             check_hermes_agent,
             call_hermes_agent,
             delegate_task,
+            list_delegated_agents,
+            kill_delegated_agent,
+            check_file_state,
             search_archived_context,
             condense_archive_recall_query,
             read_archive_record,

@@ -3,6 +3,21 @@
 This is the running backlog for features that are intentionally prepared but
 not fully wired yet.
 
+## Native Delegate Agent — VERIFIED ✅ (2026-05-31)
+
+Full feature parity with Hermes `delegate_task` — all 4 previously-missing
+features now implemented and tested (22 new tests, 696 total passing):
+
+- ✅ Nested Delegation (max_spawn_depth=2)
+- ✅ Cancellation (list_delegated_agents → kill_delegated_agent)
+- ✅ File-State Tracking (cross-agent stale read detection)
+- ✅ Sub-Agent Registry (running agent list with IDs)
+- ✅ Tool-Set expanded from 19 to 22
+- ✅ All 4 new @tools registered in categories + local_tool_map
+
+Files: `langgraph-app/delegate_agent.py` (new), `langgraph-app/agent_graph.py`
+(modified), `tests/test_delegate_agent.py` (new, 22 tests).
+
 ## Mongo Raw Store + PGVector Search Head
 
 Status: Phase 1 partially implemented. The PGVector text table has the explicit

@@ -4,6 +4,86 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-05-31 — Delegate Agent Full Feature Parity mit Hermes
+
+Vier fehlende Features implementiert — AlphaRavis-native Sub-Agent-Delegation
+ist jetzt auf Augenhöhe mit Hermes `delegate_task`:
+
+### Neue Datei: `langgraph-app/delegate_agent.py`
+
+Enthält alle Sub-Agent-Infrastruktur als eigenständiges Modul:
+
+- **SubAgentRegistry** — Globales Dict zum Tracken laufender Sub-Agents.
+  `register()`, `unregister()`, `get()`, `list_all()`, `kill()`,
+  `kill_children_of()`. Jeder Agent bekommt eine monotone ID (`delegate-0001`).
+- **FileStateTracker** — Verfolgt, welcher Agent zuletzt in eine Datei
+  geschrieben hat. `check_stale_read()` warnt, wenn Agent B eine Datei liest,
+  die Agent A seit dem letzten Read von B geschrieben hat. Timestamps in
+  Sekunden (float), verglichen mit `time.time()` — kein ns-vs-s Bug.
+- **run_sub_agent()** — Core Multi-Turn-Tool-Loop mit:
+  - Nested Delegation: `depth` Parameter + `_check_cancellation` vor jedem
+    Turn. Sub-Agents können `delegate_task` callen → Rekursion mit
+    `max_spawn_depth` guard (default 2: parent→child→grandchild).
+  - Cancellation: `asyncio.Event` pro Agent, `_check_cancellation` zwischen
+    Turns, `asyncio.CancelledError` catch.
+  - Timeout: `asyncio.wait_for` pro LLM-Call.
+  - File-Tracking: Vor Read-Tools (`read_source_chunks`, `read_raw_source`,
+    `read_alpha_ravis_artifact`) wird `check_stale_read` aufgerufen. Nach
+    Write-Tools (`write_alpha_ravis_artifact`, `execute_local_command` mit
+    Redirect) wird `record_write` aufgerufen.
+- **list_running_agents()** / **kill_agent()** / **get_file_state()** —
+  Öffentliche API für Observability und Control.
+
+### Geänderte Datei: `langgraph-app/agent_graph.py`
+
+- `delegate_task` @tool komplett umgeschrieben — delegiert an `_run_sub_agent()`
+  aus dem neuen Modul. Neue Parameter: `max_spawn_depth` (default 2).
+  Docstring dokumentiert alle Features.
+- Tool-Set von 19 auf 22 erweitert: `query_source`, `query_sources`,
+  `search_agent_memory` hinzugefügt.
+- Drei neue @tools registriert: `list_delegated_agents`, `kill_delegated_agent`,
+  `check_file_state` — alle mit guarded import (`_run_sub_agent is None` check).
+- Neue Tools in `TOOL_REGISTRY_CATEGORIES` (coding/write, coding/execute) und
+  `local_tool_map` aufgenommen.
+- Guarded Import für `delegate_agent` Modul (analog zu `event_indexing`,
+  `background_review`).
+
+### Neue Tests: `tests/test_delegate_agent.py` (22 Tests)
+
+- SubAgentRegistry: register, list, get, unregister, kill, kill_children_of,
+  monotonic IDs.
+- FileStateTracker: write+read mit stale detection, Re-read nach stale, keine
+  Warnung für eigenen Write, nonexistent path, get_last_writer.
+- Helpers: `_normalize_tool_names`, `_extract_write_path_from_command`
+  (redirect, >>, tee, cp, mv, install), `_build_tool_schemas`.
+- Source-Scans: neue @tools existieren in agent_graph.py, `max_spawn_depth`
+  Parameter, 22-Tool-Docstring, Tool-Kategorien enthalten neue Tools,
+  `local_tool_map` enthält neue Tools, guarded import existiert,
+  `delegate_agent.py` enthält alle 4 Features.
+
+### Feature Parity Table (FINAL)
+
+| Feature                 | AlphaRavis | Hermes | Status |
+|-------------------------|-----------|--------|--------|
+| Multi-Turn Sub-Agent    | ✅ Tool-Loop mit BigBoss | ✅ | MATCH |
+| Isolierter Kontext      | ✅ Frische Messages | ✅ | MATCH |
+| Restricted Toolset      | ✅ 22 Tools, tool_names Filter | ✅ | MATCH |
+| Iteration-Budget        | ✅ max_iterations (3-90) | ✅ | MATCH |
+| Batch/Parallel          | ✅ asyncio.gather, bis 5 | ✅ | MATCH |
+| Timeout pro Task        | ✅ asyncio.wait_for, 30-1800s | ✅ | MATCH |
+| **Nested Delegation**   | ✅ max_spawn_depth=2 | ✅ max_spawn_depth | **NEU** |
+| **Cancellation**        | ✅ asyncio.Event + kill_agent | ✅ | **NEU** |
+| **File-State-Cross-Agent** | ✅ check_stale_read Warnung | ✅ | **NEU** |
+| **Sub-Agent-Registry**  | ✅ list_delegated_agents | ✅ TUI | **NEU** |
+
+Env vars: `ALPHARAVIS_DELEGATE_MAX_SPAWN_DEPTH=2`,
+`ALPHARAVIS_DELEGATE_MAX_CONCURRENT=5`,
+`ALPHARAVIS_DELEGATE_TEMPERATURE=0.1`,
+`ALPHARAVIS_DELEGATE_MAX_TOKENS=4096`.
+
+Verification: `pytest -q tests/` → 696 passed (674 baseline + 22 new).
+Alle 22 `test_delegate_agent.py` Tests grün.
+
 ## 2026-05-30 — PGVector Search-Head Contract Fields
 
 - Extended `langgraph-app/vector_memory.py`'s AlphaRavis pgvector text table

@@ -861,6 +861,58 @@ Safety:
 - If Hermes needs LangGraph, the request is transferred back inside AlphaRavis
   instead of recursively calling Hermes again.
 
+### Native Delegate Agent (delegate_agent.py)
+
+AlphaRavis-native sub-agent delegation — full feature parity with Hermes
+`delegate_task`, no external dependency.
+
+Core module: `langgraph-app/delegate_agent.py`
+
+Capabilities:
+
+- Multi-turn tool-calling loop with BigBoss via LiteLLM.
+- Isolated context per sub-agent (fresh message list, no parent state).
+- Restricted toolset: 22 AlphaRavis tools, filterable per sub-agent via `toolsets`.
+- Nested delegation: sub-agents at depth < `max_spawn_depth` (default 2) can
+  spawn grandchildren via recursive `delegate_task` calls.
+- Cancellation: `list_delegated_agents` → `kill_delegated_agent(agent_id)`
+  kills agent and all descendants via `asyncio.Event`.
+- File-state tracking: `FileStateTracker` warns when agent B reads a file
+  that agent A wrote since B's last read (STALE FILE warning injected into
+  message stream).
+- Sub-agent registry: `SubAgentRegistry` tracks all running agents with
+  monotonic IDs, states, depths, and parent relationships.
+- Timeout per task: `asyncio.wait_for` wrapping each LLM invoke call.
+
+Architecture:
+
+```
+delegate_task @tool (agent_graph.py)
+  └─> _run_sub_agent() (delegate_agent.py)
+       ├─> SubAgentRegistry.register()
+       ├─> FileStateTracker.check_stale_read() (before read tools)
+       ├─> LLM call via _model() with tool schemas
+       ├─> Tool execution via .ainvoke()
+       ├─> FileStateTracker.record_write() (after write tools)
+       └─> SubAgentRegistry.unregister()
+```
+
+Tools available to sub-agents (22):
+`execute_local_command`, `read_source_chunks`, `read_raw_source`,
+`write_alpha_ravis_artifact`, `fast_web_search`, `deep_web_research`,
+`semantic_memory_search`, `search_curated_memory`, `search_session_history`,
+`search_skill_library`, `record_skill_candidate`, `read_repo_ai_skill`,
+`agentic_rag_retrieve`, `search_archived_context`, `read_archive_record`,
+`read_alpha_ravis_artifact`, `list_alpha_ravis_artifacts`,
+`search_debugging_lessons`, `record_debugging_lesson`,
+`query_source`, `query_sources`, `search_agent_memory`.
+
+Env vars:
+- `ALPHARAVIS_DELEGATE_MAX_SPAWN_DEPTH=2`
+- `ALPHARAVIS_DELEGATE_MAX_CONCURRENT=5`
+- `ALPHARAVIS_DELEGATE_TEMPERATURE=0.1`
+- `ALPHARAVIS_DELEGATE_MAX_TOKENS=4096`
+
 ### UI Assistant
 
 Handles browser, VNC, and desktop-style tasks when the optional UI stack is available.
