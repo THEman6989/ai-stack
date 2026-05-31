@@ -13192,13 +13192,13 @@ async def background_review_node(state: AlphaRavisState, runtime: Any | None = N
         if not memory_text:
             continue
         try:
-            await record_curated_memory.ainvoke({
-                "action": "create",
-                "memory": memory_text,
-                "memory_type": str(mem.get("memory_type", "fact"))[:80],
-                "evidence": str(mem.get("evidence", ""))[:1200],
-                "scope": str(mem.get("scope", "global"))[:40],
-            })
+            await record_curated_memory(
+                action="create",
+                memory=memory_text,
+                memory_type=str(mem.get("memory_type", "fact"))[:80],
+                evidence=str(mem.get("evidence", ""))[:1200],
+                scope=str(mem.get("scope", "global"))[:40],
+            )
             memory_count += 1
         except Exception:
             pass
@@ -13209,15 +13209,15 @@ async def background_review_node(state: AlphaRavisState, runtime: Any | None = N
         if not isinstance(skill, dict):
             continue
         try:
-            await record_skill_candidate.ainvoke({
-                "name": str(skill.get("name", "curated-skill"))[:120],
-                "trigger": str(skill.get("trigger", ""))[:600],
-                "steps": str(skill.get("steps", ""))[:2000],
-                "success_signals": str(skill.get("success_signals", ""))[:600],
-                "safety_notes": str(skill.get("safety_notes", ""))[:600],
-                "evidence": str(skill.get("evidence", ""))[:1200],
-                "source_task": "background_review",
-            })
+            await record_skill_candidate(
+                name=str(skill.get("name", "curated-skill"))[:120],
+                trigger=str(skill.get("trigger", ""))[:600],
+                steps=str(skill.get("steps", ""))[:2000],
+                success_signals=str(skill.get("success_signals", ""))[:600],
+                safety_notes=str(skill.get("safety_notes", ""))[:600],
+                evidence=str(skill.get("evidence", ""))[:1200],
+                source_task="background_review",
+            )
             skill_count += 1
         except Exception:
             pass
