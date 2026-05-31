@@ -4261,22 +4261,20 @@ def execute_local_command(command: str):
                     thread_key=_state_thread_key(),
                 )
                 if indexing and indexing.get("scheduled"):
-                    try:
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(
-                            _maybe_index_vector_memory(
-                                source_type=indexing["source_type"],
-                                source_key=indexing["source_key"],
-                                title=indexing["title"],
-                                content=indexing["content"],
-                                thread_id=indexing["thread_id"],
-                                thread_key=indexing["thread_key"],
-                                scope=indexing["scope"],
-                                metadata=indexing["metadata"],
-                            )
+                    # maybe_index_tool_run already verified the event loop exists
+                    # (returns scheduled=False if no loop), so create_task is safe.
+                    asyncio.create_task(
+                        _maybe_index_vector_memory(
+                            source_type=indexing["source_type"],
+                            source_key=indexing["source_key"],
+                            title=indexing["title"],
+                            content=indexing["content"],
+                            thread_id=indexing["thread_id"],
+                            thread_key=indexing["thread_key"],
+                            scope=indexing["scope"],
+                            metadata=indexing["metadata"],
                         )
-                    except RuntimeError:
-                        pass
+                    )
             except Exception:
                 pass
         return output

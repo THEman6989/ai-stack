@@ -26,14 +26,25 @@ import re
 import time
 from typing import Any
 
-# Secret-scrubbing patterns — never index these
+# Secret-scrubbing patterns — applied in order BEFORE surrogate construction.
+# Pattern 1 catches key=value pairs with sensitive-sounding keys.
+# Patterns 2-6 catch standalone secrets not wrapped in key=value syntax.
+# All matches replaced with [REDACTED]. Order matters: pattern 1 runs first
+# and redacts the entire `key=value` line, so later patterns only catch
+# standalone references.
 _SECRET_PATTERNS = [
-    re.compile(r"(?:password|passwd|pass|token|secret|key|api_key|auth)\s*[=:]\s*\S+", re.IGNORECASE),
+    # key=value / key: value patterns — only sensitive key names, not generic "key"/"auth"
+    re.compile(r"(?:password|passwd|pass|token|secret|api_key|private_key|secret_key|access_key)\s*[=:]\s*[^\n]+", re.IGNORECASE),
+    # SSH private key blocks
     re.compile(r"-----BEGIN\s+(?:RSA|EC|DSA|OPENSSH)\s+PRIVATE KEY-----[\s\S]*?-----END\s+(?:RSA|EC|DSA|OPENSSH)\s+PRIVATE KEY-----"),
+    # GitHub personal access tokens
     re.compile(r"ghp_[a-zA-Z0-9]{36}"),
+    # OpenAI / generic sk- API keys
     re.compile(r"sk-[a-zA-Z0-9]{20,}"),
+    # Slack tokens (xoxb, xoxp, xoxa, xoxr, xoxs)
     re.compile(r"xox[bpras]-\d{10,}-\d{10,}-[a-zA-Z0-9]+"),
-    re.compile(r"eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*"),  # JWT
+    # JWT tokens (header.payload.signature)
+    re.compile(r"eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*"),
 ]
 
 
