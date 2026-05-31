@@ -1804,3 +1804,25 @@ ALPHARAVIS_LOCAL_COMMAND_MAX_OUTPUT_CHARS=12000
 # Optional cloud model keys, only needed if you add cloud fallback models.
 # OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 # ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# --- Sub-agent delegation tuning ---
+# Streaming for sub-agents: off by default — sub-agents don't stream to the
+# user, and non-streaming mode avoids tool-call chunking issues with some LLM
+# providers (especially local llama.cpp backends). Enable only if your
+# provider handles streamed tool calls reliably.
+# ALPHARAVIS_DELEGATE_STREAMING=false
+
+# Tool result truncation limit for sub-agents (chars). Hermes-style smart
+# truncation at last newline within this limit. Default 16000.
+# ALPHARAVIS_DELEGATE_TOOL_RESULT_CHARS=16000
+
+# Context budget for sub-agents (chars). Oldest tool results are trimmed
+# when total message chars exceed this limit. Protects context window
+# from silent overflow during long tool-calling chains. Default 80000.
+# ALPHARAVIS_DELEGATE_CONTEXT_BUDGET_CHARS=80000
+
+# Sub-agent model temperature (lower = more deterministic). Default 0.1.
+# ALPHARAVIS_DELEGATE_TEMPERATURE=0.1
+
+# Max output tokens per sub-agent LLM call. Default 4096.
+# ALPHARAVIS_DELEGATE_MAX_TOKENS=4096
