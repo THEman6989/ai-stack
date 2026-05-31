@@ -4232,6 +4232,40 @@ def execute_ssh_command(pc_name: str, command: str):
         return f"SSH connection failed: {exc}"
 
 
+def _schedule_background_task(coro, label: str = "") -> None:
+    """Schedule a coroutine for fire-and-forget execution with error logging.
+
+    Creates an ``asyncio.Task`` from *coro* and attaches a done-callback
+    that logs any unhandled exception — so errors are visible instead of
+    silently swallowed.  Silently returns when no event loop is running
+    (sync context without an active async runtime).
+
+    Intended for best-effort side-effects (PGVector indexing, tool-memory
+    auto-save, curated-memory storage) where the caller must not block
+    waiting for the result.
+    """
+    try:
+        task = asyncio.create_task(coro)
+        task.add_done_callback(
+            lambda t: (
+                _print_if_exception(t, label)
+                if t.exception() is not None
+                else None
+            )
+        )
+    except RuntimeError:
+        pass  # No running event loop — skip silently
+
+
+def _print_if_exception(task: asyncio.Task, label: str = "") -> None:
+    exc = task.exception()
+    if exc is not None:
+        print(
+            f"WARNING: background task failed"
+            f"{': ' + label if label else ''}: {exc}"
+        )
+
+
 @tool
 def execute_local_command(command: str):
     """Executes a local diagnostic shell command for Docker, logs, or repo inspection."""
@@ -4263,8 +4297,8 @@ def execute_local_command(command: str):
                 )
                 if indexing and indexing.get("scheduled"):
                     # maybe_index_tool_run already verified the event loop exists
-                    # (returns scheduled=False if no loop), so create_task is safe.
-                    asyncio.create_task(
+                    # (returns scheduled=False if no loop), so scheduling is safe.
+                    _schedule_background_task(
                         _maybe_index_vector_memory(
                             source_type=indexing["source_type"],
                             source_key=indexing["source_key"],
@@ -4274,7 +4308,8 @@ def execute_local_command(command: str):
                             thread_key=indexing["thread_key"],
                             scope=indexing["scope"],
                             metadata=indexing["metadata"],
-                        )
+                        ),
+                        label=f"tool_run_index:{indexing.get('source_key', '?')}",
                     )
             except Exception:
                 pass
@@ -4714,18 +4749,15 @@ def create_curated_memory_review_candidates(
     if isinstance(result, dict) and result.get("ok") and result.get("items"):
         for item in result["items"]:
             if item.get("status") == "accepted" and not item.get("memory_key"):
-                # Use the existing tool logic to store
-                try:
-                    # We need a dummy agent_id/scope or from item
-                    asyncio.create_task(
-                        record_curated_memory(
-                            memory=item["memory"],
-                            memory_type=item["memory_type"],
-                            evidence=item.get("source_preview", ""),
-                        )
-                    )
-                except Exception:
-                    pass
+                # Auto-store via background task (fire-and-forget with error logging)
+                _schedule_background_task(
+                    record_curated_memory(
+                        memory=item["memory"],
+                        memory_type=item["memory_type"],
+                        evidence=item.get("source_preview", ""),
+                    ),
+                    label=f"auto_store_memory:{item.get('memory_type', '?')}",
+                )
 
     return _json_tool_result(result)
 
@@ -7532,12 +7564,8 @@ def _try_auto_save_tool_memory(tool_name: str, memory: str, evidence: str = "") 
     Called from sync tool functions after successful execution. Schedules an
     async task to record the memory without blocking the tool's return.
     Silently skips if no event loop is running or the store is unavailable.
+    Errors in the background task are logged via done-callback.
     """
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return  # No running event loop, skip
-
     async def _save():
         try:
             if get_store is None:
@@ -7568,7 +7596,7 @@ def _try_auto_save_tool_memory(tool_name: str, memory: str, evidence: str = "") 
         except Exception:
             pass  # Best-effort — never break the tool
 
-    loop.create_task(_save())
+    _schedule_background_task(_save(), label=f"tool_memory:{tool_name}")
 
 
 @tool
