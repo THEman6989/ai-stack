@@ -5,7 +5,10 @@ Features:
 - Nested delegation with max_spawn_depth
 - Sub-agent registry with cancellation (asyncio.Event)
 - File-state tracking across agents (stale-read warnings)
-- All four missing features in one module.
+- Smart tool-result truncation (Hermes-style: last-newline, clear markers)
+- Context budget enforcement (per-turn message trimming)
+- Wall-clock timeout (entire task, not per-iteration)
+- Configurable streaming for sub-agents
 
 Architecture:
     SubAgentRegistry — global dict of running agents
@@ -17,6 +20,7 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
 import time
@@ -25,6 +29,24 @@ from pathlib import Path
 from typing import Any
 
 LOGGER = logging.getLogger("alpharavis.delegate_agent")
+
+# Context variables for nested delegation tracking.
+# Set by run_sub_agent() so delegate_task @tool can read the current agent's
+# depth and parent_id without explicit parameter passing.
+_CURRENT_AGENT_ID: contextvars.ContextVar[str] = contextvars.ContextVar("delegate_agent_id", default="")
+_CURRENT_AGENT_DEPTH: contextvars.ContextVar[int] = contextvars.ContextVar("delegate_agent_depth", default=0)
+
+
+def get_current_agent_context() -> dict[str, Any]:
+    """Return the current sub-agent's context for nested delegation.
+
+    Called by delegate_task @tool in agent_graph.py to determine depth/parent_id.
+    Returns {'agent_id': '', 'depth': 0} when not inside a sub-agent.
+    """
+    return {
+        "agent_id": _CURRENT_AGENT_ID.get(),
+        "depth": _CURRENT_AGENT_DEPTH.get(),
+    }
 
 # ---------------------------------------------------------------------------
 # Global registry — survives across tool calls within the same LangGraph run
@@ -136,8 +158,8 @@ class FileStateTracker:
     """
 
     def __init__(self) -> None:
-        self._records: dict[str, FileRecord] = {}  # path → last write
-        self._agent_reads: dict[str, dict[str, float]] = {}  # agent_id → {path → last_read_ts}
+        self._records: dict[str, FileRecord] = {}  # path -> last write
+        self._agent_reads: dict[str, dict[str, float]] = {}  # agent_id -> {path -> last_read_ts}
 
     def record_write(self, path: str, agent_id: str) -> None:
         """Record that an agent wrote to a file."""
@@ -190,7 +212,7 @@ class FileStateTracker:
 
         if record_mtime_sec > last_read:
             stale_warning = (
-                f"⚠️ STALE FILE: {key} was last written by agent '{record.agent_id}' "
+                f"WARNING: STALE FILE: {key} was last written by agent '{record.agent_id}' "
                 f"{time.time() - record.timestamp:.0f}s ago. "
                 f"Your agent's last read was at t={last_read:.3f}. "
                 f"Consider re-reading before acting on cached data."
@@ -222,11 +244,105 @@ FILE_STATE_TRACKER = FileStateTracker()
 # Core sub-agent spawner — recursive with depth guard
 # ---------------------------------------------------------------------------
 
-# Default max depth — sub-agents can spawn sub-agents once (depth 0→1→2 stops)
+# Default max depth — sub-agents can spawn sub-agents once (depth 0->1->2 stops)
 DEFAULT_MAX_SPAWN_DEPTH = int(os.getenv("ALPHARAVIS_DELEGATE_MAX_SPAWN_DEPTH", "2"))
 
 # Maximum concurrent sub-agents across all depths
 DEFAULT_MAX_CONCURRENT = int(os.getenv("ALPHARAVIS_DELEGATE_MAX_CONCURRENT", "5"))
+
+# Tool result truncation — Hermes-style: truncate at last newline within limit
+# Default 16k lets sub-agents see substantial output without context-bombing the LLM.
+# When truncated, a clear marker shows original vs truncated size.
+DELEGATE_TOOL_RESULT_MAX_CHARS = int(os.getenv(
+    "ALPHARAVIS_DELEGATE_TOOL_RESULT_CHARS", "16000"
+))
+
+# Context budget — if total message chars exceed this, oldest tool results are trimmed.
+# Protects the sub-agent's context window from silent overflow.
+DELEGATE_CONTEXT_BUDGET_CHARS = int(os.getenv(
+    "ALPHARAVIS_DELEGATE_CONTEXT_BUDGET_CHARS", "80000"
+))
+
+
+# ---------------------------------------------------------------------------
+# Helper: Hermes-style smart tool result truncation
+# ---------------------------------------------------------------------------
+
+def _truncate_tool_result(content: str, max_chars: int) -> str:
+    """Truncate tool output at the last newline within max_chars.
+
+    Hermes-style: preserves readable line boundaries, adds a clear marker
+    showing original vs truncated size so the sub-agent knows data was lost.
+    """
+    if len(content) <= max_chars:
+        return content
+    truncated = content[:max_chars]
+    last_nl = truncated.rfind("\n")
+    if last_nl > max_chars // 2:
+        truncated = truncated[:last_nl + 1]
+    return (
+        f"{truncated}\n"
+        f"[Truncated: tool response was {len(content):,} chars -> shown {len(truncated):,} chars. "
+        f"Consider re-running with more specific parameters or using read_alpha_ravis_artifact "
+        f"to store and page through large results.]"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helper: context budget enforcement (Hermes layer 3: per-turn aggregate)
+# ---------------------------------------------------------------------------
+
+def _enforce_context_budget(
+    messages: list[dict[str, Any]],
+    budget_chars: int,
+) -> None:
+    """Trim oldest tool results until total message chars are under budget.
+
+    Preserves system + user messages and the most recent tool interactions.
+    Only removes tool results (role='tool') from the middle of the history.
+    Each removed message gets a brief tombstone so the agent knows data was dropped.
+    """
+    total = sum(len(str(m.get("content", ""))) for m in messages)
+    if total <= budget_chars:
+        return
+
+    # Find trimmable indices: tool messages after the first user turn,
+    # but before the last N messages (keep recent context).
+    keep_tail = max(4, len(messages) // 4)  # keep last 25% minimum
+    trim_candidates: list[int] = []
+    for i, m in enumerate(messages):
+        if i < 2:  # preserve system + first user
+            continue
+        if i >= len(messages) - keep_tail:  # preserve recent context
+            break
+        if m.get("role") == "tool":
+            trim_candidates.append(i)
+
+    removed = 0
+    for idx in reversed(trim_candidates):
+        if total <= budget_chars * 0.8:  # stop at 80% of budget (headroom)
+            break
+        msg = messages[idx]
+        content_len = len(str(msg.get("content", "")))
+        messages[idx] = {
+            "role": "tool",
+            "tool_call_id": msg.get("tool_call_id", ""),
+            "content": (
+                f"[Context trimmed: tool result ({content_len:,} chars) removed "
+                f"to stay within {budget_chars:,}-char budget. "
+                f"Re-run the tool if you need this data.]"
+            ),
+        }
+        total -= content_len
+        total += len(str(messages[idx]["content"]))
+        removed += 1
+
+    if removed:
+        LOGGER.debug(
+            "Context budget enforced: removed %d tool results, "
+            "total now ~%d chars (budget %d)",
+            removed, total, budget_chars,
+        )
 
 
 async def run_sub_agent(
@@ -251,10 +367,10 @@ async def run_sub_agent(
     Args:
         goal: The task goal for this agent.
         context: Background info passed from parent.
-        tools: dict of tool_name → tool_object (callable with .ainvoke()).
+        tools: dict of tool_name -> tool_object (callable with .ainvoke()).
         tool_names: Optional subset of tool names to expose.
         max_iterations: Max tool-calling turns.
-        timeout_seconds: Per-call timeout (wraps LLM invoke).
+        timeout_seconds: Total wall-clock timeout for the entire task.
         max_output_chars: Truncate final summary.
         depth: Current nesting depth (0 = top-level).
         parent_id: Agent ID of the spawner (None for top-level).
@@ -272,6 +388,10 @@ async def run_sub_agent(
     )
     agent_id = ctx.agent_id
     cancel_evt = ctx.cancel_event
+
+    # Set context vars so nested delegate_task calls inherit correct depth/parent
+    _CURRENT_AGENT_ID.set(agent_id)
+    _CURRENT_AGENT_DEPTH.set(depth)
 
     clean_tool_names = _normalize_tool_names(tool_names)
 
@@ -306,7 +426,8 @@ async def run_sub_agent(
         f"You are AlphaRavis sub-agent '{agent_id}' (depth {depth}/{max_depth}). "
         "Focus exclusively on the assigned goal. Use your tools and return a structured result. "
         f"Available tools: {tool_list_str}. "
-        f"You have up to {max_iterations} tool-calling turns."
+        f"You have up to {max_iterations} tool-calling turns "
+        f"and {timeout_seconds}s total wall-clock time."
         f"{nest_hint}\n\n"
         "When done, return a final answer with these sections:\n"
         "  ## Summary — what you accomplished\n"
@@ -324,12 +445,18 @@ async def run_sub_agent(
     if _model_fn is None:
         ctx.state = "failed"
         ctx.result = {"status": "failed", "error": "No model function provided"}
+        SUB_AGENT_REGISTRY.unregister(agent_id)
         return ctx.result
 
     model_kwargs: dict[str, Any] = {
         "temperature": float(os.getenv("ALPHARAVIS_DELEGATE_TEMPERATURE", "0.1")),
         "max_tokens": int(os.getenv("ALPHARAVIS_DELEGATE_MAX_TOKENS", "4096")),
     }
+    # Streaming: off by default for sub-agents — they don't stream to the user
+    # and non-streaming mode avoids tool-call chunking issues with some providers.
+    # Enable via ALPHARAVIS_DELEGATE_STREAMING=true if your provider handles it well.
+    if env_bool("ALPHARAVIS_DELEGATE_STREAMING", "false"):
+        model_kwargs["stream"] = True
     if tool_schemas:
         model_kwargs["tools"] = tool_schemas
 
@@ -337,6 +464,7 @@ async def run_sub_agent(
     if model is None:
         ctx.state = "failed"
         ctx.result = {"status": "failed", "error": "Model unavailable"}
+        SUB_AGENT_REGISTRY.unregister(agent_id)
         return ctx.result
 
     started = time.perf_counter()
@@ -345,105 +473,122 @@ async def run_sub_agent(
     timeout = max(30, min(int(timeout_seconds), 1800))
 
     name_to_tool = selected_tools  # already normalized
+    tool_result_limit = DELEGATE_TOOL_RESULT_MAX_CHARS
+    context_budget = DELEGATE_CONTEXT_BUDGET_CHARS
 
     try:
-        for turn in range(max_iterations):
-            # Check cancellation
-            if cancel_evt is not None and cancel_evt.is_set():
-                ctx.state = "cancelled"
-                result = {
-                    "status": "cancelled",
-                    "goal": goal[:120],
-                    "agent_id": agent_id,
-                    "summary": f"Cancelled by parent after {turn} turns.",
-                    "api_calls": api_calls,
-                    "duration_seconds": round(time.perf_counter() - started, 1),
-                }
-                ctx.result = result
-                return result
+        # Wall-clock timeout: wrap the ENTIRE task, not per-iteration.
+        # asyncio.wait_for on the loop ensures sub-agents never exceed their
+        # total time budget regardless of how many turns they take.
+        async def _task_loop() -> dict[str, Any]:
+            nonlocal api_calls
+            for turn in range(max_iterations):
+                # Check cancellation
+                if cancel_evt is not None and cancel_evt.is_set():
+                    ctx.state = "cancelled"
+                    result = {
+                        "status": "cancelled",
+                        "goal": goal[:120],
+                        "agent_id": agent_id,
+                        "summary": f"Cancelled by parent after {turn} turns.",
+                        "api_calls": api_calls,
+                        "duration_seconds": round(time.perf_counter() - started, 1),
+                    }
+                    ctx.result = result
+                    SUB_AGENT_REGISTRY.unregister(agent_id)
+                    return result
 
-            api_calls += 1
-            response = await asyncio.wait_for(
-                model.ainvoke(messages),
-                timeout=timeout,
-            )
+                api_calls += 1
+                response = await model.ainvoke(messages)
 
-            # Check for tool calls
-            tool_calls = getattr(response, "tool_calls", None) or []
-            if not tool_calls:
-                content = str(getattr(response, "content", "") or "")
-                ctx.state = "completed"
-                result = {
-                    "status": "completed",
-                    "goal": goal[:120],
-                    "agent_id": agent_id,
-                    "depth": depth,
-                    "summary": content[:max_chars],
-                    "api_calls": api_calls,
-                    "duration_seconds": round(time.perf_counter() - started, 1),
-                }
-                ctx.result = result
-                SUB_AGENT_REGISTRY.unregister(agent_id)
-                return result
+                # Check for tool calls
+                tool_calls = getattr(response, "tool_calls", None) or []
+                if not tool_calls:
+                    content = str(getattr(response, "content", "") or "")
+                    ctx.state = "completed"
+                    result = {
+                        "status": "completed",
+                        "goal": goal[:120],
+                        "agent_id": agent_id,
+                        "depth": depth,
+                        "summary": content[:max_chars],
+                        "api_calls": api_calls,
+                        "duration_seconds": round(time.perf_counter() - started, 1),
+                    }
+                    ctx.result = result
+                    SUB_AGENT_REGISTRY.unregister(agent_id)
+                    return result
 
-            # Execute tools
-            messages.append(response)
-            for tc in tool_calls:
-                tc_name = tc.get("name", "")
-                tc_args = tc.get("args", {})
-                tc_id = tc.get("id", "")
+                # Execute tools
+                messages.append(response)
+                for tc in tool_calls:
+                    tc_name = tc.get("name", "")
+                    tc_args = tc.get("args", {})
+                    tc_id = tc.get("id", "")
 
-                # --- File-state tracking before read operations ---
-                if tc_name in {"read_source_chunks", "read_raw_source", "read_alpha_ravis_artifact"}:
-                    if "path" in tc_args:
-                        stale_warn = FILE_STATE_TRACKER.check_stale_read(tc_args["path"], agent_id)
-                        if stale_warn:
-                            messages.append({
-                                "role": "system",
-                                "content": stale_warn,
-                            })
+                    # --- File-state tracking before read operations ---
+                    if tc_name in {"read_source_chunks", "read_raw_source", "read_alpha_ravis_artifact"}:
+                        if "path" in tc_args:
+                            stale_warn = FILE_STATE_TRACKER.check_stale_read(tc_args["path"], agent_id)
+                            if stale_warn:
+                                messages.append({
+                                    "role": "system",
+                                    "content": stale_warn,
+                                })
 
-                tool_obj = name_to_tool.get(tc_name)
-                if tool_obj is not None:
-                    try:
-                        result_raw = await tool_obj.ainvoke(tc_args)
-                        result_str = str(result_raw) if result_raw is not None else ""
+                    tool_obj = name_to_tool.get(tc_name)
+                    if tool_obj is not None:
+                        try:
+                            result_raw = await tool_obj.ainvoke(tc_args)
+                            result_str = str(result_raw) if result_raw is not None else ""
 
-                        # --- File-state tracking after write operations ---
-                        if tc_name in {"write_alpha_ravis_artifact"}:
-                            if "path" in tc_args:
-                                FILE_STATE_TRACKER.record_write(tc_args["path"], agent_id)
-                        elif tc_name == "execute_local_command":
-                            # Track writes from commands that clearly write files
-                            cmd = str(tc_args.get("command", "")).lower()
-                            write_path = _extract_write_path_from_command(cmd)
-                            if write_path:
-                                FILE_STATE_TRACKER.record_write(write_path, agent_id)
+                            # --- File-state tracking after write operations ---
+                            if tc_name in {"write_alpha_ravis_artifact"}:
+                                if "path" in tc_args:
+                                    FILE_STATE_TRACKER.record_write(tc_args["path"], agent_id)
+                            elif tc_name == "execute_local_command":
+                                cmd = str(tc_args.get("command", "")).lower()
+                                write_path = _extract_write_path_from_command(cmd)
+                                if write_path:
+                                    FILE_STATE_TRACKER.record_write(write_path, agent_id)
 
-                    except Exception as exc:
-                        result_str = f"Tool error: {exc}"
-                else:
-                    result_str = f"Tool '{tc_name}' not available in this sub-agent context."
+                        except Exception as exc:
+                            result_str = f"Tool error: {exc}"
+                    else:
+                        result_str = (
+                            f"Tool '{tc_name}' is not available in this sub-agent context. "
+                            f"Available tools: {', '.join(sorted(name_to_tool.keys()))}. "
+                            f"Do not call '{tc_name}' again."
+                        )
 
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc_id,
-                    "content": result_str[:4000],
-                })
+                    # Hermes-style smart truncation: cut at last newline within limit,
+                    # with clear marker showing original vs truncated size.
+                    result_str = _truncate_tool_result(result_str, tool_result_limit)
 
-        # Max iterations reached
-        ctx.state = "completed"  # still completed, but with max_iterations flag
-        result = {
-            "status": "max_iterations",
-            "goal": goal[:120],
-            "agent_id": agent_id,
-            "summary": f"Reached max tool-calling iterations ({max_iterations}) without final answer.",
-            "api_calls": api_calls,
-            "duration_seconds": round(time.perf_counter() - started, 1),
-        }
-        ctx.result = result
-        SUB_AGENT_REGISTRY.unregister(agent_id)
-        return result
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": result_str,
+                    })
+
+                # Context budget guard: trim oldest tool results if total exceeds budget
+                _enforce_context_budget(messages, context_budget)
+
+            # Max iterations reached
+            ctx.state = "completed"
+            result = {
+                "status": "max_iterations",
+                "goal": goal[:120],
+                "agent_id": agent_id,
+                "summary": f"Reached max tool-calling iterations ({max_iterations}) without final answer.",
+                "api_calls": api_calls,
+                "duration_seconds": round(time.perf_counter() - started, 1),
+            }
+            ctx.result = result
+            SUB_AGENT_REGISTRY.unregister(agent_id)
+            return result
+
+        return await asyncio.wait_for(_task_loop(), timeout=timeout)
 
     except asyncio.TimeoutError:
         ctx.state = "timeout"
@@ -451,7 +596,7 @@ async def run_sub_agent(
             "status": "timeout",
             "goal": goal[:120],
             "agent_id": agent_id,
-            "error": f"Timed out after {timeout}s",
+            "error": f"Task timed out after {timeout}s wall-clock time ({api_calls} API calls made).",
             "api_calls": api_calls,
             "duration_seconds": round(time.perf_counter() - started, 1),
         }
@@ -502,9 +647,16 @@ def _build_tool_schemas(
     tools: dict[str, Any],
     _tool_name_fn: Any | None,
 ) -> list[dict[str, Any]]:
-    """Build OpenAI-format tool schemas from tool objects."""
+    """Build OpenAI-format tool schemas from tool objects.
+
+    Tools without a valid args_schema get a minimal fallback schema
+    (empty object properties) so the model can still call them.
+    Logged at WARNING so operators can fix the tool definition.
+    """
     schemas: list[dict[str, Any]] = []
     for name, tool_obj in tools.items():
+        tool_name = _tool_name_fn(tool_obj) if _tool_name_fn else name
+        description = getattr(tool_obj, "description", "") or ""
         if hasattr(tool_obj, "args_schema"):
             schema = tool_obj.args_schema
             if hasattr(schema, "model_json_schema"):
@@ -512,15 +664,31 @@ def _build_tool_schemas(
             elif callable(getattr(schema, "schema", None)):
                 js = schema.schema()
             else:
-                continue
-            schemas.append({
-                "type": "function",
-                "function": {
-                    "name": _tool_name_fn(tool_obj) if _tool_name_fn else name,
-                    "description": getattr(tool_obj, "description", "") or "",
-                    "parameters": js,
-                },
-            })
+                # Schema object exists but has no known introspection method.
+                # Fall through to minimal schema instead of silently dropping.
+                LOGGER.warning(
+                    "Tool '%s' has args_schema but no model_json_schema() / schema(). "
+                    "Using minimal fallback (empty properties). Fix the tool's args_schema.",
+                    tool_name,
+                )
+                js = {"type": "object", "properties": {}}
+        else:
+            # No args_schema at all — use minimal valid schema.
+            LOGGER.warning(
+                "Tool '%s' has no args_schema. "
+                "Using minimal fallback (empty properties). The model can call it "
+                "but parameter validation is disabled. Fix the tool definition.",
+                tool_name,
+            )
+            js = {"type": "object", "properties": {}}
+        schemas.append({
+            "type": "function",
+            "function": {
+                "name": tool_name,
+                "description": description,
+                "parameters": js,
+            },
+        })
     return schemas
 
 
@@ -538,12 +706,12 @@ def _extract_write_path_from_command(command: str) -> str | None:
     import re
 
     patterns = [
-        r'(?:^|\s)>>\s*([^\s;&|]+)',                # redirect >> file (MUST come before >)
-        r'(?:^|\s)(?<!>)>\s*([^\s;&|]+)',            # redirect > file (NOT >>)
-        r'(?:^|\s)tee\s+([^\s;&|]+)',                 # tee file
-        r'(?:^|\s)cp\s+.*\s+([^\s;&|]+)$',          # cp ... dest (last arg)
-        r'(?:^|\s)mv\s+.*\s+([^\s;&|]+)$',          # mv ... dest (last arg)
-        r'(?:^|\s)install\s+.*\s+([^\s;&|]+)$',     # install ... dest
+        r'(?:^|\s)>>\s*([^\s;&|)]+)',                # redirect >> file (before >)
+        r'(?:^|\s)(?<!>)>\s*([^\s;&|)]+)',            # redirect > file (NOT >>)
+        r'(?:^|\s)tee\s+([^\s;&|)]+)',                 # tee file
+        r'(?:^|\s)cp\s+.*\s+([^\s;&|)]+)$',          # cp ... dest (last arg)
+        r'(?:^|\s)mv\s+.*\s+([^\s;&|)]+)$',          # mv ... dest (last arg)
+        r'(?:^|\s)install\s+.*\s+([^\s;&|)]+)$',     # install ... dest
     ]
     for pat in patterns:
         m = re.search(pat, command)

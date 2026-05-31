@@ -436,8 +436,8 @@ def test_execute_local_command_has_tool_run_indexing_flag() -> None:
         "execute_local_command delegates to event_indexing module — "
         "flag is checked in maybe_index_tool_run, not duplicated here"
     )
-    assert "_maybe_index_tool_run" in _cmd_fn, (
-        "execute_local_command must call _maybe_index_tool_run "
+    assert "_index_tool_call" in _cmd_fn, (
+        "execute_local_command must call _index_tool_call "
         "to schedule optional tool-run PGVector indexing"
     )
 

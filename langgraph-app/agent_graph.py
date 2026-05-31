@@ -538,6 +538,7 @@ try:
         list_running_agents as _list_running_agents,
         kill_agent as _kill_agent,
         get_file_state as _get_file_state,
+        get_current_agent_context as _get_current_agent_context,
         SubAgentRegistry as _SubAgentRegistry,
         SUB_AGENT_REGISTRY as _SUB_AGENT_REGISTRY,
     )
@@ -546,6 +547,7 @@ except Exception as exc:  # pragma: no cover - optional local helper
     _list_running_agents = None
     _kill_agent = None
     _get_file_state = None
+    _get_current_agent_context = None
     _SubAgentRegistry = None
     _SUB_AGENT_REGISTRY = None
     DELEGATE_AGENT_IMPORT_ERROR: Exception | None = exc
@@ -4291,6 +4293,51 @@ def _schedule_background_task(coro, label: str = "") -> None:
         pass  # No running event loop — skip silently
 
 
+def _index_tool_call(
+    tool_name: str,
+    result: str,
+    *,
+    thread_id: str = "",
+    thread_key: str = "",
+    max_chars: int = 500,
+) -> None:
+    """Fire-and-forget PGVector indexing of a tool call result.
+
+    Feature-flagged: ALPHARAVIS_ENABLE_TOOL_EVENT_VECTOR_INDEX (default OFF).
+    Safe to call from sync or async context — silently skips if indexing is
+    disabled, event_indexing is unavailable, or no event loop is running.
+
+    Intended to be called at the end of @tool functions, just before ``return``.
+    """
+    if _maybe_index_tool_run is None or _maybe_index_vector_memory is None:
+        return
+    try:
+        indexing = _maybe_index_tool_run(
+            tool_name,
+            result,
+            thread_id=thread_id,
+            thread_key=thread_key,
+            max_chars=max_chars,
+        )
+    except Exception:
+        return
+    if not (indexing and indexing.get("scheduled")):
+        return
+    _schedule_background_task(
+        _maybe_index_vector_memory(
+            source_type=indexing["source_type"],
+            source_key=indexing["source_key"],
+            title=indexing["title"],
+            content=indexing["content"],
+            thread_id=indexing["thread_id"],
+            thread_key=indexing["thread_key"],
+            scope=indexing["scope"],
+            metadata=indexing["metadata"],
+        ),
+        label=f"tool_index:{indexing.get('source_key', '?')}",
+    )
+
+
 def _print_if_exception(task: asyncio.Task, label: str = "") -> None:
     exc = task.exception()
     if exc is not None:
@@ -4319,34 +4366,12 @@ def execute_local_command(command: str):
             timeout=int(os.getenv("ALPHARAVIS_LOCAL_COMMAND_TIMEOUT_SECONDS", "45")),
         )
         output = f"Exit Code {result.returncode}\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-        # Optional tool-run PGVector indexing (feature-flagged, default OFF)
-        if _maybe_index_tool_run is not None:
-            try:
-                indexing = _maybe_index_tool_run(
-                    "execute_local_command",
-                    output,
-                    exit_code=result.returncode,
-                    thread_id=_state_thread_id(),
-                    thread_key=_state_thread_key(),
-                )
-                if indexing and indexing.get("scheduled"):
-                    # maybe_index_tool_run already verified the event loop exists
-                    # (returns scheduled=False if no loop), so scheduling is safe.
-                    _schedule_background_task(
-                        _maybe_index_vector_memory(
-                            source_type=indexing["source_type"],
-                            source_key=indexing["source_key"],
-                            title=indexing["title"],
-                            content=indexing["content"],
-                            thread_id=indexing["thread_id"],
-                            thread_key=indexing["thread_key"],
-                            scope=indexing["scope"],
-                            metadata=indexing["metadata"],
-                        ),
-                        label=f"tool_run_index:{indexing.get('source_key', '?')}",
-                    )
-            except Exception:
-                pass
+        _index_tool_call(
+            "execute_local_command",
+            output,
+            thread_id=_state_thread_id(),
+            thread_key=_state_thread_key(),
+        )
         return output
     except subprocess.TimeoutExpired:
         return "Error: local command timed out."
@@ -4564,7 +4589,9 @@ def fast_web_search(query: str):
     """ONLY for quick facts, weather, or simple questions using 1-2 sources."""
 
     search = DuckDuckGoSearchRun()
-    return search.invoke(query)
+    result = search.invoke(query)
+    _index_tool_call("fast_web_search", str(result), thread_id=_state_thread_id(), thread_key=_state_thread_key())
+    return result
 
 
 @tool
@@ -4572,7 +4599,10 @@ async def deep_web_research(query: str):
     """Use for complex research, comparisons, or deep multi-source web searches."""
 
     search = TavilySearchResults(max_results=10)
-    return await search.ainvoke({"query": query})
+    result = await search.ainvoke({"query": query})
+    _index_tool_call("deep_web_research", json.dumps(result) if isinstance(result, (list, dict)) else str(result),
+                     thread_id=_state_thread_id(), thread_key=_state_thread_key())
+    return result
 
 
 @tool
@@ -5792,7 +5822,9 @@ async def agentic_rag_retrieve(
         chunk_count=((payload.get("context_packet") or {}).get("chunk_count") if isinstance(payload, dict) else 0),
         elapsed_seconds=round(time.perf_counter() - started, 3),
     )
-    return _json_tool_result(payload)
+    result = _json_tool_result(payload)
+    _index_tool_call("agentic_rag_retrieve", result, thread_id=_state_thread_id(), thread_key=_state_thread_key())
+    return result
 
 
 async def _llm_grade_retrieval_hits(
@@ -5995,7 +6027,9 @@ async def read_source_chunks(
         )
     except Exception as exc:
         return _json_tool_result({"source_key": source_key, "chunks": [], "error": str(exc)[:500]})
-    return _json_tool_result(payload)
+    result = _json_tool_result(payload)
+    _index_tool_call("read_source_chunks", result, thread_id=_state_thread_id(), thread_key=_state_thread_key())
+    return result
 
 
 @tool
@@ -6031,7 +6065,7 @@ async def read_raw_source(
             }
         )
     window = _bounded_text_window(str(record.get("content") or ""), start=start, max_chars=max_chars, search=search)
-    return _json_tool_result(
+    result = _json_tool_result(
         {
             "found": True,
             "source_key": source_key,
@@ -6047,6 +6081,8 @@ async def read_raw_source(
             ),
         }
     )
+    _index_tool_call("read_raw_source", result, thread_id=_state_thread_id(), thread_key=_state_thread_key())
+    return result
 
 
 @tool
@@ -6173,7 +6209,7 @@ or a precise keyword match."""
         warnings=[warning for warning in [vector_warning, rag_warning, rerank_warning] if warning],
         elapsed_seconds=round(time.perf_counter() - started, 3),
     )
-    return _json_tool_result(
+    result = _json_tool_result(
         {
             "query": query,
             "include_other_threads": include_other_threads,
@@ -6189,6 +6225,8 @@ or a precise keyword match."""
             "warnings": [warning for warning in [vector_warning, rag_warning] if warning],
         }
     )
+    _index_tool_call("semantic_memory_search", result, thread_id=_state_thread_id(), thread_key=_state_thread_key())
+    return result
 
 
 @tool
@@ -6426,7 +6464,9 @@ across sessions (preferences, conventions, environment details)."""
 
     if not lines:
         return "No matching session history was found."
-    return "\n\n".join(lines[:limit])
+    result = "\n\n".join(lines[:limit])
+    _index_tool_call("search_session_history", result, thread_id=_state_thread_id(), thread_key=_state_thread_key())
+    return result
 
 
 def _artifact_root() -> Path:
@@ -6649,10 +6689,12 @@ async def read_alpha_ravis_artifact(artifact_id_or_query: str, max_chars: int = 
 
     if len(content) > max_chars:
         content = content[:max_chars].rstrip() + "\n\n[Artifact truncated. Ask for a narrower read if needed.]"
-    return (
+    result = (
         f"Artifact `{record.get('artifact_id')}`: {record.get('title')}\n"
         f"Path: {record.get('path')}\n\n{content}"
     )
+    _index_tool_call("read_alpha_ravis_artifact", result, thread_id=_state_thread_id(), thread_key=_state_thread_key())
+    return result
 
 
 @tool
@@ -6837,9 +6879,6 @@ async def delegate_task(
 
     depth = max(0, min(int(max_spawn_depth), 10))
 
-    # Resolve tool names → tool objects
-    _name_to_tool = {_tool_name_for_profile(t): t for t in _delegate_tool_map.values()}
-
     # Update env for nested delegation depth
     os.environ["ALPHARAVIS_DELEGATE_MAX_SPAWN_DEPTH"] = str(depth)
 
@@ -6848,16 +6887,21 @@ async def delegate_task(
         t_context = task_def.get("context", "")
         t_tool_names = task_def.get("toolsets")
 
+        # Determine depth/parent from context vars (supports nested delegation)
+        parent_ctx = _get_current_agent_context() if _get_current_agent_context else {"agent_id": "", "depth": 0}
+        child_depth = parent_ctx["depth"] + 1
+        child_parent = parent_ctx["agent_id"] or None
+
         return await _run_sub_agent(
             goal=t_goal,
             context=t_context,
-            tools=_name_to_tool,
+            tools=_delegate_tool_map,
             tool_names=list(t_tool_names) if t_tool_names else None,
             max_iterations=max(3, min(int(max_iterations), 90)),
             timeout_seconds=max(30, min(int(timeout_seconds), 1800)),
             max_output_chars=max(1000, min(int(max_output_chars), 16000)),
-            depth=0,
-            parent_id=None,
+            depth=child_depth,
+            parent_id=child_parent,
             _model_fn=lambda kw: _model(model_kwargs=kw),
             _tool_name_fn=_tool_name_for_profile,
         )

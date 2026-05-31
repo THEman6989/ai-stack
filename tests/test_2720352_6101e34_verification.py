@@ -129,19 +129,11 @@ def test_execute_local_command_structure():
     fn_end = source.index("def storage_manager_status")
     fn_source = source[fn_start:fn_end]
 
-    # 6101e34: No try/except RuntimeError around create_task
-    assert "except RuntimeError:" not in fn_source, \
-        "6101e34: Dead RuntimeError catch should be removed"
+    # 2026-05-31: execute_local_command now uses _index_tool_call helper
+    assert "_index_tool_call" in fn_source, \
+        "execute_local_command must call _index_tool_call for PGVector indexing"
 
-    # 6101e34: Comment explaining the guarantee
-    assert "maybe_index_tool_run already verified" in fn_source, \
-        "6101e34: Comment explaining loop guarantee should be present"
-
-    # 2720352: Calls _maybe_index_tool_run
-    assert "_maybe_index_tool_run" in fn_source, \
-        "2720352: execute_local_command must call _maybe_index_tool_run"
-
-    # 2720352: Returns output after indexing attempt
+    # Returns output after indexing attempt
     assert "return output" in fn_source, \
         "execute_local_command must return output"
 
@@ -149,7 +141,7 @@ def test_execute_local_command_structure():
     assert "ALPHARAVIS_ENABLE_TOOL_EVENT_VECTOR_INDEX" not in fn_source, \
         "Flag should only be in event_indexing.py, not duplicated"
 
-    print("  ✓ execute_local_command: no dead RuntimeError, proper comment, flag in module only")
+    print("  ✓ execute_local_command: uses _index_tool_call helper, flag in module only")
 
 
 # ============================================================
