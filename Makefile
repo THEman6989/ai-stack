@@ -81,7 +81,7 @@ help:
 		'  make tailscale-status' \
 		'' \
 		'Smoke checks:' \
-		'  make bridge-smoke | make hermes-smoke | make media-smoke | make openwebui-smoke | make comfyui-smoke' \
+		'  make bridge-smoke | make hermes-smoke | make media-smoke | make openwebui-smoke | make comfyui-smoke | make delegate-smoke' \
 		'' \
 		'ARM Gateway (deepagent-arm-gateway):' \
 		'  make gateway-install          # venv + pip install + .env from .env.example' \
@@ -306,6 +306,9 @@ hermes-smoke:
 
 media-smoke:
 	$(PYTHON) scripts/alpharavis_setup.py media-smoke
+
+delegate-smoke:
+	$(PYTHON) scripts/alpharavis_setup.py delegate-smoke
 
 openwebui-smoke:
 	$(PYTHON) scripts/alpharavis_setup.py openwebui-smoke

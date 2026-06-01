@@ -1130,6 +1130,64 @@ Reverse mode is disabled by default:
 BRIDGE_ENABLE_LANGGRAPH_TOOL=false
 ```
 
+### Native Sub-Agent Delegation (delegate_task)
+
+AlphaRavis can spawn its own sub-agents natively — no Hermes needed.
+When the LLM decides a task is complex enough, it calls `delegate_task`
+which spawns an isolated sub-agent with its own tool loop, context,
+and lifecycle management.
+
+**How it works from the user's perspective:**
+
+1. You ask AlphaRavis something complex ("analysier den Bug in X und
+   recherchiere parallel Y")
+2. AlphaRavis erkennt dass das 2+ unabhaengige Subtasks sind
+3. Es ruft `delegate_task(tasks=[{goal: "Bug X analysieren"},
+   {goal: "Y recherchieren"}])` auf
+4. Beide Sub-Agents laufen parallel (via asyncio.gather) mit eigenem
+   Kontext und 22-Tool-Toolset
+5. AlphaRavis kriegt strukturierte Summaries zurueck und antwortet dir
+
+**Sub-Agent Features (2026-06-01 — Full Hermes Parity):**
+
+| Feature | Default |
+|---------|---------|
+| Multi-Turn Tool-Loop | max 30 Iterationen, 600s Timeout |
+| Provider Override | `ALPHARAVIS_DELEGATE_PROVIDER/MODEL` (leer = Parent) |
+| Retry/Backoff | 2 Retries bei Rate-Limit/5xx, exponential |
+| Heartbeat-Keepalive | Alle 30s Parent-Activity-Touch |
+| Toolset-Blocklist | clarify, memory, send_message, execute_code geblockt |
+| Concurrency-Limit | Max 5 parallele Sub-Agents (DEFAULT_MAX_CONCURRENT) |
+| Spawn-Pause | `set_spawn_paused` @tool — globaler Kill-Switch |
+| Nested Delegation | depth 0→1→2 (max_spawn_depth=2) |
+| File-State-Tracking | STALE-FILE-Warnung bei Cross-Agent-Reads |
+| Context-Kompression | Automatisch via compress_messages |
+
+**Smoke-Test:**
+
+```bash
+make delegate-smoke
+# oder:
+python scripts/alpharavis_setup.py delegate-smoke
+```
+
+**ENV-Vars (alle mit guten Defaults):**
+
+```text
+# Provider (leer = Parent)
+ALPHARAVIS_DELEGATE_PROVIDER=
+ALPHARAVIS_DELEGATE_MODEL=
+# Heartbeat
+ALPHARAVIS_DELEGATE_HEARTBEAT_ENABLED=true
+ALPHARAVIS_DELEGATE_HEARTBEAT_INTERVAL_SECONDS=30
+# Toolset
+ALPHARAVIS_DELEGATE_INTERSECT_PARENT_TOOLS=true
+ALPHARAVIS_DELEGATE_BLOCKED_TOOLS=clarify,memory,send_message,execute_code
+# Resilience
+ALPHARAVIS_DELEGATE_MAX_RETRIES=2
+ALPHARAVIS_DELEGATE_RETRY_DELAY_SECONDS=5
+```
+
 When enabled, Hermes can call `POST /tools/langgraph/run`, but only with
 `explicit_user_request=true`. This is the loop guard: Hermes may use LangGraph
 only when you explicitly ask it to.

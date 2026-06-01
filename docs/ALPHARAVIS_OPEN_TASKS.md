@@ -3,20 +3,29 @@
 This is the running backlog for features that are intentionally prepared but
 not fully wired yet.
 
-## Native Delegate Agent — VERIFIED ✅ (2026-05-31)
+## Native Delegate Agent — VERIFIED ✅ (2026-06-01 — Full Hermes Parity)
 
-Full feature parity with Hermes `delegate_task` — all 4 previously-missing
-features now implemented and tested (22 new tests, 696 total passing):
+All 8 gaps vs Hermes `delegate_task` closed. 3 optional features added.
+37 tests, 801 total passing.
 
-- ✅ Nested Delegation (max_spawn_depth=2)
-- ✅ Cancellation (list_delegated_agents → kill_delegated_agent)
-- ✅ File-State Tracking (cross-agent stale read detection)
-- ✅ Sub-Agent Registry (running agent list with IDs)
-- ✅ Tool-Set expanded from 19 to 22
-- ✅ All 4 new @tools registered in categories + local_tool_map
+**Gap-Closure (2026-06-01):**
+- ✅ Provider/Credential-Override (sub-agents on different model)
+- ✅ Retry/Exponential-Backoff (2 retries, _is_retryable_error)
+- ✅ Heartbeat-Keepalive (prevents gateway inactivity timeout)
+- ✅ Toolset-Blocklist (clarify, memory, send_message, execute_code)
+- ✅ Toolset-Intersection with parent
+- ✅ Workspace-Hint in system prompt
+- ✅ Orchestrator-Prompt (when/when not to delegate)
+- ✅ Output-Format (5 structured sections incl. Issues)
 
-Files: `langgraph-app/delegate_agent.py` (new), `langgraph-app/agent_graph.py`
-(modified), `tests/test_delegate_agent.py` (new, 22 tests).
+**Optional Features (2026-06-01):**
+- ✅ Spawn-Pause (set_spawn_paused @tool — global kill-switch)
+- ✅ Concurrency-Semaphore (max 5 parallel via asyncio.Semaphore)
+- ✅ Caller Model Override (delegate_task(model="...") param > ENV)
+
+Files: `langgraph-app/delegate_agent.py` (1064→1135 lines),
+`langgraph-app/agent_graph.py` (modified), `scripts/alpharavis_setup.py`
+(delegate-smoke), `tests/test_delegate_agent.py` (37 tests).
 
 ## Mongo Raw Store + PGVector Search Head
 

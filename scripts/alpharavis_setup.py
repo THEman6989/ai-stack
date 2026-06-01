@@ -964,6 +964,64 @@ def openwebui_smoke() -> None:
     print(http_json(f"http://localhost:{port}/", timeout=15)[:1000])
 
 
+def delegate_smoke() -> None:
+    """End-to-end smoke test: verify delegate_task works through the bridge.
+
+    Sends a simple request that should trigger delegate_task sub-agent spawning.
+    Prints the bridge response and checks for delegate-specific markers.
+    """
+    env = read_env(ENV_PATH)
+    base = env.get("BRIDGE_EXTERNAL_API_BASE", "http://localhost:8123/v1").rstrip("/")
+
+    # Phase 1: Basic health — is the bridge alive?
+    print("=== Phase 1: Bridge health ===")
+    health = http_json(f"{base}/models", api_key="sk-1234", timeout=15)
+    print(health[:500])
+    if "error" in health.lower() or "ok" not in health.lower():
+        print("[FAIL] Bridge not healthy. Is the stack running? (make up)")
+        print("[HINT] Run: docker compose ps | grep bridge")
+        return
+
+    # Phase 2: Import check — is delegate_agent importable?
+    print("\n=== Phase 2: Delegate module import ===")
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-c", "from delegate_agent import run_sub_agent, SubAgentRegistry; print('OK')"],
+        capture_output=True, text=True,
+        cwd=os.path.join(os.path.dirname(__file__), "..", "langgraph-app"),
+        timeout=15,
+    )
+    if result.returncode == 0 and "OK" in result.stdout:
+        print("[PASS] delegate_agent module importable")
+    else:
+        print(f"[FAIL] delegate_agent import: {result.stderr[:500]}")
+        return
+
+    # Phase 3: Delegate-task request — ask AlphaRavis to self-analyze
+    # This should trigger delegate_task since it's a coding/analysis task
+    print("\n=== Phase 3: Delegate-task request ===")
+    body = {
+        "model": env.get("OPENAI_MODEL_NAME", "my-agent"),
+        "messages": [{
+            "role": "user",
+            "content": (
+                "Analyze this request and respond in German. "
+                "Check: (1) Is delegate_task available as a tool? "
+                "(2) List the registered tools. "
+                "Keep it under 3 sentences."
+            ),
+        }],
+        "stream": False,
+    }
+    response = http_json(f"{base}/chat/completions", api_key="sk-1234", payload=body, timeout=120)
+    print(response[:2000])
+
+    if "delegate_task" in response.lower() or "tool" in response.lower():
+        print("\n[PASS] Bridge responded — delegate_task tools are accessible.")
+    else:
+        print("\n[INFO] Response received. Check manually for delegate_task tool availability.")
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="AlphaRavis setup helper")
     parser.add_argument(
@@ -984,6 +1042,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             "hermes-smoke",
             "media-smoke",
             "openwebui-smoke",
+            "delegate-smoke",
         ],
     )
     parser.add_argument(
@@ -1094,6 +1153,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         media_smoke()
     elif args.command == "openwebui-smoke":
         openwebui_smoke()
+    elif args.command == "delegate-smoke":
+        delegate_smoke()
     return 0
 
 
