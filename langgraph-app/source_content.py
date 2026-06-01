@@ -8,34 +8,123 @@ from typing import Any
 # ---------- source content analysis ----------
 
 _SOURCE_STOPWORDS: set[str] = {
-    "about",
-    "after",
-    "also",
-    "and",
-    "aus",
-    "bei",
-    "but",
-    "das",
-    "der",
-    "die",
-    "dies",
-    "diese",
-    "ein",
-    "eine",
-    "for",
-    "from",
-    "hier",
-    "mit",
-    "nicht",
-    "oder",
-    "sich",
-    "that",
-    "the",
-    "und",
-    "von",
-    "was",
-    "wenn",
-    "with",
+    "a", "ab", "aber", "ach", "acht",
+    "achte", "achten", "achter", "achtes", "ag",
+    "alle", "allein", "allem", "allen", "aller",
+    "allerdings", "alles", "allgemeinen", "als", "also",
+    "am", "an", "andere", "anderem", "anderen",
+    "andern", "anders", "auch", "auf", "aus",
+    "ausser", "ausserdem", "außer", "außerdem", "bald",
+    "bei", "beide", "beiden", "beim", "beispiel",
+    "bekannt", "bereits", "besonders", "besser", "besten",
+    "bin", "bis", "bisher", "bist", "da",
+    "dabei", "dadurch", "dafür", "dagegen", "daher",
+    "dahin", "dahinter", "damals", "damit", "danach",
+    "daneben", "dank", "dann", "daran", "darauf",
+    "daraus", "darf", "darfst", "darin", "darum",
+    "darunter", "darüber", "das", "dasein", "daselbst",
+    "dass", "dasselbe", "davon", "davor", "dazu",
+    "dazwischen", "daß", "dein", "deine", "deinem",
+    "deiner", "dem", "dementsprechend", "demgegenüber", "demgemäss",
+    "demgemäß", "demselben", "demzufolge", "den", "denen",
+    "denn", "denselben", "der", "deren", "derjenige",
+    "derjenigen", "dermassen", "dermaßen", "derselbe", "derselben",
+    "des", "deshalb", "desselben", "dessen", "deswegen",
+    "dich", "die", "diejenige", "diejenigen", "dies",
+    "diese", "dieselbe", "dieselben", "diesem", "diesen",
+    "dieser", "dieses", "dir", "doch", "dort",
+    "drei", "drin", "dritte", "dritten", "dritter",
+    "drittes", "du", "durch", "durchaus", "durfte",
+    "durften", "dürfen", "dürft", "eben", "ebenso",
+    "ehrlich", "eigen", "eigene", "eigenen", "eigener",
+    "eigenes", "ein", "einander", "eine", "einem",
+    "einen", "einer", "eines", "einige", "einigen",
+    "einiger", "einiges", "einmal", "einmaleins", "elf",
+    "en", "ende", "endlich", "entweder", "er",
+    "erst", "erste", "ersten", "erster", "erstes",
+    "es", "etwa", "etwas", "euch", "früher",
+    "fünf", "fünfte", "fünften", "fünfter", "fünftes",
+    "für", "gab", "ganz", "ganze", "ganzen",
+    "ganzer", "ganzes", "gar", "gedurft", "gegen",
+    "gegenüber", "gehabt", "gehen", "geht", "gekannt",
+    "gekonnt", "gemacht", "gemocht", "gemusst", "genug",
+    "gerade", "gern", "gesagt", "geschweige", "gewesen",
+    "gewollt", "geworden", "gibt", "ging", "gleich",
+    "gross", "grosse", "grossen", "grosser", "grosses",
+    "groß", "große", "großen", "großer", "großes",
+    "gut", "gute", "guter", "gutes", "habe",
+    "haben", "habt", "hast", "hat", "hatte",
+    "hatten", "heisst", "heißt", "her", "heute",
+    "hier", "hin", "hinter", "hoch", "hätte",
+    "hätten", "ich", "ihm", "ihn", "ihnen",
+    "ihr", "ihre", "ihrem", "ihren", "ihrer",
+    "ihres", "im", "immer", "in", "indem",
+    "infolgedessen", "ins", "irgend", "ist", "ja",
+    "jahr", "jahre", "jahren", "je", "jede",
+    "jedem", "jeden", "jeder", "jedermann", "jedermanns",
+    "jedoch", "jemand", "jemandem", "jemanden", "jene",
+    "jenem", "jenen", "jener", "jenes", "jetzt",
+    "kam", "kann", "kannst", "kaum", "kein",
+    "keine", "keinem", "keinen", "keiner", "kleine",
+    "kleinen", "kleiner", "kleines", "kommen", "kommt",
+    "konnte", "konnten", "kurz", "können", "könnt",
+    "könnte", "lang", "lange", "leicht", "leider",
+    "lieber", "los", "machen", "macht", "machte",
+    "mag", "magst", "man", "manche", "manchem",
+    "manchen", "mancher", "manches", "mehr", "mein",
+    "meine", "meinem", "meinen", "meiner", "meines",
+    "mich", "mir", "mit", "mittel", "mochte",
+    "mochten", "morgen", "muss", "musst", "musste",
+    "mussten", "muß", "möchte", "mögen", "möglich",
+    "mögt", "müssen", "müsst", "na", "nach",
+    "nachdem", "nahm", "natürlich", "neben", "nein",
+    "neue", "neuen", "neun", "neunte", "neunten",
+    "neunter", "neuntes", "nicht", "nichts", "nie",
+    "niemand", "niemandem", "niemanden", "noch", "nun",
+    "nur", "ob", "oben", "oder", "offen",
+    "oft", "ohne", "recht", "rechte", "rechten",
+    "rechter", "rechtes", "richtig", "rund", "sagt",
+    "sagte", "sah", "satt", "schlecht", "schon",
+    "sechs", "sechste", "sechsten", "sechster", "sechstes",
+    "sehr", "sei", "seid", "seien", "sein",
+    "seine", "seinem", "seinen", "seiner", "seines",
+    "seit", "seitdem", "selbst", "sich", "sie",
+    "sieben", "siebente", "siebenten", "siebenter", "siebentes",
+    "siebte", "siebten", "siebter", "siebtes", "sind",
+    "so", "solang", "solche", "solchem", "solchen",
+    "solcher", "solches", "soll", "sollen", "sollte",
+    "sollten", "sondern", "sonst", "sowie", "später",
+    "statt", "tag", "tage", "tagen", "tat",
+    "teil", "tel", "trotzdem", "tun", "uhr",
+    "um", "und", "uns", "unser", "unsere",
+    "unserer", "unter", "vergangene", "vergangenen", "viel",
+    "viele", "vielem", "vielen", "vielleicht", "vier",
+    "vierte", "vierten", "vierter", "viertes", "vom",
+    "von", "vor", "wahr", "wann", "war",
+    "waren", "wart", "warum", "was", "wegen",
+    "weil", "weit", "weiter", "weitere", "weiteren",
+    "weiteres", "welche", "welchem", "welchen", "welcher",
+    "welches", "wem", "wen", "wenig", "wenige",
+    "weniger", "weniges", "wenigstens", "wenn", "wer",
+    "werde", "werden", "werdet", "wessen", "wie",
+    "wieder", "will", "willst", "wir", "wird",
+    "wirklich", "wirst", "wo", "wohl", "wollen",
+    "wollt", "wollte", "wollten", "worden", "wurde",
+    "wurden", "während", "währenddem", "währenddessen", "wäre",
+    "würde", "würden", "zehn", "zehnte", "zehnten",
+    "zehnter", "zehntes", "zeit", "zu", "zuerst",
+    "zugleich", "zum", "zunächst", "zur", "zurück",
+    "zusammen", "zwanzig", "zwar", "zwei", "zweite",
+    "zweiten", "zweiter", "zweites", "zwischen", "á",
+    "über", "überhaupt", "übrigens",
+    # --- merged from NLTK + ISO-619 (genuine German words missing from spaCy) ---
+    "ander", "anderer", "anderes", "anderm",
+    "deinen", "deines", "derer",
+    "einig", "einigem",
+    "euer", "eure", "eurem", "euren", "eurer", "eures",
+    "folgende", "folgendem", "folgenden", "folgender", "folgendes",
+    "hab", "jedes", "keines",
+    "unserem", "unseren", "unseres", "warst",
 }
 
 
@@ -79,7 +168,7 @@ def detect_source_content_type(text: str, *, title: str = "", metadata: dict[str
     log_lines = sum(
         1
         for line in lines
-        if re.search(r"^\s*(\d{4}-\d{2}-\d{2}[T\s]|\[[^\]]+\]\s*)?(INFO|WARN|WARNING|ERROR|DEBUG|TRACE|Traceback|Exception)\b", line)
+        if re.search(r"^\s*(\d{4}-\d{2}-\d{2}[T\s]|\[[^\]]+\]\s*)?(INFO|WARN|WARNING|ERROR|DEBUG|TRACE|Traceback|Exception|FEHLER|WARNUNG|FEHLERSCHWERE|HINWEIS|VERFOLGUNG|KRITISCH|FATAL|AUSNAHME|RÜCKVERFOLGUNG)\b", line)
     )
     config_lines = sum(1 for line in lines if re.search(r"^\s*[\w.-]+\s*[:=]\s*[^=].*$", line))
     table_lines = sum(
@@ -333,7 +422,10 @@ def classifier_window_text(text: str) -> str:
         return "\n".join(f"{index}: {line}" for index, line in numbered)
 
     marker_re = re.compile(
-        r"(?i)(^|\b)(/rag|/rake|/index|/ingest|/big-context|/big_context|<big-context|<big_context|task|instructions?|rules?|document|source|context|question|frage|aufgabe|anweisung|quelle)\b"
+        r"(?i)(^|\b)(/rag|/rake|/index|/ingest|/big-context|/big_context|<big-context|<big_context|"
+        r"task|instructions?|rules?|document|source|context|question|"
+        r"frage|aufgabe|anweisung|quelle|anleitung|spezifikation|verfahren|"
+        r"durchführung|durchfuehrung|vorgabe|richtlinie|bedingung)\b"
     )
     selected: dict[int, str] = {}
     head_lines = int(os.getenv("ALPHARAVIS_RAG_CLASSIFIER_HEAD_LINES", "80"))
@@ -365,8 +457,11 @@ def local_retrieval_query(text: str) -> str:
 
     lines = [line.strip() for line in raw.splitlines() if line.strip()]
     question_re = re.compile(
-        r"(?i)(\?|^(was|wie|warum|wann|wo|wer|welche|welcher|welches|wieso|how|what|why|when|where|who|which)\b|"
-        r"\b(find|search|suche|such|erklär|erklaer|zeige|tell me|look up|nachschauen|nachschau)\b)"
+        r"(?i)(\?|^(was|wie|warum|wann|wo|wer|welche|welcher|welches|wieso|weshalb|worum|inwiefern|"
+        r"how|what|why|when|where|who|which)\b|"
+        r"\b(find|search|suche|such|erklär|erklaere|erläutere|erlaeutere|beschreibe|definiere|"
+        r"zeige|tell me|look up|nachschauen|nachschau|nachschlagen|fass zusammen|fasse zusammen|"
+        r"analysiere|untersuche|prüfe|pruefe|vergleiche)\b)"
     )
     selected: list[str] = []
     for line in reversed(lines[-120:]):

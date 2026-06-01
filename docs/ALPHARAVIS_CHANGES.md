@@ -4,6 +4,67 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-06-01 — Deutsche Heuristik-Erweiterung (German Heuristic Expansion)
+
+Systematische Verbesserung aller Heuristik-Patterns für deutsche Spracheingaben.
+AlphaRavis versteht jetzt deutlich mehr deutsche Formulierungen für
+Archiv-Recall, Large-Paste-Klassifikation und Fast-Path-Routing — komplett
+im LangGraph, ohne Hermes-Abhängigkeit.
+
+### Geänderte Dateien
+
+- **`langgraph-app/agent_graph.py`**
+  - `_looks_like_archive_recall_request`: 43 neue deutsche Recall-Phrasen
+    ("such mal", "wo waren wir", "was haben wir gemacht", "erzähl nochmal",
+    "beim letzten mal", "zurück zu", "aufgreifen", "fortsetzen", etc.)
+  - `_condense_archive_recall_query_from_text`: Condenser-Regex spiegelt
+    alle neuen Phrasen für saubere Topic-Extraktion
+  - `_LARGE_PASTE_INSTRUCTION_PATTERNS`: 21 neue deutsche Regex-Patterns
+    (anleitung, spezifikation, verfahren, durchführung, handbuch, leitfaden,
+    checkliste, du darfst nicht, halte dich an, agenten-prompt, etc.)
+  - `_LARGE_PASTE_DOCUMENT_PATTERNS`: 11 neue deutsche Regex-Patterns
+    (nachricht, chatverlauf, gespräch, zusammenfassung, übersicht,
+    datensatz, ergebnis, textausschnitt, codeausschnitt, ausführlich)
+  - Heading-Detection (instruction): +8 Begriffe (anleitung, spezifikation,
+    verfahren, handbuch, leitfaden, checkliste, durchführung)
+  - Heading-Detection (document): +10 Begriffe (nachricht, chatverlauf,
+    gespräch, gesprächsprotokoll, zusammenfassung, übersicht, datensatz,
+    ergebnis, ergebnisse)
+  - Directive-Count: +12 deutsche Direktiven (halte dich an, unerlässlich,
+    absolut, keinesfalls, unter gar keinen umständen, nicht vergessen,
+    denk daran, bedenke, beachte, etc.)
+  - Zwei directive_re-Instanzen erweitert (instruction_brief +
+    document_stripping)
+
+- **`langgraph-app/prompt_assembly.py`**
+  - `FAST_PATH_DENY_PATTERNS`: 75 neue Einträge für deutschen Tech-Wortschatz
+    (programmier*, entwickl*, erstell*, änder*, lösch*, ausführ*, kompilier*,
+    bau*/build, konfig*, einstellung*, aktualisier*, reparier*, korrigier*,
+    optimier*, datenbank, netzwerk, api, schnittstelle, prozess*, refaktor*,
+    deploy*, migrier*, schreib*/schreiben, lies*/lesen, analysier*,
+    vergleich*, durchsuch*, find*/finden, zeig*/zeigen, mach*/machen,
+    test*/testen). Verhindert dass deutsche Coding-Prompts fälschlich
+    den Fast Path nehmen.
+
+- **`langgraph-app/source_content.py`**
+  - `classifier_window_text` marker_re: +6 deutsche Marker (anleitung,
+    spezifikation, verfahren, durchführung, vorgabe, richtlinie, bedingung)
+
+- **`alpharavis-development` Skill-Referenz** (`references/2b-classifier-heuristics.md`)
+  - Baseline von 2026-05-31 auf 2026-06-01 aktualisiert mit allen neuen
+    Kategorien und Pattern-Zahlen
+
+### Auswirkungen
+
+- Archiv-Recall erkennt jetzt ~118 deutsche Phrasen (vorher ~75)
+- FAST_PATH_DENY: 119 Einträge (vorher 44) — deutlich bessere deutsche
+  Intent-Erkennung, weniger Fehlrouting in den Fast Path
+- Large-Paste-Klassifikation: 41 Instruktions-Patterns (vorher 20),
+  16 Dokument-Patterns (vorher 5)
+- Alle Änderungen sind rein heuristisch (regex/string-match) — keine
+  zusätzliche Latenz, keine 2B-Classifier-Abhängigkeit
+- Rückwärtskompatibel: alle existierenden englischen Patterns bleiben aktiv
+
 ## 2026-05-31 — Delegate Agent Full Feature Parity mit Hermes
 
 Vier fehlende Features implementiert — AlphaRavis-native Sub-Agent-Delegation

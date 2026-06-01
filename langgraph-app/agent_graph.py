@@ -23,6 +23,11 @@ if str(_WORKSPACE_ROOT) not in sys.path:
 import httpx
 from deepagents import create_deep_agent
 from langchain_community.tools import DuckDuckGoSearchRun
+
+try:
+    from rapidfuzz import fuzz as _rapidfuzz_fuzz
+except ImportError:
+    _rapidfuzz_fuzz = None
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.globals import set_llm_cache
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, SystemMessage
@@ -9409,26 +9414,154 @@ def _compact_instructions_from_state(state: dict[str, Any], messages: list[Any])
 def _looks_like_archive_recall_request(text: str) -> bool:
     lowered = (text or "").lower()
     patterns = (
-        "archiv",
-        "archive",
+        # Deutsche Recall-Phrasen
+        "weisst du noch",
+        "weißt du noch",
+        "kannst du dich erinnern",
+        "erinnerst du dich",
+        "erinnere mich",
+        "was haben wir",
+        "hatten wir",
+        "hast du noch",
+        "hast du die",
+        "wo war das",
+        "wo ist das",
+        "wie war das",
+        "was war nochmal",
+        "was war noch mal",
+        "was war das",
+        "was hatten wir",
+        "wie hieß",
+        "wie hiess",
+        "wie hieß das nochmal",
+        "zeig mir nochmal",
+        "zeig nochmal",
+        "hol nochmal",
+        "such nochmal",
+        "geh zurück",
+        "geh zurueck",
+        "schau nach",
+        "guck mal",
+        # Zeitbezogene Phrasen
         "vorhin",
         "vorher",
-        "oben",
+        "davor",
         "damals",
         "frueher",
         "früher",
+        "gestern",
+        "letztes mal",
+        "letztem mal",
+        "letzten mal",
+        "neulich",
+        "kürzlich",
+        "kuerzlich",
+        "vor einer weile",
+        "vorhin schon",
+        "ältere",
+        "aeltere",
+        "vergangen",
+        "vorige",
+        "vorherige",
+        "vorherigen",
+        # Ortsbezug
+        "oben",
+        "weiter oben",
+        "am anfang",
+        "zu beginn",
+        # Allgemeine Recall-Signale
         "nochmal",
         "noch mal",
-        "wie war das",
-        "was war nochmal",
+        "archiv",
+        "archive",
+        "zusammenfassung",
+        "zusammengefasst",
         "letzte nachricht",
         "letzten nachrichten",
+        "alte nachricht",
+        "alten chat",
+        "verloren",
+        "verschwunden",
+        "weg",
+        # Erweiterte Recall-Phrasen (2026-06-01)
+        "such mal",
+        "such raus",
+        "find mal",
+        "was hatten wir noch",
+        "wo waren wir",
+        "was haben wir gemacht",
+        "was hab ich gemacht",
+        "woran haben wir gearbeitet",
+        "was stand da",
+        "was stand nochmal da",
+        "was meintest du",
+        "erzähl nochmal",
+        "erzaehl nochmal",
+        "wiederhol",
+        "wiederhole",
+        "nochmal von vorne",
+        "beim letzten mal",
+        "vorherige session",
+        "vorheriger chat",
+        "vorherige konversation",
+        "vorherigen konversation",
+        "damalig",
+        "damalige",
+        "zurück zu",
+        "zurueck zu",
+        "zurückkommen auf",
+        "zurueckkommen auf",
+        "aufgreifen",
+        "wieder aufgreifen",
+        "fortsetzen",
+        "weitermachen",
+        "weitermach",
+        "wo haben wir aufgehört",
+        "wo haben wir aufgehoert",
+        "was war die letzte",
+        "was waren die letzten",
+        "an was haben wir",
+        "was weisst du noch",
+        "was weißt du noch",
+        "was weisst du",
+        "was weißt du",
+        "weist du noch",
+        # Englische Fallbacks
         "old context",
         "previous context",
         "compressed context",
-        "zusammenfassung",
+        "what did we",
+        "what was the",
+        "do you remember",
+        "look back",
     )
-    return any(pattern in lowered for pattern in patterns)
+    if any(pattern in lowered for pattern in patterns):
+        return True
+    # Typo-tolerant fallback — catches "farge"→"frage", "nochaml"→"nochmal", etc.
+    return _fuzzy_match_archive_recall(text, patterns)
+
+
+def _fuzzy_match_archive_recall(text: str, patterns: tuple[str, ...], threshold: int = 83) -> bool:
+    """Fuzzy fallback for typo-tolerant archive recall detection.
+
+    Uses rapidfuzz partial_ratio to catch typos like 'farge'→'frage',
+    'nochaml'→'nochmal', 'zusamenfassung'→'zusammenfassung'.
+    Only called when exact match fails, so performance impact is minimal.
+    """
+    if _rapidfuzz_fuzz is None:
+        return False
+    lowered = text.lower()
+    # Only check patterns with len >= 5 chars — short patterns have too many
+    # false positives with fuzzy matching (e.g. "weg" matches "web")
+    for pattern in patterns:
+        if len(pattern) < 5:
+            continue
+        # partial_ratio finds the best matching substring — ideal for
+        # "was war nochaml" matching against pattern "was war nochmal"
+        score = _rapidfuzz_fuzz.partial_ratio(pattern, lowered)
+        if score >= threshold:
+            return True
+    return False
 
 
 def _condense_archive_recall_query_from_text(query: str, context: str = "") -> dict[str, Any]:
@@ -9436,8 +9569,20 @@ def _condense_archive_recall_query_from_text(query: str, context: str = "") -> d
     raw_context = str(context or "").strip()
     topic = re.sub(
         r"(?i)\b(wie war das nochmal mit|wie war das noch mal mit|was war nochmal mit|was war noch mal mit|"
-        r"hatten wir|vorhin|vorher|oben|damals|frueher|früher|archive|archiv|compressed context|old context|"
-        r"previous context|zusammenfassung|erinnerst du dich an|remember)\b",
+        r"hatten wir|hast du noch|hast du die|weisst du noch|weißt du noch|erinnerst du dich an|erinnere mich an|"
+        r"kannst du dich erinnern an|was haben wir|wo war das|wo ist das|was war das|was hatten wir|"
+        r"wie hieß|wie hiess|wie hieß das nochmal|zeig mir nochmal|zeig nochmal|hol nochmal|such nochmal|"
+        r"geh zurück zu|geh zurueck zu|schau nach|guck mal|"
+        r"vorhin|vorher|davor|oben|damals|frueher|früher|gestern|letztes mal|letztem mal|neulich|"
+        r"kürzlich|kuerzlich|vor einer weile|vorhin schon|ältere|aeltere|vergangen|vorige|vorherige|"
+        r"archive|archiv|compressed context|old context|previous context|zusammenfassung|zusammengefasst|remember|"
+        r"such mal|such raus|find mal|was hatten wir noch|wo waren wir|was haben wir gemacht|was hab ich gemacht|"
+        r"woran haben wir gearbeitet|was stand da|was stand nochmal da|was meintest du|erzähl nochmal|erzaehl nochmal|"
+        r"wiederhol|wiederhole|nochmal von vorne|beim letzten mal|vorherige session|vorheriger chat|"
+        r"vorherige konversation|vorherigen konversation|damalig|damalige|zurück zu|zurueck zu|"
+        r"zurückkommen auf|zurueckkommen auf|aufgreifen|wieder aufgreifen|fortsetzen|weitermachen|weitermach|"
+        r"wo haben wir aufgehört|wo haben wir aufgehoert|was war die letzte|was waren die letzten|"
+        r"an was haben wir|was weisst du noch|was weißt du noch|was weisst du|was weißt du|weist du noch)\b",
         " ",
         raw_query,
     )
@@ -9829,6 +9974,27 @@ _LARGE_PASTE_INSTRUCTION_PATTERNS = (
     r"\bbefolge\b",
     r"\bniemals\b",
     r"\bimmer\b",
+    # Erweiterte deutsche Instruktions-Marker (2026-06-01)
+    r"\banleitung\b",
+    r"\bspezifikation\b",
+    r"\bverfahren\b",
+    r"\bdurchführung\b",
+    r"\bdurchfuehrung\b",
+    r"\bhandbuch\b",
+    r"\bleitfaden\b",
+    r"\bcheckliste\b",
+    r"\bdu\s+darfst\s+nicht\b",
+    r"\bhalte\s+dich\s+(an|genau\s+an)\b",
+    r"\b(agenten|agenten-)\s*prompt\b",
+    r"\baufgabe\s*:",
+    r"\banforderung\b",
+    r"\bablauf\b",
+    r"\bschritte\b",
+    r"\bvorgehen\b",
+    r"\brichtlinien?\b",
+    r"\bbedingungen?\b",
+    r"\beinschränkungen?\b",
+    r"\beinschraenkungen?\b",
 )
 
 _LARGE_PASTE_DOCUMENT_PATTERNS = (
@@ -9837,6 +10003,17 @@ _LARGE_PASTE_DOCUMENT_PATTERNS = (
     r"\b(here is|the following is)\s+(a|the)?\s*(document|text|log|data|source)\b",
     r"\b(dokument|quelle|daten|protokoll|mitschnitt|bericht|log)\b",
     r"\b(analysiere|fasse|extrahiere|pruefe|prüfe)\s+(dies|diese|den|das)\b",
+    # Erweiterte deutsche Dokument-Marker (2026-06-01)
+    r"\b(nachricht|nachrichten)\b",
+    r"\bchatverlauf\b",
+    r"\b(gespräch|gespraech|gesprächsprotokoll|gespraechsprotokoll)\b",
+    r"\bzusammenfassung\b",
+    r"\b(übersicht|uebersicht)\b",
+    r"\bdatensatz\b",
+    r"\b(ergebnis|ergebnisse)\b",
+    r"\b(textausschnitt|codeausschnitt)\b",
+    r"\bausführlich\b",
+    r"\bausfuehrlich\b",
 )
 
 
@@ -9875,19 +10052,32 @@ def _classify_large_paste_intent(content: str) -> dict[str, Any]:
 
     heading_instruction_count = len(
         re.findall(
-            r"(?im)^\s{0,4}(#{1,6}\s*)?(system prompt|developer prompt|instructions?|rules?|requirements?|constraints?|workflow|policy|prompt|anweisungen?|regeln?|vorgaben?)\s*[:#-]?",
+            r"(?im)^\s{0,4}(#{1,6}\s*)?(system prompt|developer prompt|instructions?|rules?|requirements?|constraints?|"
+            r"workflow|policy|prompt|anweisungen?|regeln?|vorgaben?|aufgabe|aufgaben|anforderung|anforderungen|"
+            r"ablauf|schritte|vorgehen|prozedur|richtlinien?|bedingungen?|einschränkungen?|einschraenkungen?|"
+            r"anleitung|spezifikation|verfahren|handbuch|leitfaden|checkliste|durchführung|durchfuehrung)\s*[:#-]?",
             text,
         )
     )
     heading_document_count = len(
         re.findall(
-            r"(?im)^\s{0,4}(#{1,6}\s*)?(document|source|context|data|logs?|transcript|article|paper|input|text|dokument|quelle|daten|kontext|protokoll)\s*[:#-]?",
+            r"(?im)^\s{0,4}(#{1,6}\s*)?(document|source|context|data|logs?|transcript|article|paper|input|output|text|"
+            r"dokument|quelle|daten|kontext|protokoll|bericht|mitschnitt|artikel|paper|eingabe|ausgabe|text|"
+            r"dokumentation|notizen|aufzeichnung|verlauf|logfile|auszug|"
+            r"nachricht|nachrichten|chatverlauf|gespräch|gespraech|gesprächsprotokoll|gespraechsprotokoll|"
+            r"zusammenfassung|übersicht|uebersicht|datensatz|ergebnis|ergebnisse)\s*[:#-]?",
             text,
         )
     )
     directive_count = len(
         re.findall(
-            r"(?i)\b(must|shall|required|always|never|do not|don't|befolge|musst|sollst|niemals|immer)\b",
+            r"(?i)\b(must|shall|required|always|never|do not|don't|"
+            r"befolge|musst|sollst|niemals|immer|darfst nicht|auf keinen fall|unbedingt|"
+            r"verpflichtend|erforderlich|notwendig|zwingend|stelle sicher|achte darauf|"
+            r"vergiss nicht|wichtig|essentiell|essenziell|obligatorisch|vorgeschrieben|"
+            r"halte dich an|unerlässlich|unerlaesslich|zwingend erforderlich|"
+            r"absolut|auf jeden fall|keinesfalls|keineswegs|unter gar keinen umständen|"
+            r"unter gar keinen umstaenden|nicht vergessen|denk daran|bedenke|beachte)\b",
             text,
         )
     )
@@ -9895,10 +10085,10 @@ def _classify_large_paste_intent(content: str) -> dict[str, Any]:
     instruction_score = len(instruction_hits) + heading_instruction_count * 2 + min(directive_count, 12) * 0.35
     document_score = len(document_hits) + heading_document_count * 2 + min(fenced_blocks, 4) * 0.5
 
-    if re.search(r"<\s*(instructions?|system-prompt|developer-prompt)\b", text, flags=re.IGNORECASE | re.DOTALL):
+    if re.search(r"<\s*(instructions?|system-prompt|developer-prompt|anweisungen?|system-prompt|entwickler-prompt)\b", text, flags=re.IGNORECASE | re.DOTALL):
         instruction_score += 4
     if re.search(
-        r"<\s*(big-context|document|source|data)\b|^\s*/(ingest|big-context)\b",
+        r"<\s*(big-context|big_context|document|source|data|dokument|quelle|daten)\b|^\s*/(ingest|big-context|big_context|rake|index)\b",
         text,
         flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
     ):
@@ -10014,7 +10204,10 @@ def _large_paste_instruction_brief(content: str, classification: dict[str, Any] 
     selected: list[str] = []
     directive_re = re.compile(
         r"(?i)(must|shall|required|always|never|do not|don't|acceptance|criteria|output format|response format|"
-        r"instruction|rule|constraint|policy|workflow|befolge|musst|sollst|niemals|immer|vorgabe|regel)"
+        r"instruction|rule|constraint|policy|workflow|"
+        r"befolge|musst|sollst|niemals|immer|vorgabe|regel|anweisung|anleitung|"
+        r"darfst nicht|auf keinen fall|unbedingt|verpflichtend|erforderlich|"
+        r"stelle sicher|achte darauf|vergiss nicht|halte dich an)"
     )
 
     for line in lines[:80]:
@@ -10088,7 +10281,9 @@ def _large_paste_document_body_for_index(content: str, paste_intent: str, classi
     directive_re = re.compile(
         r"(?i)(system prompt|developer prompt|instructions?|rules?|constraints?|policy|"
         r"you are|must|shall|required|always|never|do not|don't|"
-        r"anweisungen?|regeln?|vorgaben?|du bist|du sollst|du musst|niemals|immer|befolge)"
+        r"anweisungen?|regeln?|vorgaben?|du bist|du sollst|du musst|niemals|immer|befolge|"
+        r"anleitung|spezifikation|durchführung|durchfuehrung|halte dich an|"
+        r"darfst nicht|auf keinen fall|unbedingt|verpflichtend)"
     )
     for line in text.splitlines():
         stripped = line.strip()
@@ -11444,24 +11639,22 @@ def _planner_needed(state: AlphaRavisState) -> bool:
 def _looks_like_coding_task(text: str) -> bool:
     query = (text or "").lower()
     triggers = [
-        "code",
-        "repo",
-        "datei",
-        "file",
-        "terminal",
-        "shell",
-        "patch",
-        "implement",
-        "refactor",
-        "docker",
-        "git",
-        "python",
-        "typescript",
-        "javascript",
-        "fastapi",
-        "langgraph",
-        "fix",
-        "bug",
+        # English
+        "code", "repo", "file", "terminal", "shell", "patch",
+        "implement", "refactor", "docker", "git",
+        "python", "typescript", "javascript", "fastapi", "langgraph",
+        "fix", "bug",
+        # German
+        "datei", "programmieren", "programmier", "entwickeln", "entwickler",
+        "erstellen", "erstell", "schreiben", "schreib",
+        "korrigieren", "korrigier", "beheben", "beheb",
+        "anpassen", "anpass", "umgestalten", "umgestalt",
+        "bauen", "bau", "testen", "test", "debuggen", "debugg",
+        "fehler", "fehlermeldung", "änderung", "aenderung",
+        "kompilieren", "kompilier", "ausführen", "ausfuehren",
+        "deployen", "deploy", "installation", "installieren",
+        "konfigurieren", "konfiguration", "repository",
+        "branch", "commit", "merge", "pull request",
     ]
     return any(trigger in query for trigger in triggers)
 
