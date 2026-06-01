@@ -4,6 +4,61 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-06-01 — Delegate Agent Gap-Closure: Full Hermes Feature Parity
+
+Alle 8 identifizierten Gaps zwischen AlphaRavis `delegate_task` und Hermes
+`delegate_task` geschlossen. AlphaRavis Sub-Agents sind jetzt auf Augenhöhe.
+
+### Gap-Closure Summary
+
+| # | Gap | Status | Implementation |
+|---|-----|--------|---------------|
+| 1 | Provider/Credential-Override | ✅ | `run_sub_agent()` akzeptiert `_provider/_model_name/_api_base/_api_key`. Baut eigene `ChatOpenAI`-Instanz statt Parent-`_model_fn`. |
+| 2 | Toolset-Intersection | ✅ | `DELEGATE_INTERSECT_PARENT_TOOLS` + `DELEGATE_BLOCKED_TOOLS` frozenset. |
+| 3 | Heartbeat/Gateway-Keepalive | ✅ | `_heartbeat_loop()` toucht Parent-Activity alle 30s. Verhindert Gateway-Timeout. |
+| 4 | Blocked-Tools | ✅ | `clarify`, `memory`, `send_message` per Default geblockt. ENV-konfigurierbar. |
+| 5 | Workspace-Hint | ✅ | `DELEGATE_WORKSPACE_HINT` + "Never assume /workspace/" Regel im Prompt. |
+| 6 | Orchestrator-Rolle | ✅ | Ausführliche Delegations-Anleitung (wann/wann nicht delegieren). |
+| 7 | Output-Format | ✅ | Strukturierte Sektionen inkl. "## Issues" für Probleme. |
+| 8 | Fallback/Retry | ✅ | `_is_retryable_error()` + Exponential-Backoff-Loop (max 2 Retries). |
+
+### Neue ENV-Vars
+
+```
+ALPHARAVIS_DELEGATE_PROVIDER=         # leer = Parent-Provider
+ALPHARAVIS_DELEGATE_MODEL=           # Modell für Sub-Agent
+ALPHARAVIS_DELEGATE_API_BASE=        # API-Endpoint
+ALPHARAVIS_DELEGATE_API_KEY=***      # API-Key
+ALPHARAVIS_DELEGATE_HEARTBEAT_ENABLED=true
+ALPHARAVIS_DELEGATE_HEARTBEAT_INTERVAL_SECONDS=30
+ALPHARAVIS_DELEGATE_BLOCKED_TOOLS=clarify,memory,send_message
+ALPHARAVIS_DELEGATE_MAX_RETRIES=2
+ALPHARAVIS_DELEGATE_RETRY_DELAY_SECONDS=5
+ALPHARAVIS_DELEGATE_WORKSPACE_HINT=
+```
+
+### Dateien
+
+- `langgraph-app/delegate_agent.py`: +200 Zeilen (862→1064)
+  - Provider-Override mit `ChatOpenAI`-Fallback
+  - `_is_retryable_error()` + Exponential-Backoff-Retry-Loop
+  - `_heartbeat_loop()` mit Cleanup in `finally`
+  - Toolset-Blocklist + Workspace-Discovery
+  - Verbesserte System-Prompts (Orchestrator + Output-Format)
+- `langgraph-app/agent_graph.py`: Provider-Params an `run_sub_agent()` übergeben
+- `.env(exaple)`: 14 neue ENV-Vars dokumentiert
+- `tests/test_delegate_agent.py`: 10 neue Gap-Tests (32 total, alle grün)
+
+### Commits
+
+```
+c7bfc50 feat(delegate): ENV vars for provider-override, heartbeat, ...
+3948caf feat(delegate): provider/model override
+3795661 feat(delegate): retry with exponential backoff
+e755657 feat(delegate): heartbeat, toolset-blocklist, workspace, prompts
+de17e1f test(delegate): gap-closure tests
+```
+
 ## 2026-06-01 — Deutsche Heuristik-Erweiterung (German Heuristic Expansion)
 
 Systematische Verbesserung aller Heuristik-Patterns für deutsche Spracheingaben.
