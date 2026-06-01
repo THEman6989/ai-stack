@@ -280,6 +280,43 @@ DELEGATE_CONTEXT_LENGTH = int(os.getenv(
 
 
 # ---------------------------------------------------------------------------
+# Provider override — sub-agents can run on a different provider/model
+# ---------------------------------------------------------------------------
+DELEGATE_PROVIDER = os.getenv("ALPHARAVIS_DELEGATE_PROVIDER", "").strip()
+DELEGATE_MODEL = os.getenv("ALPHARAVIS_DELEGATE_MODEL", "").strip()
+DELEGATE_API_BASE = os.getenv("ALPHARAVIS_DELEGATE_API_BASE", "").strip()
+DELEGATE_API_KEY = os.getenv("ALPHARAVIS_DELEGATE_API_KEY", "").strip()
+
+# ---------------------------------------------------------------------------
+# Heartbeat — prevents gateway inactivity timeout during sub-agent runs
+# ---------------------------------------------------------------------------
+HEARTBEAT_ENABLED = env_bool("ALPHARAVIS_DELEGATE_HEARTBEAT_ENABLED", "true")
+HEARTBEAT_INTERVAL = float(os.getenv("ALPHARAVIS_DELEGATE_HEARTBEAT_INTERVAL_SECONDS", "30"))
+
+# ---------------------------------------------------------------------------
+# Toolset control
+# ---------------------------------------------------------------------------
+DELEGATE_INTERSECT_PARENT_TOOLS = env_bool(
+    "ALPHARAVIS_DELEGATE_INTERSECT_PARENT_TOOLS", "true"
+)
+_blocked_raw = os.getenv("ALPHARAVIS_DELEGATE_BLOCKED_TOOLS", "clarify,memory,send_message")
+DELEGATE_BLOCKED_TOOLS: frozenset[str] = frozenset(
+    name.strip() for name in _blocked_raw.split(",") if name.strip()
+)
+
+# ---------------------------------------------------------------------------
+# Fallback / retry
+# ---------------------------------------------------------------------------
+DELEGATE_MAX_RETRIES = int(os.getenv("ALPHARAVIS_DELEGATE_MAX_RETRIES", "2"))
+DELEGATE_RETRY_DELAY = float(os.getenv("ALPHARAVIS_DELEGATE_RETRY_DELAY_SECONDS", "5"))
+
+# ---------------------------------------------------------------------------
+# Workspace
+# ---------------------------------------------------------------------------
+DELEGATE_WORKSPACE_HINT = os.getenv("ALPHARAVIS_DELEGATE_WORKSPACE_HINT", "").strip()
+
+
+# ---------------------------------------------------------------------------
 # Helper: Hermes-style smart tool result truncation
 # ---------------------------------------------------------------------------
 

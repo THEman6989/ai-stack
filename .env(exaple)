@@ -1270,7 +1270,7 @@ ALPHARAVIS_RAW_SOURCE_READ_MAX_CHARS=30000
 ALPHARAVIS_RAW_SOURCE_SEARCH_CONTEXT_BEFORE_CHARS=1000
 ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_MAX_ARCHIVES=5
 ALPHARAVIS_ARCHIVE_AUTO_ON_INTENT_AGENT_DEFAULT=true
-ALPHARAVIS_ENABLE_ARCHIVE_AUTO_INTENT_CLASSIFIER=true
+ALPHARAVIS_ENABLE_ARCHIVE_AUTO_INTENT_CLASSIFIER=false
 ALPHARAVIS_ARCHIVE_AUTO_INTENT_MIN_CONFIDENCE=0.6
 ALPHARAVIS_ARCHIVE_AUTO_INTENT_CLASSIFIER_MAX_TOKENS=384
 ALPHARAVIS_ENABLE_RAG_RERANKING=false
@@ -1288,7 +1288,7 @@ ALPHARAVIS_RAG_RERANKER_FALLBACK_DETERMINISTIC=true
 # derives it from BIG_BOSS_API_BASE by replacing the port with 8001.
 ALPHARAVIS_RETRIEVAL_QUERY_MAX_CHARS=1500
 ALPHARAVIS_RETRIEVAL_DIRECT_QUERY_MAX_CHARS=1500
-ALPHARAVIS_ENABLE_RETRIEVAL_QUERY_CLASSIFIER=true
+ALPHARAVIS_ENABLE_RETRIEVAL_QUERY_CLASSIFIER=false
 ALPHARAVIS_RETRIEVAL_QUERY_CLASSIFIER_MIN_CHARS=6000
 ALPHARAVIS_RAG_CLASSIFIER_API_BASE=
 ALPHARAVIS_RAG_CLASSIFIER_MODEL=unsloth/Qwen3.5-2B-GGUF:Q4_1
@@ -1365,7 +1365,7 @@ ALPHARAVIS_LARGE_PASTE_RAG_POST_COMPRESSION_TRIGGER_RATIO=0.80
 ALPHARAVIS_LARGE_PASTE_POST_RAG_COMPRESSION_ENABLED=true
 ALPHARAVIS_LARGE_PASTE_POST_RAG_COMPRESSION_TRIGGER_RATIO=0.80
 ALPHARAVIS_ENABLE_LARGE_PASTE_INTENT_CLASSIFIER=true
-ALPHARAVIS_ENABLE_LARGE_PASTE_SMALL_CLASSIFIER=true
+ALPHARAVIS_ENABLE_LARGE_PASTE_SMALL_CLASSIFIER=false
 ALPHARAVIS_LARGE_PASTE_SMALL_CLASSIFIER_MIN_CHARS=6000
 ALPHARAVIS_LARGE_PASTE_RAG_MIN_CHARS=20000
 # Legacy pre_run auto-ingest margin; only used when
@@ -1826,3 +1826,35 @@ ALPHARAVIS_LOCAL_COMMAND_MAX_OUTPUT_CHARS=12000
 
 # Max output tokens per sub-agent LLM call. Default 4096.
 # ALPHARAVIS_DELEGATE_MAX_TOKENS=4096
+
+# -- Provider Override (empty = inherit from parent agent) --
+# Route sub-agents to a different provider/model than the parent.
+# Example: parent uses deepseek, sub-agents use a cheap qwen model.
+# ALPHARAVIS_DELEGATE_PROVIDER=
+# ALPHARAVIS_DELEGATE_MODEL=
+# ALPHARAVIS_DELEGATE_API_BASE=
+# ALPHARAVIS_DELEGATE_API_KEY=
+
+# -- Heartbeat (prevents gateway inactivity timeout during long sub-agent runs) --
+# When enabled, sub-agents periodically touch the parent's activity timestamp
+# so the gateway doesn't kill the session while a sub-agent is working.
+# ALPHARAVIS_DELEGATE_HEARTBEAT_ENABLED=true
+# ALPHARAVIS_DELEGATE_HEARTBEAT_INTERVAL_SECONDS=30
+
+# -- Toolset Control --
+# Intersect parent tools: when true, sub-agent only gets tools the parent has.
+# When false, sub-agent gets the full delegate tool list (22 tools).
+# ALPHARAVIS_DELEGATE_INTERSECT_PARENT_TOOLS=true
+# Blocked tools: never available to sub-agents (comma-separated).
+# ALPHARAVIS_DELEGATE_BLOCKED_TOOLS=clarify,memory,send_message
+
+# -- Fallback / Retry --
+# Max retries on retryable API errors (rate-limit, timeout, 5xx). Default 2.
+# ALPHARAVIS_DELEGATE_MAX_RETRIES=2
+# Base delay between retries in seconds (exponential backoff). Default 5.
+# ALPHARAVIS_DELEGATE_RETRY_DELAY_SECONDS=5
+
+# -- Workspace --
+# Explicit workspace path for sub-agents. When set, injected into the system
+# prompt so sub-agents don't guess /workspace/... paths. Default: TERMINAL_CWD.
+# ALPHARAVIS_DELEGATE_WORKSPACE_HINT=
