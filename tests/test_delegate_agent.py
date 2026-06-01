@@ -412,3 +412,105 @@ def test_local_tool_map_includes_new_tools():
     assert "list_delegated_agents," in source
     assert "kill_delegated_agent," in source
     assert "check_file_state," in source
+
+
+# ---------------------------------------------------------------------------
+# Gap-closure tests (2026-06-01)
+# ---------------------------------------------------------------------------
+
+
+def test_is_retryable_error_detects_rate_limit():
+    """_is_retryable_error returns True for rate-limit patterns."""
+    from delegate_agent import _is_retryable_error
+
+    assert _is_retryable_error(Exception("rate limit exceeded"))
+    assert _is_retryable_error(Exception("too many requests"))
+    assert _is_retryable_error(Exception("429"))
+
+
+def test_is_retryable_error_detects_server_errors():
+    """_is_retryable_error returns True for server-error patterns."""
+    from delegate_agent import _is_retryable_error
+
+    assert _is_retryable_error(Exception("internal server error"))
+    assert _is_retryable_error(Exception("503 service unavailable"))
+    assert _is_retryable_error(Exception("connection reset by peer"))
+
+
+def test_is_retryable_error_rejects_auth_and_not_found():
+    """_is_retryable_error returns False for non-retryable errors."""
+    from delegate_agent import _is_retryable_error
+
+    assert not _is_retryable_error(Exception("invalid api key"))
+    assert not _is_retryable_error(Exception("model not found"))
+    assert not _is_retryable_error(Exception("context length exceeded"))
+
+
+def test_blocked_tools_constant_is_frozenset():
+    """DELEGATE_BLOCKED_TOOLS is a frozenset with default values."""
+    from delegate_agent import DELEGATE_BLOCKED_TOOLS
+
+    assert isinstance(DELEGATE_BLOCKED_TOOLS, frozenset)
+    assert "clarify" in DELEGATE_BLOCKED_TOOLS
+    assert "memory" in DELEGATE_BLOCKED_TOOLS
+    assert "send_message" in DELEGATE_BLOCKED_TOOLS
+
+
+def test_provider_override_constants_exist():
+    """Provider override ENV constants are defined."""
+    from delegate_agent import (
+        DELEGATE_PROVIDER,
+        DELEGATE_MODEL,
+        DELEGATE_API_BASE,
+        DELEGATE_API_KEY,
+    )
+
+    assert isinstance(DELEGATE_PROVIDER, str)
+    assert isinstance(DELEGATE_MODEL, str)
+    assert isinstance(DELEGATE_API_BASE, str)
+    assert isinstance(DELEGATE_API_KEY, str)
+
+
+def test_heartbeat_constants_exist():
+    """Heartbeat constants are defined."""
+    from delegate_agent import HEARTBEAT_ENABLED, HEARTBEAT_INTERVAL
+
+    assert isinstance(HEARTBEAT_ENABLED, bool)
+    assert HEARTBEAT_INTERVAL > 0
+
+
+def test_retry_constants_exist():
+    """Retry constants are defined with sensible defaults."""
+    from delegate_agent import DELEGATE_MAX_RETRIES, DELEGATE_RETRY_DELAY
+
+    assert DELEGATE_MAX_RETRIES >= 0
+    assert DELEGATE_RETRY_DELAY > 0
+
+
+def test_workspace_constant_exists():
+    """Workspace hint constant is defined."""
+    from delegate_agent import DELEGATE_WORKSPACE_HINT
+
+    assert isinstance(DELEGATE_WORKSPACE_HINT, str)
+
+
+def test_run_sub_agent_signature_has_provider_params():
+    """run_sub_agent accepts _provider, _model_name, _api_base, _api_key, _parent_touch_fn."""
+    import inspect
+    from delegate_agent import run_sub_agent
+
+    sig = inspect.signature(run_sub_agent)
+    params = set(sig.parameters.keys())
+    assert "_provider" in params
+    assert "_model_name" in params
+    assert "_api_base" in params
+    assert "_api_key" in params
+    assert "_parent_touch_fn" in params
+
+
+def test_heartbeat_loop_exists():
+    """_heartbeat_loop function is defined."""
+    from delegate_agent import _heartbeat_loop
+
+    import inspect
+    assert inspect.iscoroutinefunction(_heartbeat_loop)
