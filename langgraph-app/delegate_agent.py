@@ -366,7 +366,32 @@ def _is_retryable_error(exc: Exception) -> bool:
     return any(pattern in msg for pattern in retryable)
 
 
-# ---------------------------------------------------------------------------\n# Helper: autonomous context compression via the existing compression pipeline
+async def _heartbeat_loop(
+    agent_id: str,
+    cancel_evt: asyncio.Event,
+    parent_touch_fn: Any,
+    started: float,
+) -> None:
+    """Periodically touch parent activity while sub-agent is running."""
+    interval = HEARTBEAT_INTERVAL
+    while not cancel_evt.is_set():
+        try:
+            await asyncio.sleep(interval)
+            if cancel_evt.is_set():
+                break
+            if parent_touch_fn:
+                elapsed = time.perf_counter() - started
+                parent_touch_fn(
+                    f"delegate_task: sub-agent {agent_id} working ({elapsed:.0f}s)"
+                )
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Helper: autonomous context compression via the existing compression pipeline
 # ---------------------------------------------------------------------------
 
 async def _compress_sub_agent_context(
@@ -542,31 +567,69 @@ async def run_sub_agent(
 
     clean_tool_names = _normalize_tool_names(tool_names)
 
-    # Resolve tools
+    # Resolve tools with blocklist + toolset intersection
     selected_tools: dict[str, Any] = {}
     if tools:
         for name, tool_obj in tools.items():
+            # Blocklist — never allow dangerous tools in sub-agents
+            if name in DELEGATE_BLOCKED_TOOLS:
+                continue
+            # Toolset filter — intersect with parent's tool_names if enabled
             if clean_tool_names and name not in clean_tool_names:
                 continue
             selected_tools[name] = tool_obj
     if clean_tool_names and not selected_tools:
         LOGGER.warning("Agent %s: no matching tools from names=%s", agent_id, clean_tool_names)
+    if DELEGATE_BLOCKED_TOOLS:
+        blocked_in_use = DELEGATE_BLOCKED_TOOLS & set(tools.keys() if tools else {})
+        if blocked_in_use:
+            LOGGER.info("Agent %s: blocked tools filtered: %s", agent_id, sorted(blocked_in_use))
 
     # Build tool schemas
     tool_schemas = _build_tool_schemas(selected_tools, _tool_name_fn)
 
     # Build system prompt
-    nest_hint = ""
+    # Workspace discovery
+    workspace = DELEGATE_WORKSPACE_HINT or os.getenv("TERMINAL_CWD", os.getcwd())
+    workspace_note = ""
+    if workspace and os.path.isdir(workspace):
+        workspace_note = (
+            f"\nWorkspace: {workspace}\n"
+            "IMPORTANT: Use this exact path for file operations. "
+            "Never assume /workspace/... or any container-style path.\n"
+        )
+
+    # Orchestrator guidance
+    orchestrator_guidance = ""
     if depth < max_depth:
-        nest_hint = (
-            f"\nYou can spawn sub-agents via delegate_task. Nesting depth: {depth}/{max_depth}. "
-            f"Max concurrent: {max_concurrent}."
+        orchestrator_guidance = (
+            "\n## Subagent Spawning (Orchestrator)\n"
+            "You CAN spawn sub-agents via delegate_task to parallelize work.\n\n"
+            "WHEN to delegate:\n"
+            "- The goal splits into 2+ independent subtasks (parallel).\n"
+            "- A subtask is reasoning-heavy and would flood your context.\n\n"
+            "WHEN NOT to delegate:\n"
+            "- Single-step work — do it directly.\n"
+            "- Trivial tasks you can finish in 1-2 tool calls.\n"
+            "- Pass-through: don't re-delegate your entire goal to one worker.\n\n"
+            "Coordinate results and synthesize before reporting to parent.\n"
         )
     else:
-        nest_hint = (
+        orchestrator_guidance = (
             "\nNested delegation is disabled at your depth level. "
-            "Complete the task yourself — do not call delegate_task."
+            "Complete the task yourself — do not call delegate_task.\n"
         )
+
+    # Output format
+    output_format = (
+        "When done, return a final answer with these sections:\n"
+        "  ## Summary — what you accomplished\n"
+        "  ## Key Findings — discoveries, answers\n"
+        "  ## Actions — commands/files used\n"
+        "  ## Issues — problems encountered (if any)\n"
+        "  ## Recommendation — next step for the parent agent\n"
+        "Be thorough but concise — your response goes back to the parent agent."
+    )
 
     tool_list_str = ", ".join(sorted(selected_tools.keys())) if selected_tools else "none"
     system_prompt = (
@@ -575,12 +638,9 @@ async def run_sub_agent(
         f"Available tools: {tool_list_str}. "
         f"You have up to {max_iterations} tool-calling turns "
         f"and {timeout_seconds}s total wall-clock time."
-        f"{nest_hint}\n\n"
-        "When done, return a final answer with these sections:\n"
-        "  ## Summary — what you accomplished\n"
-        "  ## Key Findings — discoveries, answers\n"
-        "  ## Actions — commands/files used\n"
-        "  ## Recommendation — for the parent agent"
+        f"{workspace_note}"
+        f"{orchestrator_guidance}\n"
+        f"{output_format}"
     )
 
     messages: list[dict[str, Any]] = [
@@ -674,6 +734,13 @@ async def run_sub_agent(
     if context_length <= 0:
         context_length = 60000  # safe default
     compression_token_limit = max(4096, int(context_length * DELEGATE_COMPRESSION_TRIGGER_RATIO))
+
+    # Heartbeat keepalive — prevents gateway inactivity timeout during long sub-agent runs
+    heartbeat_task = None
+    if HEARTBEAT_ENABLED and _parent_touch_fn:
+        heartbeat_task = asyncio.create_task(
+            _heartbeat_loop(agent_id, cancel_evt, _parent_touch_fn, started)
+        )
 
     try:
         # Wall-clock timeout: wrap the ENTIRE task, not per-iteration.
@@ -868,10 +935,17 @@ async def run_sub_agent(
         ctx.result = result
         SUB_AGENT_REGISTRY.unregister(agent_id)
         return result
+    finally:
+        # Clean up heartbeat task
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
 
 
-# ---------------------------------------------------------------------------
-# Helpers
+# ---------------------------------------------------------------------------\n# Helpers
 # ---------------------------------------------------------------------------
 
 def _normalize_tool_names(tool_names: list[str] | None) -> set[str] | None:
