@@ -341,7 +341,32 @@ def _truncate_tool_result(content: str, max_chars: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Helper: autonomous context compression via the existing compression pipeline
+# Helper: retryable error detection for sub-agent API calls
+# ---------------------------------------------------------------------------
+
+def _is_retryable_error(exc: Exception) -> bool:
+    """Return True if the error is likely transient and worth retrying.
+
+    Covers rate limits, server overload, timeouts, and connection issues.
+    Non-retryable: auth errors, model not found, bad requests, context overflow.
+    """
+    msg = str(exc).lower()
+    retryable = {
+        "rate limit", "rate_limit", "too many requests",
+        "timeout", "timed out",
+        "overloaded", "capacity",
+        "server error", "internal server error",
+        "503", "502", "500", "529",
+        "429",
+        "connection", "connect",
+        "reset by peer", "broken pipe",
+        "service unavailable",
+        "temporarily unavailable",
+    }
+    return any(pattern in msg for pattern in retryable)
+
+
+# ---------------------------------------------------------------------------\n# Helper: autonomous context compression via the existing compression pipeline
 # ---------------------------------------------------------------------------
 
 async def _compress_sub_agent_context(
@@ -673,7 +698,30 @@ async def run_sub_agent(
                     return result
 
                 api_calls += 1
-                response = await model.ainvoke(messages)
+                # Retry loop with exponential backoff for transient API errors
+                max_retries = DELEGATE_MAX_RETRIES
+                retry_delay = DELEGATE_RETRY_DELAY
+                last_error = None
+                for attempt in range(max_retries + 1):
+                    try:
+                        response = await model.ainvoke(messages)
+                        last_error = None
+                        break  # success
+                    except Exception as exc:
+                        last_error = exc
+                        if attempt < max_retries and _is_retryable_error(exc):
+                            delay = retry_delay * (2 ** attempt)
+                            LOGGER.warning(
+                                "Agent %s: retryable API error (attempt %d/%d), "
+                                "retrying in %.1fs: %s",
+                                agent_id, attempt + 1, max_retries + 1, delay, exc,
+                            )
+                            await asyncio.sleep(delay)
+                        else:
+                            # Out of retries or non-retryable — let it propagate
+                            break
+                if last_error is not None:
+                    raise last_error
 
                 # Check for tool calls
                 tool_calls = getattr(response, "tool_calls", None) or []
