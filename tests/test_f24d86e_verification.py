@@ -43,10 +43,14 @@ def test_registry_unregister_all_exit_paths():
         is_setup_failure = (
             "_model_fn is None" in before[-500:] or "model is None" in before[-500:]
         )
+        # Spawn-pause early return: no agent registered yet, unregister not needed
+        is_spawn_paused_path = "_spawn_paused" in before[-500:]
 
         if is_cancellation_path:
             # Cancellation: arguably intentional, but document
             pass  # Not a bug per se, but a design choice
+        elif is_spawn_paused_path:
+            pass  # Spawn-pause: returns before registration, no unregister needed
         elif is_setup_failure:
             assert has_unregister, (
                 f"Setup failure return #{i+1} MUST call unregister "

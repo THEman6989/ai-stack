@@ -514,3 +514,75 @@ def test_heartbeat_loop_exists():
 
     import inspect
     assert inspect.iscoroutinefunction(_heartbeat_loop)
+
+
+# ---------------------------------------------------------------------------
+# Optional feature tests (2026-06-01): spawn_pause, concurrency, model override
+# ---------------------------------------------------------------------------
+
+
+def test_set_spawn_paused_toggles_flag():
+    """set_spawn_paused(True) blocks spawns, set_spawn_paused(False) allows them."""
+    from delegate_agent import set_spawn_paused, is_spawn_paused
+    import asyncio
+
+    async def _test():
+        # Start clean
+        await set_spawn_paused(False)
+        assert not await is_spawn_paused()
+
+        # Pause
+        state = await set_spawn_paused(True)
+        assert state is True
+        assert await is_spawn_paused()
+
+        # Unpause
+        state = await set_spawn_paused(False)
+        assert state is False
+        assert not await is_spawn_paused()
+
+    asyncio.run(_test())
+
+
+def test_spawn_paused_blocks_run_sub_agent():
+    """run_sub_agent returns blocked status when spawns are paused at depth 0."""
+    from delegate_agent import run_sub_agent, set_spawn_paused
+    import asyncio
+
+    async def _test():
+        await set_spawn_paused(True)
+        # At depth 0 with no model, should fail fast with blocked status
+        result = await run_sub_agent(goal="test", depth=0, _model_fn=None)
+        assert result["status"] == "blocked"
+        assert "paused" in result["error"].lower()
+        await set_spawn_paused(False)
+
+    asyncio.run(_test())
+
+
+def test_concurrency_semaphore_exists():
+    """_get_concurrency_sem returns an asyncio.Semaphore."""
+    from delegate_agent import _get_concurrency_sem
+
+    sem = _get_concurrency_sem()
+    assert isinstance(sem, __import__("asyncio").Semaphore)
+
+
+def test_delegate_task_has_model_param():
+    """delegate_task @tool signature includes model parameter."""
+    import inspect
+    import sys
+    sys.path.insert(0, "langgraph-app")
+    from agent_graph import delegate_task
+
+    sig = inspect.signature(delegate_task)
+    params = set(sig.parameters.keys())
+    assert "model" in params
+
+
+def test_set_spawn_paused_tool_exists():
+    """set_spawn_paused @tool is registered in local_tool_map."""
+    with open("langgraph-app/agent_graph.py", encoding="utf-8") as f:
+        source = f.read()
+    assert "set_spawn_paused" in source
+    assert "is_spawn_paused" in source

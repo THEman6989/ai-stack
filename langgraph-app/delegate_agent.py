@@ -317,6 +317,52 @@ DELEGATE_WORKSPACE_HINT = os.getenv("ALPHARAVIS_DELEGATE_WORKSPACE_HINT", "").st
 
 
 # ---------------------------------------------------------------------------
+# Spawn pause — global kill-switch for sub-agent creation
+# ---------------------------------------------------------------------------
+
+_spawn_pause_lock = asyncio.Lock()
+_spawn_paused: bool = False
+
+
+async def set_spawn_paused(paused: bool) -> bool:
+    """Globally block/unblock new delegate_task spawns.
+
+    Active children keep running; only NEW calls to delegate_task fail fast
+    with a "spawning paused" error until unblocked. Returns the new state.
+    """
+    global _spawn_paused
+    async with _spawn_pause_lock:
+        _spawn_paused = bool(paused)
+        return _spawn_paused
+
+
+async def is_spawn_paused() -> bool:
+    """Return True if delegate_task spawns are currently blocked."""
+    async with _spawn_pause_lock:
+        return _spawn_paused
+
+
+# ---------------------------------------------------------------------------
+# Concurrency gate — semaphore-based max concurrent children enforcement
+# ---------------------------------------------------------------------------
+
+_concurrency_sem: asyncio.Semaphore | None = None
+
+
+def _get_concurrency_sem() -> asyncio.Semaphore:
+    """Return the global semaphore for max_concurrent_children enforcement.
+
+    Lazily initialized from DEFAULT_MAX_CONCURRENT so ENV changes between
+    calls are reflected across the process lifetime.
+    """
+    global _concurrency_sem
+    limit = DEFAULT_MAX_CONCURRENT
+    if _concurrency_sem is None or _concurrency_sem._value != limit:
+        _concurrency_sem = asyncio.Semaphore(limit)
+    return _concurrency_sem
+
+
+# ---------------------------------------------------------------------------
 # Helper: Hermes-style smart tool result truncation
 # ---------------------------------------------------------------------------
 
@@ -552,6 +598,18 @@ async def run_sub_agent(
     max_depth = DEFAULT_MAX_SPAWN_DEPTH
     max_concurrent = DEFAULT_MAX_CONCURRENT
 
+    # Spawn-pause check (only at top-level; nested calls from within a
+    # sub-agent skip this since the parent already passed the gate).
+    if depth == 0 and _spawn_paused:
+        return {
+            "status": "blocked",
+            "error": "Sub-agent spawning is currently paused. Use set_spawn_paused(False) to resume.",
+            "agent_id": "",
+            "depth": 0,
+            "api_calls": 0,
+            "duration_seconds": 0,
+        }
+
     # Register
     ctx = SUB_AGENT_REGISTRY.register(
         parent_id=parent_id,
@@ -741,6 +799,10 @@ async def run_sub_agent(
         heartbeat_task = asyncio.create_task(
             _heartbeat_loop(agent_id, cancel_evt, _parent_touch_fn, started)
         )
+
+    # Acquire concurrency semaphore — enforces max_concurrent_children
+    sem = _get_concurrency_sem()
+    await sem.acquire()
 
     try:
         # Wall-clock timeout: wrap the ENTIRE task, not per-iteration.
@@ -943,6 +1005,8 @@ async def run_sub_agent(
                 await heartbeat_task
             except asyncio.CancelledError:
                 pass
+        # Release concurrency slot
+        sem.release()
 
 
 # ---------------------------------------------------------------------------\n# Helpers

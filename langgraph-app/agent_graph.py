@@ -546,6 +546,8 @@ try:
         get_current_agent_context as _get_current_agent_context,
         SubAgentRegistry as _SubAgentRegistry,
         SUB_AGENT_REGISTRY as _SUB_AGENT_REGISTRY,
+        set_spawn_paused as _set_spawn_paused,
+        is_spawn_paused as _is_spawn_paused,
     )
 except Exception as exc:  # pragma: no cover - optional local helper
     _run_sub_agent = None
@@ -555,6 +557,8 @@ except Exception as exc:  # pragma: no cover - optional local helper
     _get_current_agent_context = None
     _SubAgentRegistry = None
     _SUB_AGENT_REGISTRY = None
+    _set_spawn_paused = None
+    _is_spawn_paused = None
     DELEGATE_AGENT_IMPORT_ERROR: Exception | None = exc
 else:
     DELEGATE_AGENT_IMPORT_ERROR = None
@@ -838,12 +842,12 @@ TOOL_REGISTRY_CATEGORIES = [
     {
         "category": "coding/write",
         "description": "Write AlphaRavis artifacts or delegate tasks to sub-agents (native or Hermes).",
-        "tools": ["write_alpha_ravis_artifact", "check_hermes_agent", "call_hermes_agent", "delegate_task", "list_delegated_agents", "kill_delegated_agent", "check_file_state"],
+        "tools": ["write_alpha_ravis_artifact", "check_hermes_agent", "call_hermes_agent", "delegate_task", "list_delegated_agents", "kill_delegated_agent", "check_file_state", "set_spawn_paused", "is_spawn_paused"],
     },
     {
         "category": "coding/execute",
         "description": "Run bounded diagnostics or terminal-oriented work through approved execution/debugging paths.",
-        "tools": ["execute_local_command", "check_external_service", "call_hermes_agent", "delegate_task", "list_delegated_agents", "kill_delegated_agent", "check_file_state"],
+        "tools": ["execute_local_command", "check_external_service", "call_hermes_agent", "delegate_task", "list_delegated_agents", "kill_delegated_agent", "check_file_state", "set_spawn_paused", "is_spawn_paused"],
     },
     {
         "category": "media/image",
@@ -6782,6 +6786,7 @@ async def delegate_task(
     max_output_chars: int = 8000,
     tasks: list[dict[str, Any]] | None = None,
     max_spawn_depth: int = 2,
+    model: str = "",
 ):
     """Spawn AlphaRavis-native sub-agents with isolated contexts, nested delegation, and full lifecycle.
 
@@ -6866,6 +6871,7 @@ async def delegate_task(
                 "goal": str(t.get("goal", "")).strip(),
                 "context": str(t.get("context", "")).strip()[:12000],
                 "toolsets": t.get("toolsets") if isinstance(t.get("toolsets"), list) else None,
+                "model": str(t.get("model", "")).strip(),
             }
             for t in tasks[:5]
             if isinstance(t, dict) and str(t.get("goal", "")).strip()
@@ -6875,6 +6881,7 @@ async def delegate_task(
             "goal": goal.strip(),
             "context": context.strip()[:12000],
             "toolsets": toolsets if isinstance(toolsets, list) else None,
+            "model": model.strip() if model else "",
         }]
     else:
         return "Either 'goal' or 'tasks' is required for delegate_task."
@@ -6891,6 +6898,8 @@ async def delegate_task(
         t_goal = task_def["goal"]
         t_context = task_def.get("context", "")
         t_tool_names = task_def.get("toolsets")
+        # Caller's model param overrides ENV for this specific task
+        t_model = str(task_def.get("model", "")).strip()
 
         # Determine depth/parent from context vars (supports nested delegation)
         parent_ctx = _get_current_agent_context() if _get_current_agent_context else {"agent_id": "", "depth": 0}
@@ -6912,9 +6921,9 @@ async def delegate_task(
             _thread_id=_state_thread_id(),
             _thread_key=_state_thread_key(),
             _router_ingest_source=_router_ingest_source,
-            # Provider override — enables sub-agents on a different provider/model
+            # Provider override — caller param > ENV
             _provider=os.getenv("ALPHARAVIS_DELEGATE_PROVIDER", "").strip(),
-            _model_name=os.getenv("ALPHARAVIS_DELEGATE_MODEL", "").strip(),
+            _model_name=t_model or os.getenv("ALPHARAVIS_DELEGATE_MODEL", "").strip(),
             _api_base=os.getenv("ALPHARAVIS_DELEGATE_API_BASE", "").strip(),
             _api_key=os.getenv("ALPHARAVIS_DELEGATE_API_KEY", "").strip(),
         )
@@ -6965,6 +6974,36 @@ async def check_file_state(path: str) -> str:
     if _get_file_state is None:
         return json.dumps({"error": "Delegate agent module not available."})
     return json.dumps(_get_file_state(path), indent=2)
+
+
+@tool
+async def set_spawn_paused(paused: bool = True) -> str:
+    """Globally block/unblock new sub-agent spawns via delegate_task.
+
+    When paused, ALL new delegate_task calls will fail fast with a
+    'spawning paused' error. Already-running sub-agents continue unaffected.
+    Use this before maintenance, config changes, or during incident response.
+
+    Args:
+        paused: True to block new spawns, False to allow them again.
+    Returns JSON with 'spawn_paused' state.
+    """
+    if _set_spawn_paused is None:
+        return json.dumps({"error": "Delegate agent module not available."})
+    state = await _set_spawn_paused(bool(paused))
+    return json.dumps({"spawn_paused": state})
+
+
+@tool
+async def is_spawn_paused() -> str:
+    """Check whether sub-agent spawning is currently paused.
+
+    Returns JSON with 'spawn_paused' boolean.
+    """
+    if _is_spawn_paused is None:
+        return json.dumps({"error": "Delegate agent module not available."})
+    state = await _is_spawn_paused()
+    return json.dumps({"spawn_paused": state})
 
 
 @tool
@@ -14652,6 +14691,8 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             list_delegated_agents,
             kill_delegated_agent,
             check_file_state,
+            set_spawn_paused,
+            is_spawn_paused,
             search_archived_context,
             condense_archive_recall_query,
             read_archive_record,
