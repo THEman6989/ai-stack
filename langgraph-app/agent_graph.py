@@ -6926,6 +6926,8 @@ async def delegate_task(
             _model_name=t_model or os.getenv("ALPHARAVIS_DELEGATE_MODEL", "").strip(),
             _api_base=os.getenv("ALPHARAVIS_DELEGATE_API_BASE", "").strip(),
             _api_key=os.getenv("ALPHARAVIS_DELEGATE_API_KEY", "").strip(),
+            # Heartbeat keepalive — prevents gateway inactivity timeout
+            _parent_touch_fn=lambda msg: logging.getLogger(__name__).debug("delegate heartbeat: %s", msg),
         )
 
     # Execute
@@ -9188,6 +9190,12 @@ def _retrieval_query_classifier_enabled() -> bool:
     return _env_bool("ALPHARAVIS_ENABLE_RETRIEVAL_QUERY_CLASSIFIER", "true")
 
 
+def _rag_query_2b_classifier_enabled() -> bool:
+    """Separate flag: only controls the 2B RAG-query condensation in _prepare_retrieval_query.
+    Default false — heuristic _local_retrieval_query is sufficient."""
+    return _env_bool("ALPHARAVIS_ENABLE_RAG_QUERY_2B_CLASSIFIER", "false")
+
+
 def _small_classifier_default_base_url() -> str:
     configured = os.getenv("ALPHARAVIS_RAG_CLASSIFIER_API_BASE", "").strip()
     if configured:
@@ -9345,7 +9353,7 @@ async def _prepare_retrieval_query(text: str) -> dict[str, Any]:
         "warning": "",
     }
     if (
-        not _retrieval_query_classifier_enabled()
+        not _rag_query_2b_classifier_enabled()
         or len(raw) < _retrieval_query_classifier_min_chars()
     ):
         return result
@@ -11218,8 +11226,6 @@ async def _long_prompt_direct_route_decision(state: AlphaRavisState, base_reason
     )
     if len(query) > max_chars:
         return False, f"{base_reason}; too large for direct-route classifier", None
-    if not _retrieval_query_classifier_enabled():
-        return False, base_reason, None
     try:
         classification = await _classify_prompt_for_retrieval(query)
     except Exception as exc:

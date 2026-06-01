@@ -632,8 +632,8 @@ async def run_sub_agent(
             # Blocklist — never allow dangerous tools in sub-agents
             if name in DELEGATE_BLOCKED_TOOLS:
                 continue
-            # Toolset filter — intersect with parent's tool_names if enabled
-            if clean_tool_names and name not in clean_tool_names:
+            # Toolset filter — intersect with parent's tool_names when enabled
+            if DELEGATE_INTERSECT_PARENT_TOOLS and clean_tool_names and name not in clean_tool_names:
                 continue
             selected_tools[name] = tool_obj
     if clean_tool_names and not selected_tools:
@@ -845,7 +845,17 @@ async def run_sub_agent(
                                 "retrying in %.1fs: %s",
                                 agent_id, attempt + 1, max_retries + 1, delay, exc,
                             )
-                            await asyncio.sleep(delay)
+                            # Cancel-aware sleep — check cancel_evt during backoff
+                            if cancel_evt is not None:
+                                try:
+                                    await asyncio.wait_for(cancel_evt.wait(), timeout=delay)
+                                except asyncio.TimeoutError:
+                                    pass  # normal: delay elapsed
+                                if cancel_evt.is_set():
+                                    last_error = None
+                                    break  # cancelled; outer turn loop handles cleanup
+                            else:
+                                await asyncio.sleep(delay)
                         else:
                             # Out of retries or non-retryable — let it propagate
                             break

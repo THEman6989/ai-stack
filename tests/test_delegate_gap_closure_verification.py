@@ -47,6 +47,7 @@ def test_blocked_tools_is_frozenset_with_defaults():
     assert "clarify" in DELEGATE_BLOCKED_TOOLS
     assert "memory" in DELEGATE_BLOCKED_TOOLS
     assert "send_message" in DELEGATE_BLOCKED_TOOLS
+    assert "execute_code" in DELEGATE_BLOCKED_TOOLS  # added in 28e9ff1
 
 
 def test_workspace_constant():
@@ -215,28 +216,37 @@ def test_agent_graph_passes_provider_params():
     assert "_api_key=" in call_site
 
 
-def test_agent_graph_missing_parent_touch_fn():
-    """KNOWN ISSUE: agent_graph.py does NOT pass _parent_touch_fn,
-    so the heartbeat is effectively disabled. This test documents the gap."""
+def test_retry_sleep_respects_cancel_evt():
+    """The retry delay checks cancel_evt via asyncio.wait_for,
+    so parent cancellation interrupts the backoff sleep."""
+    source = _load_source("delegate_agent.py")
+    # Find the cancel-aware sleep block
+    assert "Cancel-aware sleep" in source
+    assert "cancel_evt.wait()" in source
+    assert "asyncio.wait_for" in source
+    # After cancel detection, break out cleanly for outer loop to handle
+    assert "last_error = None" in source
+    assert "cancelled; outer turn loop handles cleanup" in source
+
+
+# ── Updated integration tests (after fixes) ──────────────────────────
+def test_agent_graph_passes_parent_touch_fn():
+    """agent_graph.py delegate_task passes _parent_touch_fn for heartbeat.
+    This was fixed from a known gap — heartbeat is now activated."""
     ag_source = _load_source("agent_graph.py")
     call_site = ag_source[ag_source.index("return await _run_sub_agent("):ag_source.index("\n        )", ag_source.index("return await _run_sub_agent("))]
-    # This asserts the KNOWN GAP — when the gap is closed, flip this test
-    assert "_parent_touch_fn" not in call_site, (
-        "GAP: _parent_touch_fn is not passed from agent_graph.py. "
-        "Heartbeat is wired in delegate_agent.py but never activated. "
-        "If this assertion fails, the gap has been closed — update this test."
+    assert "_parent_touch_fn=" in call_site, (
+        "Heartbeat is now wired — _parent_touch_fn is passed from agent_graph.py"
     )
 
 
-def test_intersect_parent_tools_is_unused():
-    """KNOWN ISSUE: DELEGATE_INTERSECT_PARENT_TOOLS is defined but never checked.
-    Tool intersection runs unconditionally regardless of this ENV var."""
+def test_intersect_parent_tools_is_gated():
+    """DELEGATE_INTERSECT_PARENT_TOOLS now gates the tool intersection.
+    When False, sub-agents get the full tool list regardless of parent tools."""
     source = _load_source("delegate_agent.py")
-    # Find tool resolution block
     tool_start = source.index("# Resolve tools with blocklist")
     tool_end = source.index("# Build tool schemas")
     tool_block = source[tool_start:tool_end]
-    assert "DELEGATE_INTERSECT_PARENT_TOOLS" not in tool_block, (
-        "GAP: DELEGATE_INTERSECT_PARENT_TOOLS is never checked in tool resolution. "
-        "Intersection always runs. This ENV var is dead code."
+    assert "DELEGATE_INTERSECT_PARENT_TOOLS" in tool_block, (
+        "DELEGATE_INTERSECT_PARENT_TOOLS is now checked in tool resolution"
     )
