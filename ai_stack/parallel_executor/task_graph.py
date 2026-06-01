@@ -508,25 +508,52 @@ def _classify_task_from_title(title: str) -> tuple[TaskType, bool, bool, ModelCl
 
     # Write/implementation tasks
     write_triggers = [
+        # English
         "implement", "build", "create", "write", "code", "patch", "fix",
         "refactor", "add", "change", "modify", "update", "edit", "generate",
         "docker", "deploy",
+        # German
+        "implementieren", "implementier", "bauen", "bau", "erstellen", "erstell",
+        "schreiben", "schreib", "programmieren", "programmier",
+        "korrigieren", "korrigier", "beheben", "beheb", "hinzufügen", "hinzufuegen",
+        "ändern", "aendern", "aktualisieren", "aktualisier",
+        "generieren", "generier", "umgestalten", "umgestalt",
     ]
     if any(trigger in lowered for trigger in write_triggers):
         return TaskType.WRITE_IMPLEMENTATION, False, True, ModelClass.BIG_MODEL
 
     # Test tasks
-    test_triggers = ["test", "verify", "validate", "check", "assert"]
+    test_triggers = [
+        # English
+        "test", "verify", "validate", "check", "assert",
+        # German
+        "testen", "test", "überprüfen", "ueberpruefen", "prüfen", "pruefen",
+        "validieren", "validier", "verifizieren", "verifizier",
+    ]
     if any(trigger in lowered for trigger in test_triggers):
         return TaskType.TEST, False, True, ModelClass.BIG_MODEL
 
     # Summarization / analysis
-    summary_triggers = ["summarize", "summary", "compress", "extract", "analyze", "analysis", "review"]
+    summary_triggers = [
+        # English
+        "summarize", "summary", "compress", "extract", "analyze", "analysis", "review",
+        # German
+        "zusammenfassen", "zusammenfassung", "komprimieren", "komprimier",
+        "extrahieren", "extrahier", "analysieren", "analysier", "analyse",
+        "auswerten", "auswertung", "begutachten", "begutachtung",
+    ]
     if any(trigger in lowered for trigger in summary_triggers):
         return TaskType.SUMMARIZATION, True, False, ModelClass.SMALL_MODEL
 
     # Classification
-    classify_triggers = ["classify", "route", "judge", "categorize", "detect"]
+    classify_triggers = [
+        # English
+        "classify", "route", "judge", "categorize", "detect",
+        # German
+        "klassifizieren", "klassifizier", "zuordnen", "zuordnung",
+        "kategorisieren", "kategorisier", "erkennen", "erkennung",
+        "beurteilen", "beurteilung", "einordnen", "einordnung",
+    ]
     if any(trigger in lowered for trigger in classify_triggers):
         return TaskType.CLASSIFICATION, True, False, ModelClass.SMALL_MODEL
 

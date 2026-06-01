@@ -76,84 +76,81 @@ class AlphaRavisAPIError(RuntimeError):
 
 
 _CONTEXT_PATTERNS = (
-    "context length",
-    "context size",
-    "maximum context",
-    "context window",
-    "too many tokens",
-    "token limit",
-    "prompt is too long",
-    "prompt exceeds",
-    "reduce the length",
-    "exceeds the max_model_len",
-    "max_model_len",
-    "maximum model length",
-    "context length exceeded",
-    "n_ctx_slot",
-    "slot context",
-    "input is too long",
-    "max input token",
+    # English
+    "context length", "context size", "maximum context", "context window",
+    "too many tokens", "token limit", "prompt is too long", "prompt exceeds",
+    "reduce the length", "exceeds the max_model_len", "max_model_len",
+    "maximum model length", "context length exceeded", "n_ctx_slot",
+    "slot context", "input is too long", "max input token",
+    # German
+    "kontextlänge", "kontextfenster", "maximale kontext", "zu viele token",
+    "token-limit", "tokenlimit", "prompt zu lang", "eingabe zu lang",
+    "maximale eingabelänge", "kontext überschritten", "kontext ueberschritten",
+    "länge reduzieren", "verringern sie", "max_model_len",
 )
 _RATE_LIMIT_PATTERNS = (
-    "rate limit",
-    "rate_limit",
-    "too many requests",
-    "throttled",
-    "requests per minute",
-    "tokens per minute",
-    "resource_exhausted",
+    # English
+    "rate limit", "rate_limit", "too many requests", "throttled",
+    "requests per minute", "tokens per minute", "resource_exhausted",
     "retry after",
+    # German
+    "ratenlimit", "ratenbegrenzung", "zu viele anfragen", "gedrosselt",
+    "anfragen pro minute", "token pro minute", "ressource erschöpft",
+    "ressource erschoepft", "später erneut", "spaeter erneut", "wiederholen nach",
 )
 _AUTH_PATTERNS = (
-    "invalid api key",
-    "invalid_api_key",
-    "unauthorized",
-    "forbidden",
-    "authentication",
-    "invalid token",
-    "token expired",
+    # English
+    "invalid api key", "invalid_api_key", "unauthorized", "forbidden",
+    "authentication", "invalid token", "token expired",
+    # German
+    "ungültiger api-schlüssel", "ungueltiger api-schluessel", "nicht autorisiert",
+    "verboten", "authentifizierung", "ungültiger token", "ungueltiger token",
+    "token abgelaufen", "anmeldung fehlgeschlagen",
 )
 _MODEL_NOT_FOUND_PATTERNS = (
-    "model not found",
-    "model_not_found",
-    "invalid model",
-    "no such model",
-    "unknown model",
-    "does not exist",
-    "not a valid model",
+    # English
+    "model not found", "model_not_found", "invalid model", "no such model",
+    "unknown model", "does not exist", "not a valid model",
+    # German
+    "modell nicht gefunden", "ungültiges modell", "ungueltiges modell",
+    "unbekanntes modell", "existiert nicht", "kein gültiges modell",
+    "kein gueltiges modell", "modell nicht verfügbar", "modell nicht verfuegbar",
 )
 _FORMAT_PATTERNS = (
-    "unsupported parameter",
-    "unknown parameter",
-    "extra fields not permitted",
-    "invalid request",
-    "invalid tool",
-    "schema",
-    "json",
-    "bad request",
+    # English
+    "unsupported parameter", "unknown parameter", "extra fields not permitted",
+    "invalid request", "invalid tool", "schema", "json", "bad request",
+    # German
+    "nicht unterstützter parameter", "nicht unterstuetzter parameter",
+    "unbekannter parameter", "ungültige anfrage", "ungueltige anfrage",
+    "ungültiges werkzeug", "schema", "json", "fehlerhafte anfrage",
+    "zusätzliche felder nicht erlaubt", "zusaetzliche felder nicht erlaubt",
 )
 _PAYLOAD_PATTERNS = (
-    "payload too large",
-    "request entity too large",
-    "content too large",
+    # English
+    "payload too large", "request entity too large", "content too large",
+    # German
+    "nutzdaten zu groß", "nutzdaten zu gross", "anfrage zu groß",
+    "anfrage zu gross", "inhalt zu groß", "inhalt zu gross",
+    "datenmenge zu groß", "datenmenge zu gross",
 )
 _IMAGE_PATTERNS = (
-    "image too large",
-    "image exceeds",
-    "image_too_large",
+    # English
+    "image too large", "image exceeds", "image_too_large",
+    # German
+    "bild zu groß", "bild zu gross", "bild überschreitet", "bild ueberschreitet",
+    "bildgröße", "bildgroesse",
 )
 _TIMEOUT_PATTERNS = (
-    "timeout",
-    "timed out",
-    "readtimeout",
-    "connecttimeout",
-    "cannot connect",
-    "connection refused",
-    "connection reset",
-    "server disconnected",
-    "remote protocol",
-    "broken pipe",
-    "eof",
+    # English
+    "timeout", "timed out", "readtimeout", "connecttimeout",
+    "cannot connect", "connection refused", "connection reset",
+    "server disconnected", "remote protocol", "broken pipe", "eof",
+    # German
+    "zeitüberschreitung", "zeitueberschreitung", "zeit abgelaufen",
+    "verbindung abgelehnt", "verbindung zurückgesetzt", "verbindung zurueckgesetzt",
+    "verbindung unterbrochen", "server getrennt", "keine verbindung",
+    "nicht erreichbar", "leitung unterbrochen",
 )
 
 

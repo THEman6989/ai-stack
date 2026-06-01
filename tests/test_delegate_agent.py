@@ -454,6 +454,7 @@ def test_blocked_tools_constant_is_frozenset():
     assert "clarify" in DELEGATE_BLOCKED_TOOLS
     assert "memory" in DELEGATE_BLOCKED_TOOLS
     assert "send_message" in DELEGATE_BLOCKED_TOOLS
+    assert "execute_code" in DELEGATE_BLOCKED_TOOLS
 
 
 def test_provider_override_constants_exist():

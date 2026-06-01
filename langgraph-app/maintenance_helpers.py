@@ -30,6 +30,7 @@ _STOPWORDS = {
 }
 
 _INSIGHT_PATTERNS = (
+    # English
     (re.compile(r"\bI prefer\b(.{8,180})", re.IGNORECASE), "user_preference", 0.85),
     (re.compile(r"\bI usually\b(.{8,180})", re.IGNORECASE), "user_habit", 0.75),
     (re.compile(r"\bI always\b(.{8,180})", re.IGNORECASE), "user_preference", 0.92),
@@ -38,6 +39,16 @@ _INSIGHT_PATTERNS = (
     (re.compile(r"\bdefault(?:s)? to\b(.{8,180})", re.IGNORECASE), "runtime_default", 0.80),
     (re.compile(r"\bkeep\b(.{8,180})\bby default\b", re.IGNORECASE), "runtime_default", 0.80),
     (re.compile(r"\bimportant:\b(.{8,180})", re.IGNORECASE), "fact", 0.70),
+    # German
+    (re.compile(r"\bich bevorzuge\b(.{8,180})", re.IGNORECASE), "user_preference", 0.85),
+    (re.compile(r"\bich mag\b(.{8,180})", re.IGNORECASE), "user_preference", 0.75),
+    (re.compile(r"\bich (?:mache|nutze|verwende) immer\b(.{8,180})", re.IGNORECASE), "user_preference", 0.92),
+    (re.compile(r"\bich (?:mache|nutze) nie\b(.{8,180})", re.IGNORECASE), "user_preference", 0.92),
+    (re.compile(r"\bmerke? dir\b(.{8,180})", re.IGNORECASE), "explicit_memory_request", 0.95),
+    (re.compile(r"\bstandardmäßig\b(.{8,180})", re.IGNORECASE), "runtime_default", 0.80),
+    (re.compile(r"\bbehalt(?:e|en)\b(.{8,180})\bstandard\b", re.IGNORECASE), "runtime_default", 0.80),
+    (re.compile(r"\bwichtig:\b(.{8,180})", re.IGNORECASE), "fact", 0.70),
+    (re.compile(r"\bnicht vergessen\b(.{8,180})", re.IGNORECASE), "explicit_memory_request", 0.90),
 )
 
 

@@ -299,7 +299,7 @@ HEARTBEAT_INTERVAL = float(os.getenv("ALPHARAVIS_DELEGATE_HEARTBEAT_INTERVAL_SEC
 DELEGATE_INTERSECT_PARENT_TOOLS = env_bool(
     "ALPHARAVIS_DELEGATE_INTERSECT_PARENT_TOOLS", "true"
 )
-_blocked_raw = os.getenv("ALPHARAVIS_DELEGATE_BLOCKED_TOOLS", "clarify,memory,send_message")
+_blocked_raw = os.getenv("ALPHARAVIS_DELEGATE_BLOCKED_TOOLS", "clarify,memory,send_message,execute_code")
 DELEGATE_BLOCKED_TOOLS: frozenset[str] = frozenset(
     name.strip() for name in _blocked_raw.split(",") if name.strip()
 )

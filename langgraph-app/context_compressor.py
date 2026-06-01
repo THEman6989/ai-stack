@@ -344,9 +344,16 @@ def _arg_value(args: Any, *names: str) -> str:
 
 def _find_exit_code(text: str) -> str:
     for pattern in [
+        # English
         r"(?i)\bexit(?:\s+code)?\s*[:=]\s*(-?\d+)",
         r"(?i)\breturncode\s*[:=]\s*(-?\d+)",
         r"(?i)\bExit code:\s*(-?\d+)",
+        # German
+        r"(?i)\brückgabewert\s*[:=]\s*(-?\d+)",
+        r"(?i)\brueckgabewert\s*[:=]\s*(-?\d+)",
+        r"(?i)\bfehlercode\s*[:=]\s*(-?\d+)",
+        r"(?i)\bexit-code\s*[:=]\s*(-?\d+)",
+        r"(?i)\bbeendigungscode\s*[:=]\s*(-?\d+)",
     ]:
         match = re.search(pattern, text)
         if match:
@@ -356,9 +363,16 @@ def _find_exit_code(text: str) -> str:
 
 def _count_search_matches(text: str) -> str:
     patterns = [
+        # English
         r"(?i)\b(\d+)\s+matches?\b",
         r"(?i)\b(\d+)\s+results?\b",
         r"(?i)\bfound\s+(\d+)\b",
+        # German
+        r"(?i)\b(\d+)\s+treffer\b",
+        r"(?i)\b(\d+)\s+ergebnisse\b",
+        r"(?i)\b(\d+)\s+resultate\b",
+        r"(?i)\bgefunden\s*:\s*(\d+)\b",
+        r"(?i)\b(\d+)\s+gefunden\b",
     ]
     for pattern in patterns:
         match = re.search(pattern, text)

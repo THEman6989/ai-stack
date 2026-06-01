@@ -1838,21 +1838,20 @@ ALPHARAVIS_LOCAL_COMMAND_MAX_OUTPUT_CHARS=12000
 # -- Heartbeat (prevents gateway inactivity timeout during long sub-agent runs) --
 # When enabled, sub-agents periodically touch the parent's activity timestamp
 # so the gateway doesn't kill the session while a sub-agent is working.
-# ALPHARAVIS_DELEGATE_HEARTBEAT_ENABLED=true
-# ALPHARAVIS_DELEGATE_HEARTBEAT_INTERVAL_SECONDS=30
+ALPHARAVIS_DELEGATE_HEARTBEAT_ENABLED=true
+ALPHARAVIS_DELEGATE_HEARTBEAT_INTERVAL_SECONDS=30
 
 # -- Toolset Control --
 # Intersect parent tools: when true, sub-agent only gets tools the parent has.
-# When false, sub-agent gets the full delegate tool list (22 tools).
-# ALPHARAVIS_DELEGATE_INTERSECT_PARENT_TOOLS=true
+ALPHARAVIS_DELEGATE_INTERSECT_PARENT_TOOLS=true
 # Blocked tools: never available to sub-agents (comma-separated).
-# ALPHARAVIS_DELEGATE_BLOCKED_TOOLS=clarify,memory,send_message
+ALPHARAVIS_DELEGATE_BLOCKED_TOOLS=clarify,memory,send_message,execute_code
 
 # -- Fallback / Retry --
 # Max retries on retryable API errors (rate-limit, timeout, 5xx). Default 2.
-# ALPHARAVIS_DELEGATE_MAX_RETRIES=2
+ALPHARAVIS_DELEGATE_MAX_RETRIES=2
 # Base delay between retries in seconds (exponential backoff). Default 5.
-# ALPHARAVIS_DELEGATE_RETRY_DELAY_SECONDS=5
+ALPHARAVIS_DELEGATE_RETRY_DELAY_SECONDS=5
 
 # -- Workspace --
 # Explicit workspace path for sub-agents. When set, injected into the system
