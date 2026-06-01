@@ -6912,6 +6912,11 @@ async def delegate_task(
             _thread_id=_state_thread_id(),
             _thread_key=_state_thread_key(),
             _router_ingest_source=_router_ingest_source,
+            # Provider override — enables sub-agents on a different provider/model
+            _provider=os.getenv("ALPHARAVIS_DELEGATE_PROVIDER", "").strip(),
+            _model_name=os.getenv("ALPHARAVIS_DELEGATE_MODEL", "").strip(),
+            _api_base=os.getenv("ALPHARAVIS_DELEGATE_API_BASE", "").strip(),
+            _api_key=os.getenv("ALPHARAVIS_DELEGATE_API_KEY", "").strip(),
         )
 
     # Execute

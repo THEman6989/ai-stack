@@ -472,6 +472,14 @@ async def run_sub_agent(
     _thread_id: str = "",
     _thread_key: str = "",
     _router_ingest_source: Any = None,
+    # Provider override — when set, sub-agent uses its own ChatOpenAI client
+    # instead of inheriting the parent's model function.
+    _provider: str = "",
+    _model_name: str = "",
+    _api_base: str = "",
+    _api_key: str = "",
+    # Parent-activity touch for heartbeat keepalive
+    _parent_touch_fn: Any = None,
 ) -> dict[str, Any]:
     """Run one sub-agent with tool-calling loop. Callable from any depth.
 
@@ -555,26 +563,68 @@ async def run_sub_agent(
         {"role": "user", "content": goal + (f"\n\nContext:\n{context}" if context else "")},
     ]
 
-    # Get model
-    if _model_fn is None:
+    # Get model — supports two paths:
+    # 1. Provider override: builds a dedicated ChatOpenAI client for this sub-agent.
+    #    Enables sub-agents to run on a different provider/model than the parent.
+    # 2. Legacy: inherits the parent's model function (_model_fn).
+    if _provider and _model_name:
+        # Provider override — build a standalone ChatOpenAI instance
+        try:
+            from langchain_openai import ChatOpenAI
+
+            model_kwargs: dict[str, Any] = {
+                "model": _model_name,
+                "temperature": float(os.getenv("ALPHARAVIS_DELEGATE_TEMPERATURE", "0.1")),
+                "max_tokens": int(os.getenv("ALPHARAVIS_DELEGATE_MAX_TOKENS", "4096")),
+            }
+            if _api_base:
+                model_kwargs["base_url"] = _api_base
+            if _api_key:
+                model_kwargs["api_key"] = _api_key
+            if tool_schemas:
+                model_kwargs["tools"] = tool_schemas
+            model = ChatOpenAI(**model_kwargs)
+            LOGGER.info(
+                "Agent %s: using provider override %s/%s", agent_id, _provider, _model_name
+            )
+        except ImportError:
+            LOGGER.warning(
+                "Agent %s: langchain_openai not available, falling back to parent model", agent_id
+            )
+            if _model_fn is None:
+                ctx.state = "failed"
+                ctx.result = {"status": "failed", "error": "Provider override failed: langchain_openai not installed and no fallback model"}
+                SUB_AGENT_REGISTRY.unregister(agent_id)
+                return ctx.result
+            model_kwargs: dict[str, Any] = {
+                "temperature": float(os.getenv("ALPHARAVIS_DELEGATE_TEMPERATURE", "0.1")),
+                "max_tokens": int(os.getenv("ALPHARAVIS_DELEGATE_MAX_TOKENS", "4096")),
+            }
+            if env_bool("ALPHARAVIS_DELEGATE_STREAMING", "false"):
+                model_kwargs["stream"] = True
+            if tool_schemas:
+                model_kwargs["tools"] = tool_schemas
+            model = _model_fn(model_kwargs)
+    elif _model_fn is not None:
+        # Legacy path — use parent's model function
+        model_kwargs: dict[str, Any] = {
+            "temperature": float(os.getenv("ALPHARAVIS_DELEGATE_TEMPERATURE", "0.1")),
+            "max_tokens": int(os.getenv("ALPHARAVIS_DELEGATE_MAX_TOKENS", "4096")),
+        }
+        # Streaming: off by default for sub-agents — they don't stream to the user
+        # and non-streaming mode avoids tool-call chunking issues with some providers.
+        # Enable via ALPHARAVIS_DELEGATE_STREAMING=true if your provider handles it well.
+        if env_bool("ALPHARAVIS_DELEGATE_STREAMING", "false"):
+            model_kwargs["stream"] = True
+        if tool_schemas:
+            model_kwargs["tools"] = tool_schemas
+
+        model = _model_fn(model_kwargs)
+    else:
         ctx.state = "failed"
-        ctx.result = {"status": "failed", "error": "No model function provided"}
+        ctx.result = {"status": "failed", "error": "No model function or provider override provided"}
         SUB_AGENT_REGISTRY.unregister(agent_id)
         return ctx.result
-
-    model_kwargs: dict[str, Any] = {
-        "temperature": float(os.getenv("ALPHARAVIS_DELEGATE_TEMPERATURE", "0.1")),
-        "max_tokens": int(os.getenv("ALPHARAVIS_DELEGATE_MAX_TOKENS", "4096")),
-    }
-    # Streaming: off by default for sub-agents — they don't stream to the user
-    # and non-streaming mode avoids tool-call chunking issues with some providers.
-    # Enable via ALPHARAVIS_DELEGATE_STREAMING=true if your provider handles it well.
-    if env_bool("ALPHARAVIS_DELEGATE_STREAMING", "false"):
-        model_kwargs["stream"] = True
-    if tool_schemas:
-        model_kwargs["tools"] = tool_schemas
-
-    model = _model_fn(model_kwargs)
     if model is None:
         ctx.state = "failed"
         ctx.result = {"status": "failed", "error": "Model unavailable"}
