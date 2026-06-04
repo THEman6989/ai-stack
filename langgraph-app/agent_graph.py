@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import importlib
 import inspect
 import json
 import logging
@@ -167,7 +168,6 @@ else:
 
 try:
     from video_drop_planner import plan_video_outfit_drops as _plan_video_outfit_drops
-    import importlib
 
     _run_video_outfit_drop = importlib.import_module("beatdrop_outfit.runner").run_video_outfit_drop
 except Exception as exc:  # pragma: no cover - optional local helper/deps
@@ -981,14 +981,24 @@ def _beatdrop_outfit_extension_enabled() -> bool:
     pluginenv = _WORKSPACE_ROOT / "plugins" / "beatdrop_outfit" / ".pluginenv"
     if not pluginenv.exists():
         return False
+    enabled = False
     try:
         for line in pluginenv.read_text().splitlines():
             key, _, value = line.partition("=")
             if key.strip().upper() == "ENABLED":
-                return value.strip().lower() in {"1", "true", "yes", "on"}
+                enabled = value.strip().lower() in {"1", "true", "yes", "on"}
+                break
     except Exception:
         return False
-    return False
+    if not enabled:
+        return False
+    try:
+        from plugin_loader import load_plugin_python_tools as _load_pp_tools
+
+        tools = _load_pp_tools()
+        return len(tools) >= 1
+    except Exception:
+        return False
 
 
 def _crisis_max_attempts() -> int:
