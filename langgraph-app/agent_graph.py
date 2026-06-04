@@ -166,6 +166,14 @@ else:
     MEDIA_ANALYSIS_IMPORT_ERROR = None
 
 try:
+    from video_drop_planner import plan_video_outfit_drops as _plan_video_outfit_drops
+except Exception as exc:  # pragma: no cover - optional local helper/deps
+    _plan_video_outfit_drops = None
+    VIDEO_DROP_PLANNER_IMPORT_ERROR: Exception | None = exc
+else:
+    VIDEO_DROP_PLANNER_IMPORT_ERROR = None
+
+try:
     from comfyui_client import (
         ComfyUIClient as _ComfyUIClient,
         comfyui_status as _comfyui_status,
@@ -861,6 +869,7 @@ TOOL_REGISTRY_CATEGORIES = [
             "register_media_asset",
             "semantic_media_search",
             "plan_media_analysis",
+            "plan_video_outfit_drops",
             "prepare_media_for_model",
             "inspect_media_index_status",
             "inspect_embedding_queue_status",
@@ -3601,6 +3610,52 @@ def plan_media_analysis(media_url: str, media_type: str = "video", user_goal: st
         "Media handling stores metadata only by default. Use register_media_asset first; run a specific "
         "analysis pipeline only when the user explicitly asks for it."
     )
+
+
+@tool
+async def plan_video_outfit_drops(
+    media_url: str,
+    outfit_images_json: str = "[]",
+    workflow_name: str = "outfit_change_beatdrop",
+    source_key: str = "",
+    max_drops: int = 8,
+    black_frame_ms: int = 60,
+    window_seconds: float = 1.0,
+    candidate_fps: float = 30.0,
+    extract_frames: bool = True,
+) -> str:
+    """Analyze a dance/beatdrop video into a reusable outfit-change drop plan JSON.
+
+    This is analysis-only: it detects beat candidates, zooms into candidate frame
+    windows, suggests exact cut/black-frame metadata, and writes a drop-plan
+    manifest. It does not submit ComfyUI workflows; use saved ComfyUI workflow
+    tools later with the returned plan_path.
+    """
+
+    if _plan_video_outfit_drops is None:
+        return _json_tool_result({"ok": False, "error": f"Video drop planner helper is unavailable: {VIDEO_DROP_PLANNER_IMPORT_ERROR}"})
+    try:
+        outfit_images = json.loads(outfit_images_json or "[]")
+    except Exception as exc:
+        return _json_tool_result({"ok": False, "error": f"Invalid outfit_images_json: {exc}"})
+    if not isinstance(outfit_images, list):
+        return _json_tool_result({"ok": False, "error": "outfit_images_json must decode to a JSON array."})
+    try:
+        result = await asyncio.to_thread(
+            _plan_video_outfit_drops,
+            media_url=media_url,
+            outfit_images=outfit_images,
+            workflow_name=workflow_name,
+            source_key=source_key or _state_thread_id(),
+            max_drops=max(1, min(int(max_drops), 16)),
+            black_frame_ms=max(1, int(black_frame_ms)),
+            window_seconds=max(0.1, min(float(window_seconds), 5.0)),
+            candidate_fps=max(1.0, min(float(candidate_fps), 60.0)),
+            extract_frames=extract_frames,
+        )
+        return _json_tool_result(result)
+    except Exception as exc:
+        return _json_tool_result({"ok": False, "media_url": media_url, "workflow_name": workflow_name, "error": str(exc)})
 
 
 @tool
@@ -14644,6 +14699,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             register_media_asset,
             semantic_media_search,
             plan_media_analysis,
+            plan_video_outfit_drops,
             prepare_media_for_model,
             inspect_media_index_status,
             inspect_embedding_queue_status,
@@ -14873,6 +14929,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             register_media_asset,
             semantic_media_search,
             plan_media_analysis,
+            plan_video_outfit_drops,
             prepare_media_for_model,
             inspect_media_index_status,
             inspect_embedding_queue_status,
