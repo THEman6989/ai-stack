@@ -229,6 +229,20 @@ def test_minimal_manifest_defaults():
     assert manifest.env_defaults == {}
 
 
+def test_preinstalled_beatdrop_outfit_plugin_is_disabled_by_default():
+    plugin_dir = ROOT / "plugins" / "beatdrop_outfit"
+
+    manifest = _load_manifest(plugin_dir)
+
+    assert manifest is not None
+    assert manifest.name == "beatdrop-outfit"
+    assert manifest.toolsets["media/beatdrop-outfit"]["tools"] == [
+        "plan_video_outfit_drops",
+        "run_video_outfit_drop",
+    ]
+    assert _plugin_is_enabled(plugin_dir) is False
+
+
 # ── load_plugins ───────────────────────────────────────────────────
 
 def test_no_plugins_when_system_flag_off():

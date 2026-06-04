@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "langgraph-app"))
 
 import video_drop_planner  # noqa: E402
+from beatdrop_outfit.runner import run_video_outfit_drop  # noqa: E402
 
 
 def _write_pcm16_wav(path: Path, samples: list[float], sample_rate: int = 22050) -> None:
@@ -303,3 +304,31 @@ def test_plan_from_file_records_contact_sheet_paths_in_manifest(monkeypatch, tmp
     assert contact_sheet.name.endswith("contact-sheet.svg")
     saved = json.loads(Path(plan["plan_path"]).read_text())
     assert saved["analysis_artifacts"]["frame_windows"][0]["contact_sheet_path"] == str(contact_sheet)
+
+
+def test_run_video_outfit_drop_dry_run_maps_drop_plan_parameters() -> None:
+    plan = {
+        "source_video": "/tmp/source.mp4",
+        "workflow_name": "outfit_change_beatdrop",
+        "outfit_images": [{"id": "outfit_1", "url": "/tmp/outfit.png"}],
+        "drops": [
+            {
+                "drop_id": "drop_001",
+                "beat_frame": 60,
+                "window_start_frame": 30,
+                "window_end_frame": 90,
+                "first_new_outfit_frame": 61,
+                "selected_outfit_image": "outfit_1",
+                "insert_black_frame": True,
+                "black_frame_count": 2,
+            }
+        ],
+    }
+
+    result = run_video_outfit_drop(plan, "drop_001", dry_run=True)
+
+    assert result["ok"] is True
+    assert result["dry_run"] is True
+    assert result["parameters"]["source_video"] == "/tmp/source.mp4"
+    assert result["parameters"]["reference_image"] == "/tmp/outfit.png"
+    assert result["parameters"]["target_frame"] == 61

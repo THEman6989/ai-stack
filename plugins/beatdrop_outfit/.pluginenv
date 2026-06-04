@@ -1,0 +1,2 @@
+# Disabled by default because this is a specialized optional extension.
+ENABLED=false

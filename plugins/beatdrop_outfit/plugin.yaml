@@ -1,0 +1,18 @@
+name: beatdrop-outfit
+version: 0.1.0
+description: Beatdrop/outfit-change video planner and ComfyUI single-drop runner.
+author: AlphaRavis
+
+toolsets:
+  media/beatdrop-outfit:
+    description: Optional beatdrop/outfit-change planning and ComfyUI dry-run rendering tools.
+    tools:
+      - plan_video_outfit_drops
+      - run_video_outfit_drop
+    includes:
+      - media/video
+
+env_defaults:
+  ALPHARAVIS_BEATDROP_OUTFIT_ALLOW_LOCAL_PATHS: "false"
+  ALPHARAVIS_BEATDROP_OUTFIT_ALLOW_PRIVATE_URLS: "false"
+  ALPHARAVIS_BEATDROP_OUTFIT_AUDIO_BACKEND: "rms"

@@ -1,0 +1,3 @@
+# Optional Python deps for richer previews.
+# Core planner works with Python stdlib + ffmpeg/ffprobe.
+pillow>=10

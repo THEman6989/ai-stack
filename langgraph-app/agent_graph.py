@@ -167,8 +167,12 @@ else:
 
 try:
     from video_drop_planner import plan_video_outfit_drops as _plan_video_outfit_drops
+    import importlib
+
+    _run_video_outfit_drop = importlib.import_module("beatdrop_outfit.runner").run_video_outfit_drop
 except Exception as exc:  # pragma: no cover - optional local helper/deps
     _plan_video_outfit_drops = None
+    _run_video_outfit_drop = None
     VIDEO_DROP_PLANNER_IMPORT_ERROR: Exception | None = exc
 else:
     VIDEO_DROP_PLANNER_IMPORT_ERROR = None
@@ -869,7 +873,6 @@ TOOL_REGISTRY_CATEGORIES = [
             "register_media_asset",
             "semantic_media_search",
             "plan_media_analysis",
-            "plan_video_outfit_drops",
             "prepare_media_for_model",
             "inspect_media_index_status",
             "inspect_embedding_queue_status",
@@ -970,6 +973,22 @@ def _comfyui_agent_enabled() -> bool:
 
 def _storage_manager_enabled() -> bool:
     return _env_bool("ALPHARAVIS_STORAGE_MANAGER_ENABLED", "false")
+
+
+def _beatdrop_outfit_extension_enabled() -> bool:
+    if not _env_bool("ALPHARAVIS_ENABLE_PLUGIN_SYSTEM", "false"):
+        return False
+    pluginenv = _WORKSPACE_ROOT / "plugins" / "beatdrop_outfit" / ".pluginenv"
+    if not pluginenv.exists():
+        return False
+    try:
+        for line in pluginenv.read_text().splitlines():
+            key, _, value = line.partition("=")
+            if key.strip().upper() == "ENABLED":
+                return value.strip().lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        return False
+    return False
 
 
 def _crisis_max_attempts() -> int:
@@ -3656,6 +3675,41 @@ async def plan_video_outfit_drops(
         return _json_tool_result(result)
     except Exception as exc:
         return _json_tool_result({"ok": False, "media_url": media_url, "workflow_name": workflow_name, "error": str(exc)})
+
+
+@tool
+async def run_video_outfit_drop(
+    plan_json_or_path: str,
+    drop_id: str = "",
+    workflow_name: str = "outfit_change_beatdrop",
+    dry_run: bool = True,
+    extra_parameters_json: str = "{}",
+) -> str:
+    """Prepare one planned beatdrop/outfit-change drop for a saved ComfyUI workflow; dry-run by default."""
+
+    if _run_video_outfit_drop is None:
+        return _json_tool_result({"ok": False, "error": f"Video drop runner helper is unavailable: {VIDEO_DROP_PLANNER_IMPORT_ERROR}"})
+    try:
+        extra_parameters = json.loads(extra_parameters_json or "{}")
+    except Exception as exc:
+        return _json_tool_result({"ok": False, "error": f"Invalid extra_parameters_json: {exc}"})
+    if not isinstance(extra_parameters, dict):
+        return _json_tool_result({"ok": False, "error": "extra_parameters_json must decode to a JSON object."})
+    try:
+        result = await asyncio.to_thread(
+            _run_video_outfit_drop,
+            plan_json_or_path,
+            drop_id,
+            workflow_name=workflow_name,
+            dry_run=dry_run,
+            extra_parameters=extra_parameters,
+        )
+        return _json_tool_result(result)
+    except Exception as exc:
+        return _json_tool_result({"ok": False, "drop_id": drop_id, "workflow_name": workflow_name, "error": str(exc)})
+
+
+beatdrop_outfit_tools = [plan_video_outfit_drops, run_video_outfit_drop] if _beatdrop_outfit_extension_enabled() else []
 
 
 @tool
@@ -14699,7 +14753,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             register_media_asset,
             semantic_media_search,
             plan_media_analysis,
-            plan_video_outfit_drops,
+            *beatdrop_outfit_tools,
             prepare_media_for_model,
             inspect_media_index_status,
             inspect_embedding_queue_status,
@@ -14929,7 +14983,7 @@ def _build_graph(mcp_tools: list[Any] | None = None, store: Any | None = None):
             register_media_asset,
             semantic_media_search,
             plan_media_analysis,
-            plan_video_outfit_drops,
+            *beatdrop_outfit_tools,
             prepare_media_for_model,
             inspect_media_index_status,
             inspect_embedding_queue_status,

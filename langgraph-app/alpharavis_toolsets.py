@@ -120,12 +120,11 @@ TOOLSETS: dict[str, Toolset] = {
     ),
     "media/video": Toolset(
         "media/video",
-        "Register videos, preserve URLs/file ids, prepare explicit analysis, plan beatdrop/outfit-change frame windows, inspect indexing, and search indexed media.",
+        "Register videos, preserve URLs/file ids, prepare explicit analysis, inspect indexing, and search indexed media.",
         tools=(
             "register_media_asset",
             "semantic_media_search",
             "plan_media_analysis",
-            "plan_video_outfit_drops",
             "prepare_media_for_model",
             "inspect_media_index_status",
             "inspect_embedding_queue_status",
@@ -376,7 +375,7 @@ _TOOLSET_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
     ("coding/write", ("implement", "patch", "refactor", "code", "repo", "datei", "file", "fix")),
     ("comfyui/workflows", ("comfy", "comfyui", "comfypc", "workflow", "prompt_id", "checkpoint", "loras", "queue")),
     ("media/image", ("bild", "image", "pixelle")),
-    ("media/video", ("video", "frame", "timecode", "beatdrop", "beat", "drop", "outfit", "kleidung")),
+    ("media/video", ("video", "frame", "timecode")),
     ("media/audio", ("audio", "transcribe", "transkript")),
     ("rag/documents", ("pdf", "document", "dokument", "rag", "quelle")),
     (
