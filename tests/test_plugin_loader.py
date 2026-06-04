@@ -17,6 +17,7 @@ from plugin_loader import (  # noqa: E402
     _plugin_is_enabled,
     _load_manifest,
     load_plugins,
+    load_plugin_python_tools,
     merge_mcp_servers,
     merge_toolsets,
     get_merged_mcp_config,
@@ -227,6 +228,24 @@ def test_minimal_manifest_defaults():
     assert manifest.docker_compose == {}
     assert manifest.skills == []
     assert manifest.env_defaults == {}
+    assert manifest.python_tools == {}
+
+
+def test_load_manifest_parses_python_tools():
+    with tempfile.TemporaryDirectory() as tmp:
+        d = _make_plugin(Path(tmp), "pt",
+            "name: pt\n"
+            "version: 1.0\n"
+            "python_tools:\n"
+            "  pt.tools:\n"
+            "    import_names:\n"
+            "      - tool_a\n"
+            "      - tool_b\n"
+        )
+        manifest = _load_manifest(d)
+
+    assert manifest is not None
+    assert manifest.python_tools == {"pt.tools": {"import_names": ["tool_a", "tool_b"]}}
 
 
 def test_preinstalled_beatdrop_outfit_plugin_is_disabled_by_default():
@@ -492,3 +511,41 @@ def test_get_merged_mcp_config_missing_base_file():
                 base_config_path=str(Path(tmp) / "nonexistent.json")
             )
         assert config == {"mcpServers": {}}
+
+
+# ── load_plugin_python_tools ────────────────────────────────────────
+
+
+def test_load_plugin_python_tools_imports_functions():
+    with tempfile.TemporaryDirectory() as tmp:
+        plugins_dir = Path(tmp)
+        plugin_dir = plugins_dir / "test_plugin"
+        plugin_dir.mkdir(parents=True)
+        plugin_pkg = plugin_dir / "test_plugin"
+        plugin_pkg.mkdir()
+        (plugin_pkg / "__init__.py").write_text("from .tools import tool_x, tool_y\n")
+        (plugin_pkg / "tools.py").write_text("def tool_x(): return 'x'\ndef tool_y(): return 'y'\n")
+        (plugin_dir / "plugin.yaml").write_text(
+            "name: test-plugin\n"
+            "version: 1.0\n"
+            "python_tools:\n"
+            "  test_plugin.tools:\n"
+            "    import_names:\n"
+            "      - tool_x\n"
+            "      - tool_y\n"
+        )
+        (plugin_dir / ".pluginenv").write_text("ENABLED=true\n")
+
+        with patch.dict(os.environ, {"ALPHARAVIS_ENABLE_PLUGIN_SYSTEM": "true"}):
+            tools = load_plugin_python_tools(plugins_dir=str(plugins_dir))
+
+        assert len(tools) == 2
+        assert tools[0]() == "x"
+        assert tools[1]() == "y"
+
+
+def test_load_plugin_python_tools_empty_when_no_plugins():
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.dict(os.environ, {"ALPHARAVIS_ENABLE_PLUGIN_SYSTEM": "true"}):
+            tools = load_plugin_python_tools(plugins_dir=str(tmp))
+        assert tools == []

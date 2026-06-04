@@ -12,6 +12,12 @@ toolsets:
     includes:
       - media/video
 
+python_tools:
+  beatdrop_outfit.tools:
+    import_names:
+      - plan_video_outfit_drops
+      - run_video_outfit_drop
+
 env_defaults:
   ALPHARAVIS_BEATDROP_OUTFIT_ALLOW_LOCAL_PATHS: "false"
   ALPHARAVIS_BEATDROP_OUTFIT_ALLOW_PRIVATE_URLS: "false"

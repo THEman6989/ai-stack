@@ -27,6 +27,7 @@ class PluginManifest:
     depends_on: list[str] = field(default_factory=list)
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
     toolsets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    python_tools: dict[str, dict[str, Any]] = field(default_factory=dict)
     docker_compose: dict[str, Any] = field(default_factory=dict)
     skills: list[dict[str, str]] = field(default_factory=list)
     env_defaults: dict[str, str] = field(default_factory=dict)
@@ -65,6 +66,7 @@ def _load_manifest(plugin_dir: Path) -> PluginManifest | None:
         depends_on=list(raw.get("depends_on", [])),
         mcp_servers=dict(raw.get("mcp_servers", {})),
         toolsets=dict(raw.get("toolsets", {})),
+        python_tools=dict(raw.get("python_tools", {})),
         docker_compose=dict(raw.get("docker_compose", {})),
         skills=list(raw.get("skills", [])),
         env_defaults=dict(raw.get("env_defaults", {})),
@@ -207,3 +209,44 @@ def merge_toolsets(
                 }
 
     return result
+
+
+def load_plugin_python_tools(
+    plugins: list[PluginManifest] | None = None,
+    plugins_dir: str | None = None,
+) -> list[Any]:
+    """Import callable Python tools from enabled plugins' python_tools manifests.
+
+    Ensures the plugins base directory is on sys.path so `plugin_name.module`
+    imports resolve correctly.
+    """
+
+    import sys
+
+    base = Path(plugins_dir or PLUGINS_DIR)
+    if str(base) not in sys.path:
+        sys.path.insert(0, str(base))
+
+    if plugins is None:
+        plugins = load_plugins(plugins_dir=plugins_dir)
+
+    tools: list[Any] = []
+
+    for plugin in plugins:
+        plugin_dir = base / plugin.name.replace("-", "_")
+        if plugin_dir.is_dir() and str(plugin_dir) not in sys.path:
+            sys.path.insert(0, str(plugin_dir))
+        for module_name, config in plugin.python_tools.items():
+            names = list(config.get("import_names", [])) if isinstance(config, dict) else []
+            if not names:
+                continue
+            try:
+                mod = __import__(module_name, fromlist=names)
+            except Exception:
+                continue
+            for name in names:
+                obj = getattr(mod, name, None)
+                if callable(obj):
+                    tools.append(obj)
+
+    return tools
