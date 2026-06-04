@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import ipaddress
 import json
 import math
@@ -421,6 +422,91 @@ def suggest_black_frame_count(fps: float, black_frame_ms: int = 60) -> int:
     return max(1, min(3, int(round(max(1.0, fps) * max(1, black_frame_ms) / 1000))))
 
 
+def _frame_file_href(path_value: str) -> str:
+    """Return a browser-safe SVG image href for extracted local frame files.
+
+    Contact sheets are rendered as SVG in browser contexts. Do not preserve
+    unresolved raw strings here: values like ``javascript:...`` or SVG ``data:``
+    URLs would remain active URI payloads even after HTML escaping.
+    """
+
+    try:
+        path = Path(path_value).expanduser().resolve()
+        if path.is_file():
+            return path.as_uri()
+    except Exception:
+        pass
+    return ""
+
+
+def build_candidate_contact_sheet(
+    scores: list[FrameChangeScore],
+    output_path: str | Path,
+    *,
+    beat_frame: int | None = None,
+    visual_change_frame: int | None = None,
+    columns: int = 5,
+    label_frames: bool = True,
+) -> Path:
+    """Write an SVG contact sheet for a narrowed drop candidate frame window.
+
+    SVG keeps the preview dependency-light: it references extracted frame files and
+    overlays frame numbers, timestamps, diff scores, beat/cut markers, and black
+    frame labels. Browsers and the Media Gallery can render it without requiring
+    Pillow at runtime.
+    """
+
+    target = Path(output_path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    columns = max(1, int(columns))
+    cell_width = 220
+    cell_height = 184 if label_frames else 150
+    thumb_height = 132 if label_frames else 140
+    rows = max(1, math.ceil(len(scores) / columns))
+    width = columns * cell_width
+    height = rows * cell_height
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="#111827"/>',
+        '<style>text{font-family:monospace;font-size:12px;fill:#e5e7eb}.muted{fill:#9ca3af}.tag{font-weight:bold}</style>',
+    ]
+    for index, score in enumerate(scores):
+        col = index % columns
+        row = index // columns
+        x = col * cell_width
+        y = row * cell_height
+        tags: list[str] = []
+        stroke = "#374151"
+        if beat_frame is not None and score.frame_index == beat_frame:
+            tags.append("BEAT")
+            stroke = "#fbbf24"
+        if visual_change_frame is not None and score.frame_index == visual_change_frame:
+            tags.append("FIRST_NEW")
+            stroke = "#22c55e"
+        if score.is_black:
+            tags.append("BLACK")
+            stroke = "#ef4444" if stroke == "#374151" else stroke
+        href = html.escape(_frame_file_href(score.local_path), quote=True)
+        parts.extend(
+            [
+                f'<g transform="translate({x},{y})">',
+                f'<rect x="4" y="4" width="{cell_width - 8}" height="{cell_height - 8}" rx="8" fill="#1f2937" stroke="{stroke}" stroke-width="3"/>',
+                f'<image href="{href}" x="10" y="10" width="{cell_width - 20}" height="{thumb_height}" preserveAspectRatio="xMidYMid meet"/>',
+            ]
+        )
+        if label_frames:
+            label = f"Frame {score.frame_index}  t={score.time_seconds:.3f}s  diff={score.diff_score:.3f}"
+            parts.append(f'<text x="12" y="{thumb_height + 28}">{html.escape(label)}</text>')
+            if tags:
+                parts.append(f'<text class="tag" x="12" y="{thumb_height + 46}">{html.escape(" | ".join(tags))}</text>')
+            else:
+                parts.append(f'<text class="muted" x="12" y="{thumb_height + 46}">candidate frame</text>')
+        parts.append("</g>")
+    parts.append("</svg>")
+    target.write_text("\n".join(parts), encoding="utf-8")
+    return target
+
+
 def detect_visual_transition(
     scores: list[FrameChangeScore],
     *,
@@ -614,13 +700,24 @@ def plan_video_outfit_drops_from_file(
                 extraction_fps=candidate_fps,
                 source_fps=probe.fps,
             )
-            visual_transitions[candidate.frame_index] = detect_visual_transition(scores, beat_frame=candidate.frame_index, fps=probe.fps, black_frame_ms=black_frame_ms)
+            transition = detect_visual_transition(scores, beat_frame=candidate.frame_index, fps=probe.fps, black_frame_ms=black_frame_ms)
+            visual_transitions[candidate.frame_index] = transition
+            contact_sheet_path = ""
+            if scores:
+                contact_sheet = build_candidate_contact_sheet(
+                    scores,
+                    out_dir / "previews" / f"drop-{candidate.frame_index}-contact-sheet.svg",
+                    beat_frame=candidate.frame_index,
+                    visual_change_frame=int(transition.get("first_new_outfit_frame") or transition.get("visual_change_frame") or candidate.frame_index),
+                )
+                contact_sheet_path = str(contact_sheet)
             frame_windows.append(
                 {
                     "beat_frame": candidate.frame_index,
                     "start_seconds": round(start, 3),
                     "end_seconds": round(end, 3),
                     "frame_dir": str(frame_dir),
+                    "contact_sheet_path": contact_sheet_path,
                     "frame_count": len(frame_paths),
                     "scores": [asdict(score) for score in scores[:120]],
                 }

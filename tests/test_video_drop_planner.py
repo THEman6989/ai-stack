@@ -209,3 +209,97 @@ def test_plan_from_file_can_create_manifest_without_frame_extraction(monkeypatch
     assert Path(plan["plan_path"]).exists()
     saved = json.loads(Path(plan["plan_path"]).read_text())
     assert saved["plan_path"] == plan["plan_path"]
+
+
+def test_build_candidate_contact_sheet_writes_svg_with_frame_labels(tmp_path: Path) -> None:
+    frames = []
+    for index in range(3):
+        frame = tmp_path / f"frame-{index}.jpg"
+        frame.write_bytes(bytes([index + 10]) * 128)
+        frames.append(frame)
+    scores = [
+        video_drop_planner.FrameChangeScore(249, 8.300, str(frames[0]), 0.02),
+        video_drop_planner.FrameChangeScore(250, 8.333, str(frames[1]), 0.95, is_black=True),
+        video_drop_planner.FrameChangeScore(251, 8.367, str(frames[2]), 0.20),
+    ]
+
+    sheet_path = video_drop_planner.build_candidate_contact_sheet(
+        scores,
+        tmp_path / "drop-250-contact-sheet.svg",
+        beat_frame=250,
+        visual_change_frame=251,
+        columns=2,
+    )
+
+    assert sheet_path.exists()
+    content = sheet_path.read_text()
+    assert "Frame 250" in content
+    assert "BEAT" in content
+    assert "BLACK" in content
+    assert "FIRST_NEW" in content
+
+
+def test_contact_sheet_omits_dangerous_unresolved_frame_hrefs(tmp_path: Path) -> None:
+    scores = [
+        video_drop_planner.FrameChangeScore(1, 0.033, "javascript:alert(1)", 0.1),
+        video_drop_planner.FrameChangeScore(2, 0.066, "data:image/svg+xml,<svg><script>alert(1)</script></svg>", 0.2),
+        video_drop_planner.FrameChangeScore(3, 0.100, 'missing.jpg" onload="alert(1)', 0.3),
+    ]
+
+    sheet_path = video_drop_planner.build_candidate_contact_sheet(scores, tmp_path / "unsafe.svg")
+
+    content = sheet_path.read_text()
+    assert "javascript:" not in content
+    assert "data:image" not in content
+    assert "onload" not in content
+    assert "script" not in content.lower()
+
+
+def test_plan_from_file_records_contact_sheet_paths_in_manifest(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"fake video")
+    wav = tmp_path / "audio.wav"
+    _write_pcm16_wav(wav, [0.0] * 100)
+    frame_dir = tmp_path / "frames"
+    frame_dir.mkdir()
+    frame_paths = []
+    for index in range(3):
+        frame = frame_dir / f"frame-{index}.jpg"
+        frame.write_bytes(bytes([index + 1]) * 128)
+        frame_paths.append(frame)
+
+    monkeypatch.setattr(
+        video_drop_planner,
+        "probe_video",
+        lambda path: video_drop_planner.VideoProbe(duration_seconds=5.0, fps=30.0, width=640, height=360, has_audio=True),
+    )
+    monkeypatch.setattr(video_drop_planner, "extract_audio_to_wav", lambda video_path, out_dir: wav)
+    monkeypatch.setattr(
+        video_drop_planner,
+        "detect_audio_drop_candidates",
+        lambda wav_path, fps, max_candidates: [video_drop_planner.DropCandidate(2.0, 60, 0.8, "test")],
+    )
+    monkeypatch.setattr(video_drop_planner, "extract_candidate_frames", lambda *args, **kwargs: frame_paths)
+    monkeypatch.setattr(
+        video_drop_planner,
+        "compute_frame_change_scores",
+        lambda *args, **kwargs: [
+            video_drop_planner.FrameChangeScore(59, 1.967, str(frame_paths[0]), 0.01),
+            video_drop_planner.FrameChangeScore(60, 2.000, str(frame_paths[1]), 0.9, is_black=True),
+            video_drop_planner.FrameChangeScore(61, 2.033, str(frame_paths[2]), 0.2),
+        ],
+    )
+
+    plan = video_drop_planner.plan_video_outfit_drops_from_file(
+        source,
+        output_dir=tmp_path / "plan",
+        outfit_images=["media://outfit.png"],
+        extract_frames=True,
+    )
+
+    frame_window = plan["analysis_artifacts"]["frame_windows"][0]
+    contact_sheet = Path(frame_window["contact_sheet_path"])
+    assert contact_sheet.exists()
+    assert contact_sheet.name.endswith("contact-sheet.svg")
+    saved = json.loads(Path(plan["plan_path"]).read_text())
+    assert saved["analysis_artifacts"]["frame_windows"][0]["contact_sheet_path"] == str(contact_sheet)
