@@ -3,6 +3,26 @@
 This is the running backlog for features that are intentionally prepared but
 not fully wired yet.
 
+## BeatDrop outfit rendering — infrastructure verified, canvas handoff pending
+
+Implemented:
+
+- PlanWriter schedule normalization, deterministic plan hash, fresh run/attempt
+  IDs, reserved per-iteration output namespaces, sequential submit/history flow,
+  exact prompt/output correlation, fail-closed persistence, and agent/plugin
+  exports.
+- Outfit reference sorter with safe dry-run default, allowed-root enforcement,
+  endpoint host allowlisting, private-network opt-in, and non-destructive symlink
+  behavior.
+
+Still needed from the ComfyUI canvas handoff:
+
+- Amin builds and exports the named single-image workflow
+  `beatdrop_outfit_image_renderer_v1` with the runner's parameter map.
+- Register that workflow, verify its output uses the injected
+  `filename_prefix`, then run one live item before enabling a full sequence.
+- Keep BeatDrop/plugin live gates default-off until that smoke test passes.
+
 ## Native Delegate Agent — VERIFIED ✅ (2026-06-01 — Full Hermes Parity)
 
 All 8 gaps vs Hermes `delegate_task` closed. 3 optional features added.

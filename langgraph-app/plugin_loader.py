@@ -15,7 +15,27 @@ from pathlib import Path
 from typing import Any
 
 
-PLUGINS_DIR = os.path.join(os.path.dirname(__file__), "..", "plugins")
+def _resolve_plugins_dir(
+    *,
+    module_file: str | Path = __file__,
+    workspace_root: str | Path | None = None,
+) -> Path:
+    """Resolve the plugin root on the host and in the `/app` Docker layout."""
+
+    explicit = os.getenv("ALPHARAVIS_PLUGINS_DIR", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+
+    module_path = Path(module_file).resolve()
+    local_plugins = module_path.parent.parent / "plugins"
+    mounted_plugins = Path(workspace_root or "/workspace") / "plugins"
+    for candidate in (local_plugins, mounted_plugins):
+        if candidate.is_dir():
+            return candidate
+    return local_plugins
+
+
+PLUGINS_DIR = str(_resolve_plugins_dir())
 
 
 @dataclass

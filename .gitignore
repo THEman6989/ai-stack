@@ -23,6 +23,7 @@ logs/
 old\ cobvsresation-chaty.txt
 artifacts/
 service-dashboard-data/
+graphify-out/
 
 # Lokaler LangGraph-Dev-Cache
 langgraph-app/.langgraph_api/

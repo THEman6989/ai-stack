@@ -4,6 +4,31 @@ This file records important local changes that affect runtime behavior,
 compatibility, or operations. Keep detailed rationale here so future upgrades
 can tell which patches are intentional and which ones can be removed.
 
+## 2026-07-17 — BeatDrop attempt-safe outfit rendering
+
+- Added strict normalization for the PlanWriter handoff and a sequential,
+  attempt-correlated ComfyUI workflow runner. Every item persists
+  `prepared`/`submitted`/`completed|failed`, polls only the submitted prompt ID,
+  and accepts only the single image whose subfolder and filename match the
+  invocation's reserved `output_key`/`filename_prefix`.
+- Submit timeout reconciliation no longer returns while a synchronous submitter
+  can still create an untracked remote prompt. Persistence failures remain
+  fail-closed and expose reconciliation metadata when a prompt ID is orphaned.
+- Added the outfit reference sorter with default `dry_run=true`. Local reads and
+  writes require both `ALPHARAVIS_BEATDROP_OUTFIT_ALLOW_LOCAL_PATHS=true` and a
+  root under `ALPHARAVIS_BEATDROP_OUTFIT_ALLOWED_ROOTS`. Existing symlink targets
+  are never silently replaced, and symlinked source/cache images are rejected
+  before any copy, decode, hash, or VLM upload.
+- Vision calls require an explicit host in
+  `ALPHARAVIS_BEATDROP_OUTFIT_VISION_ALLOWED_HOSTS`; private/fixed-IP endpoints
+  additionally require `ALPHARAVIS_BEATDROP_OUTFIT_ALLOW_PRIVATE_URLS=true`.
+  Redirects and URL credentials are rejected.
+- BeatDrop imports now use the same resolved plugin root as `plugin_loader` and
+  remain behind both the global plugin-system gate and plugin-local `.pluginenv`.
+- The user-owned ComfyUI canvas workflow remains intentionally unregistered;
+  live execution stays gated until its named API workflow and parameter map are
+  supplied and smoke-tested.
+
 ## 2026-06-01 — Delegate Agent Gap-Closure: Full Hermes Feature Parity
 
 Alle 8 identifizierten Gaps zwischen AlphaRavis `delegate_task` und Hermes

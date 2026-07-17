@@ -4,6 +4,28 @@ This file explains what AlphaRavis uses automatically and what is used only
 when you ask for it. It is meant for humans first, and agents may also read it
 when asked how the system behaves.
 
+## BeatDrop outfit rendering
+
+BeatDrop's AlphaRavis integration prepares and validates one deterministic
+render invocation per outfit transition. Dry-run is the default; the live
+sequence requires the separately authored named ComfyUI workflow. Each accepted
+result must come from the exact prompt and injected output namespace for that
+iteration.
+
+The outfit sorter is also side-effect free by default. To permit local files,
+set both:
+
+```text
+ALPHARAVIS_BEATDROP_OUTFIT_ALLOW_LOCAL_PATHS=true
+ALPHARAVIS_BEATDROP_OUTFIT_ALLOWED_ROOTS=/approved/source:/approved/output
+```
+
+Symlinked source and cache images are rejected rather than followed.
+
+For the fixed private vision server, additionally configure its literal host in
+`ALPHARAVIS_BEATDROP_OUTFIT_VISION_ALLOWED_HOSTS` and opt in with
+`ALPHARAVIS_BEATDROP_OUTFIT_ALLOW_PRIVATE_URLS=true`. Redirects are disabled.
+
 ## Daily Interface
 
 Open the local service dashboard when you want a clickable overview of the

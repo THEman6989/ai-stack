@@ -1,6 +1,6 @@
 name: beatdrop-outfit
-version: 0.1.0
-description: Beatdrop/outfit-change video planner and ComfyUI single-drop runner.
+version: 0.3.0
+description: Beatdrop/outfit-change video planner, attempt-safe ComfyUI sequence runner, and outfit reference image sorter.
 author: AlphaRavis
 
 toolsets:
@@ -9,16 +9,27 @@ toolsets:
     tools:
       - plan_video_outfit_drops
       - run_video_outfit_drop
+      - run_beatdrop_outfit_sequence
     includes:
       - media/video
+  media/beatdrop-outfit-sorter:
+    description: Sort outfit reference images into framing/coverage folders. Uses cache/downscaled images for model review (max 768px), copies originals by basename.
+    tools:
+      - sort_outfits
+    includes:
+      - media/image
 
 python_tools:
   beatdrop_outfit.tools:
     import_names:
+      - sort_outfits
       - plan_video_outfit_drops
       - run_video_outfit_drop
+      - run_beatdrop_outfit_sequence
 
 env_defaults:
   ALPHARAVIS_BEATDROP_OUTFIT_ALLOW_LOCAL_PATHS: "false"
+  ALPHARAVIS_BEATDROP_OUTFIT_ALLOWED_ROOTS: ""
   ALPHARAVIS_BEATDROP_OUTFIT_ALLOW_PRIVATE_URLS: "false"
+  ALPHARAVIS_BEATDROP_OUTFIT_VISION_ALLOWED_HOSTS: ""
   ALPHARAVIS_BEATDROP_OUTFIT_AUDIO_BACKEND: "rms"

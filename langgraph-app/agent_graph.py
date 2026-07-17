@@ -166,16 +166,50 @@ except Exception as exc:  # pragma: no cover - optional local helper/deps
 else:
     MEDIA_ANALYSIS_IMPORT_ERROR = None
 
-try:
-    from video_drop_planner import plan_video_outfit_drops as _plan_video_outfit_drops
+from plugin_loader import PLUGINS_DIR as _PLUGINS_DIR
 
-    _run_video_outfit_drop = importlib.import_module("beatdrop_outfit.runner").run_video_outfit_drop
-except Exception as exc:  # pragma: no cover - optional local helper/deps
-    _plan_video_outfit_drops = None
-    _run_video_outfit_drop = None
-    VIDEO_DROP_PLANNER_IMPORT_ERROR: Exception | None = exc
+
+_BEATDROP_PLUGIN_ROOT = Path(_PLUGINS_DIR) / "beatdrop_outfit"
+
+
+def _beatdrop_plugin_config_enabled() -> bool:
+    if (os.getenv("ALPHARAVIS_ENABLE_PLUGIN_SYSTEM", "false") or "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return False
+    pluginenv = _BEATDROP_PLUGIN_ROOT / ".pluginenv"
+    try:
+        for line in pluginenv.read_text().splitlines():
+            key, _, value = line.partition("=")
+            if key.strip().upper() == "ENABLED":
+                return value.strip().lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        return False
+    return False
+
+
+_plan_video_outfit_drops = None
+_run_video_outfit_drop = None
+_run_beatdrop_outfit_sequence = None
+if _beatdrop_plugin_config_enabled():
+    if _BEATDROP_PLUGIN_ROOT.is_dir() and str(_BEATDROP_PLUGIN_ROOT) not in sys.path:
+        sys.path.insert(0, str(_BEATDROP_PLUGIN_ROOT))
+    try:
+        video_drop_planner = importlib.import_module("video_drop_planner")
+        _plan_video_outfit_drops = video_drop_planner.plan_video_outfit_drops
+
+        beatdrop_runner = importlib.import_module("beatdrop_outfit.runner")
+        _run_video_outfit_drop = beatdrop_runner.run_video_outfit_drop
+        _run_beatdrop_outfit_sequence = beatdrop_runner.run_beatdrop_outfit_sequence
+    except Exception as exc:  # pragma: no cover - optional local helper/deps
+        VIDEO_DROP_PLANNER_IMPORT_ERROR: Exception | None = exc
+    else:
+        VIDEO_DROP_PLANNER_IMPORT_ERROR = None
 else:
-    VIDEO_DROP_PLANNER_IMPORT_ERROR = None
+    VIDEO_DROP_PLANNER_IMPORT_ERROR = RuntimeError("BeatDrop Outfit plugin is disabled")
 
 try:
     from comfyui_client import (
@@ -976,21 +1010,13 @@ def _storage_manager_enabled() -> bool:
 
 
 def _beatdrop_outfit_extension_enabled() -> bool:
-    if not _env_bool("ALPHARAVIS_ENABLE_PLUGIN_SYSTEM", "false"):
+    if not _beatdrop_plugin_config_enabled():
         return False
-    pluginenv = _WORKSPACE_ROOT / "plugins" / "beatdrop_outfit" / ".pluginenv"
-    if not pluginenv.exists():
-        return False
-    enabled = False
-    try:
-        for line in pluginenv.read_text().splitlines():
-            key, _, value = line.partition("=")
-            if key.strip().upper() == "ENABLED":
-                enabled = value.strip().lower() in {"1", "true", "yes", "on"}
-                break
-    except Exception:
-        return False
-    if not enabled:
+    if (
+        _plan_video_outfit_drops is None
+        or _run_video_outfit_drop is None
+        or _run_beatdrop_outfit_sequence is None
+    ):
         return False
     try:
         from plugin_loader import load_plugin_python_tools as _load_pp_tools
@@ -3719,7 +3745,68 @@ async def run_video_outfit_drop(
         return _json_tool_result({"ok": False, "drop_id": drop_id, "workflow_name": workflow_name, "error": str(exc)})
 
 
-beatdrop_outfit_tools = [plan_video_outfit_drops, run_video_outfit_drop] if _beatdrop_outfit_extension_enabled() else []
+@tool
+async def run_beatdrop_outfit_sequence(
+    plan_json_or_path: str,
+    workflow_name: str = "beatdrop_outfit_renderer_v1",
+    dry_run: bool = True,
+    extra_parameters_json: str = "{}",
+    client_id: str = "alpharavis-beatdrop",
+    timeout_seconds: float = 300.0,
+    poll_interval_seconds: float = 1.0,
+) -> str:
+    """Run an attempt-safe BeatDrop schedule sequentially through a saved ComfyUI workflow.
+
+    Dry-run is the default and only returns the canonical schedule plus per-item
+    invocations. Live mode requires the user's saved canvas workflow and the
+    existing ComfyUI workflow-library/submit gates.
+    """
+
+    if _run_beatdrop_outfit_sequence is None:
+        return _json_tool_result(
+            {
+                "ok": False,
+                "error": (
+                    "BeatDrop sequence runner helper is unavailable: "
+                    f"{VIDEO_DROP_PLANNER_IMPORT_ERROR}"
+                ),
+            }
+        )
+    try:
+        extra_parameters = json.loads(extra_parameters_json or "{}")
+    except Exception as exc:
+        return _json_tool_result(
+            {"ok": False, "error": f"Invalid extra_parameters_json: {exc}"}
+        )
+    if not isinstance(extra_parameters, dict):
+        return _json_tool_result(
+            {
+                "ok": False,
+                "error": "extra_parameters_json must decode to a JSON object.",
+            }
+        )
+    try:
+        result = await _run_beatdrop_outfit_sequence(
+            plan_json_or_path,
+            workflow_name=workflow_name,
+            dry_run=dry_run,
+            extra_parameters=extra_parameters,
+            client_id=client_id,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+        return _json_tool_result(result)
+    except Exception as exc:
+        return _json_tool_result(
+            {
+                "ok": False,
+                "workflow_name": workflow_name,
+                "error": str(exc),
+            }
+        )
+
+
+beatdrop_outfit_tools = [plan_video_outfit_drops, run_video_outfit_drop, run_beatdrop_outfit_sequence] if _beatdrop_outfit_extension_enabled() else []
 
 
 @tool

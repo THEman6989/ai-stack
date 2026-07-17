@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "langgraph-app"))
 from plugin_loader import (  # noqa: E402
     PluginManifest,
     _env_bool,
+    _resolve_plugins_dir,
     _plugin_is_enabled,
     _load_manifest,
     load_plugins,
@@ -26,6 +27,29 @@ from plugin_loader import (  # noqa: E402
 
 # ── helpers ────────────────────────────────────────────────────────
 
+
+def test_resolve_plugins_dir_falls_back_to_workspace_mount(tmp_path, monkeypatch):
+    monkeypatch.delenv("ALPHARAVIS_PLUGINS_DIR", raising=False)
+    module_file = tmp_path / "app" / "plugin_loader.py"
+    workspace_root = tmp_path / "workspace"
+    expected = workspace_root / "plugins"
+    expected.mkdir(parents=True)
+
+    assert (
+        _resolve_plugins_dir(
+            module_file=module_file,
+            workspace_root=workspace_root,
+        )
+        == expected
+    )
+
+
+def test_resolve_plugins_dir_prefers_explicit_environment(tmp_path, monkeypatch):
+    explicit = tmp_path / "custom-plugins"
+    monkeypatch.setenv("ALPHARAVIS_PLUGINS_DIR", str(explicit))
+
+    assert _resolve_plugins_dir() == explicit
+
 def _make_plugin(base: Path, name: str, yaml_content: str, *, enabled: bool = False) -> Path:
     """Create a plugin directory with plugin.yaml and .pluginenv."""
     plugin_dir = base / name
@@ -33,6 +57,15 @@ def _make_plugin(base: Path, name: str, yaml_content: str, *, enabled: bool = Fa
     (plugin_dir / "plugin.yaml").write_text(yaml_content)
     (plugin_dir / ".pluginenv").write_text(f"ENABLED={'true' if enabled else 'false'}\n")
     return plugin_dir
+
+
+def test_langgraph_container_exposes_safe_plugin_system_gate():
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert (
+        "ALPHARAVIS_ENABLE_PLUGIN_SYSTEM=${ALPHARAVIS_ENABLE_PLUGIN_SYSTEM:-false}"
+        in compose
+    )
 
 
 # ── _env_bool ──────────────────────────────────────────────────────
@@ -258,6 +291,13 @@ def test_preinstalled_beatdrop_outfit_plugin_is_disabled_by_default():
     assert manifest.toolsets["media/beatdrop-outfit"]["tools"] == [
         "plan_video_outfit_drops",
         "run_video_outfit_drop",
+        "run_beatdrop_outfit_sequence",
+    ]
+    assert manifest.python_tools["beatdrop_outfit.tools"]["import_names"] == [
+        "sort_outfits",
+        "plan_video_outfit_drops",
+        "run_video_outfit_drop",
+        "run_beatdrop_outfit_sequence",
     ]
     assert _plugin_is_enabled(plugin_dir) is False
 
